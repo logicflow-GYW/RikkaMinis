@@ -350,6 +350,90 @@ class FastioTarTest {
         assertFalse(Files.exists(dest.resolve("b.txt"), LinkOption.NOFOLLOW_LINKS))
     }
 
+    // ── [W-10] an occupied target: the three member types share ONE rule ──────
+
+    @Test
+    fun `a hard link member refuses to replace an existing file without force`() {
+        // [W-10] Every hard-link test above extracts into a FRESH directory, so
+        // the occupied-target branch never ran — which is why the suite stayed
+        // green when that branch's guard was flipped to `if (force)`: a plain
+        // extract would then delete and replace a file it never wrote, and
+        // `--force` (the flag the error message names) would be refused.
+        // Asserted on the BYTES on disk, not on the counters alone.
+        val archive = ByteArrayOutputStream()
+        archive.write(craftHeader("a.txt", '0', 2, 420, ""))
+        archive.write("hi".toByteArray())
+        archive.write(ByteArray(pad(2)))
+        archive.write(craftHeader("b.txt", '1', 0, 420, "a.txt"))
+        archive.write(ByteArray(1024))
+
+        val dest = Files.createTempDirectory("fastio-tar-hard-exists").resolve("out")
+        Files.createDirectories(dest)
+        val occupied = dest.resolve("b.txt")
+        Files.write(occupied, "keep me".toByteArray())
+
+        val out = TarExtractOutcome()
+        tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, false, 100L, out)
+
+        assertEquals(listOf("b.txt: already_exists (pass --force to replace)"), out.errors)
+        assertEquals(0L, out.hardLinked)
+        assertEquals("keep me", Files.readAllBytes(occupied).decodeToString())
+    }
+
+    @Test
+    fun `a hard link member replaces an existing file with force`() {
+        // The mirror arm: the same archive and the same occupied target, this
+        // time WITH `--force`. A guard that refuses both ways (the flipped
+        // polarity reports the opposite here) cannot satisfy both tests.
+        val archive = ByteArrayOutputStream()
+        archive.write(craftHeader("a.txt", '0', 2, 420, ""))
+        archive.write("hi".toByteArray())
+        archive.write(ByteArray(pad(2)))
+        archive.write(craftHeader("b.txt", '1', 0, 420, "a.txt"))
+        archive.write(ByteArray(1024))
+
+        val dest = Files.createTempDirectory("fastio-tar-hard-force").resolve("out")
+        Files.createDirectories(dest)
+        val occupied = dest.resolve("b.txt")
+        Files.write(occupied, "keep me".toByteArray())
+
+        val out = TarExtractOutcome()
+        tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, true, 100L, out)
+
+        assertTrue("no errors expected: ${out.errors}", out.errors.isEmpty())
+        assertEquals(1L, out.hardLinked)
+        assertEquals("hi", Files.readAllBytes(occupied).decodeToString())
+    }
+
+    @Test
+    fun `a hard link member never replaces an existing directory even with force`() {
+        // The third decision of the shared rule, on the '1' branch specifically:
+        // `--force` deletes a FILE, never a directory. (The '0'/'2' halves of
+        // the same rule were fixed by [audit3 F-01]; this arm pins that the
+        // third caller inherited it.)
+        val archive = ByteArrayOutputStream()
+        archive.write(craftHeader("a.txt", '0', 2, 420, ""))
+        archive.write("hi".toByteArray())
+        archive.write(ByteArray(pad(2)))
+        archive.write(craftHeader("b.txt", '1', 0, 420, "a.txt"))
+        archive.write(ByteArray(1024))
+
+        val dest = Files.createTempDirectory("fastio-tar-hard-dir").resolve("out")
+        val occupied = Files.createDirectories(dest.resolve("b.txt"))
+        Files.write(occupied.resolve("inner.txt"), "x".toByteArray())
+
+        val out = TarExtractOutcome()
+        tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, true, 100L, out)
+
+        assertEquals(
+            listOf("b.txt: target is a directory; refusing to replace it"),
+            out.errors,
+        )
+        assertEquals(0L, out.hardLinked)
+        assertTrue(Files.isDirectory(occupied, LinkOption.NOFOLLOW_LINKS))
+        assertEquals("x", Files.readAllBytes(occupied.resolve("inner.txt")).decodeToString())
+    }
+
     @Test
     fun `a hard-linked tree round-trips as two independent files`() {
         // The writer stores a hard-linked pair as two regular members (it does
@@ -474,6 +558,42 @@ class FastioTarTest {
         assertTrue(created.skippedSelfNames.isEmpty())
         assertEquals(1L, created.files)
         assertEquals(1L, created.dirs)
+    }
+
+    @Test
+    fun `without the archive path the walk packs the file it is writing`() {
+        // [W-09] The §6 F8 self-archive guard is only reachable when the caller
+        // says WHERE its output lands: `tarCreate`'s fifth parameter defaults to
+        // null and `isSelfArchive` returns false for null. Dropping the argument
+        // at the one production call site therefore disabled the guard silently
+        // — `skipped_self: 0`, exit code 0, and a member whose declared size no
+        // longer matches the bytes that followed it.
+        //
+        // This is the negative control for the wiring the gate now pins: the
+        // SAME tree with the SAME archive file inside it, only the fifth
+        // argument missing.
+        val root = Files.createTempDirectory("fastio-tar-self-unwired")
+        val tree = Files.createDirectory(root.resolve("tree"))
+        Files.write(tree.resolve("a.txt"), "hello".toByteArray())
+        val archiveFile = Files.createFile(tree.resolve("pack.tar"))
+
+        val archive = ByteArrayOutputStream()
+        val created = TarCreateOutcome()
+        tarCreate(archive, listOf(tree to tree.toString()), 1000L, created)
+
+        assertEquals(0L, created.skippedSelf)
+        assertTrue(created.skippedSelfNames.isEmpty())
+        // a.txt AND the archive itself: the walk cannot tell them apart.
+        assertEquals(2L, created.files)
+
+        val dest = root.resolve("out")
+        val out = TarExtractOutcome()
+        tarExtract(ByteArrayInputStream(archive.toByteArray()), dest, false, 1000L, out)
+        val extractedTree = dest.resolve(tree.toString().trimStart('/'))
+        assertTrue(
+            "with no archive path the archive archives itself",
+            Files.exists(extractedTree.resolve("pack.tar"), LinkOption.NOFOLLOW_LINKS),
+        )
     }
 
     // ── tar slip ────────────────────────────────────────────────────────────

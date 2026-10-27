@@ -598,25 +598,12 @@ internal fun tarExtract(
                         out.dirs++
                     }
                     '2' -> {
-                        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
-                            if (!force) {
-                                out.errors.add("${member.name}: already_exists (pass --force to replace)")
-                                reader.skipData()
-                                continue
-                            }
-                            // [audit3 F-01] mirror the '0' branch: a DIRECTORY
-                            // is never replaceable. `--force` used to delete an
-                            // empty directory and drop a symlink in its place
-                            // (the archive's own root included: `target` is
-                            // `dest` for a `.` member), which turned the
-                            // extraction root into a link to anywhere on the
-                            // host and let every later member write through it.
-                            if (Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
-                                out.errors.add("${member.name}: target is a directory; refusing to replace it with a symlink")
-                                reader.skipData()
-                                continue
-                            }
-                            Files.delete(target)
+                        // [W-10] the occupied-target decision lives in ONE
+                        // helper for '0' / '1' / '2' — see clearOccupiedTarget.
+                        // Its refusal branch already consumed the payload, so
+                        // the caller only has to skip the member.
+                        if (!clearOccupiedTarget(target, force, out, member, reader, " with a symlink")) {
+                            continue
                         }
                         Files.createDirectories(target.parent)
                         Files.createSymbolicLink(target, java.nio.file.Paths.get(member.linkName))
@@ -649,19 +636,7 @@ internal fun tarExtract(
                             reader.skipData()
                             continue
                         }
-                        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
-                            if (!force) {
-                                out.errors.add("${member.name}: already_exists (pass --force to replace)")
-                                reader.skipData()
-                                continue
-                            }
-                            if (Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
-                                out.errors.add("${member.name}: target is a directory; refusing to replace it")
-                                reader.skipData()
-                                continue
-                            }
-                            Files.delete(target)
-                        }
+                        if (!clearOccupiedTarget(target, force, out, member, reader, "")) continue
                         Files.createDirectories(target.parent)
                         Files.copy(linkSource, target)
                         applyMetadata(target, member)
@@ -670,19 +645,7 @@ internal fun tarExtract(
                         out.hardLinked++
                     }
                     '0', '\u0000', '7' -> {
-                        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
-                            if (!force) {
-                                out.errors.add("${member.name}: already_exists (pass --force to replace)")
-                                reader.skipData()
-                                continue
-                            }
-                            if (Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
-                                out.errors.add("${member.name}: target is a directory; refusing to replace it")
-                                reader.skipData()
-                                continue
-                            }
-                            Files.delete(target)
-                        }
+                        if (!clearOccupiedTarget(target, force, out, member, reader, "")) continue
                         Files.createDirectories(target.parent)
                         Files.newOutputStream(target).use { sink -> reader.copyData(sink, member.size) }
                         applyMetadata(target, member)
@@ -705,6 +668,57 @@ internal fun tarExtract(
     } finally {
         out.paxHeaders = reader.paxHeaders
     }
+}
+
+/**
+ * [W-10] The ONE decision about a target path that is already occupied.
+ *
+ * Three member types write a path that may already exist on disk — `'0'`
+ * (regular), `'2'` (symlink) and `'1'` (hard link, materialised by copy) — and
+ * each used to carry its own copy of the same four statements. The third copy
+ * is exactly where the rule drifted: witness W-10 flipped the `'1'` copy to
+ * `if (force)`, so a plain extract (no `--force`) silently deleted and replaced
+ * the file already on disk, while `--force` — the flag the message tells you to
+ * pass — was refused. One copy, one polarity, one place for the gate to read.
+ *
+ * The order of the three decisions is the contract:
+ *   1. nothing there            -> write freely;
+ *   2. there and no `--force`   -> REFUSE, the payload is consumed here;
+ *   3. there and a DIRECTORY    -> REFUSE, with or without `--force`
+ *      ([audit3 F-01] `--force` used to delete an empty directory and drop a
+ *      link in its place — the archive's own root included, since `target` is
+ *      `dest` for a `.` member — which turned the extraction root into a link
+ *      to anywhere on the host and let every later member write through it);
+ *   4. otherwise                -> the authorised delete.
+ *
+ * [replacedKind] is the suffix the caller's refusal message needs (" with a
+ * symlink"); the wording is user-facing and asserted in FastioTarTest.
+ *
+ * @return true when the caller may write [target] now; false when the member was
+ *   refused — the error is recorded, the payload consumed, and the caller must
+ *   `continue` without touching [target].
+ */
+private fun clearOccupiedTarget(
+    target: Path,
+    force: Boolean,
+    out: TarExtractOutcome,
+    member: TarMember,
+    reader: TarReader,
+    replacedKind: String,
+): Boolean {
+    if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) return true
+    if (!force) {
+        out.errors.add("${member.name}: already_exists (pass --force to replace)")
+        reader.skipData()
+        return false
+    }
+    if (Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
+        out.errors.add("${member.name}: target is a directory; refusing to replace it$replacedKind")
+        reader.skipData()
+        return false
+    }
+    Files.delete(target)
+    return true
 }
 
 private fun describe(refusal: TarRefusal): String = when (refusal) {

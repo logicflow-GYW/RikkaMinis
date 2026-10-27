@@ -52,6 +52,25 @@ Everything structural now comes from the shared lexer/AST/value-flow modules
 stripper, brace counter and guard scanner are gone. A refactor that keeps the
 contract is a deliberate edit to this gate rather than a silent pass.
 
+[W-09 / W-10, 2026-10-27] Two criteria of the same family — the fix is in the
+code, the gate only saw the spelling:
+  W-09  `tarCreateInto` calls `tarCreate(...)` WITHOUT the fifth argument.
+        `archivePath` has a `= null` default and `isSelfArchive` returns false
+        for null, so §6 F8 (never read the archive you are writing) was off at
+        the one production entry point: `tar -cf src/a.tar src` packed a member
+        whose declared size stopped matching its bytes, and still reported
+        `skipped_self: 0` with exit code 0. The gate now reads the CALL: five
+        arguments, and the fifth resolves to `archivePath`.
+  W-10  one branch of `tarExtract`'s occupied-target guard flipped its polarity
+        (`!force` -> `force`): a plain extract deleted and replaced the file on
+        disk, and `--force`, the flag the message names, was refused. The three
+        member types ('0' regular, '1' hard link, '2' symlink) carried three
+        copies of that rule; they now share ONE helper
+        (`clearOccupiedTarget`), and the gate judges the helper's decision —
+        the refusal guarded by a NEGATED force, the authorised delete reachable
+        only past that guard — plus that every writing branch still routes
+        through it. Judging three copies would have re-created the drift.
+
 Usage: python3 scripts/scan/fastio_tar_bounds_check.py [repo_root]
        python3 scripts/scan/fastio_tar_bounds_check.py --selftest
 Exit:  0 = clean, 1 = violation(s), 2 = usage
@@ -71,6 +90,7 @@ from _kotlin_ast import (
     split_top,
     strip_parens,
     tail_expr,
+    when_branches,
 )
 from _kotlin_valueflow import (
     brace_depth,
@@ -224,6 +244,179 @@ def check_handler(src):
             )
     return v
 
+
+# ── [W-09] the self-archive guard needs the archive PATH at the call site ────
+#
+# `tarCreate(sink, roots, maxEntries, out, archivePath = null)` — the fifth
+# parameter is what lets `writeTree`/`isSelfArchive` recognise "this child IS
+# the file I am writing". With the default null `isSelfArchive` returns false
+# and §6 F8 is off, without a single error: the member's declared size stops
+# matching the bytes that follow it and every later member is misaligned.
+#
+# `check_handler` above only looks at `finishTar(deniedEntry(…), true, …)`; it
+# never reads this call's ARGUMENTS, which is why dropping the fifth argument
+# (witness W-09) kept the gate green. The criterion is the argument COUNT and
+# its identity — not "the token archivePath appears somewhere in the function",
+# which the local `archivePath` parameter satisfies on its own.
+TAR_CREATE_CALL_RE = re.compile(r"(?<![A-Za-z0-9_])tarCreate\s*\(")
+TAR_CREATE_ARITY = 5
+
+def check_tar_create_archive_arg(src):
+    v = []
+    code = code_view(src)
+    span = function_body(code, "tarCreateInto")
+    if span is None or span[2] != "block":
+        v.append("FastioOffloadHandler.kt: tarCreateInto cannot be sliced — re-point this "
+                 "rule before trusting it (the archive path may be dropped from tarCreate)")
+        return v
+    body, base = code[span[0]:span[1]], span[0]
+    calls = list(TAR_CREATE_CALL_RE.finditer(body))
+    if len(calls) != 1:
+        v.append("FastioOffloadHandler.kt: tarCreateInto must call tarCreate(…) exactly once, "
+                 "found %d — re-point this rule before trusting it" % len(calls))
+        return v
+    open_pos = calls[0].end() - 1
+    if match_bracket(body, open_pos) < 0:
+        v.append("FastioOffloadHandler.kt: unbalanced tarCreate( (fail-closed)")
+        return v
+    spans = call_args(body, open_pos)
+    if len(spans) != TAR_CREATE_ARITY:
+        v.append(
+            "FastioOffloadHandler.kt:%d tarCreate(…) is called with %d argument(s), not %d — the "
+            "fifth is the archive's own path, and its `= null` default makes isSelfArchive "
+            "return false: a `tar -cf src/a.tar src` then reads the file it is still writing, "
+            "so the member's declared size disagrees with its payload, every later member is "
+            "misaligned, and the report still says skipped_self: 0 with exit code 0"
+            % (code.count("\n", 0, base + calls[0].start()) + 1, len(spans), TAR_CREATE_ARITY))
+        return v
+    fifth = body[spans[-1][0]:spans[-1][1]].strip()
+    fifth = re.sub(r"\s+", "", strip_parens(fifth))
+    if fifth != "archivePath":
+        v.append(
+            "FastioOffloadHandler.kt: the fifth argument to tarCreate(…) is %r, not "
+            "`archivePath` — anything else (null, another path, a literal) disables §6 F8 just "
+            "as the omitted argument did" % fifth)
+    return v
+
+# ── [W-10] the occupied-target decision: ONE rule, ONE polarity ─────────────
+#
+# Three member types write a path that may already exist ('0' regular, '1' hard
+# link materialised by copy, '2' symlink) and each used to carry its own copy
+# of the same four statements. Witness W-10 flipped the '1' copy to `if
+# (force)`: without `--force` the existing file was deleted and replaced, with
+# `--force` the extraction refused. The suite missed it because every hard-link
+# test extracted into a fresh directory, where the branch never runs.
+#
+# The fix is one helper, and this criterion judges the DECISION inside it:
+#   * the refusal must be guarded by a NEGATED force (`!force` / `force.not()`
+#     / `force == false`) — the positive form is the witness;
+#   * `Files.delete(target)` must run AFTER that refusal and must not sit
+#     inside it (a delete in the refusal block is the same silent overwrite
+#     with the message still printed);
+#   * every writing branch must route through the helper, and no refusal may be
+#     re-inlined into tarExtract — a fourth copy is how this drifts.
+REPLACE_HELPER = "clearOccupiedTarget"
+REPLACE_ALREADY = "already_exists (pass --force to replace)"
+# `'0'` also covers ustar's NUL typeflag and GNU's contiguous '7'.
+TAR_WRITE_LABELS = ("'0'", "'1'", "'2'")
+DELETE_CALL_RE = re.compile(r"Files\s*\.\s*delete\s*\(")
+
+def _cond_form(cond):
+    """The condition with whitespace and one layer of parens removed."""
+    return re.sub(r"\s+", "", strip_parens((cond or "").strip()))
+
+def _negates_force(cond):
+    c = _cond_form(cond)
+    return c in ("!force", "!(force)", "force.not()", "force==false", "false==force")
+
+def _asserts_force(cond):
+    c = _cond_form(cond)
+    return c in ("force", "(force)", "force==true", "true==force", "!!force")
+
+def check_extract_replace_decision(src):
+    v = []
+    code = code_view(src)
+    lit = literal_view(src)
+    span = function_body(code, REPLACE_HELPER)
+    if span is None:
+        v.append("FastioTar.kt: no `%s(…)` helper — the occupied-target rule must live in ONE "
+                 "place; three inline copies is where the polarity flipped (W-10), so the "
+                 "criterion cannot be re-pointed at three sites" % REPLACE_HELPER)
+        return v
+    # the message text lives in the LITERAL view (mask_code blanks string
+    # interiors); the braces/conditions come from the code view, and both views
+    # are length-preserving projections of the same source, so positions are
+    # interchangeable between them.
+    helper = code[span[0]:span[1]]
+    already = [m.start() for m in re.finditer(re.escape(REPLACE_ALREADY),
+                                              lit[span[0]:span[1]])]
+    if not already:
+        v.append("FastioTar.kt: `%s` no longer records `already_exists (pass --force to "
+                 "replace)` — re-point this rule before trusting it" % REPLACE_HELPER)
+        return v
+    first = already[0]
+    conds = [c for _kind, c in enclosing_conditions(helper, first)]
+    if not conds:
+        v.append("FastioTar.kt: the `already_exists` refusal in `%s` is not guarded by the "
+                 "force flag at all — a plain extract overwrites the file on disk without "
+                 "--force" % REPLACE_HELPER)
+    elif _asserts_force(conds[-1]):
+        v.append("FastioTar.kt: the `already_exists` refusal in `%s` is guarded by `%s` — the "
+                 "polarity is INVERTED: a plain extract (no --force) deletes and replaces the "
+                 "file already on disk, and --force, the flag this very message names, is "
+                 "refused" % (REPLACE_HELPER, " ".join(conds[-1].split())[:60]))
+    elif not _negates_force(conds[-1]):
+        v.append("FastioTar.kt: the `already_exists` refusal in `%s` is guarded by `%s`, which "
+                 "is neither `!force` nor an equivalent — the decision must be 'refuse when "
+                 "force is absent'" % (REPLACE_HELPER, " ".join(conds[-1].split())[:60]))
+    deletes = [m.start() for m in DELETE_CALL_RE.finditer(helper)]
+    if not deletes:
+        v.append("FastioTar.kt: `%s` never deletes the occupied target — `--force` can no "
+                 "longer replace anything" % REPLACE_HELPER)
+    for pos in deletes:
+        if pos < first:
+            v.append("FastioTar.kt: `Files.delete(target)` in `%s` runs BEFORE the force check — "
+                     "the file is deleted whether or not --force was passed" % REPLACE_HELPER)
+            break
+        if any(_negates_force(c) for _kind, c in enclosing_conditions(helper, pos)):
+            v.append("FastioTar.kt: `Files.delete(target)` in `%s` sits INSIDE the `!force` "
+                     "refusal block — the silent overwrite is back, with the refusal message "
+                     "still printed" % REPLACE_HELPER)
+            break
+
+    extract = function_body(code, "tarExtract")
+    if extract is None:
+        v.append("FastioTar.kt: tarExtract cannot be sliced — re-point this rule before "
+                 "trusting it (the branches may bypass %s)" % REPLACE_HELPER)
+        return v
+    body = code[extract[0]:extract[1]]
+    if "already_exists" in lit[extract[0]:extract[1]]:
+        v.append("FastioTar.kt: tarExtract grew its own `already_exists` refusal again — the "
+                 "rule belongs to `%s` only, which is what keeps the three member types on one "
+                 "polarity" % REPLACE_HELPER)
+        return v
+    seen = {}
+    for subject, cond, b_start, b_end in when_branches(lit):
+        if "member.type" not in subject:
+            continue
+        if not (extract[0] <= b_start < extract[1]):
+            continue
+        for label in TAR_WRITE_LABELS:
+            if label in cond:
+                seen.setdefault(label, (cond, b_start, b_end))
+    for label in TAR_WRITE_LABELS:
+        if label not in seen:
+            v.append("FastioTar.kt: the `when (member.type)` branch %s cannot be sliced — "
+                     "re-point this rule before trusting it (it may write a target without "
+                     "asking `%s`)" % (label, REPLACE_HELPER))
+            continue
+        cond, b_start, b_end = seen[label]
+        if REPLACE_HELPER + "(" not in code[b_start:b_end]:
+            v.append("FastioTar.kt: the %s branch (type %s) writes its target without going "
+                     "through `%s` — the occupied-target rule has a copy outside the helper, "
+                     "and that copy is what the next polarity change will miss"
+                     % (" ".join(cond.split())[:24], label, REPLACE_HELPER))
+    return v
 
 # ── [dv15-A2] A-04: the archive FILE itself must not be followed ─────────────
 #
@@ -1042,11 +1235,15 @@ def run(root):
     violations += check_toplevel_roots(tar_src)
     # [R3-t14 #156] the LINKNAME ceiling on writeHeader (the documented prototype)
     violations += check_write_header_linkname(tar_src)
+    # [W-10] the occupied-target decision (polarity + authorised delete + routing)
+    violations += check_extract_replace_decision(tar_src)
     if not os.path.isfile(handler_path):
         return 2
     with open(handler_path, encoding="utf-8") as f:
         handler_src = f.read()
     violations += check_handler(handler_src)
+    # [W-09] tarCreateInto must hand tarCreate the archive path (5th argument)
+    violations += check_tar_create_archive_arg(handler_src)
     violations += check_archive_open_guard(handler_src)
     # [R3-t14 #154] the Pass-1 verdict must gate the Pass-2 write
     violations += check_extract_validate_gate(handler_src)
@@ -1336,6 +1533,7 @@ private fun tarCreateInto(entry: JSONObject, archivePath: Path): NativeOffloadRe
         return refuseLinkedArchive(entry, "write", startedNs, args)
     }
     val raw = Files.newOutputStream(archivePath)
+    raw.use { tarCreate(it, members, tarEntryBudget(args), outcome, archivePath) }
     return finishTar(entry, outcome.errors.isNotEmpty(), startedNs, args)
 }
 
@@ -1379,6 +1577,128 @@ BAD_HANDLER_FALSE = GOOD_HANDLER.replace(
     "return finishTar(deniedEntry(archiveRaw, archiveResolution), true, startedNs, args)",
     "return finishTar(deniedEntry(archiveRaw, archiveResolution), false, startedNs, args)",
 )
+
+# ── [W-09] the tarCreate wiring fixtures ────────────────────────────────────
+# The production shape (5 arguments, archivePath last) is GOOD_HANDLER itself.
+# The two witness shapes are one edit away from it — that proximity is the
+# point: nothing else in the file changes.
+GOOD_TAR_CREATE_ARGS = "tarEntryBudget(args), outcome, archivePath)"
+
+BAD_TAR_CREATE_OMITTED = GOOD_HANDLER.replace(
+    GOOD_TAR_CREATE_ARGS, "tarEntryBudget(args), outcome)", 1)
+assert BAD_TAR_CREATE_OMITTED != GOOD_HANDLER
+
+BAD_TAR_CREATE_NULL = GOOD_HANDLER.replace(
+    GOOD_TAR_CREATE_ARGS, "tarEntryBudget(args), outcome, null)", 1)
+assert BAD_TAR_CREATE_NULL != GOOD_HANDLER
+
+BAD_TAR_CREATE_OTHER = GOOD_HANDLER.replace(
+    GOOD_TAR_CREATE_ARGS, "tarEntryBudget(args), outcome, destPath)", 1)
+assert BAD_TAR_CREATE_OTHER != GOOD_HANDLER
+
+# ── [W-10] the occupied-target helper fixtures ─────────────────────────────
+# A compact stand-in for the extract loop: the three writing branches all route
+# through the helper, exactly as the production file now does.
+GOOD_EXTRACT_REPLACE = """
+internal fun tarExtract(source: InputStream, dest: Path, force: Boolean, out: TarExtractOutcome) {
+    val reader = TarReader(source)
+    while (true) {
+        val member = reader.next() ?: break
+        val target = dest.resolve(member.name).normalize()
+        when (member.type) {
+            '2' -> {
+                if (!clearOccupiedTarget(target, force, out, member, reader, " with a symlink")) continue
+                Files.createDirectories(target.parent)
+                Files.createSymbolicLink(target, Paths.get(member.linkName))
+            }
+            '1' -> {
+                if (!clearOccupiedTarget(target, force, out, member, reader, "")) continue
+                Files.createDirectories(target.parent)
+                Files.copy(linkSource, target)
+            }
+            '0', '\\u0000', '7' -> {
+                if (!clearOccupiedTarget(target, force, out, member, reader, "")) continue
+                Files.createDirectories(target.parent)
+                Files.newOutputStream(target).use { sink -> reader.copyData(sink, member.size) }
+            }
+            else -> {
+                out.skippedSpecial++
+            }
+        }
+        reader.skipData()
+    }
+}
+
+private fun clearOccupiedTarget(
+    target: Path,
+    force: Boolean,
+    out: TarExtractOutcome,
+    member: TarMember,
+    reader: TarReader,
+    replacedKind: String,
+): Boolean {
+    if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) return true
+    if (!force) {
+        out.errors.add("${member.name}: already_exists (pass --force to replace)")
+        reader.skipData()
+        return false
+    }
+    if (Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
+        out.errors.add("${member.name}: target is a directory; refusing to replace it$replacedKind")
+        reader.skipData()
+        return false
+    }
+    Files.delete(target)
+    return true
+}
+"""
+
+# W-10 witness: the polarity flips. The message, the position and every token
+# of `check_handler`/`check_archive_open_guard` are untouched.
+BAD_EXTRACT_FORCE_INVERTED = GOOD_EXTRACT_REPLACE.replace(
+    "    if (!force) {\n        out.errors.add(\"${member.name}: already_exists",
+    "    if (force) {\n        out.errors.add(\"${member.name}: already_exists", 1)
+assert BAD_EXTRACT_FORCE_INVERTED != GOOD_EXTRACT_REPLACE
+
+# the delete moved ABOVE the force check: the file disappears either way.
+BAD_EXTRACT_DELETE_FIRST = GOOD_EXTRACT_REPLACE.replace(
+    "    if (!force) {", "    Files.delete(target)\n    if (!force) {", 1).replace(
+    "    Files.delete(target)\n    return true", "    return true", 1)
+assert BAD_EXTRACT_DELETE_FIRST != GOOD_EXTRACT_REPLACE
+
+# the delete moved INSIDE the refusal block: message printed, file gone anyway.
+BAD_EXTRACT_DELETE_INSIDE = GOOD_EXTRACT_REPLACE.replace(
+    "        out.errors.add(\"${member.name}: already_exists (pass --force to replace)\")\n"
+    "        reader.skipData()",
+    "        out.errors.add(\"${member.name}: already_exists (pass --force to replace)\")\n"
+    "        Files.delete(target)\n"
+    "        reader.skipData()", 1)
+assert BAD_EXTRACT_DELETE_INSIDE != GOOD_EXTRACT_REPLACE
+
+# the '1' branch gets its own copy of the rule back (the third-copy drift).
+BAD_EXTRACT_REINLINED = GOOD_EXTRACT_REPLACE.replace(
+    "                if (!clearOccupiedTarget(target, force, out, member, reader, \"\")) continue\n"
+    "                Files.createDirectories(target.parent)\n"
+    "                Files.copy(linkSource, target)",
+    "                if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {\n"
+    "                    if (!force) {\n"
+    "                        out.errors.add(\"${member.name}: already_exists (pass --force to replace)\")\n"
+    "                        continue\n"
+    "                    }\n"
+    "                    Files.delete(target)\n"
+    "                }\n"
+    "                Files.createDirectories(target.parent)\n"
+    "                Files.copy(linkSource, target)", 1)
+assert BAD_EXTRACT_REINLINED != GOOD_EXTRACT_REPLACE
+
+# a branch that stops asking at all (no message, so only the routing arm sees it).
+BAD_EXTRACT_BYPASS = GOOD_EXTRACT_REPLACE.replace(
+    "                if (!clearOccupiedTarget(target, force, out, member, reader, \"\")) continue\n"
+    "                Files.createDirectories(target.parent)\n"
+    "                Files.copy(linkSource, target)",
+    "                Files.createDirectories(target.parent)\n"
+    "                Files.copy(linkSource, target, LinkOption.REPLACE_EXISTING)", 1)
+assert BAD_EXTRACT_BYPASS != GOOD_EXTRACT_REPLACE
 
 # ── [dv14-A2] writeRegular fixtures ──────────────────────────────────────────
 
@@ -1980,6 +2300,36 @@ def selftest():
         )
     )
     expect_trip("single-site fixture", bad_single, "expected >= 2 finishTar")
+
+    # ── [W-09] the archive path must reach tarCreate ────────────────────────
+    expect_clean("compliant tarCreate wiring fixture (W-09)",
+                 check_tar_create_archive_arg(GOOD_HANDLER))
+    expect_trip("tarCreate without the archive path (W-09)",
+                check_tar_create_archive_arg(BAD_TAR_CREATE_OMITTED),
+                "argument(s), not 5")
+    expect_trip("tarCreate with a null archive path (W-09)",
+                check_tar_create_archive_arg(BAD_TAR_CREATE_NULL), "not `archivePath`")
+    expect_trip("tarCreate with another identifier (W-09)",
+                check_tar_create_archive_arg(BAD_TAR_CREATE_OTHER), "not `archivePath`")
+
+    # ── [W-10] one occupied-target rule, one polarity ───────────────────────
+    expect_clean("compliant occupied-target helper fixture (W-10)",
+                 check_extract_replace_decision(GOOD_EXTRACT_REPLACE))
+    expect_trip("inverted guard polarity fixture (W-10)",
+                check_extract_replace_decision(BAD_EXTRACT_FORCE_INVERTED),
+                "polarity is INVERTED")
+    expect_trip("delete before the force check (W-10)",
+                check_extract_replace_decision(BAD_EXTRACT_DELETE_FIRST),
+                "BEFORE the force check")
+    expect_trip("delete inside the refusal block (W-10)",
+                check_extract_replace_decision(BAD_EXTRACT_DELETE_INSIDE),
+                "INSIDE the `!force`")
+    expect_trip("rule re-inlined into a branch (W-10)",
+                check_extract_replace_decision(BAD_EXTRACT_REINLINED),
+                "grew its own `already_exists`")
+    expect_trip("branch bypasses the helper (W-10)",
+                check_extract_replace_decision(BAD_EXTRACT_BYPASS),
+                "without going through")
 
     # ── [dv15-A2] A-04: the archive opens must not follow a link ────────────
     good_guard = check_archive_open_guard(GOOD_HANDLER)
