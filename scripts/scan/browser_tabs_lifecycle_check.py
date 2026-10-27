@@ -2080,6 +2080,260 @@ def check_context_only_persist(pool_src: str) -> list:
     return errs
 
 
+# ── [witness-1027 W-12] C12: the storage page's MANUAL orphan assembly ───────
+# `StorageManagementScreen.reload` does not call `SessionFileStore.scanOrphans`
+# (one media walk, not two), it assembles the same `ReclaimReport` by hand:
+# `scanOrphanSessionDirs(liveIds)` + `scanMediaOnce(liveIds)` +
+# `scanOrphanBrowserTabFiles(liveIds)`. C1-C3 judge the STORE, and the store
+# unit tests call the store — so this call site was outside every layer: pass
+# `emptySet()` instead of `liveIds` and nothing fails, because the delete half
+# (`reclaimOrphans(live)`) is a different call in a different lambda. The
+# banner then counts every LIVE session's `browser_tabs/<sid>.json` as
+# reclaimable residue and, since the delete half uses the real ids, "clean up"
+# removes nothing and the banner returns on the next reload — forever.
+#
+# C12 scans ui/** (derived walk, no hardcoded file list) for the scan call:
+#   C12a  the argument must not be a constant empty / literal-only collection
+#         (`emptySet()`, `setOf()`, `listOf("x")` …) — that is the witness;
+#   C12b  the file's delete half (`reclaimOrphans(…)`) must use the SAME source
+#         (both arguments canonicalised: local `val` bindings inlined, then
+#         whitespace dropped). Different symbols are fine as long as they
+#         resolve to the same expression — the shipped tree binds `liveIds` and
+#         `live` to the same `listSessions().map { it.id }.toSet()`;
+#   C12c  a scan with no delete call at all is red: two predicates assembled
+#         separately cannot be trusted to agree.
+# Fail-closed: unlexable source, a missing UI tree, an empty argument = red.
+UI_DIR = "src/android/app/src/main/java/com/rikkaminis/app/ui"
+SCAN_CALL = "scanOrphanBrowserTabFiles"
+DELETE_CALL = "reclaimOrphans"
+EMPTY_CTORS = {
+    "emptySet", "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf", "sortedSetOf",
+    "emptyList", "listOf", "mutableListOf", "arrayListOf", "setOfNotNull",
+}
+_CTOR_RE = re.compile(r"^(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*(?:<[^<>]*>)?\s*\((.*)\)$", re.S)
+_IDENT_RUN = re.compile(r"(?<![\w.])[A-Za-z_]\w*(?![\w(])")
+_LAMBDA_PARAM = re.compile(r"\{\s*([A-Za-z_]\w*)\s*->")
+_CANON_DEPTH = 4
+
+
+def _ln(code, pos):
+    return code.count("\n", 0, pos) + 1
+
+
+def _call_arg_lists(code, name):
+    """[(pos, [raw argument texts])] for every real call to `name(…)`."""
+    out = []
+    for m in re.finditer(r"\b%s\s*\(" % re.escape(name), code):
+        if re.search(r"\bfun\s+$", code[:m.start()]):
+            continue
+        spans = call_args(code, m.end() - 1)
+        out.append((m.start(), [code[a:b].strip() for a, b in spans]))
+    return out
+
+
+def _val_before(code, name, pos):
+    """(pos, initializer) of the last `val|var <name> = …` before `pos`."""
+    pat = re.compile(r"(?<![\w.])(?:val|var)\s+" + re.escape(name) + r"\s*(?::[^=\n]+?)?=(?!=)")
+    last = None
+    for m in pat.finditer(code):
+        if m.start() >= pos:
+            break
+        last = (m.start(), code[m.end():expr_end(code, m.end())].strip())
+    return last
+
+
+def _canonical(code, expr, pos, depth=0):
+    """Inline local `val` bindings, then drop whitespace — the "same source" key.
+
+    Symbol names are NOT compared: two halves may bind different names to the
+    same expression, and requiring textual identity of the spelling would flag
+    the shipped (correct) tree. What must match is the expression the ids come
+    from.
+    """
+    e = strip_parens(" ".join(expr.split()))
+    if depth >= _CANON_DEPTH or not e:
+        return e
+    lambda_params = {m.group(1) for m in _LAMBDA_PARAM.finditer(e)}
+
+    def repl(m):
+        nm = m.group(0)
+        if nm in lambda_params or nm in ("it", "this", "true", "false", "null"):
+            return nm
+        decl = _val_before(code, nm, pos)
+        if decl is None:
+            return nm
+        # No wrapping parens: both halves are compared as expressions with
+        # whitespace dropped, and a stray pair would make identical sources
+        # look different (a false RED on the shipped tree).
+        return _canonical(code, decl[1], decl[0], depth + 1)
+
+    return strip_parens(re.sub(r"\s+", "", _IDENT_RUN.sub(repl, e)))
+
+
+def _collection_ctor(expr):
+    """(ctor_name, inner_args) when the expression is a single constructor call."""
+    m = _CTOR_RE.match(strip_parens(expr.strip()))
+    if m is None:
+        return None
+    return m.group(1), m.group(2)
+
+
+def _constant_empty(expr):
+    c = _collection_ctor(expr)
+    return bool(c) and c[0] in EMPTY_CTORS and not c[1].strip()
+
+
+def _literal_only(expr):
+    c = _collection_ctor(expr)
+    return bool(c) and c[0] in EMPTY_CTORS and not _IDENT_RUN.search(c[1].strip())
+
+
+def check_ui_source(src, label=""):
+    """C12 findings for one UI source file (empty list = clean / not a site)."""
+    tag = label or "ui source"
+    try:
+        code = code_view(src)
+    except KotlinLexError as exc:
+        return ["C12: %s is not lexable (%s) — fail closed" % (tag, exc)]
+    scans = _call_arg_lists(code, SCAN_CALL)
+    if not scans:
+        return []
+    deletes = _call_arg_lists(code, DELETE_CALL)
+    # Messages READ the arguments, so they come from the literal view (a string
+    # literal is blanked in `code`, and `setOf("a")` would print as `setOf(" ")`).
+    shown = {p: a for p, a in _call_arg_lists(literal_view(src), SCAN_CALL)}
+    shown_del = {p: a for p, a in _call_arg_lists(literal_view(src), DELETE_CALL)}
+    findings = []
+    for pos, args in scans:
+        # JUDGMENT always on the code view (a literal here is just `"   "`, which
+        # is what makes `setOf("a")` visibly literal-only); DISPLAY uses `shown`.
+        raw_code = args[0] if args else ""
+        raw = (shown.get(pos, args)[0] if shown.get(pos, args) else "")
+        line = _ln(code, pos)
+        if not raw_code.strip():
+            findings.append(
+                "C12: %s:%d — `%s(` has no argument; the live-id set cannot be "
+                "established (fail closed)" % (tag, line, SCAN_CALL))
+            continue
+        canon = _canonical(code, raw_code, pos)
+        if _constant_empty(canon) or _literal_only(canon):
+            findings.append(
+                "C12: %s:%d — `%s(%s)` measures orphans against a CONSTANT set: every live "
+                "session's browser_tabs/<sid>.json counts as reclaimable residue, and since "
+                "the delete half uses the real live ids the banner shows junk that a reclaim "
+                "can never remove (it returns on the next reload)"
+                % (tag, line, SCAN_CALL, " ".join(raw.split())))
+            continue
+        if not deletes:
+            findings.append(
+                "C12: %s:%d — the file scans orphans with `%s(` but never calls `%s(`; the "
+                "banner's predicate and the delete's predicate are assembled separately, so "
+                "nothing keeps them in agreement"
+                % (tag, line, SCAN_CALL, DELETE_CALL))
+            continue
+        delete_canons = [(d[0], (shown_del.get(d[0], d[1])[0] if d[1] else "")) for d in deletes]
+        if not any(arg.strip() and _canonical(code, arg, dpos) == canon
+                   for dpos, arg in delete_canons):
+            findings.append(
+                "C12: %s:%d — the scan half derives its ids from `%s` while the delete half "
+                "uses %s; the two halves disagree on what an orphan is, so the banner's count "
+                "never matches what a reclaim pass removes"
+                % (tag, line, " ".join(raw.split()),
+                   ", ".join("`%s`" % " ".join(a.split()) for _, a in delete_canons)))
+    return findings
+
+
+def check_ui_tree(root):
+    """C12 across the whole UI tree (derived walk — no hardcoded file list)."""
+    base = os.path.join(root, UI_DIR)
+    if not os.path.isdir(base):
+        return ["C12: `%s` is missing — the manual assembly point cannot be checked "
+                "(fail closed)" % UI_DIR]
+    findings = []
+    for dirpath, _dirs, files in os.walk(base):
+        for name in sorted(files):
+            if not name.endswith(".kt"):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    src = fh.read()
+            except OSError as exc:
+                findings.append("C12: cannot read %s (%s) — fail closed"
+                                % (os.path.relpath(path, root), exc))
+                continue
+            findings += check_ui_source(src, os.path.relpath(path, root))
+    return findings
+
+
+
+# ── C12 fixtures ([witness-1027 W-12]) ──────────────────────────────────────
+UI_OK = """package p
+
+@Composable
+fun StorageManagementScreen(chatRepository: ChatRepository, sessionFiles: SessionFileStore) {
+    val scope = rememberCoroutineScope()
+    scope.launch {
+        withContext(Dispatchers.IO) {
+            val allSessions = chatRepository.dao.listSessions()
+            val liveIds = allSessions.map { it.id }.toSet()
+            val orphanSessionPart = sessionFiles.scanOrphanSessionDirs(liveIds)
+            val orphanTabsPart = sessionFiles.scanOrphanBrowserTabFiles(liveIds)
+            val orphans = sessionFiles.buildReport(orphanSessionPart, orphanTabsPart)
+        }
+    }
+    MinisTextButton(onClick = {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                val live = chatRepository.dao.listSessions().map { it.id }.toSet()
+                sessionFiles.reclaimOrphans(live)
+            }
+        }
+    })
+}
+"""
+
+# W-12's witness: the banner measures against a constant empty set.
+UI_W12 = UI_OK.replace("scanOrphanBrowserTabFiles(liveIds)",
+                       "scanOrphanBrowserTabFiles(emptySet())")
+# a literal-only set is just as constant, and just as stable-looking
+UI_W12_LITERAL = UI_OK.replace("scanOrphanBrowserTabFiles(liveIds)",
+                               'scanOrphanBrowserTabFiles(setOf("a"))').replace(
+    "reclaimOrphans(live)", 'reclaimOrphans(setOf("a"))')
+# the two halves resolve to DIFFERENT sources (the banner can never clear)
+UI_HALVES_DISAGREE = UI_OK.replace(
+    "sessionFiles.reclaimOrphans(live)",
+    "sessionFiles.reclaimOrphans(liveIds.minus(\"a\"))")
+# no delete half in the file at all
+UI_NO_DELETE = UI_OK.replace("                sessionFiles.reclaimOrphans(live)\n", "")
+
+# clean equivalents
+UI_OK_SAME_SYMBOL = UI_OK.replace(
+    """                val live = chatRepository.dao.listSessions().map { it.id }.toSet()
+                sessionFiles.reclaimOrphans(live)""",
+    "                sessionFiles.reclaimOrphans(liveIds)")
+UI_OK_INLINE_BOTH = UI_OK.replace(
+    "scanOrphanBrowserTabFiles(liveIds)",
+    "scanOrphanBrowserTabFiles(allSessions.map { it.id }.toSet())")
+
+
+def _c12_arms():
+    """(name, source, needles, clean) — a violating arm must be red on C12."""
+    return [
+        ("C12 shipped shape is green", UI_OK, [], True),
+        ("C12 both halves on one symbol is green", UI_OK_SAME_SYMBOL, [], True),
+        ("C12 both halves inlined is green", UI_OK_INLINE_BOTH, [], True),
+        ("W-12 emptySet() scan half is red", UI_W12,
+         ["measures orphans against a CONSTANT set"], False),
+        ("W-12b literal-only set is red", UI_W12_LITERAL,
+         ["measures orphans against a CONSTANT set"], False),
+        ("W-12c the two halves disagree is red", UI_HALVES_DISAGREE,
+         ["disagree on what an orphan is"], False),
+        ("W-12d no delete half at all is red", UI_NO_DELETE,
+         ["never calls `reclaimOrphans(`"], False),
+    ]
+
+
 def selftest() -> int:
     compliant = """package com.rikkaminis.app.data.storage
 
@@ -2418,6 +2672,25 @@ class SessionFileStore internal constructor(
         else:
             print(f"  OK {name}: {errs if errs else 'green'}")
 
+    # --- [witness-1027 W-12] C12 arms: the storage page's manual assembly ---
+    for name, sample, expect, clean in _c12_arms():
+        errs = check_ui_source(sample, "Fixture.kt")
+        messages = "\n".join(errs)
+        if clean:
+            if errs:
+                print(f"  FAIL {name}: expected green, got {errs}")
+                failures += 1
+            else:
+                print(f"  OK {name}: green")
+        elif not errs:
+            print(f"  FAIL {name}: expected red, got green")
+            failures += 1
+        elif not all(e in messages for e in expect):
+            print(f"  FAIL {name}: expected {expect}, got {errs}")
+            failures += 1
+        else:
+            print(f"  OK {name}: {errs}")
+
     if failures:
         print(f"SELFTEST FAILED ({failures} arms)")
         return 1
@@ -2475,12 +2748,14 @@ def main() -> int:
     # [dv23-B4 B-04] C11 — a borrowing pool must not persist (fail-closed).
     if pool_src is not None:
         errs += check_context_only_persist(pool_src)
+    # [witness-1027 W-12] C12 — the UI-side manual orphan assembly (derived walk).
+    errs += check_ui_tree(root)
     if errs:
         print("browser_tabs_lifecycle_check RED:")
         for e in errs:
             print(f"  - {e}")
         return 1
-    print("browser_tabs_lifecycle_check OK (criteria: C1-C3 store lifecycle + C4/C4d pool teardown + window.open/close persistence + C4e disposal cancels every pool-owned scope + C4f the disposal latch guards saveState/restoreSavedTabs + C5 risk notice reaches the agent text + C6 setSession re-points downloads atomically + C7 the session-shape predicate alone carries the draft alias + C8 every orphan entry folds the composer's active draft in + C9 the pool's busy signal is funnelled and observable + C10 every destroyTab caller re-derives it after settling the list + C3b the orphan sweep deletes only non-live sessions (polarity) + C6b the remap callback writes the remapped path back + C6c loadSavedState actually dispatches the restore)")
+    print("browser_tabs_lifecycle_check OK (criteria: C1-C3 store lifecycle + C4/C4d pool teardown + window.open/close persistence + C4e disposal cancels every pool-owned scope + C4f the disposal latch guards saveState/restoreSavedTabs + C5 risk notice reaches the agent text + C6 setSession re-points downloads atomically + C7 the session-shape predicate alone carries the draft alias + C8 every orphan entry folds the composer's active draft in + C9 the pool's busy signal is funnelled and observable + C10 every destroyTab caller re-derives it after settling the list + C3b the orphan sweep deletes only non-live sessions (polarity) + C6b the remap callback writes the remapped path back + C6c loadSavedState actually dispatches the restore + C12 the UI-side manual orphan assembly uses the live ids and the SAME source as the delete half)")
     return 0
 
 
