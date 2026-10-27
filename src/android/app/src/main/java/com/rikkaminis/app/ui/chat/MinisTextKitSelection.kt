@@ -552,11 +552,6 @@ class SelectionController {
         return if (nearest.second <= hitSlopPx * 1.5f) nearest.first else null
     }
 
-    private fun distance(a: Offset, b: Offset): Float {
-        val dx = a.x - b.x; val dy = a.y - b.y
-        return kotlin.math.sqrt(dx * dx + dy * dy)
-    }
-
     /**
      * Compute the union bounding rectangle (window space) of the active
      * selection, walking only registered shards. Used to position the

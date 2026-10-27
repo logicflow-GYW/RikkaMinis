@@ -278,35 +278,7 @@ class ComposerSendSwipeTest {
         return out.toString()
     }
 
-    /**
-     * Code-only `{ … }` body of the declaration containing [marker]. Comments
-     * and string contents are blanked (offsets preserved), so NEITHER prose (a
-     * KDoc naming the very call under test) NOR a log literal can satisfy an
-     * assertion. The parameter list is skipped — a default lambda in the
-     * signature (`clampToViewportBounds: () -> Rect? = { null }`) would
-     * otherwise win the "first brace" race.
-     */
-    private fun bodyOf(text: String, marker: String): String {
-        val skel = skeleton(text)
-        val idx = skel.indexOf(marker)
-        if (idx == -1) return ""
-        var i = skel.indexOf('(', idx)
-        if (i == -1) return ""
-        var depth = 0
-        while (i < skel.length) {
-            when (skel[i]) {
-                '(' -> depth++
-                ')' -> {
-                    depth--
-                    if (depth == 0) break
-                }
-            }
-            i++
-        }
-        return braceSlice(skel, skel.indexOf('{', i + 1))
-    }
-
-    private fun braceSlice(skel: String, start: Int): String {
+        private fun braceSlice(skel: String, start: Int): String {
         if (start == -1) return ""
         var depth = 0
         var i = start

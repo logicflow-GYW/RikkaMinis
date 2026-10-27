@@ -707,7 +707,4 @@ class AgentTraceRecorder(
         obj.block()
         return obj.toString()
     }
-
-    private fun truncate(s: String, max: Int): String =
-        sanitize(s, max)
 }

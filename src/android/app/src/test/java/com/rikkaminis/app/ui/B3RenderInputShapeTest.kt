@@ -118,9 +118,6 @@ class B3RenderInputShapeTest {
     private fun window(haystack: String, from: Int, span: Int): String =
         haystack.substring(from, minOf(haystack.length, from + span))
 
-    private fun nextAfter(haystack: String, marker: String, from: Int): Int =
-        haystack.indexOf(marker, from)
-
     /**
      * [dv23-B3] ChatScreen must not reach into the composer's text itself.
      *
