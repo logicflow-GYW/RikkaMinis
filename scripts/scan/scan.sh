@@ -1,9 +1,9 @@
 #!/bin/sh
-# CI scan gate — driver for the 112 pre-build consistency checks.
+# CI scan gate — driver for the 113 pre-build consistency checks.
 #
 # The checks live in scripts/scan/scan_blocks.sh (data file, one block per
 # check). They are independent, so the driver runs them in a bounded process
-# pool and prints the transcripts in 1..112 order; the pool turns the old
+# pool and prints the transcripts in 1..113 order; the pool turns the old
 # ~9.5 minute serial phase into roughly the cost of the single slowest check
 # plus scheduling overhead.
 #
