@@ -200,26 +200,266 @@ object ConfigBackup {
         // [feat/scheduled-tasks-l0] Scheduled-tasks document from the store
         // (null = omit the section; import side skips it like a pre-L0 file).
         scheduledTasks: JSONObject? = null,
-    ): String {
+    ): String = buildWithinCap(MAX_PAYLOAD_BYTES.toLong()) { capBytes, includeArtifacts ->
         val sections = buildSections(
             providerRepo, includeSecrets, envVarRepo, skillRepo, memoryRepo,
             mcpRepo, chatRepo, chatWindowDays, artifactRoots,
             scheduledTasks = scheduledTasks,
+            documentCapBytes = capBytes,
+            includeArtifacts = includeArtifacts,
         )
-        val payload = buildPayloadObject(sections, includeSecrets, webDavConfig).toString()
-        // [T-backup-export-size-cap] Enforce the same ceiling on the export
-        // side that import already checks (MAX_PAYLOAD_BYTES). With the byte
-        // budget packing above, chat history alone can no longer blow the
-        // cap — it is trimmed to fit. What remains possible is the non-chat
-        // skeleton itself growing past the cap (pathological skills /
-        // memory files), and for that the hard refusal below stays: it keeps
-        // the failure local and actionable instead of OOMing the import side.
-        if (payload.length > MAX_PAYLOAD_BYTES) {
-            throw IllegalStateException(
-                "Backup too large (${payload.length} chars, max $MAX_PAYLOAD_BYTES)",
+        // Two views of the SAME tree: the document, and the document minus the
+        // chat arrays. [T-backup-export-size-cap] The ladder in [buildWithinCap]
+        // can only tell "shrink chat" apart from "chat is not the problem" if
+        // it knows the non-chat size. Serializing the skeleton costs one ~3MB
+        // string here and only on this (non-production) path.
+        val skeleton = buildPayloadObject(sections, includeSecrets, webDavConfig).apply {
+            remove("chatSessions")
+            remove("chatMessages")
+            remove("chatTruncated")
+        }
+        BuiltPayload(
+            text = buildPayloadObject(sections, includeSecrets, webDavConfig).toString(),
+            nonChatBytes = utf8Length(skeleton.toString()),
+            hadArtifacts = sections.artifacts.has("archive"),
+            // Only evaluated when the ladder gives up — see [oversizeMessage].
+            sectionBreakdown = { describeSections(sections) },
+        )
+    }
+
+    /**
+     * [D-C fix/backup-bootstrap-size] One attempt of [export]'s size ladder.
+     *
+     * @property text the serialized document.
+     * @property nonChatBytes UTF-8 size of everything EXCEPT the two chat
+     *   arrays (fields / providers / skills / memory files / artifacts). This
+     *   is what decides whether shrinking chat can bring the document under
+     *   the cap at all: a skeleton that is already over it cannot be rescued
+     *   by dropping chat, and pretending otherwise burns rebuild rounds.
+     * @property hadArtifacts whether this attempt embedded the artifact zip —
+     *   the only large section that is optional by design, so it is the last
+     *   thing the ladder gives up.
+     * @property sectionBreakdown lazy per-section sizes for the failure
+     *   message. A lambda so the happy path never pays for serializing every
+     *   section again (the artifact archive alone is a ~12MB base64 string).
+     */
+    internal class BuiltPayload(
+        val text: String,
+        val nonChatBytes: Long,
+        val hadArtifacts: Boolean,
+        val sectionBreakdown: () -> String = { "" },
+    )
+
+    /** [D-C fix/backup-bootstrap-size] How many times the ladder may shrink the
+     *  chat budget before it starts giving up sections. 0.7^4 ≈ 24% of the
+     *  original budget — enough to absorb any estimation drift, bounded so a
+     *  pathological payload cannot spin. */
+    internal const val EXPORT_CHAT_DEGRADE_ROUNDS = 4
+
+    /** [D-C fix/backup-bootstrap-size] Per-round chat-budget shrink factor. 0.7
+     *  is the largest drop that still keeps a usable prefix of history per
+     *  round (halving would throw a plausible export away to save a few bytes). */
+    internal const val EXPORT_CHAT_DEGRADE_FACTOR = 0.7
+
+    /**
+     * [D-C fix/backup-bootstrap-size] Produce a document that is guaranteed to
+     * fit the IMPORT side's ceiling, degrading content instead of refusing.
+     *
+     * Why the ladder exists at all: before the unit fix, export measured
+     * `payload.length` (UTF-16 code units) while import measured UTF-8 BYTES.
+     * Chinese-heavy payloads sit at bytes/chars ≈ 1.08, so a 71.4MB file
+     * passed export at 66.1M "chars" and was then permanently unimportable —
+     * the user's only backup. With both sides in bytes the budget packing in
+     * [buildSections] already keeps chat inside the cap; this ladder is the
+     * belt for everything the budget cannot see (a skeleton that grew since
+     * the measurement, a serializer change, an artifact zip that base64-
+     * inflates past what was estimated). Losing the tail of the chat history
+     * is always better than producing a file that cannot be restored.
+     *
+     * Order: chat rounds (×[EXPORT_CHAT_DEGRADE_FACTOR], at most
+     * [EXPORT_CHAT_DEGRADE_ROUNDS]) → drop the artifact archive (once) →
+     * throw with a per-section breakdown. Chat first because it is the bulk
+     * and the safest to trim (the restore already reports what it dropped);
+     * artifacts last because they are the agent's actual outputs.
+     *
+     * Extracted (rather than inlined in [export]) so the ladder is JVM-testable
+     * with a fake builder: the 64MiB cap cannot be exercised in a unit test
+     * without allocating 64MiB of Chinese text, but the DECISION logic can.
+     */
+    internal suspend fun buildWithinCap(
+        capBytes: Long,
+        // Headroom the DOCUMENT must keep free beyond the skeleton for chat to
+        // be worth re-packing (production: SAFETY_MARGIN_BYTES). A parameter
+        // because a test-scale cap (a few KB) is smaller than the real 1MB
+        // margin, which would make every fake payload look skeleton-bound.
+        safetyMarginBytes: Long = SAFETY_MARGIN_BYTES.toLong(),
+        build: suspend (capBytes: Long, includeArtifacts: Boolean) -> BuiltPayload,
+    ): String {
+        var scale = 1.0
+        var includeArtifacts = true
+        var chatRounds = 0
+        var artifactsDropped = false
+        while (true) {
+            val attemptCap = (capBytes * scale).toLong().coerceAtLeast(0L)
+            val attempt = build(attemptCap, includeArtifacts)
+            val totalBytes = utf8Length(attempt.text)
+            if (totalBytes <= capBytes) return attempt.text
+            val chatBytes = totalBytes - attempt.nonChatBytes
+            // Can chat be the culprit? Only if something is left of it AND the
+            // skeleton plus its headroom still leaves room for it.
+            val chatCanHelp = chatBytes > 0 &&
+                attempt.nonChatBytes + safetyMarginBytes < capBytes
+            if (chatCanHelp && chatRounds < EXPORT_CHAT_DEGRADE_ROUNDS) {
+                chatRounds++
+                scale *= EXPORT_CHAT_DEGRADE_FACTOR
+                continue
+            }
+            if (includeArtifacts && attempt.hadArtifacts && !artifactsDropped) {
+                artifactsDropped = true
+                includeArtifacts = false
+                continue
+            }
+            throw IllegalStateException(oversizeMessage(capBytes, totalBytes, attempt))
+        }
+    }
+
+    /** Which section blew the cap, and what the user can do about it. Names
+     *  sizes because "too large" without a culprit left the 2026-10-27 user
+     *  with no move except hand-trimming the JSON. */
+    private fun oversizeMessage(
+        capBytes: Long,
+        totalBytes: Long,
+        attempt: BuiltPayload,
+    ): String {
+        val chatBytes = totalBytes - attempt.nonChatBytes
+        val kb = { v: Long -> "${v / 1024}KB" }
+        return "Backup too large: ${totalBytes} bytes (${kb(totalBytes)}), cap " +
+            "$capBytes bytes (${kb(capBytes)}). Sections: ${attempt.sectionBreakdown()}; " +
+            "chat=${kb(chatBytes)} (already trimmed over " +
+            "$EXPORT_CHAT_DEGRADE_ROUNDS rounds). The import side enforces the same " +
+            "byte cap, so a larger file could not be restored. To fit: remove or " +
+            "shrink oversized skills, trim daily memory logs, shorten the chat " +
+            "history window, or exclude the artifact archive, then export again."
+    }
+
+    /** Per-section UTF-8 sizes of a built payload, largest first. Called only
+     *  from [oversizeMessage]; every section is re-serialized here. */
+    private fun describeSections(sections: ExportSections): String {
+        val sizes = listOf(
+            "fields" to sections.fields,
+            "providers" to sections.providers,
+            "thinkingRules" to sections.thinkingRules,
+            "groups" to sections.groups,
+            "envVars" to sections.envVars,
+            "skills" to sections.skills,
+            "memoryFiles" to sections.memoryFiles,
+            "mcpServers" to sections.mcpServers,
+            "artifacts" to sections.artifacts,
+            "scheduledTasks" to (sections.scheduledTasks ?: JSONObject()),
+        ).map { (name, value) -> name to utf8Length(value.toString()) }
+            .sortedByDescending { it.second }
+        return sizes.joinToString(", ") { (name, bytes) -> "$name=${bytes / 1024}KB" }
+    }
+
+    /**
+     * [D-B fix/backup-bootstrap-size] Outcome of merging a backed-up WebDAV
+     * server block into whatever this install already holds.
+     *
+     * @property config the config to persist, or null when the backup block
+     *   has no url (nothing to restore — same as before this fix).
+     * @property notice one line for [ImportResult.skipped] when the user has to
+     *   know something happened to the password; null when the restore is
+     *   complete and self-explanatory.
+     */
+    internal class WebDavRestorePlan(
+        val config: WebDavConfig?,
+        val notice: String?,
+    )
+
+    /**
+     * [D-B fix/backup-bootstrap-size] Decide what the `webdavConfig` section of
+     * a backup means on THIS install.
+     *
+     * The trap this exists to avoid: [WebDavConfigStore.save] documents that a
+     * BLANK password CLEARS the stored password (the dialog pre-fills it, so a
+     * blank only ever means "the user cleared it"). A secrets-free backup has
+     * no password by construction, so naively handing its blanks to save()
+     * would delete the password the user had just retyped — turning a restore
+     * into a silent wipe of the very credential the restore was supposed to
+     * leave in place. Three cases, in order:
+     *
+     *  1. backup carries a non-blank password (secrets export) → it wins
+     *     outright. This is the family's restore-is-restore rule (providers /
+     *     groups behave the same way).
+     *  2. backup carries no (or a blank) password, this install has one →
+     *     keep the local password, take url/username/path from the backup.
+     *     Nothing is lost and nothing is cleared.
+     *  3. backup carries no password and this install has none (fresh
+     *     reinstall — the deadlock case) → store the three non-secret fields
+     *     and tell the user the password still has to be typed. That is the
+     *     whole point: three fields restored instead of zero, and the hint
+     *     arrives through the existing `skipped` channel instead of a new UI.
+     */
+    internal fun resolveWebDavRestore(
+        backup: JSONObject,
+        existing: WebDavConfig?,
+    ): WebDavRestorePlan {
+        val url = backup.optString("url", "")
+        if (url.isEmpty()) return WebDavRestorePlan(config = null, notice = null)
+        val username = backup.optString("username", "")
+        val path = backup.optString("path", WebDavConfig.DEFAULT_BACKUP_DIR)
+        val backedUpPassword = backup.optString("password", "")
+        if (backedUpPassword.isNotEmpty()) {
+            return WebDavRestorePlan(
+                config = WebDavConfig(url, username, backedUpPassword, path),
+                notice = null,
             )
         }
-        return payload
+        val keptPassword = existing?.password.orEmpty()
+        return if (keptPassword.isNotEmpty()) {
+            WebDavRestorePlan(
+                config = WebDavConfig(url, username, keptPassword, path),
+                notice = "webdav: 密码沿用本机现有配置（备份未包含密钥）",
+            )
+        } else {
+            WebDavRestorePlan(
+                config = WebDavConfig(url, username, "", path),
+                notice = "webdav 密码需重新填写（备份未包含密钥）",
+            )
+        }
+    }
+
+    /**
+     * [D-B fix/backup-bootstrap-size] The `webdavConfig` section for a backup
+     * payload, or null when nothing should be written (no server configured).
+     *
+     * Deliberately a standalone pure function (JVM-testable): the gate split
+     * here is the whole fix, and a text probe cannot tell "password omitted"
+     * from "password present but empty". Contract:
+     *  - no config → null → the section is absent (never an empty object —
+     *    import keys off section presence);
+     *  - `includeSecrets=false` → url / username / path only, NO `password`
+     *    key at all. Import keys off the *absence* of the password field to
+     *    preserve the local password — see [resolveWebDavRestore];
+     *  - `includeSecrets=true` → all four fields, even a blank password
+     *    (writing `"password": ""` makes the no-secrets intent explicit and
+     *    round-trips to "store the blank", which is what the user had).
+     *
+     * If the product ever reclassifies the username as a credential, revert
+     * this function to the pre-D-B single `includeSecrets &&` gate — that
+     * restores the old semantics wholesale (section absent without secrets).
+     */
+    internal fun buildWebDavConfigSection(
+        includeSecrets: Boolean,
+        webDavConfig: WebDavConfig?,
+    ): JSONObject? {
+        if (webDavConfig == null) return null
+        return JSONObject().apply {
+            put("url", webDavConfig.url)
+            put("username", webDavConfig.username)
+            put("path", webDavConfig.path)
+            if (includeSecrets) put("password", webDavConfig.password)
+        }
     }
 
     /**
@@ -251,18 +491,17 @@ object ConfigBackup {
         // backup (brief §6.6). Additive section: absent in pre-L0 backups, and
         // import treats absence as "nothing to restore" (no version bump).
         sections.scheduledTasks?.let { put("scheduledTasks", it) }
-        // [T-auto-backup-assets] The WebDAV server config rides the same
-        // secrets gate as provider keys: it contains the server password.
-        // Without secrets we never carry it — a restore that drops every
-        // credential also drops the server it would reconnect to.
-        if (includeSecrets && webDavConfig != null) {
-            put("webdavConfig", JSONObject().apply {
-                put("url", webDavConfig.url)
-                put("username", webDavConfig.username)
-                put("password", webDavConfig.password)
-                put("path", webDavConfig.path)
-            })
-        }
+        // [D-B fix/backup-bootstrap-size] The WebDAV server block used to ride
+        // the secrets gate AS A WHOLE, which deadlocked the one scenario it is
+        // for: the config lives in EncryptedSharedPreferences, so a re-signed
+        // reinstall always loses it — "restore your remote backups" demanded
+        // the remote credentials, and those were the thing that was lost.
+        // url / username / path are configuration, not credentials: url+path
+        // only say WHERE, and username grants nothing without the password
+        // (same level as CF_ACCOUNT_EMAIL, which has always travelled in
+        // cleartext config). Only `password` is gated. Net effect on a fresh
+        // install: three fields arrive by restore, one still has to be typed.
+        buildWebDavConfigSection(includeSecrets, webDavConfig)?.let { put("webdavConfig", it) }
         if (sections.readFailures > 0) put("readFailures", sections.readFailures)
     }
 
@@ -379,6 +618,16 @@ object ConfigBackup {
         chatWindowDays: Int = 90,
         artifactRoots: List<File>? = null,
         scheduledTasks: JSONObject? = null,
+        // [D-C fix/backup-bootstrap-size] The ceiling this assembly packs
+        // against, in UTF-8 BYTES. Defaults to the real import cap; [export]'s
+        // size ladder lowers it on retries (×0.7) so the chat packer trims
+        // harder instead of the caller re-slicing a finished document.
+        documentCapBytes: Long = MAX_PAYLOAD_BYTES.toLong(),
+        // [D-C] The ladder's last resort: the artifact archive is the only
+        // large section that is optional by design, so it can be excluded
+        // outright. False = the `artifacts` section stays empty (import treats
+        // an absent archive exactly like a pre-artifact backup).
+        includeArtifacts: Boolean = true,
     ): ExportSections {
         val registry = ConfigRegistry.get()
 
@@ -483,7 +732,10 @@ object ConfigBackup {
         // file so a multi-MB set never sits fully in memory as a string.
         val artifacts = JSONObject()
         var artifactSkipped = 0
-        if (artifactRoots != null && artifactRoots.isNotEmpty()) {
+        // [D-C fix/backup-bootstrap-size] `includeArtifacts=false` is the size
+        // ladder's last resort (see [buildWithinCap]); it yields an empty
+        // section, which import already handles as "no archive in backup".
+        if (includeArtifacts && artifactRoots != null && artifactRoots.isNotEmpty()) {
             val archiveFile = java.io.File.createTempFile("artifact-backup-", ".zip")
             try {
                 var totalBytes = 0L
@@ -689,16 +941,18 @@ object ConfigBackup {
         var chatTruncated: JSONObject? = null
         if (chatRepo != null && chatWindowDays > 0) {
             // Serialize the non-chat skeleton ONCE to measure its exact
-            // serialized cost; the chat sections get whatever budget is left
-            // under MAX_PAYLOAD_BYTES. SAFETY_MARGIN_BYTES absorbs the JSON
+            // serialized cost IN UTF-8 BYTES (the unit the import side
+            // enforces — see the [ChatBackupBudget] header); the chat sections
+            // get whatever budget is left under MAX_PAYLOAD_BYTES.
+            // SAFETY_MARGIN_BYTES absorbs the JSON
             // escaping / separators between the skeleton and the chat arrays
             // plus any drift between the estimate and the final document.
             //
-            // [T-backup-lazy-chat-load] Take the LENGTH only. Binding the
+            // [T-backup-lazy-chat-load] Take the measurement only. Binding the
             // string to a val here kept ~40MB of UTF-16 reachable for the
             // whole chat-packing block below, on top of the tree it was
             // rendered from and the arrays that accumulate during packing.
-            val skeletonChars = JSONObject().apply {
+            val skeletonBytes = JSONObject().apply {
                 put("format", "openminis.config.backup")
                 put("version", FORMAT_VERSION)
                 put("createdAt", System.currentTimeMillis())
@@ -721,7 +975,7 @@ object ConfigBackup {
                 // time; webdavConfig isn't in buildSections scope.)
                 scheduledTasks?.let { put("scheduledTasks", it) }
                 if (readFailures > 0) put("readFailures", readFailures)
-            }.toString().length
+            }.toString().let(::utf8Length)
 
             val cutoff = System.currentTimeMillis() - chatWindowDays * 24L * 3600 * 1000
             val sessions = runCatching {
@@ -761,8 +1015,14 @@ object ConfigBackup {
             }
 
             val packed = packChatHistoryWithBudgetLazily(
-                skeletonChars = skeletonChars,
-                budgetTotalChars = (MAX_PAYLOAD_BYTES - SAFETY_MARGIN_BYTES).toLong(),
+                skeletonBytes = skeletonBytes,
+                // [D-C fix/backup-bootstrap-size] Bytes on both ends: the cap
+                // the import side enforces (readSafBytes + import's byte gate)
+                // and the margin are UTF-8 bytes, and so is every charge the
+                // packer makes. `documentCapBytes` is lowered by export()'s
+                // size ladder on retries, which is why this is not the
+                // constant directly.
+                budgetTotalBytes = documentCapBytes - SAFETY_MARGIN_BYTES,
                 sessionJsons = sessionJsons,
                 messagesAt = { index ->
                     runCatching {
@@ -889,15 +1149,28 @@ object ConfigBackup {
         // the store (caller supplies the suspension point — this class has no
         // Context). Absent/null section = pre-L0 backup, stage skipped.
         onScheduledTasks: (suspend (JSONObject) -> Unit)? = null,
+        // [D-B fix/backup-bootstrap-size] The WebDAV server config this install
+        // currently holds (caller reads it from WebDavConfigStore — this class
+        // has no Context). Needed because a secrets-free backup carries no
+        // password, and [WebDavConfigStore.save] treats a blank password as
+        // "clear the stored one": applying such a backup blind would wipe the
+        // password the user just retyped. Null = nothing stored here, so a
+        // missing backup password really does mean "ask the user".
+        existingWebDavConfig: WebDavConfig? = null,
     ): ImportResult {
         // [fix-audit-p1-2] Reject oversized documents BEFORE any parsing /
         // decoding: a backup with embedded skill archives or chat history is
         // Base64-decoded into full byte arrays in memory, so an unbounded
         // payload is an OOM door. This check runs on the raw string, before
         // JSONTokener allocates the parsed tree.
-        if (json.length > MAX_PAYLOAD_BYTES) {
+        // [D-C fix/backup-bootstrap-size] Measured in UTF-8 BYTES — the same
+        // unit the SAF read cap (BackupSettingsScreen) and the export-side
+        // budget use. It used to be `.length` (UTF-16 code units) while the
+        // reader above it capped bytes, so every non-ASCII document was
+        // judged by two different rulers.
+        if (documentExceedsPayloadCap(json)) {
             throw InvalidBackupException(
-                "Backup too large (${json.length} chars, max ${MAX_PAYLOAD_BYTES})"
+                "Backup too large (${utf8Length(json)} bytes, max $MAX_PAYLOAD_BYTES)"
             )
         }
         val root = try {
@@ -1582,21 +1855,19 @@ object ConfigBackup {
         // Restores (manual and the auto-backup path) apply the backed-up
         // WebDAV server config so a new install can immediately reach its
         // remote backups.
+        //
+        // [D-B fix/backup-bootstrap-size] A secrets-free backup carries
+        // url/username/path but NO password (see [buildWebDavConfigSection]).
+        // [resolveWebDavRestore] decides the merge — critically, it never emits
+        // a blank password over a stored one, because [WebDavConfigStore.save]
+        // reads a blank password as "clear it".
         val wdObj = root.optJSONObject("webdavConfig")
         if (wdObj != null) {
-            val url = wdObj.optString("url", "")
-            if (url.isNotEmpty() && onWebDavConfig != null) {
-                onWebDavConfig(
-                    WebDavConfig(
-                        url = url,
-                        username = wdObj.optString("username", ""),
-                        password = wdObj.optString("password", ""),
-                        path = wdObj.optString(
-                            "path", WebDavConfig.DEFAULT_BACKUP_DIR,
-                        ),
-                    )
-                )
+            val plan = resolveWebDavRestore(wdObj, existingWebDavConfig)
+            if (plan.config != null && onWebDavConfig != null) {
+                onWebDavConfig(plan.config)
                 webdavConfigImported = true
+                plan.notice?.let { skipped.add(it) }
             } else if (onWebDavConfig == null) {
                 skipped.add("WebDAV server config: not restorable here")
             }
@@ -1727,6 +1998,58 @@ object ConfigBackup {
      *  before decoding anything (a malicious/huge file is dropped outright
      *  instead of OOMing mid-restore). */
     const val MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+
+    /**
+     * [D-C fix/backup-bootstrap-size] UTF-8 size of [value], i.e. how many
+     * bytes the document occupies on disk / in the SAF stream.
+     *
+     * THE single unit of every backup size decision. Before this helper the
+     * export side compared `String.length` (UTF-16 code units) against
+     * [MAX_PAYLOAD_BYTES] while the import side compared BYTES — for Chinese
+     * text (bytes/chars ≈ 1.08) that made a 71.4MB file pass export at 66.1M
+     * "chars" and then be rejected forever on import. Every gate must call
+     * this, never `.length`.
+     *
+     * Computed by walking the chars (1/2/3 bytes, 4 for a surrogate pair)
+     * instead of `toByteArray().size`: allocating a second copy of a 70MB
+     * string just to measure it is exactly the OOM shape the streaming export
+     * was built to avoid. A LONE surrogate counts as 3 bytes while Android's
+     * encoder writes '?' (1 byte) for it, so this over-estimates by at most
+     * 2 bytes per broken char — an over-estimate can only make the packer
+     * trim slightly more, never produce an oversize file.
+     */
+    internal fun utf8Length(value: CharSequence): Long {
+        var bytes = 0L
+        var i = 0
+        val n = value.length
+        while (i < n) {
+            val c = value[i]
+            bytes += when {
+                c.code < 0x80 -> 1
+                c.code < 0x800 -> 2
+                Character.isHighSurrogate(c) && i + 1 < n &&
+                    Character.isLowSurrogate(value[i + 1]) -> {
+                    i++
+                    4
+                }
+                else -> 3
+            }
+            i++
+        }
+        return bytes
+    }
+
+    /**
+     * [D-C fix/backup-bootstrap-size] The import-side ceiling test, in the ONE
+     * unit that matters (UTF-8 bytes). Extracted so it can be exercised against
+     * a small [capBytes] in a JVM test — the real 64MiB cap needs a 64MiB
+     * document to trip, which no unit test should allocate; the ruler and the
+     * comparison can still be pinned.
+     */
+    internal fun documentExceedsPayloadCap(
+        document: String,
+        capBytes: Long = MAX_PAYLOAD_BYTES.toLong(),
+    ): Boolean = utf8Length(document) > capBytes
 
     /** [T-auto-backup-assets] Upper bound for a decoded artifact archive. The
      *  export side caps the selection at [ArtifactBackupScope.MAX_ARCHIVE_BYTES]

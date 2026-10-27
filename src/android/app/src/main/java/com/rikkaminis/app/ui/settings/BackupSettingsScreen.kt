@@ -342,6 +342,17 @@ fun BackupSettingsScreen(
             var restoredMsg: String? = null
             try {
                 val report = withContext(Dispatchers.Default) {
+                    // [D-B fix/backup-bootstrap-size] Read the CURRENT server
+                    // config first (EncryptedSharedPreferences → IO): the merge
+                    // in ConfigBackup.import has to run against what is actually
+                    // stored, not against Compose state that may still be null.
+                    // WebDavConfigStore.save() reads a blank password as "clear
+                    // the stored one", so a secrets-free backup's missing
+                    // password must be filled in from here — otherwise applying
+                    // it silently deletes the password the user just retyped.
+                    val existingWebDav = withContext(Dispatchers.IO) {
+                        runCatching { webDavStore.load() }.getOrNull()
+                    }
                     ConfigBackup.import(
                         providerRepo = providerRepository,
                         json = json,
@@ -355,6 +366,7 @@ fun BackupSettingsScreen(
                         onScheduledTasks = { doc ->
                             ScheduledTasksStore.importDocument(context, doc)
                         },
+                        existingWebDavConfig = existingWebDav,
                     )
                 }
                 withContext(Dispatchers.Main) {
@@ -537,13 +549,19 @@ fun BackupSettingsScreen(
         scope.launch {
             try {
                 // [T-backup-import-memory] Reject oversized files BEFORE pulling
-                // them into memory. The exact char-count check (MAX_PAYLOAD_BYTES)
-                // inside ConfigBackup.import only runs after the whole file has
-                // been read into a String (UTF-16 doubles the allocation) and a
-                // full pre-restore snapshot export has been built — an OOM window
-                // for large backups. Byte size is a conservative bound (chars ≤
-                // bytes for UTF-8), so a file that passes here still gets the
-                // exact char check during import.
+                // them into memory. The exact check inside ConfigBackup.import
+                // only runs after the whole file has been read into a String
+                // (UTF-16 doubles the allocation) and a full pre-restore
+                // snapshot export has been built — an OOM window for large
+                // backups.
+                //
+                // [D-C fix/backup-bootstrap-size] This cap and the one inside
+                // import() are now the SAME unit (UTF-8 bytes) and the same
+                // value, and the export budget packs against that unit too —
+                // so "export succeeded" implies "this read accepts it". Before
+                // the unit fix this read was bytes while export/import compared
+                // chars: a 71.4MB Chinese backup exported fine and was then
+                // rejected here on every attempt.
                 val bytes = withContext(Dispatchers.IO) {
                     when (val read = readSafBytes(
                         context.contentResolver,
