@@ -427,6 +427,9 @@ lang: "auto"
         /** Present but unreadable — nothing to copy; the save proceeds. */
         Unreadable,
 
+        /** Larger than [MAX_BACKUP_BYTES] — not copied; the save proceeds. */
+        TooLarge,
+
         /** The copy failed (disk full, permissions) — the save proceeds. */
         Failed,
     }
@@ -434,6 +437,16 @@ lang: "auto"
     /** Backup siblings kept on disk; older ones are pruned per new backup. */
     private const val RECOVERED_KEEP = 3
     private const val RECOVERED_INFIX = ".recovered-"
+
+    /**
+     * Ceiling on what may be copied into a backup. The documented body cap is
+     * [CHINESE_CHAR_LIMIT] (1600 chars), so a SOUL.md above 1 MiB is already a
+     * foreign or corrupted file — and copying it three times over is how a
+     * "protect the user's data" guard ends up filling the disk in exactly the
+     * situation it exists for. Also bounds the read: the bytes are never pulled
+     * into memory when the length is already over the cap.
+     */
+    private const val MAX_BACKUP_BYTES = 1L * 1024 * 1024
 
     /**
      * Read + parse [target] without collapsing "missing" into "unreadable".
@@ -554,6 +567,18 @@ lang: "auto"
         readExisting: (File) -> ByteArray? = { f -> if (f.isFile) f.readBytes() else null },
     ): BackupOutcome {
         if (!target.exists()) return BackupOutcome.Missing
+
+        // Length first, read second: a foreign 200 MB file must not be pulled
+        // into memory just to be judged too big to copy.
+        if (target.isFile && target.length() > MAX_BACKUP_BYTES) {
+            AppLogger.warning(
+                TAG,
+                "SOUL.md at ${target.absolutePath} is ${target.length()} bytes " +
+                    "(over the $MAX_BACKUP_BYTES-byte backup cap) — overwriting without a " +
+                    "backup. The previous content is not recoverable from this device.",
+            )
+            return BackupOutcome.TooLarge
+        }
 
         val existing = try {
             readExisting(target)

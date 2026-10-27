@@ -171,8 +171,25 @@ class SoulStoreOverwriteBackupTest {
         assertEquals(0, backupsIn(tempDir).size)
     }
 
-    // ── 6. readState tells the three worlds apart ────────────────────────
+    @Test
+    fun `a target larger than the backup cap is not copied and the save still lands`() {
+        val target = File(tempDir, "SOUL.md")
+        // Just over 1 MiB: a foreign/corrupted file (the documented body cap is
+        // 1600 chars), copied three times over only to fill the disk.
+        val huge = ByteArray(1024 * 1024 + 1) { 'a'.code.toByte() }
+        target.writeBytes(huge)
 
+        val outcome = SoulStore.backupBeforeOverwrite(target, "small")
+
+        assertEquals(SoulStore.BackupOutcome.TooLarge, outcome)
+        assertEquals(0, backupsIn(tempDir).size)
+
+        SoulStore.saveTo(target, soulFile("small body"))
+        assertTrue(target.readText().contains("small body"))
+        assertEquals("still nothing backed up", 0, backupsIn(tempDir).size)
+    }
+
+    // ── 6. readState tells the three worlds apart ────────────────────────
     @Test
     fun `readState distinguishes missing loaded and unreadable`() {
         val dir = File(tempDir, "minis-global/memory")
