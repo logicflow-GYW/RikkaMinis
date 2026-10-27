@@ -145,7 +145,19 @@ ChatBackupBudgetTest            OK (14 tests)   ← 既有 14 臂改名后在字
 
 ## 5. CI 记录
 
-（待回填：run id / attempt / head_sha 三方一致 / skipped 列表 / 日志逐条读数）
+- run `40471015457` / **#2781** / job `122077882227` / attempt 1 / **success**（08:04:20Z dispatch → 08:24:38Z 完成，约 20 分钟）。
+- **head_sha `28b1e15a4b8b7571183677eeff87786f30174197` 与本地 HEAD 逐字符一致**（防并发假绿）。
+- 24 步，skipped 仅 2：step 23 `Move the rolling tag`、step 24 `Publish to Releases`（都是 main 门控，分支构建预期跳过）。
+- 日志（job log 逐条核）：
+  - `Summary: 112 passed, 0 failed` 恰 1（scan gate 在本支树上全绿）；
+  - `✅ ALL 347 CASES PASS` 恰 1 —— 注意是 **347** 不是 344：夹具套件在 62caedb4c 之后随已合并分支涨了 3 例（§4 写作 344 的是套件旧读数）；
+  - `^ e: ` 0（无编译错误）；含 `FAILED` 的行逐条确认全是 PASSED 用例名子串。
+  - **三条（新）测试类逐臂 PASSED**：`ConfigBackupWebDavGateTest` 9 / `ConfigBackupPayloadSizeTest` 12 / `ChatBackupBudgetTest` 14（改名后既有臂）= 35 条全绿，含关键臂
+    `a document the char ruler accepts is rejected by the byte ruler`、
+    `a cjk message a char budget would keep is dropped by the byte budget`、
+    `a stored password is never cleared by a secrets-free backup`。
+- 本支 `test_scan.py` 夹具未触碰（门脚本 0 改动），CI 侧 347 全绿即为旁证。
+
 
 ## 6. 残留与登记（不在本支修）
 
