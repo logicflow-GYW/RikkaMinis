@@ -187,41 +187,51 @@ triggered manually from the Actions tab. It:
 
 ### Signing in CI
 
-`DEBUG_KEYSTORE_B64` holds a base64-encoded `debug.keystore`. It is a **repo
-secret, not a file in the tree** — keystores are credentials and must not be
-committed.
+Release builds are signed with a private release keystore that lives in **repo
+secrets, never in the tree**:
 
-The workflow decodes it to `$RUNNER_TEMP/ci-signing.keystore` and exports
-`MINIS_KEYSTORE_PATH`; `build.gradle.kts` reads that variable and points the
-`debug` signing config at it.
+| Secret | Contents |
+|---|---|
+| `RELEASE_KEYSTORE_B64` | base64 of the `.keystore` file |
+| `RELEASE_STORE_PASSWORD` | keystore password |
+| `RELEASE_KEY_ALIAS` | key alias (`rikkaminis`) |
+| `RELEASE_KEY_PASSWORD` | key password |
 
-That indirection is necessary, not decorative. AGP's default is
+The workflow decodes the keystore to `$RUNNER_TEMP/release-signing.keystore`,
+exports `MINIS_RELEASE_*`, and `build.gradle.kts` reads them into a dedicated
+`release` signing config. The job **fails hard** when any of the four secrets is
+missing — a release APK must never silently fall back to the debug identity.
+
+Older builds were signed with the public AOSP debug key (`androiddebugkey`),
+which meant anyone could forge an APK that passed as a valid upgrade. The
+rotation happened on 2026-10-27; installs from before it must be uninstalled
+once before the first release-signed APK can be installed.
+
+The restore path also avoids a subtle failure: AGP's default is
 `$HOME/.android/debug.keystore`, but `actions/checkout` temporarily overrides
-`HOME` on the runner — so a keystore written to `~/.android/` is restored to a
-path Gradle never reads, and AGP quietly generates a throwaway key instead. The
-build succeeds, the APK looks fine, and it then refuses to install over an
-existing one with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. This bit us once; the
-`Verify APK signature` step exists so it cannot happen silently again. It
-compares the certificate embedded in the built APK against the keystore, using
-`scripts/apk_cert_sha256.py`.
+`HOME`, so a keystore written there is restored to a path Gradle never reads and
+AGP quietly generates a throwaway key. The `Verify APK signature` step compares
+the certificate embedded in the built APK against the keystore via
+`scripts/apk_cert_sha256.py`, so that cannot happen silently.
 
-Losing it means losing upgrade continuity: a new key produces APKs that will not
-install over existing ones, and every user has to uninstall and reinstall. Back
-it up somewhere durable.
+Losing the key means losing upgrade continuity — every user would have to
+uninstall and reinstall, and a forged APK could claim the old identity again.
+Back the keystore and its passwords up somewhere durable (the owner keeps a 0600
+copy outside the repo).
 
-To rotate or recreate it:
+To rotate:
 
 ```sh
-keytool -genkeypair -v -keystore debug.keystore \
-  -storepass android -keypass android \
-  -alias androiddebugkey -keyalg RSA -keysize 2048 \
-  -validity 10950 -dname "CN=Android Debug,O=Android,C=US"
+keytool -genkeypair -v -keystore rikka-release.keystore \
+  -alias rikkaminis -keyalg RSA -keysize 4096 -validity 12000 \
+  -dname "CN=RikkaMinis, OU=Personal, O=logicflow-GYW, C=CN"
+# choose a random store password (it is also the key password)
 
-base64 -w0 debug.keystore   # paste into the repo secret
+base64 -w0 rikka-release.keystore   # → RELEASE_KEYSTORE_B64
 ```
 
-The storepass, keypass and alias above are the Android defaults and must stay
-as-is — Gradle's `debug` signing config looks for exactly those.
+Then update the other three secrets and re-run the workflow. A rotation is a
+**signature change**: existing installs must be uninstalled once.
 
 ---
 
