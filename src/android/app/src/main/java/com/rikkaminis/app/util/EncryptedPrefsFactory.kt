@@ -8,6 +8,11 @@ import androidx.security.crypto.MasterKey
 import java.io.File
 import java.security.KeyStore
 
+private const val TAG = "EncryptedPrefsFactory"
+
+/** The single Tink keyset blob shared by every encrypted store (security-crypto). */
+private const val SHARED_KEYSET_FILE = "__androidx_security_crypto_encrypted_prefs__.xml"
+
 /**
  * T-android-keystore-aead-fail: self-healing wrapper around
  * [EncryptedSharedPreferences.create].
@@ -19,53 +24,92 @@ import java.security.KeyStore
  * exception bubbles to the main thread and the app dies in a relaunch
  * loop because every cold start hits the same lazy init.
  *
- * Strategy:
- *  1. Try the normal create.
- *  2. On any crypto error: drop the encrypted XML file + the on-disk
- *     Tink keyset prefs file + the AndroidKeystore alias, then retry
- *     once. The user loses stored credentials (they need to re-paste
- *     their API key / re-login OAuth) but the app boots.
- *  3. If recreate still fails: fall back to a PLAIN-TEXT
- *     SharedPreferences so the rest of the app sees an empty,
- *     read-write store and never crashes. Plain-text fallback is a
- *     last-resort safety net — the on-disk file is named with a
- *     "_plain_fallback" suffix so it's distinguishable from real
- *     encrypted state and never gets promoted back to the encrypted
- *     slot on the next launch.
+ * Strategy (decided by [KeystoreRecoveryPlan], executed here):
+ *  1. Try the normal create, up to 3 times with a 0/50/150 ms backoff. Most
+ *     observed failures are transient — a second process creating the MasterKey
+ *     at the same moment, keystore briefly busy — and the old code destroyed
+ *     this store's XML on the first one. [F-1] Nothing is deleted until the
+ *     retry burst is exhausted.
+ *  2. Stage 1: back up this store's XML to `shared_prefs/<fileName>.xml.recovered-<epoch>`
+ *     (newest 3 kept), then drop only THIS store's XML. That is the common
+ *     corruption case (one file's ciphertext no longer decrypts) and the only
+ *     recovery step that leaves the other encrypted stores intact.
+ *  3. Stage 2: back up + drop the SHARED state. security-crypto keeps ONE Tink
+ *     keyset blob and ONE AndroidKeystore alias behind every
+ *     EncryptedSharedPreferences instance, so deleting them resets all of them
+ *     (provider secrets, WebDAV, env vars, OAuth, device identity, worker key).
+ *     Only reachable when stage 1 proved the damage is in the shared keyset.
+ *     The copies left behind are the difference between "credentials gone" and
+ *     "credentials recoverable by hand".
+ *  4. If recreate still fails: fall back to an in-memory SharedPreferences so
+ *     the rest of the app sees an empty, read-write store and never crashes.
+ *     Fallback is a last-resort safety net — the on-disk file stays untouched
+ *     (nothing is promoted back into the encrypted slot) and the degradation is
+ *     [F-2] *visible*: [isDegraded] / [degradedStores] report it, the fallback
+ *     `commit()` returns `false` (the SharedPreferences contract for "not
+ *     persisted"), and the downgrade is logged at error level.
+ *
+ * Instances are cached per `fileName` ([F-2]), so callers that used to build a
+ * fresh store per call (`DeviceIdentity`, `ModelExecutionService`) share one —
+ * in particular they share ONE degraded map instead of each getting its own
+ * empty one.
  */
 object EncryptedPrefsFactory {
-    private const val TAG = "EncryptedPrefsFactory"
+
+    private val registry = DegradeRegistry<SharedPreferences>()
 
     fun safeCreate(context: Context, fileName: String): SharedPreferences {
-        runCatching { return build(context, fileName) }
-            .onFailure { Log.w(TAG, "first create($fileName) failed: ${it.message}") }
+        val appContext = context.applicationContext ?: context
+        return registry.resolve(fileName) {
+            val created = createOrRecover(appContext, fileName)
+            if (created.degraded) registry.markDegraded(fileName)
+            created.prefs
+        }
+    }
 
-        // [T8-M3] Stage 1 — drop only THIS store's XML. That is the common
-        // corruption case (one file's ciphertext no longer decrypts) and the
-        // only recovery step that leaves the other encrypted stores intact.
-        deleteOwnPrefsFile(context, fileName)
-        runCatching { return build(context, fileName) }
-            .onFailure {
-                Log.w(TAG, "rebuild($fileName) after dropping its own XML failed: ${it.message}")
+    /** True when [fileName] is currently served from process memory only. */
+    fun isDegraded(fileName: String): Boolean = registry.isDegraded(fileName)
+
+    /** Every store name currently served from process memory only. */
+    fun degradedStores(): Set<String> = registry.degradedStores()
+
+    private fun createOrRecover(context: Context, fileName: String): Created {
+        var obtained: SharedPreferences? = null
+        var attemptIndex = 0
+        val outcome = runKeystoreRecovery(
+            attempt = {
+                attemptIndex++
+                val result = runCatching { build(context, fileName) }
+                result.onFailure {
+                    Log.w(TAG, "create($fileName) attempt $attemptIndex failed: ${it.message}")
+                }
+                obtained = result.getOrNull()
+                obtained != null
+            },
+            io = FileRecoveryIo(context, fileName),
+        )
+
+        val prefs = obtained
+        if (prefs != null && outcome.succeeded) {
+            if (outcome.attempts > 1 || !outcome.nonDestructive) {
+                Log.i(
+                    TAG,
+                    "recovered $fileName after ${outcome.attempts} attempts / " +
+                        "${outcome.drops} destructive step(s) — backups left in shared_prefs/",
+                )
             }
+            return Created(prefs, degraded = false)
+        }
 
-        // [T8-M3] Stage 2 — escalate to the SHARED state. security-crypto keeps
-        // ONE Tink keyset blob (__androidx_security_crypto_encrypted_prefs__.xml)
-        // and ONE AndroidKeystore alias behind every EncryptedSharedPreferences
-        // instance, so deleting them resets all of them (provider secrets,
-        // WebDAV, env vars, OAuth, device identity, worker key). Only reachable
-        // when stage 1 proved the damage is in the shared keyset — previously
-        // this ran unconditionally, so a single corrupt file wiped everything.
-        Log.w(TAG, "escalating: shared keyset unreadable — resetting ALL encrypted stores for $fileName")
-        wipeSharedKeyset(context)
-
-        runCatching { return build(context, fileName) }
-            .onFailure {
-                Log.e(TAG, "rebuild($fileName) after shared-key reset failed: ${it.message}", it)
-            }
-
-        Log.w(TAG, "falling back to in-memory SharedPreferences for $fileName — credentials lost, nothing persisted")
-        return InMemorySharedPreferences()
+        Log.e(
+            TAG,
+            "DEGRADED: $fileName is served from process memory only — credentials will NOT " +
+                "persist: a cold start starts empty and needs them re-entered. " +
+                "Keystore recovery exhausted ${outcome.attempts} attempt(s), " +
+                "${outcome.drops} destructive step(s); backups (if any) are " +
+                "\"shared_prefs/${fileName}.xml${KeystorePrefsBackup.SUFFIX}<epoch>\".",
+        )
+        return Created(InMemorySharedPreferences(), degraded = true)
     }
 
     private fun build(context: Context, fileName: String): SharedPreferences {
@@ -80,25 +124,41 @@ object EncryptedPrefsFactory {
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
     }
+}
 
-    private fun prefsDir(context: Context) = File(context.applicationInfo.dataDir, "shared_prefs")
+private data class Created(val prefs: SharedPreferences, val degraded: Boolean)
 
-    /** Drop just this store's XML — the least destructive recovery step. */
-    private fun deleteOwnPrefsFile(context: Context, fileName: String) {
-        runCatching { File(prefsDir(context), "$fileName.xml").delete() }
-            .onFailure { Log.w(TAG, "delete own prefs file failed: ${it.message}") }
+private fun prefsDir(context: Context) = File(context.applicationInfo.dataDir, "shared_prefs")
+
+/**
+ * Executes [KeystoreRecoveryAction.BackupThenDrop] against the real
+ * `shared_prefs/` directory: copy aside first, delete second, always logging so
+ * a wrong recovery decision leaves a trail.
+ */
+private class FileRecoveryIo(
+    private val context: Context,
+    private val fileName: String,
+) : KeystoreRecoveryIo {
+
+    override fun backup(target: KeystoreRecoveryTarget): Boolean {
+        val source = fileFor(target)
+        if (!source.isFile) return true // nothing to lose
+        val destination = runCatching { KeystorePrefsBackup.backup(source) }.getOrNull()
+        return if (destination == null) {
+            Log.w(TAG, "backup of ${source.name} failed — dropping it anyway (recovery continues)")
+            false
+        } else {
+            Log.w(TAG, "recovery: backed up ${source.name} → ${destination.name}")
+            true
+        }
     }
 
-    /**
-     * Drop the state shared by every encrypted store: the single Tink keyset
-     * blob plus the AndroidKeystore master alias. Destructive — callers must
-     * have already established that the damage is in the shared keyset.
-     */
-    private fun wipeSharedKeyset(context: Context) {
-        runCatching {
-            File(prefsDir(context), "__androidx_security_crypto_encrypted_prefs__.xml").delete()
-        }.onFailure { Log.w(TAG, "wipe shared keyset file failed: ${it.message}") }
+    override fun drop(target: KeystoreRecoveryTarget) {
+        val file = fileFor(target)
+        runCatching { file.delete() }
+            .onFailure { Log.w(TAG, "delete ${file.name} failed: ${it.message}") }
 
+        if (target != KeystoreRecoveryTarget.SharedKeyset) return
         runCatching {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             if (ks.containsAlias(MasterKey.DEFAULT_MASTER_KEY_ALIAS)) {
@@ -106,19 +166,31 @@ object EncryptedPrefsFactory {
             }
         }.onFailure { Log.w(TAG, "wipe master-key alias failed: ${it.message}") }
     }
+
+    private fun fileFor(target: KeystoreRecoveryTarget): File = when (target) {
+        KeystoreRecoveryTarget.PrefsFile -> File(prefsDir(context), "$fileName.xml")
+        KeystoreRecoveryTarget.SharedKeyset -> File(prefsDir(context), SHARED_KEYSET_FILE)
+    }
 }
 
 /**
  * Fail-closed in-memory [SharedPreferences] used when
- * [EncryptedSharedPreferences] can't be created after a wipe+rebuild.
+ * [EncryptedSharedPreferences] can't be created after the recovery script is
+ * exhausted.
  *
  * Every read returns the default; every write is kept only in process
  * memory and is never persisted to disk. This guarantees secrets can
  * never silently fall back to plaintext storage. The app continues to
  * work (users see "no credentials stored"), and the next launch retries
  * the encrypted path.
+ *
+ * [F-2] `commit()` returns **false**: the store did not land on disk, and
+ * `false` is exactly the SharedPreferences contract for that. Callers that
+ * check it (`ProviderRepository.persistToDbAndMirror`) now log the truth
+ * instead of a success they did not get. Nothing throws — a degraded app must
+ * still start, and `apply()` simply delegates to `commit()`.
  */
-private class InMemorySharedPreferences : SharedPreferences {
+internal class InMemorySharedPreferences : SharedPreferences {
     private val values = mutableMapOf<String, Any?>()
 
     override fun getAll(): MutableMap<String, *> = HashMap(values)
@@ -135,7 +207,7 @@ private class InMemorySharedPreferences : SharedPreferences {
     override fun edit(): SharedPreferences.Editor = InMemoryEditor(values)
 }
 
-private class InMemoryEditor(
+internal class InMemoryEditor(
     private val values: MutableMap<String, Any?>,
 ) : SharedPreferences.Editor {
     private val staged = mutableMapOf<String, Any?>()
@@ -149,10 +221,13 @@ private class InMemoryEditor(
     override fun putBoolean(key: String, value: Boolean): SharedPreferences.Editor { staged[key] = value; return this }
     override fun remove(key: String): SharedPreferences.Editor { removed.add(key); return this }
     override fun clear(): SharedPreferences.Editor { staged.clear(); removed.addAll(values.keys); return this }
+
+    /** Applies to memory, then reports `false`: nothing was persisted. */
     override fun commit(): Boolean {
         removed.forEach { values.remove(it) }
         staged.forEach { (k, v) -> values[k] = v }
-        return true
+        return false
     }
+
     override fun apply() { commit() }
 }
