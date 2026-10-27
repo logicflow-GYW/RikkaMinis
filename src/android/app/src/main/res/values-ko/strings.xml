@@ -1084,7 +1084,7 @@
     <string name="common_loading">로딩 중…</string>
     <string name="rootfs_reset_button">초기화</string>
     <string name="session_title_label">제목</string>
-    <string name="backup_import_too_large">백업 파일이 너무 큽니다(%1$d MB, 최대 %2$d MB). 아무것도 가져오지 않았습니다.</string>
+    <string name="backup_import_too_large">백업 파일이 너무 큽니다(%1$d MB, 최대 %2$d MB). 아무것도 가져오지 않았습니다. 채팅 기록 기간을 줄이거나 끈 뒤 다시 내보내고 새 파일을 가져오세요.</string>
     <string name="backup_export_incomplete">경고: %1$d개 필드를 읽지 못했습니다 — 이 백업은 불완전할 수 있습니다.</string>
     <string name="code_expand">%1$d줄 펼치기</string>
     <string name="code_collapse">접기</string>

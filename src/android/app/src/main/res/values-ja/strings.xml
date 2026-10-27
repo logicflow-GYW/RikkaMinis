@@ -1092,7 +1092,7 @@
     <string name="common_loading">読み込み中…</string>
     <string name="rootfs_reset_button">リセット</string>
     <string name="session_title_label">タイトル</string>
-    <string name="backup_import_too_large">バックアップファイルが大きすぎます（%1$d MB、上限 %2$d MB）。何もインポートされませんでした。</string>
+    <string name="backup_import_too_large">バックアップファイルが大きすぎます（%1$d MB、上限 %2$d MB）。何もインポートされませんでした。「チャット履歴の期間」を短くするかオフにして再エクスポートし、新しいファイルをインポートしてください。</string>
     <string name="backup_export_incomplete">警告: %1$d 個のフィールドの読み取りに失敗しました — このバックアップは不完全な可能性があります。</string>
     <string name="code_expand">%1$d 行を展開</string>
     <string name="code_collapse">折りたたむ</string>

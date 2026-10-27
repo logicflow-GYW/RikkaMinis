@@ -1222,7 +1222,7 @@
     <string name="common_loading">Загрузка…</string>
     <string name="rootfs_reset_button">Сбросить</string>
     <string name="session_title_label">Название</string>
-    <string name="backup_import_too_large">Файл резервной копии слишком велик (%1$d МБ, максимум %2$d МБ) — ничего не импортировано.</string>
+    <string name="backup_import_too_large">Файл резервной копии слишком велик (%1$d МБ, максимум %2$d МБ) — ничего не импортировано. Сократите окно истории чата (или отключите его), экспортируйте заново и импортируйте новый файл.</string>
     <string name="backup_export_incomplete">Предупреждение: %1$d полей не удалось прочитать — резервная копия может быть неполной.</string>
     <string name="code_expand">Развернуть %1$d строк</string>
     <string name="code_collapse">Свернуть</string>
