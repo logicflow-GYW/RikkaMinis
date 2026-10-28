@@ -769,8 +769,6 @@ def _calls(code, name):
 def _constant_empty(expr):
     """`emptySet()` / `setOf()` / `mutableSetOf<String>()` — a single empty ctor."""
     e = strip_parens(" ".join(expr.split()))
-    if e in ("emptySet()", "emptyList()", "emptyMap()") and "(" not in e[:-2]:
-        return True
     m = _CTOR_RE.match(e)
     return bool(m) and m.group(1) in EMPTY_CTORS and not m.group(2).strip()
 
