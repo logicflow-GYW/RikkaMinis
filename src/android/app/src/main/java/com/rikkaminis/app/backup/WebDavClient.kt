@@ -500,6 +500,24 @@ class WebDavClient(
         var isCollection = false
         var lastTag: String? = null
         var rootSeen = false
+        // [FIX-R3-D / F-10] RFC 4918 allows a <response> to carry SEVERAL
+        // <propstat> blocks, each with its own <status>: servers put the
+        // properties they could answer in the 200 group and the missing
+        // optional ones in a second group with 404. The parser kept ONE
+        // `statusOk` for the whole response, so that second group's
+        // "HTTP/1.1 404 Not Found" overwrote the 200 and the resource was
+        // dropped — a folder that lists fine in every other client came back
+        // empty here ("you have no remote backups" over a folder full of
+        // them). Properties are now staged per <propstat> and committed only
+        // when that group is 2xx; the response survives if ANY group was.
+        var inPropstat = false
+        var sawPropstat = false
+        var acceptedPropstat = false
+        var propstatOk = true
+        var stagedDisplayName: String? = null
+        var stagedContentLength: Long? = null
+        var stagedLastModified: Instant? = null
+        var stagedIsCollection = false
         // Signal 3: how many elements are still open. XmlPullParser (kxml2)
         // is forgiving — a body that ends mid-element simply reports
         // END_DOCUMENT instead of failing — so "the document was complete"
@@ -529,8 +547,30 @@ class WebDavClient(
                             contentLength = 0
                             lastModified = null
                             isCollection = false
+                            inPropstat = false
+                            sawPropstat = false
+                            acceptedPropstat = false
+                            propstatOk = true
+                            stagedDisplayName = null
+                            stagedContentLength = null
+                            stagedLastModified = null
+                            stagedIsCollection = false
                         }
-                        "collection" -> if (inResponse) isCollection = true
+                        // [FIX-R3-D / F-10] A new property group starts clean:
+                        // its status decides whether what follows it counts.
+                        "propstat" -> if (inResponse) {
+                            inPropstat = true
+                            sawPropstat = true
+                            propstatOk = true
+                            stagedDisplayName = null
+                            stagedContentLength = null
+                            stagedLastModified = null
+                            stagedIsCollection = false
+                        }
+                        "collection" -> when {
+                            inPropstat -> stagedIsCollection = true
+                            inResponse -> isCollection = true
+                        }
                     }
                     lastTag = name
                 }
@@ -540,10 +580,29 @@ class WebDavClient(
                         if (text.isNotEmpty()) {
                             when (lastTag) {
                                 "href" -> href = text
-                                "displayname" -> displayName = text
-                                "getcontentlength" -> contentLength = text.trim('"').toLongOrNull() ?: 0
-                                "getlastmodified" -> lastModified = parseLastModified(text)
-                                "status" -> statusOk = text.contains(" 200")
+                                "status" -> if (inPropstat) {
+                                    propstatOk = text.contains(" 200")
+                                } else {
+                                    // Response-level status (an error response
+                                    // with no propstat at all): still the whole
+                                    // answer.
+                                    statusOk = text.contains(" 200")
+                                }
+                                "displayname" -> if (inPropstat) {
+                                    stagedDisplayName = text
+                                } else {
+                                    displayName = text
+                                }
+                                "getcontentlength" -> {
+                                    val bytes = text.trim('"').toLongOrNull() ?: 0L
+                                    if (inPropstat) stagedContentLength = bytes
+                                    else contentLength = bytes
+                                }
+                                "getlastmodified" -> if (inPropstat) {
+                                    stagedLastModified = parseLastModified(text)
+                                } else {
+                                    lastModified = parseLastModified(text)
+                                }
                             }
                         }
                     }
@@ -551,10 +610,27 @@ class WebDavClient(
                 XmlPullParser.END_TAG -> {
                     val name = parser.name
                     openElements--
+                    if (name == "propstat" && inPropstat) {
+                        inPropstat = false
+                        // Commit only the group that actually answered; the
+                        // 404 group's (absent) values must not erase what the
+                        // 200 group already established.
+                        if (propstatOk) {
+                            acceptedPropstat = true
+                            stagedDisplayName?.let { displayName = it }
+                            stagedContentLength?.let { contentLength = it }
+                            stagedLastModified?.let { lastModified = it }
+                            if (stagedIsCollection) isCollection = true
+                        }
+                    }
                     if (name == "response" && inResponse) {
                         inResponse = false
                         val h = href
-                        if (h != null && statusOk && hrefPath(h) != requestPath) {
+                        // [FIX-R3-D / F-10] With propstat groups present, the
+                        // resource exists iff one group was 2xx; without them
+                        // the response-level status is the only evidence.
+                        val ok = if (sawPropstat) acceptedPropstat else statusOk
+                        if (h != null && ok && hrefPath(h) != requestPath) {
                             resources.add(
                                 WebDavResourceInfo(
                                     href = h,
