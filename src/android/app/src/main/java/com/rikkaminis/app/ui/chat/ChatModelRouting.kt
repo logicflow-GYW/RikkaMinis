@@ -532,12 +532,55 @@ internal fun ChatViewModel.rotateForNewTurn(label: String) {
     // [deep-audit-1044 B-03] Rotated-in member takes the same enriched path as
     // an explicit pick (raw base model = no modalities / effort tiers on the wire).
     val effectiveModel = providerModelFor(targetEntry)
+    // [meta-audit-1028 F-06] The throwing call comes FIRST, and its outcome is a
+    // value ([planTurnRotation]). These four fields used to be published BEFORE
+    // `ProviderFactory.create`, so a creation failure left the top bar / picker /
+    // `_activeEntryId` claiming the rotated-in member while `currentProvider`
+    // still answered with the previous one — rotation runs unattended on every
+    // message, so the split state could persist for the rest of the session.
+    // The direct-pick path fixed exactly this shape in `[audit-0917]`; rotation
+    // never got the same treatment.
+    var created: LLMProvider? = null
+    var createError: String? = null
+    try {
+        created = ProviderFactory.create(instance, apiKey, effectiveModel, context)
+    } catch (e: Exception) {
+        createError = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+    }
+    val plan = planTurnRotation(
+        current = SessionModelSelection(
+            modelId = currentModel?.id,
+            modelName = _modelName.value,
+            providerName = _providerName.value,
+            activeEntryId = currentEntryId,
+            selectedGroupId = groupId,
+            selectedGroupName = _selectedGroupName.value,
+            // The one-shot pick was consumed above on purpose: it armed THIS
+            // turn, and re-arming it after an abort would retry a creation that
+            // just failed on every following turn.
+            pendingEntryOverride = null,
+        ),
+        targetEntryId = targetEntry.id,
+        targetModelId = effectiveModel.id,
+        targetModelName = effectiveModel.displayName,
+        targetProviderName = instance.label.ifEmpty { effectiveModel.provider },
+        created = created,
+        createError = createError,
+    )
+    if (!plan.applied) {
+        AppLogger.warning(
+            "ChatVMRouting",
+            "🔄LB $label rotate $currentEntryId -> $targetId ABORTED, session keeps " +
+                "the current member: ${plan.reason}",
+        )
+        return
+    }
     currentModel = effectiveModel
-    _modelName.value = effectiveModel.displayName
-    _providerName.value = instance.label.ifEmpty { effectiveModel.provider }
-    _activeEntryId.value = targetEntry.id
+    _modelName.value = plan.state.modelName
+    _providerName.value = plan.state.providerName
+    _activeEntryId.value = plan.state.activeEntryId
     // [T-provider-key-roulette] Rotation happens inside ProviderFactory.create.
-    currentProvider = ProviderFactory.create(instance, apiKey, effectiveModel, context)
+    currentProvider = plan.provider
     persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"$targetId"}""")
     AppLogger.info(
         "ChatVMRouting",
