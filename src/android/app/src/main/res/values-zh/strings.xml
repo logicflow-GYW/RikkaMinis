@@ -421,6 +421,9 @@
     <string name="skill_import_error_no_url">请输入 URL</string>
     <string name="skill_import_error_invalid">SKILL.md 无效或 skill 已存在</string>
     <string name="skill_import_error_format">SKILL.md 无效。请确认包含 \'name:\' 字段的 YAML frontmatter。</string>
+    <string name="skill_file_error_read">无法读取所选文件</string>
+    <string name="skill_file_error_archive">技能包无效：其中未找到 SKILL.md</string>
+    <string name="skill_file_error_detail">导入失败：%1$s</string>
     <string name="skill_import_in_progress">导入中…</string>
     <string name="skill_import_submit">导入</string>
     <string name="skill_detail_label_name">名称</string>

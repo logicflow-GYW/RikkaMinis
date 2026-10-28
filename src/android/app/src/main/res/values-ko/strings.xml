@@ -328,6 +328,9 @@
     <string name="skill_import_error_no_url">URL 을 입력하세요</string>
     <string name="skill_import_error_invalid">SKILL.md 가 잘못되었거나 skill 이 이미 존재합니다</string>
     <string name="skill_import_error_format">SKILL.md 가 잘못되었습니다. \'name:\' 필드가 포함된 YAML frontmatter 를 확인하세요.</string>
+    <string name="skill_file_error_read">선택한 파일을 읽을 수 없습니다</string>
+    <string name="skill_file_error_archive">잘못된 skill 압축 파일입니다: SKILL.md 를 찾을 수 없습니다</string>
+    <string name="skill_file_error_detail">가져오기 실패: %1$s</string>
     <string name="skill_import_in_progress">가져오는 중…</string>
     <string name="skill_import_submit">가져오기</string>
     <string name="skill_detail_label_name">이름</string>

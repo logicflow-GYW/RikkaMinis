@@ -533,6 +533,9 @@
     <string name="skill_import_error_no_url">Введите URL</string>
     <string name="skill_import_error_invalid">Недопустимый SKILL.md или навык уже существует</string>
     <string name="skill_import_error_format">Недопустимый SKILL.md. Убедитесь, что есть YAML-заголовок с полем \'name:\'.</string>
+    <string name="skill_file_error_read">Не удалось прочитать выбранный файл</string>
+    <string name="skill_file_error_archive">Недопустимый архив навыка: SKILL.md не найдена</string>
+    <string name="skill_file_error_detail">Сбой импорта: %1$s</string>
     <string name="skill_import_in_progress">Импортирование...</string>
     <string name="skill_import_submit">Импортировать</string>
     <string name="skill_detail_label_name">Имя</string>
