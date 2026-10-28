@@ -336,6 +336,145 @@ class ConfigBackupEnvvarsAndOverlayTest {
      * [relative]. Gradle sets user.dir to the module dir; a sandbox JVM run can
      * start anywhere under the repo — no fixed depth works.
      */
+    // ── 4. [FIX-P1A / FINDING-7] env-var export accounting ───────────────
+    //
+    // W1 (encrypted store unusable → `getValue` returns null) used to make the
+    // export emit `{key, note}` — no `value`, no marker, no counter — while the
+    // document still said `includesSecrets: true`. A payload that claimed to
+    // carry credentials was indistinguishable from one that did, and the loss
+    // only surfaced after a device transfer. `buildEnvVarExportEntries` is the
+    // real production function (pure Kotlin, no Android); every expected value
+    // below is a literal.
+
+    private fun entriesWithValue(json: org.json.JSONArray): Int {
+        var n = 0
+        for (i in 0 until json.length()) {
+            if (json.getJSONObject(i).has("value")) n++
+        }
+        return n
+    }
+
+    @Test
+    fun `unreadable secret value is marked per entry and counted`() {
+        val out = buildEnvVarExportEntries(
+            entries = listOf(
+                EnvVarBackupMeta(key = "OPENAI_API_KEY", note = "llm", group = "models"),
+                EnvVarBackupMeta(key = "GONE_KEY", note = "was here", group = ""),
+            ),
+            includeSecrets = true,
+            readValue = { key -> if (key == "OPENAI_API_KEY") "sk-live" else null },
+        )
+        assertEquals(2, out.entries.length())
+        val present = out.entries.getJSONObject(0)
+        assertEquals("OPENAI_API_KEY", present.getString("key"))
+        assertEquals("sk-live", present.getString("value"))
+        assertFalse(
+            "a readable value must not be marked unreadable",
+            present.has(ENV_VALUE_UNREADABLE_KEY),
+        )
+        val missing = out.entries.getJSONObject(1)
+        assertEquals("GONE_KEY", missing.getString("key"))
+        assertEquals("was here", missing.getString("note"))
+        assertFalse("no value may be fabricated", missing.has("value"))
+        assertTrue(
+            "a declared-but-unreadable value MUST carry the marker — otherwise the " +
+                "payload is indistinguishable from one whose value was never set",
+            missing.getBoolean(ENV_VALUE_UNREADABLE_KEY),
+        )
+        assertEquals(listOf("GONE_KEY"), out.missingSecretValues)
+        // The document has to be self-reconcilable: entries without a value
+        // minus markers == 0, and the reported list == the marker count.
+        assertEquals(out.entries.length() - entriesWithValue(out.entries), out.missingSecretValues.size)
+    }
+
+    @Test
+    fun `secret-free export carries no marker and reports nothing`() {
+        val out = buildEnvVarExportEntries(
+            entries = listOf(EnvVarBackupMeta(key = "K", note = "n", group = "g")),
+            includeSecrets = false,
+            readValue = { error("must not be read when secrets are excluded") },
+        )
+        val entry = out.entries.getJSONObject(0)
+        assertFalse(
+            "without secrets the absence of a value is the REQUESTED shape, not a failure",
+            entry.has(ENV_VALUE_UNREADABLE_KEY),
+        )
+        assertFalse(entry.has("value"))
+        assertEquals(emptyList<String>(), out.missingSecretValues)
+        assertEquals("g", entry.getString("group"))
+    }
+
+    @Test
+    fun `every value readable means nothing is reported`() {
+        val out = buildEnvVarExportEntries(
+            entries = listOf(
+                EnvVarBackupMeta(key = "A", note = "", group = ""),
+                EnvVarBackupMeta(key = "B", note = "", group = ""),
+            ),
+            includeSecrets = true,
+            readValue = { "v-$it" },
+        )
+        assertEquals(listOf("v-A", "v-B"), (0 until 2).map { out.entries.getJSONObject(it).getString("value") })
+        assertEquals(emptyList<String>(), out.missingSecretValues)
+        assertEquals(2, entriesWithValue(out.entries))
+    }
+
+    /** buildSections' env-var block, from the function head to the skills pass. */
+    private fun envVarExportBody(): String {
+        val src = readRepoFile(configBackupRel)
+        val start = src.indexOf("private suspend fun buildSections(")
+        assertTrue("buildSections not found in $configBackupRel", start >= 0)
+        val end = src.indexOf("val skills = JSONArray()", start)
+        assertTrue("skills section anchor lost — re-point the probe", end > start)
+        return src.substring(start, end)
+    }
+
+    private fun assertExportAccounting(body: String) {
+        val code = codeOnly(body)
+        assertTrue(
+            "buildSections must build the envVars section through buildEnvVarExportEntries( — " +
+                "otherwise the per-entry marker and the missing-value count cannot exist",
+            code.contains("buildEnvVarExportEntries("),
+        )
+        assertTrue(
+            "a throwing value read must degrade to 'missing', not abort the whole backup",
+            code.contains("runCatching { envVarRepo.getValue(key) }.getOrNull()"),
+        )
+        assertTrue(
+            "the missing values must land in the readFailures channel the export callers surface",
+            code.contains("readFailures += missingSecretValues.size"),
+        )
+        assertFalse(
+            "the silent `getValue(...)?.let { put(\"value\", it) }` form is back — a missing " +
+                "value would again leave no trace in the payload",
+            code.replace(" ", "").contains("envVarRepo.getValue(entry.key)?.let"),
+        )
+    }
+
+    @Test
+    fun `buildSections wires the env-var accounting`() {
+        assertExportAccounting(envVarExportBody())
+    }
+
+    @Test
+    fun `env-var accounting probe has discriminating power`() {
+        val body = envVarExportBody()
+        assertExportAccounting(body)
+        for (mutated in listOf(
+            body.replace("buildEnvVarExportEntries(", "buildSomethingElse("),
+            body.replace("runCatching { envVarRepo.getValue(key) }.getOrNull()", "envVarRepo.getValue(key)"),
+            body.replace("readFailures += missingSecretValues.size", "Unit"),
+        )) {
+            var rejected = false
+            try {
+                assertExportAccounting(mutated)
+            } catch (_: AssertionError) {
+                rejected = true
+            }
+            assertTrue("negative control: the probe still accepts a mutated body", rejected)
+        }
+    }
+
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {

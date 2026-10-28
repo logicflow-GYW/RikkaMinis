@@ -272,8 +272,14 @@ fun BackupSettingsScreen(
 
     // Restore-with-safety-net: before applying an imported config (local file
     // or WebDAV) snapshot the CURRENT config so the user can always roll back
-    // after a mistaken restore. Best-effort: a failed snapshot never blocks
-    // the restore, it only reports via snapshotNote.
+    // after a mistaken restore.
+    // [FIX-P1A / RT-S3] This used to be "best-effort: a failed snapshot never
+    // blocks the restore". That inverted the point of a rollback point: the
+    // import went on to overwrite the config with NO way back, while the
+    // "one-tap rollback" list was populated from whatever half-written file
+    // the failed snapshot had left behind. Writes are atomic now (no truncated
+    // JSON can appear), and a failure ABORTS the restore instead — the user is
+    // told, nothing was applied, and retrying after freeing space is safe.
     // Declared before the launchers below because their callbacks invoke it.
     val restoreWithSnapshot: (String) -> Unit = doRestore@{ json ->
         // [fix restore-mutex] Reject a restore while any backup/restore path is
@@ -296,7 +302,7 @@ fun BackupSettingsScreen(
         // applicationScope dispatcher), racing recomposition. The export
         // path in this same file already did withContext(Dispatchers.Main);
         // this restores the same discipline here.
-        application.applicationScope.launch {
+        application.applicationScope.launch snapshotBeforeRestore@{
             try {
                 // [T-backup-streaming-export] Stream the pre-restore snapshot
                 // straight to disk — the in-memory String variant OOMs on a
@@ -309,9 +315,12 @@ fun BackupSettingsScreen(
                 // naming) that pollutes the remote list. The snapshot's only
                 // job is rolling back THIS device if the restore goes wrong, so
                 // it belongs in local storage, never on the remote.
-                // [fix-audit-p0-3] Second-precision name + keep SNAPSHOT_KEEP
+                // [fix-audit-p0-3] Second-precision base name + keep SNAPSHOT_KEEP
                 // newest (see ConfigBackup.writeSnapshot) so two restores in
                 // the same minute no longer overwrite the first rollback point.
+                // [FIX-P1A / RT-S3] The write itself is atomic and the name is
+                // resolved against the directory, so a same-second restore can
+                // neither truncate nor overwrite the existing rollback point.
                 val dir = File(context.filesDir, "backup-snapshots")
                 ConfigBackup.writeSnapshotStreaming(dir) { w ->
                     ConfigBackup.exportToWriter(
@@ -334,9 +343,24 @@ fun BackupSettingsScreen(
                     refreshSnapshots()
                 }
             } catch (t: Throwable) {
+                // [FIX-P1A / RT-S3] No rollback point ⇒ no restore. Continuing
+                // would overwrite a config the user cannot get back, which is
+                // strictly worse than "fix the cause and retry" (typically
+                // ENOSPC, or a document over the payload cap). The failure is
+                // reported through the existing error dialog + tray, so this
+                // adds no UI surface of its own.
+                val failed = context.getString(R.string.backup_snapshot_failed)
                 withContext(Dispatchers.Main) {
-                    snapshotNote = context.getString(R.string.backup_snapshot_failed)
+                    snapshotNote = failed
+                    errorMessage = failed
+                    operationBusy = false
                 }
+                notifier.notifyWorkCompleted(
+                    tag = "webdav-restore",
+                    title = context.getString(R.string.webdav_notify_title_failed),
+                    body = failed,
+                )
+                return@snapshotBeforeRestore
             }
             var restoredOk = true
             var restoredMsg: String? = null
