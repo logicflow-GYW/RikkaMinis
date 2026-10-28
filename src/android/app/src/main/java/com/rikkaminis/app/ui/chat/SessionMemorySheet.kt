@@ -57,6 +57,11 @@ import com.rikkaminis.app.ui.components.MemoryFileViewerContent
 import com.rikkaminis.app.ui.components.buildEditWindow
 import com.rikkaminis.app.ui.components.chunkText
 import com.rikkaminis.app.ui.components.spliceEditWindow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+/** Log tag for the memory sheet's IO/error paths. */
+private const val MEMORY_SHEET_TAG = "SessionMemorySheet"
 
 /**
  * Bottom sheet showing memory state for the current session.
@@ -93,8 +98,32 @@ fun SessionMemorySheet(
     // next save spliced stale text over the file. Bump the tick on every
     // successful mutation and the snapshot rebuilds.
     var autoItemsRefreshTick by remember { mutableStateOf(0) }
-    val autoItems = remember(memoryRepository, context, autoItemsRefreshTick) {
-        buildAutoInjectedItems(context, memoryRepository)
+    // [meta-audit-1028 F-08] The snapshot is now built in TWO phases, because
+    // the old single-phase form ran four `File.readText()` calls inside this
+    // `remember` — i.e. on the composition thread of the frame that opened the
+    // sheet. The volume is not small and is unbounded: on the reference device
+    // (2026-10-28) GLOBAL.md 34 KB + today 93 KB + yesterday 137 KB = 264 KB of
+    // UTF-8 decoded before the first frame could be drawn, and both daily logs
+    // grow all day.
+    //   phase 1 — [autoFiles]: one withContext(Dispatchers.IO) read of all four
+    //             files, keyed on the same refresh tick (so every in-sheet
+    //             mutation still triggers a rebuild);
+    //   phase 2 — the item assembly stays in `remember` keyed on the tick +
+    //             the landed snapshot; it is a pure function of those bytes, so
+    //             composition never touches disk.
+    // Null = the IO pass has not landed yet (first frame); the list renders
+    // empty for one frame instead of blocking.
+    var autoFiles by remember { mutableStateOf<AutoInjectedFiles?>(null) }
+    LaunchedEffect(memoryRepository, autoItemsRefreshTick) {
+        autoFiles = withContext(Dispatchers.IO) {
+            readAutoInjectedFiles(
+                readFile = memoryRepository::readFile,
+                readGlobalMd = memoryRepository::loadGlobalMd,
+            )
+        }
+    }
+    val autoItems = remember(memoryRepository, context, autoItemsRefreshTick, autoFiles) {
+        buildAutoInjectedItems(context, autoFiles)
     }
 
     // Editing state for the active detail screen. Lives at the sheet level so
@@ -115,6 +144,15 @@ fun SessionMemorySheet(
     var editedWindow by remember { mutableStateOf<EditWindow?>(null) }
     var editedFullBase by remember { mutableStateOf("") }
     var savedToastVisible by remember { mutableStateOf(false) }
+    // [meta-audit-1028 F-08] Save-failure channel for the AutoFile editor. The
+    // catch below was `catch (_: Exception) { /* UI toast omitted on failure */ }`
+    // and the editor was handed a hard-coded `errorMessage = null`, so a failed
+    // `saveFile` (read-only dir, ENOSPC, SOUL rename-aside failure) left the
+    // user in edit mode with the old text on disk and no signal at all — the
+    // next read of the file showed the pre-edit body as if the save had never
+    // been attempted. Reset per detail mode, cleared on a new Edit and on
+    // success.
+    var editErrorMessage by remember(mode) { mutableStateOf<String?>(null) }
 
     // Per-mode dialog state for revoke flow.
     var showRevokeConfirm by remember { mutableStateOf(false) }
@@ -201,6 +239,7 @@ fun SessionMemorySheet(
                             first - MEMORY_EDIT_WINDOW_MARGIN_CHUNKS,
                             last,
                         )
+                        editErrorMessage = null
                         isEditing = true
                         editedState.edit { replace(0, length, editedWindow?.text ?: m.content) }
                     },
@@ -222,10 +261,25 @@ fun SessionMemorySheet(
                                 com.rikkaminis.app.agent.SoulStore.refreshCache(context)
                             }
                             mode = MemorySheetMode.AutoFile(m.name, full, m.editable)
+                            editErrorMessage = null
                             isEditing = false
                             autoItemsRefreshTick++
                             savedToastVisible = true
-                        } catch (_: Exception) { /* fall through; UI toast omitted on failure */ }
+                        } catch (e: Exception) {
+                            // [meta-audit-1028 F-08] Fail VISIBLY: log with the
+                            // stack (the old arm dropped the exception entirely,
+                            // so a broken save left nothing in the log either)
+                            // and hand the reason to the editor, which renders
+                            // it in `errorMessage` below the field. Staying in
+                            // edit mode is deliberate — the user's buffer is
+                            // still the only copy of their text.
+                            android.util.Log.w(
+                                MEMORY_SHEET_TAG,
+                                "memory file save failed (${m.name}): ${e.message}",
+                                e,
+                            )
+                            editErrorMessage = e.message ?: e.toString()
+                        }
                     },
                     onRevoke = {},
                 )
@@ -238,7 +292,7 @@ fun SessionMemorySheet(
                     Box(modifier = Modifier.fillMaxSize()) {
                         MemoryFileEditorContent(
                             state = editedState,
-                            errorMessage = null,
+                            errorMessage = editErrorMessage,
                             modifier = Modifier.fillMaxSize(),
                         )
                         if (savedToastVisible) {
@@ -440,7 +494,11 @@ private fun MemoryToolRow(
     onClick: () -> Unit,
     showDivider: Boolean,
 ) {
-    val opLabel = if (record.isWrite) "memory_write" else "memory_get"
+    // [meta-audit-1028 F-09] The pill names the op itself. It used to be
+    // derived from `isWrite` (`if (record.isWrite) "memory_write" else
+    // "memory_get"`), which mislabels the rollup: `isWrite` is the routing
+    // discriminator for Write/Get detail, not a write-vs-read flag.
+    val opLabel = record.toolName
     val opColor = MaterialTheme.colorScheme.primary
 
     Column(modifier = Modifier.clickable(onClick = onClick)) {
@@ -510,6 +568,15 @@ data class MemoryToolRecord(
     val output: String,
     val writtenContent: String? = null,
     val keywords: String? = null,
+    /**
+     * [meta-audit-1028 F-09] The op's own name (`memory_write` /
+     * `memory_get` / `memory_rollup`) — the label the row pill shows.
+     * [isWrite] cannot do this job: it is a ROUTING discriminator (Write vs
+     * Get detail body), so the rollup record is `isWrite = false` by design
+     * and used to be labelled `memory_get`, i.e. a write-shaped tool shown as
+     * a read-only search.
+     */
+    val toolName: String,
 )
 
 /**
@@ -590,7 +657,58 @@ internal fun dailyAutoItemFor(
     )
 }
 
-private fun buildAutoInjectedItems(context: Context, memoryRepository: MemoryRepository): List<AutoItem> {
+/**
+ * [meta-audit-1028 F-08] The disk half of the sheet snapshot: every byte the
+ * auto-injected section needs, read in ONE off-main pass.
+ *
+ * Deliberately takes the two repository reads as functions instead of a
+ * [MemoryRepository]: the read SET and the today/yesterday derivation are the
+ * parts that break silently (a wrong date window shows yesterday's log as
+ * "today", an added file is never surfaced), so they are unit-testable on the
+ * JVM with a fake map.
+ */
+internal data class AutoInjectedFiles(
+    val soulMd: String,
+    val globalMd: String,
+    val todayName: String,
+    val todayContent: String,
+    val yesterdayName: String,
+    val yesterdayContent: String,
+    val maxInjectLines: Int,
+)
+
+/**
+ * [meta-audit-1028 F-08] Read the four snapshot files. Must be called from
+ * [Dispatchers.IO] — see [AutoInjectedFiles].
+ */
+internal fun readAutoInjectedFiles(
+    readFile: (String) -> String,
+    readGlobalMd: () -> String,
+    nowMillis: Long = System.currentTimeMillis(),
+    maxInjectLines: Int = AgentRuntimeLimitsPrefs.memoryInjectLines(),
+): AutoInjectedFiles {
+    val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+    val today = dateFmt.format(Date(nowMillis))
+    val yesterday = dateFmt.format(Date(nowMillis - 86400_000L))
+    return AutoInjectedFiles(
+        soulMd = readFile("SOUL.md"),
+        globalMd = readGlobalMd(),
+        todayName = today,
+        todayContent = readFile("$today.md"),
+        yesterdayName = yesterday,
+        yesterdayContent = readFile("$yesterday.md"),
+        maxInjectLines = maxInjectLines,
+    )
+}
+
+/**
+ * [meta-audit-1028 F-08] Item assembly — a PURE function of [files] plus the
+ * string resources. [files] is null until the IO pass publishes its snapshot
+ * (first frame), which renders as an empty section rather than a blocked
+ * composition thread.
+ */
+private fun buildAutoInjectedItems(context: Context, files: AutoInjectedFiles?): List<AutoItem> {
+    if (files == null) return emptyList()
     val items = mutableListOf<AutoItem>()
     val emptyLabel = context.getString(R.string.memory_file_empty)
 
@@ -602,7 +720,7 @@ private fun buildAutoInjectedItems(context: Context, memoryRepository: MemoryRep
         autoItemFor(
             fileName = "SOUL.md",
             displayName = "SOUL.md",
-            content = memoryRepository.readFile("SOUL.md"),
+            content = files.soulMd,
             emptyLabel = emptyLabel,
         )
     )
@@ -612,26 +730,28 @@ private fun buildAutoInjectedItems(context: Context, memoryRepository: MemoryRep
         autoItemFor(
             fileName = "GLOBAL.md",
             displayName = "GLOBAL.md",
-            content = memoryRepository.loadGlobalMd(),
+            content = files.globalMd,
             emptyLabel = emptyLabel,
         )
     )
 
-    // Today + yesterday. Empty days are skipped (not injected).
-    val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    val today = dateFmt.format(Date())
-    val yesterday = dateFmt.format(Date(Date().time - 86400_000L))
+    // Today + yesterday. Empty days are skipped (not injected). The cap comes
+    // from the snapshot, which read it on the IO pass.
+    val todayLabel = context.getString(R.string.time_today)
+    dailyAutoItemFor(
+        fileName = "${files.todayName}.md",
+        displayName = "$todayLabel — ${files.todayName}.md",
+        content = files.todayContent,
+        maxInjectLines = files.maxInjectLines,
+    )?.let { items.add(it) }
 
-    for (dateStr in listOf(today, yesterday)) {
-        val fileName = "$dateStr.md"
-        val label = if (dateStr == today) context.getString(R.string.time_today) else context.getString(R.string.time_yesterday)
-        dailyAutoItemFor(
-            fileName = fileName,
-            displayName = "$label — $fileName",
-            content = memoryRepository.readFile(fileName),
-            maxInjectLines = AgentRuntimeLimitsPrefs.memoryInjectLines(),
-        )?.let { items.add(it) }
-    }
+    val yesterdayLabel = context.getString(R.string.time_yesterday)
+    dailyAutoItemFor(
+        fileName = "${files.yesterdayName}.md",
+        displayName = "$yesterdayLabel — ${files.yesterdayName}.md",
+        content = files.yesterdayContent,
+        maxInjectLines = files.maxInjectLines,
+    )?.let { items.add(it) }
 
     return items
 }

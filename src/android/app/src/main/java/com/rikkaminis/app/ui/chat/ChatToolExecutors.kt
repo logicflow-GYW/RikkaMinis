@@ -88,6 +88,30 @@ internal fun linuxPathToMinisURL(path: String): String? {
 }
 
 /**
+ * [meta-audit-1028 F-10] Monotonic per-process counter for browser screenshot
+ * filenames. Seconds are not a unique key: two `browser_use` calls in the same
+ * second produced the SAME `screenshot_<seconds>.jpg`, so the later write
+ * overwrote the earlier one — the earlier tool card's thumbnail, its
+ * `imageFilePath` and every `minis://browser/screenshot_…` URL the agent had
+ * already been handed silently became the newest image. The counter is
+ * process-wide and never reset, so a timestamp collision (same millisecond,
+ * clock stepped backwards, two calls on different sessions) can no longer
+ * alias two screenshots into one file.
+ */
+private val browserScreenshotSequence = java.util.concurrent.atomic.AtomicLong(0L)
+
+/** Next value of the screenshot uniqueness counter (strictly increasing). */
+internal fun nextBrowserScreenshotSequence(): Long = browserScreenshotSequence.incrementAndGet()
+
+/**
+ * [meta-audit-1028 F-10] Screenshot filename: millisecond timestamp (was
+ * seconds) + the monotonic [sequence]. Pure so the uniqueness rule is a unit
+ * test instead of an observation.
+ */
+internal fun browserScreenshotFilename(timestampMillis: Long, sequence: Long): String =
+    "screenshot_${timestampMillis}_$sequence.jpg"
+
+/**
  * browser_use executor. [artifactWriter] persists bytes and returns the host
  * path (production wires persistBrowserArtifact with the session id).
  */
@@ -150,7 +174,10 @@ internal suspend fun executeBrowserUseTool(
                 // Anthropic supports up to 8000×8000 / 5MB; we standardize at 2000
                 // long edge across attachments / browser / read_image.
                 inferenceBytes = resizeJpeg(raw, 2000) ?: raw
-                val filename = "screenshot_${System.currentTimeMillis() / 1000}.jpg"
+                val filename = browserScreenshotFilename(
+                    System.currentTimeMillis(),
+                    nextBrowserScreenshotSequence(),
+                )
                 val persistPath = artifactWriter(filename, raw)
                 if (persistPath != null) {
                     persistentImagePath = persistPath
@@ -217,6 +244,35 @@ internal fun memoryToolDisabledMessage(memoryEnabled: Boolean): String? =
 internal const val MEMORY_DISABLED_TOOL_TITLE = "Memory (disabled)"
 
 /**
+ * [meta-audit-1028 F-09] Op-kind labels for the sheet's op-log pill.
+ *
+ * `MemoryToolRecord.isWrite` is a ROUTING discriminator (Write detail needs
+ * `writtenContent`), not "did this touch the disk" — that is why the rollup
+ * record keeps `isWrite = false`. It therefore cannot label the row: the
+ * rollup pill used to read `memory_get`, i.e. the panel claimed a read-only
+ * search for a tool that rewrote MEMORY-ROLLUP.md. The label is now carried
+ * explicitly so each op kind names itself.
+ */
+internal const val MEMORY_TOOL_WRITE = "memory_write"
+internal const val MEMORY_TOOL_GET = "memory_get"
+internal const val MEMORY_TOOL_ROLLUP = "memory_rollup"
+
+/**
+ * [meta-audit-1028 F-09] The body a write record may claim it wrote.
+ *
+ * Only a SUCCESSFUL write with a non-blank body has an on-disk entry to point
+ * at. The record used to carry `writtenContent` unconditionally, so a failed
+ * `memory_write` (repo disabled, entry malformed, disk error) still landed a
+ * success-shaped row: tapping Edit pre-filled the text that was never written
+ * and Save/Revoke hit the repository with a body that does not exist →
+ * NotFound, with no hint that the original write had failed. Null here is what
+ * the Write detail already treats as "not editable/revocable"
+ * (`canEditOrRevoke = writtenContent != null`).
+ */
+internal fun memoryWriteRecordContent(success: Boolean, content: String): String? =
+    if (success && content.isNotBlank()) content else null
+
+/**
  * memory_write executor. [recordSink] replaces the _memoryToolRecords side
  * channel (production appends to the StateFlow).
  */
@@ -239,7 +295,10 @@ internal fun executeMemoryWriteTool(
         isWrite = true,
         preview = content.lines().firstOrNull { it.isNotBlank() }?.take(100) ?: "",
         output = result.output,
-        writtenContent = content,
+        // [meta-audit-1028 F-09] Only a write that really landed carries a
+        // body — see [memoryWriteRecordContent].
+        writtenContent = memoryWriteRecordContent(result.success, content),
+        toolName = MEMORY_TOOL_WRITE,
     ))
     return ToolExecutionResult(result.output, result.success, toolTitle = result.toolTitle)
 }
@@ -260,6 +319,7 @@ internal fun executeMemoryGetTool(
         preview = if (keywords.isNotBlank()) "Search: $keywords" else result.output.take(100),
         output = result.output,
         keywords = keywords,
+        toolName = MEMORY_TOOL_GET,
     ))
     return ToolExecutionResult(result.output, result.success, toolTitle = result.toolTitle)
 }
@@ -284,11 +344,16 @@ internal fun executeMemoryRollupTool(
     }
     val memoryDir = repo.memoryDirectory()
     val result = com.rikkaminis.app.tools.MemoryRollupTool.execute(memoryDir)
+    // [meta-audit-1028 F-09] `isWrite` stays false: it routes the sheet to the
+    // Write/Get detail body and a rollup has no per-entry body to show there.
+    // The row LABEL no longer follows it — [toolName] does that job, so the
+    // rollup row stops claiming to be a read-only `memory_get`.
     recordSink(MemoryToolRecord(
         title = result.toolTitle,
         isWrite = false,
         preview = result.output.take(100),
         output = result.output,
+        toolName = MEMORY_TOOL_ROLLUP,
     ))
     return ToolExecutionResult(result.output, result.success, toolTitle = result.toolTitle)
 }
