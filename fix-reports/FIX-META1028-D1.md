@@ -73,13 +73,17 @@ if (dbWrite.isSuccess && truthfulHash != mirrorHash) → upsertMeta / deleteMeta
 
 ### 2.3 证据
 
-- `ProviderMirrorHashTest`（16 例）：FakeStore 模拟 prefs + DB 行 + hash，跑完整
+- `ProviderMirrorHashTest`（15 例）：FakeStore 模拟 prefs + DB 行 + hash，跑完整
   save → restart；`legacyPersistAndColdStart` 是**修前算法的逐字复刻**，断言它在同一
   夹具上确实回滚（1 次 re-import + 返回旧配置），新实现不回滚（0 次 re-import）。
 - 变异臂 M1（哈希改回 intended）→ 3 条红，含 `aRejectedCommitDoesNotRollBackTheSave`；
   M2（prefs 读不出时回落 null）→ 1 条红；M3（仲裁反向）→ 4 条红。
-- 既有 `ProviderPersistDegradedMirrorTest` 改为复刻新的日志分支（4/4 绿），
-  该门 arm 10 在本树 `clean (13 arms)`。
+- 既有 `ProviderPersistDegradedMirrorTest` 改成与新写序一致的 replica（7 例全绿）。
+  **改它时踩到一处假保真**：`FakePrefs.commit()` 原本无论返回什么都把值写进
+  `committed`，而真实 SharedPreferences 在 commit 失败时保留旧值 —— 正是这个差异让
+  「repair 触发」在测试里永远不成立。改为「只有 commit 成功才落值」+ 给 arm 4 装一个
+  「已有旧镜像」的初值，repair 才被真正钉住。
+- 该门 arm 10 在本树 `clean (13 arms)`。
 
 ## 3. F-02 —— 不可解码 blob 不得被写回成真相
 
@@ -168,14 +172,34 @@ val tails = runCatching { dao.lastMessageTailPerSession() }.getOrElse { emptyLis
 ## 7. 验证
 
 - **JVM 窄编译**：`probe-d1/build.sh` —— 只编纯函数 + 真 `ProviderConfigMapping` + model 层 +
-  4 个新测试类，单趟 kotlinc + `nice -n 10`（19 会话并行，禁 gradle）。`OK (33 tests)`。
-- **变异 8/8**：每条臂只红钉它对应的用例，基线复跑 33/33 绿，无 `.armbak` 残留。
+  5 个测试类，单趟 kotlinc + `nice -n 10`（19 会话并行，禁 gradle）。`OK (40 tests)`。
+- **变异 8/8**：每条臂只红钉它对应的用例（M1 4 红 / M2 1 / M3 4 / M4 1 / M5 2 / M6 2 /
+  M7 3 / M8 1），基线复跑 40/40 绿，无 `.armbak` 残留。
 - **形状断言 16/16**（剥离行注释后判，避免注释里的修前形态误判）。
 - **门**：`provider_import_id_roundtrip_check` clean (13 arms)、`parts_json_funnel_check`
   单调用点计数恢复 1/1/4（**中途踩坑**：降级路径直接调 `dao.loadMessagesPage` 触发 R1，
   改走 `loadPageSlice`）、`model_entry_override_parity_check` OK (7 arms)、
   `entry_composite_key_guard_check` OK (9 arms)、`dao_loadmessages_check` clean。
-- **CI**：见 §8。
+- **CI**：run `40703697841`（**#2848**）**success** 21m04s，head_sha
+  `aaf48918708a3a598954504647ba20bda5c8a3f1` 与本地 HEAD **逐字符一致**；
+  日志 3,010,956 B / NUL 0；`^ e: ` **0**；14 条 `Summary: N passed, 0 failed`
+  （含 `113 passed, 0 failed` ×2）；`ALL 349 CASES PASS` ×2；无非 PASSED 的 FAILED 行；
+  五个测试类在册全绿（MirrorHash 15 / PersistDegraded 7 / FrozenBlob 8 /
+  RemoveInstanceEmptyGroup 6 / SessionBadgeReconcile 4）。
+
+### 7.1 CI 四轮失败链（记录，避免后人重踩）
+
+| 轮 | run | 唯一失败 | 原因 |
+|---|---|---|---|
+| 1 | #2836 | `parts_json_funnel_check` [R1] | 降级尾部读直接调 `dao.loadMessagesPage`，该门钉死单调用点（漏斗） |
+| 2 | #2837 | 编译 3 错 | `loadPageSlice` 无默认参 / 缺 `restoreFrozenBlobs` import / 冻结行读变量被前一次编辑删掉 |
+| 3 | #2840 | 编译 1 错 | 给 DAO 加 `deleteMetaKey` 后，既有测试的 `FakeProviderConfigDao` 未实现 |
+| 4 | #2844 | `doubleFailureWarningDoesNotFalselyReassure` | 新加 commit 失败 warning 让双失败场景 warnings 由 1 变 2；replica 仍是旧写序 |
+| 5 | **#2848** | **无** | **success** |
+
+四轮的共同教训同一条：**本地窄装置没覆盖到 CI 会跑的东西**（门脚本、既有测试 fake、
+既有 test 的断言），所以每一轮都是「本地绿 → 云端红」。窄装置省掉的是全量成本，不是
+覆盖义务 —— 动 DAO 接口 / 动既有测试语义时，必须 `rg` 出所有实现点与断言点一并改。
 
 ## 8. 残留（登记，未修）
 
