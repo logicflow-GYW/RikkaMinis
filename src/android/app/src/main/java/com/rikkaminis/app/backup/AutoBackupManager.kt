@@ -50,6 +50,15 @@ object AutoBackupManager {
     /** Auto-backup local file prefix (public for the settings UI list). */
     const val LOCAL_FILE_PREFIX = "rikkaminis-auto-"
 
+    fun isEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ENABLED, false)
+
+    fun setEnabled(context: Context, on: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_ENABLED, on).apply()
+    }
+
     /** Local auto-backup files, newest first. */
     fun listLocal(context: Context): List<File> {
         val dir = File(context.filesDir, DIR)
