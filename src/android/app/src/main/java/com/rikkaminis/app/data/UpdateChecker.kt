@@ -380,7 +380,12 @@ object UpdateChecker {
         // store does not record the request URL, so the request must
         // correlate with the record first ([judgeResumePending]); anything
         // uncorrelated falls through to a fresh download below.
-        resumablePending(context)?.let { pending ->
+        // [meta-audit-1028 E2 / B07 F-13] Bound once so the staging sweep further
+        // down can also protect the APK this record points at (even when the
+        // record was rejected above and the request falls through to a fresh
+        // download, that file may still be in the middle of an install).
+        val resumeCandidate = resumablePending(context)
+        resumeCandidate?.let { pending ->
             val integrity = judgeResumePending(
                 recordedPublisherDigest = pending.publisherDigest,
                 recordedSha256 = pending.sha256,
@@ -423,6 +428,28 @@ object UpdateChecker {
             // A previous, possibly-aborted download could leave a stale APK
             // behind that the installer would happily try to consume. Wipe it.
             if (outFile.exists()) outFile.delete()
+            // [meta-audit-1028 E2 / B07 F-13] ... and every OTHER version's APK
+            // stayed forever: the staging dir lives in filesDir (not cacheDir —
+            // T-android-update-resume-33637), no path deleted a file after a
+            // successful install ("the file was handed to the system installer,
+            // it may still be reading it"), nor after a failure / cancel, nor in
+            // clearPending. ~15 MB per release, invisible, unbounded.
+            // The sweep is ownership-gated plus a one-hour in-flight window on
+            // purpose: "not the current version" is not a safe predicate, because
+            // the pending record is cleared the moment the install intent fires,
+            // so a file the installer is reading right now is indistinguishable
+            // from abandoned debris. See [UpdateStaging].
+            val keep = buildSet {
+                add(safeName)
+                resumeCandidate?.apkPath?.let { add(File(it).name) }
+            }
+            runCatching { UpdateStaging.prune(outDir, keep = keep) }
+                .onSuccess { pruned ->
+                    if (pruned.isNotEmpty()) {
+                        AppLogger.info(TAG, "download: pruned ${pruned.size} stale apk(s) from $UPDATES_DIR: $pruned")
+                    }
+                }
+                .onFailure { AppLogger.warning(TAG, "download: staging sweep failed: ${it.message}") }
 
             val req = Request.Builder().url(url).build()
             client.newCall(req).execute().use { resp ->
