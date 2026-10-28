@@ -110,7 +110,16 @@ internal fun internalGuestTmpNewestActivityMs(root: File, maxDepth: Int, maxEntr
         visited++
         val children = runCatching { dir.listFiles() }.getOrNull() ?: continue
         for (child in children) {
-            val mtime = runCatching { child.lastModified() }.getOrDefault(0L)
+            // [meta1028 D3-F05] MAX of the entry's own (lstat) mtime and the
+            // followed (stat) mtime. lstat alone would under-report a live
+            // write that arrives through an old symlink (build dirs whose
+            // `obj -> ../real-obj` link was created once and never touched);
+            // stat alone under-reports a fresh link to an old target and
+            // reports 0 for a dangling one. Taking both keeps this probe at
+            // least as conservative as before, which is the only safe
+            // direction for a probe whose answer means "leave it alone".
+            val statMtime = runCatching { child.lastModified() }.getOrDefault(0L)
+            val mtime = maxOf(internalGuestTmpEntryMtimeMs(child.toPath()), statMtime)
             if (mtime > newest) newest = mtime
             if (depth >= maxDepth) continue
             val symlink = runCatching { Files.isSymbolicLink(child.toPath()) }.getOrDefault(false)
@@ -130,3 +139,84 @@ internal fun internalGuestTmpNewestActivityMs(root: File, maxDepth: Int, maxEntr
  */
 internal fun internalGuestTmpLooksLive(newestActivityMs: Long, now: Long, maxAgeMs: Long): Boolean =
     newestActivityMs > 0L && now - newestActivityMs < maxAgeMs
+
+/**
+ * [meta1028 D3-F05] The entry's OWN mtime (epoch millis), i.e. `lstat`, not
+ * `stat`.
+ *
+ * WHY it matters: `java.io.File.lastModified()` follows symlinks. A dangling
+ * link reports `0` (which [internalGuestTmpIsAged] reads as "definitely aged")
+ * and a link to an old binary reports the TARGET's mtime — so a link created
+ * a second ago was aged-out on its first sweep and silently deleted between
+ * two commands (a build's `/tmp/lock -> …`, or any `ln -s` a script relies
+ * on). The link's own timestamp is the only one that answers "when was this
+ * ENTRY last touched", which is what the age gate is asking.
+ *
+ * `Files.readAttributes(…, NOFOLLOW_LINKS)` also reports 0 when the parent
+ * directory refuses to answer, which keeps the aged-on-unknown direction.
+ */
+internal fun internalGuestTmpEntryMtimeMs(path: java.nio.file.Path): Long =
+    runCatching {
+        java.nio.file.Files
+            .readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            .lastModifiedTime()
+            .toMillis()
+    }.getOrDefault(0L)
+
+/**
+ * [meta1028 D3-F05] Delete [root] and everything under it WITHOUT following
+ * symlinks: a link is unlinked as a link, never walked into.
+ *
+ * WHY not `File.deleteRecursively()`: that walks with `File.listFiles()`, and
+ * `File.isDirectory` follows links — so an aged `/tmp/build/out -> /` (or
+ * `-> /var/minis/workspace`) made the sweeper recurse into the TARGET and
+ * delete real files outside `/tmp`. The top-level `symlink` check in
+ * [ExecutionCoordinator.sweepGuestTmpDir] only protected the entry itself, not
+ * anything nested inside an aged directory.
+ *
+ * `Files.walkFileTree` does NOT follow links unless `FOLLOW_LINKS` is passed,
+ * so a nested link surfaces in [SimpleFileVisitor.visitFile] as a plain file
+ * and `deleteIfExists` unlinks exactly the link. Directories are removed in
+ * [SimpleFileVisitor.postVisitDirectory] (children first).
+ *
+ * Returns true only when the whole tree is gone. A partial failure leaves the
+ * caller's descend-and-retry path intact; the direction that matters
+ * (never reach outside the swept entry) is structural, not best-effort.
+ */
+internal fun internalGuestTmpDeleteTreeNoFollow(root: java.nio.file.Path): Boolean {
+    var ok = true
+    return try {
+        java.nio.file.Files.walkFileTree(
+            root,
+            object : java.nio.file.SimpleFileVisitor<java.nio.file.Path>() {
+                override fun visitFile(
+                    file: java.nio.file.Path,
+                    attrs: java.nio.file.attribute.BasicFileAttributes,
+                ): java.nio.file.FileVisitResult {
+                    if (!runCatching { java.nio.file.Files.deleteIfExists(file) }.getOrDefault(false)) ok = false
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+
+                override fun visitFileFailed(
+                    file: java.nio.file.Path,
+                    exc: java.io.IOException,
+                ): java.nio.file.FileVisitResult {
+                    ok = false
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+
+                override fun postVisitDirectory(
+                    dir: java.nio.file.Path,
+                    exc: java.io.IOException?,
+                ): java.nio.file.FileVisitResult {
+                    if (exc != null) ok = false
+                    if (!runCatching { java.nio.file.Files.deleteIfExists(dir) }.getOrDefault(false)) ok = false
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+            },
+        )
+        ok
+    } catch (t: Throwable) {
+        false
+    }
+}

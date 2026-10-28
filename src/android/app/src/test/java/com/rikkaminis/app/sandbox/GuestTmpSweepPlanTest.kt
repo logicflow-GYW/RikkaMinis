@@ -232,4 +232,115 @@ class GuestTmpSweepPlanTest {
         assertFalse(internalGuestTmpLooksLive(probe(root), now, hour))
         assertTrue(internalGuestTmpIsPinned(root))
     }
+
+    // ---- [meta1028 D3-F05] symlinks: the age gate and the delete ----------
+    //
+    // Both halves of the sweeper used `stat` (follow the link) where the entry
+    // itself was the question: a fresh dangling link read `lastModified() == 0`
+    // (→ "definitely aged"), a fresh link to an old file inherited the old
+    // mtime, and `deleteRecursively()` walked THROUGH a nested link into the
+    // target. Each arm below ships its own pre-fix reading as the contrast, so
+    // the fixture is proven to have teeth instead of merely agreeing with the
+    // new code.
+
+    @Test
+    fun `a dangling symlink has an mtime of its own`() {
+        val root = tree()
+        val link = File(root, "lock")
+        Files.createSymbolicLink(link.toPath(), File(root, "nonexistent").toPath())
+        val wall = System.currentTimeMillis()
+
+        // pre-fix reading: stat fails on a dangling link → 0 → "aged"
+        assertEquals(0L, link.lastModified())
+        assertTrue(
+            "the pre-fix read deleted a link created a second ago",
+            internalGuestTmpIsAged(link.lastModified(), wall, hour),
+        )
+
+        // fixed reading: the LINK's own timestamp
+        val own = internalGuestTmpEntryMtimeMs(link.toPath())
+        assertTrue("lstat must report the link's own mtime, got $own", own > 0L)
+        assertFalse(internalGuestTmpIsAged(own, wall, hour))
+    }
+
+    @Test
+    fun `a fresh symlink does not inherit its target's age`() {
+        val root = tree()
+        val target = File(root, "old.bin")
+        write(target, now - 5 * hour)
+        val link = File(root, "alias")
+        Files.createSymbolicLink(link.toPath(), target.toPath())
+        val wall = System.currentTimeMillis()
+
+        assertEquals("stat follows the link", target.lastModified(), link.lastModified())
+        assertTrue(internalGuestTmpIsAged(link.lastModified(), wall, hour))
+
+        val own = internalGuestTmpEntryMtimeMs(link.toPath())
+        assertFalse("a just-created link must survive the first sweep", internalGuestTmpIsAged(own, wall, hour))
+    }
+
+    @Test
+    fun `deleting an aged tree does not follow a nested symlink`() {
+        val root = tree()
+        val victimDir = tree()
+        val victim = File(victimDir, "keep.txt").also { it.writeText("keep") }
+        val build = File(root, "build").also { it.mkdirs() }
+        File(build, "obj.o").writeText("x")
+        Files.createSymbolicLink(File(build, "out").toPath(), victimDir.toPath())
+
+        assertTrue(internalGuestTmpDeleteTreeNoFollow(root.toPath()))
+
+        assertFalse("the aged entry is gone", root.exists())
+        assertTrue("the link TARGET must survive", victimDir.exists())
+        assertTrue("the target's file must survive", victim.exists())
+    }
+
+    @Test
+    fun `the pre-fix recursive delete did follow it`() {
+        // Contrast arm: the same fixture through `File.deleteRecursively()`,
+        // the call the sweeper used. If this ever stops reproducing, the fix
+        // above is solving a problem that no longer exists and should be
+        // revisited rather than silently kept.
+        val root = tree()
+        val victimDir = tree()
+        val victim = File(victimDir, "keep.txt").also { it.writeText("keep") }
+        val build = File(root, "build").also { it.mkdirs() }
+        File(build, "obj.o").writeText("x")
+        Files.createSymbolicLink(File(build, "out").toPath(), victimDir.toPath())
+
+        root.deleteRecursively()
+
+        assertFalse("the pre-fix delete reached outside the swept entry", victim.exists())
+    }
+
+    @Test
+    fun `deleting a symlink entry removes the link only`() {
+        val root = tree()
+        val targetDir = tree()
+        val inside = File(targetDir, "f.txt").also { it.writeText("x") }
+        val link = File(root, "dirlink")
+        Files.createSymbolicLink(link.toPath(), targetDir.toPath())
+
+        assertTrue(internalGuestTmpDeleteTreeNoFollow(link.toPath()))
+        assertFalse("the link itself is gone", Files.exists(link.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+        assertTrue("the target is untouched", inside.exists())
+    }
+
+    @Test
+    fun `the activity probe still counts a fresh link as activity`() {
+        // The probe's answer means "leave it alone", so the fix had to be at
+        // least as conservative as before: it now takes the max of the link's
+        // own mtime and the followed one, so neither a fresh link to an old
+        // target nor writes that arrive through an old link can be missed.
+        val root = tree()
+        val old = File(root, "old.bin")
+        write(old, now - 9 * hour)
+        val link = File(root, "fresh-link")
+        Files.createSymbolicLink(link.toPath(), old.toPath())
+        ageDirectories(root, now - 9 * hour)
+        assertTrue(
+            "a link created moments ago must read as activity",
+            internalGuestTmpLooksLive(probe(root), System.currentTimeMillis(), hour),
+        )
+    }
 }

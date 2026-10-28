@@ -129,6 +129,19 @@ object PRootKernel {
     private suspend fun bootCriticalSection(context: Context) {
         bootContext = context.applicationContext
         rootfsManager = RootfsManager.getInstance(context)
+        // [meta1028 D3-F02] Wire the rebuild notification FIRST: a
+        // `RootfsManager.reset()` (manual reset, or autoRepair Stage 3) wipes
+        // and re-extracts the very tree the rest of this section materializes
+        // into, and `bootGate` has no reset edge of its own — so before this
+        // hook existed, `isBooted` stayed true after a mid-session reset and
+        // nothing ever re-ran installHandlerStubs / applyDefaultMountOverlay /
+        // applyMountedFoldersSnapshot: every offload stub answered `127: not
+        // found` and read-only mount guards were gone until the app restarted.
+        // The hook only re-arms the gate; the next `boot()` (command, terminal)
+        // re-runs this whole body, which is idempotent by design.
+        rootfsManager.afterRootfsReinstalled = {
+            onRootfsReinstalled(context)
+        }
         rootfsManager.installIfNeeded()
         rootfsManager.installProotIfNeeded()
 
@@ -286,6 +299,40 @@ object PRootKernel {
             "offloadHandlers=${OffloadHandlerCatalog.allHandlerNames.sorted()}")
     }
 
+    /**
+     * [meta1028 D3-F02] Called by [RootfsManager.reset] after the wipe +
+     * re-extract has landed (hook wired at the top of
+     * [bootCriticalSection]).
+     *
+     * Only re-arms the one-shot gate. That is the whole fix: `isBooted` is the
+     * single fact every entry point consults (`ExecutionCoordinator.execute`
+     * auto-boot, `TerminalSession.start`, `ShellExecutor`), so invalidating it
+     * makes the tree's dependents rebuild themselves through the ONE code path
+     * that knows how ([bootCriticalSection]) instead of a second, drifting copy
+     * of "what has to be re-applied after a wipe".
+     *
+     * Deliberately does NOT kill shells here. The two owners do that on their
+     * own next entry, where they can also serialize against a running command:
+     * [ExecutionCoordinator] drops shells built against the pre-wipe tree
+     * before its auto-boot, and [TerminalSession.start] restarts a PTY that is
+     * still pointing at it.
+     *
+     * Re-entrancy: when the wipe comes from inside [bootCriticalSection]
+     * (autoRepair Stage 3), this runs while `bootGate`'s mutex is held by that
+     * same body. `invalidate` is a plain volatile write with no lock, so there
+     * is no self-deadlock — and the body's own tail (stubs, overlay, mounts)
+     * re-materializes everything AFTER the reset, which is exactly why
+     * re-arming here is safe as well as necessary.
+     */
+    private fun onRootfsReinstalled(@Suppress("UNUSED_PARAMETER") context: Context) {
+        bootGate.invalidate()
+        Log.w(
+            TAG,
+            "rootfs re-extracted underneath a booted kernel — boot gate re-armed; " +
+                "the next boot re-applies stubs / mounts / default_mount overlay",
+        )
+    }
+
     fun addBindMount(linuxPath: String, hostPath: String) {
         bindMounts[linuxPath] = hostPath
     }
@@ -342,6 +389,14 @@ object PRootKernel {
     // ln source is read).
     // internal: the test package pins the shapes ([MountGuardScriptTest]).
     internal val MOUNT_GUARD_LAST_ARG_CMDS = setOf("cp", "ln")
+
+    // [meta1028 D3-F06] Commands that accept `-t DIR` / `--target-directory[=]DIR`
+    // (in joined forms too: `-tDIR`, `-rtDIR`), i.e. the commands whose write
+    // target can arrive as a FLAG VALUE instead of the last positional.
+    // `mv` is in here WITHOUT being in [MOUNT_GUARD_LAST_ARG_CMDS]: with `-t`
+    // its positionals are all sources (must still be checked — audit3 F-07), so
+    // it takes the flag-value parse but keeps the check-every-positional rule.
+    internal val MOUNT_GUARD_TARGET_DIR_CMDS = setOf("cp", "ln", "mv")
 
     // Full wrapper set installed by [installMountWriteGuards]. [audit3 F-07] the
     // list is ALSO hardcoded into every generated script as an unwritable target:
@@ -1165,10 +1220,16 @@ object PRootKernel {
      *    (reading OUT of a read-only mount) must stay legal. `[audit3 F-07]`
      *    exception: with `-t DIR` / `--target-directory[=]DIR` (clustered forms
      *    `-rt DIR` / `-rtDIR` too) the write target is the FLAG VALUE and every
-     *    positional is a source, so the positional tail must NOT be checked;
+     *    positional is a source, so the positional tail must NOT be checked.
+     *    `[meta1028 D3-F06]` the flag-value parse is character-wise (see the
+     *    selection block) and a `-t` with no value is REFUSED, not allowed;
      *  - mv: every positional (plus the `-t` value, which is positional too) —
      *    a mv SOURCE is destroyed, `mv <read-only>/f /tmp/` deletes f from the
-     *    mount, so B5a's "sources are reads" model does not hold here;
+     *    mount, so B5a's "sources are reads" model does not hold here.
+     *    `[meta1028 D3-F06]` mv therefore gets the SAME flag-value parse as
+     *    cp/ln while keeping the check-every-positional rule: before, the
+     *    joined forms (`-tDIR`, `--target-directory=DIR`) began with `-` and
+     *    were skipped, so only the source was ever inspected;
      *  - dd: the write target is the value of `of=`, never a positional
      *    argument — and `oflag=`/`ofs=` must not be confused with `of=`;
      *  - touch/tee/mkdir/rm/rmdir: every positional argument IS a target
@@ -1213,30 +1274,66 @@ object PRootKernel {
         val guardBinPatterns = MOUNT_GUARD_CMDS
             .joinToString(separator = "|") { "\"$MOUNT_GUARD_BIN_LINUX_PREFIX/$it\"" }
         val selection = when {
-            name in MOUNT_GUARD_LAST_ARG_CMDS -> """
+            name in MOUNT_GUARD_TARGET_DIR_CMDS -> {
+                // [meta1028 D3-F06] Two bypasses lived in this block:
+                //  1. `-[!-]*t?*) tdest="${arg##*[t]}"` used a GREEDY prefix
+                //     strip: `##*[t]` removes everything up to the LAST `t` in
+                //     the whole argument, not the option letter. Every mount
+                //     path contains `t` twice over ("/var/minis/moun**t**s/…"
+                //     plus most names), so `cp -rt/var/minis/mounts/vault f`
+                //     produced tdest="" (or a fragment like "s/vault") — and
+                //     the next line's `[ -z "$tdest" ] ||` SHORT-CIRCUITED on
+                //     the empty value and allowed the write. The positional
+                //     tail was skipped too, so nothing else caught it.
+                //  2. `mv` had no flag-value parse at all (it is not a
+                //     LAST_ARG cmd): `-tDIR` / `--target-directory=DIR` start
+                //     with `-` and the old `-*) continue` skipped them, so
+                //     only the source was checked.
+                // The fix parses the short cluster CHARACTER BY CHARACTER
+                // (`t` is the only value-taking option for these three), so
+                // the value is whatever follows that `t` and nothing else, and
+                // a missing value is REFUSED instead of allowed.
+                val positionalRule =
+                    if (name in MOUNT_GUARD_LAST_ARG_CMDS) "dest=\"${'$'}arg\""
+                    else "check_prefix \"${'$'}arg\" || exit 1"
+                """
                 |dest=""
                 |tdest=""
                 |tdir=""
                 |take=""
+                |endopts=""
                 |for arg in "${'$'}@"; do
-                |    if [ "${'$'}take" = 1 ]; then take=""; tdest="${'$'}arg"; continue; fi
+                |    if [ "${'$'}take" = 1 ]; then take=""; tdir=1; tdest="${'$'}{arg}"; continue; fi
+                |    if [ -n "${'$'}endopts" ]; then $positionalRule; continue; fi
                 |    case "${'$'}arg" in
-                |        -t) tdir=1; take=1;;
-                |        -t?*) tdir=1; tdest="${'$'}{arg#-t}";;
-                |        -[!-]*t) tdir=1; take=1;;
-                |        -[!-]*t?*) tdir=1; tdest="${'$'}{arg##*[t]}";;
-                |        --target-directory) tdir=1; take=1;;
+                |        --) endopts=1;;
+                |        --target-directory) take=1;;
                 |        --target-directory=*) tdir=1; tdest="${'$'}{arg#*=}";;
-                |        -*) ;;
-                |        *) dest="${'$'}arg"
+                |        --*) ;;
+                |        -?*)
+                |            rest="${'$'}{arg#-}"
+                |            while [ -n "${'$'}rest" ]; do
+                |                ch="${'$'}{rest%"${'$'}{rest#?}"}"
+                |                rest="${'$'}{rest#?}"
+                |                if [ "${'$'}ch" = t ]; then
+                |                    tdir=1
+                |                    if [ -n "${'$'}rest" ]; then tdest="${'$'}rest"; rest=""; else take=1; fi
+                |                fi
+                |            done;;
+                |        *) $positionalRule;;
                 |    esac
                 |done
                 |if [ "${'$'}tdir" = 1 ]; then
-                |    [ -z "${'$'}tdest" ] || check_prefix "${'$'}tdest" || exit 1
+                |    if [ -z "${'$'}tdest" ]; then
+                |        echo "$name: -t/--target-directory given without a directory — refused by the read-only mount guard" >&2
+                |        exit 1
+                |    fi
+                |    check_prefix "${'$'}tdest" || exit 1
                 |elif [ -n "${'$'}dest" ]; then
                 |    check_prefix "${'$'}dest" || exit 1
                 |fi
-            """.trimMargin()
+                """.trimMargin()
+            }
             name == "dd" -> """
                 |for arg in "${'$'}@"; do
                 |    case "${'$'}arg" in
@@ -1404,6 +1501,11 @@ internal fun hasDotDotSegment(path: String): Boolean = path.split('/').any { it 
  * concurrent callers, and every later caller observes [isDone] == true and
  * skips. The flag is the *same fact* as the mutual exclusion, so a reader can
  * never see "done" while the body is still running.
+ *
+ * [meta1028 D3-F02] "At most once" is bounded by [invalidate]: the body writes
+ * files into the rootfs, and `RootfsManager.reset()` deletes that rootfs, so
+ * the latch has to have a reset edge or it asserts a state the disk no longer
+ * has. Re-arming is the only transition; [run] stays at-most-once per arming.
  */
 internal class BootOnceGate {
 
@@ -1432,6 +1534,28 @@ internal class BootOnceGate {
             isDone = true
             true
         }
+    }
+
+    /**
+     * [meta1028 D3-F02] Forget that the body completed, so the next [run]
+     * executes it again.
+     *
+     * Needed because the body's effect is not a one-way fact: it materializes
+     * files INSIDE `RootfsManager.rootfsDir` (offload handler stubs, the
+     * `default_mount` overlay, `/var/minis/mounts` placeholders, the read-only
+     * mount wrappers), and `RootfsManager.reset()` deletes that directory and
+     * re-extracts the factory tar. Without this edge the gate claimed "booted"
+     * about a tree that no longer contained any of it — the asymmetry was the
+     * defect: a one-way latch guarding a re-creatable artifact.
+     *
+     * Volatile store only, deliberately: callers never hold this class's mutex
+     * across it (the reset path may run inside the body, where taking the
+     * mutex again would deadlock), and a re-arm that races an in-flight [run]
+     * is resolved by [run]'s final `isDone = true` — the body's tail always
+     * re-materializes what the reset removed.
+     */
+    fun invalidate() {
+        isDone = false
     }
 }
 
