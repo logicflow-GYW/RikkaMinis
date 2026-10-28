@@ -1083,6 +1083,7 @@
     <string name="browser_viewport_width">Breite</string>
     <string name="browser_viewport_height">Höhe</string>
     <string name="common_loading">Laden…</string>
+    <string name="settings_secret_unreadable">Der gespeicherte Wert konnte nicht gelesen werden — es wurde nichts gespeichert. Formular schließen und erneut öffnen.</string>
     <string name="rootfs_reset_button">Zurücksetzen</string>
     <string name="session_title_label">Titel</string>
     <string name="backup_import_too_large">Backupdatei ist zu groß (%1$d MB, max. %2$d MB) – es wurde nichts importiert. Verkürze das Chat-Verlaufsfenster (oder schalte es ab), exportiere erneut und importiere die neue Datei.</string>

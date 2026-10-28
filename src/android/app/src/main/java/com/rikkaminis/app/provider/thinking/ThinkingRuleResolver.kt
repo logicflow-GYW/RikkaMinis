@@ -392,11 +392,43 @@ object ThinkingRuleResolver {
     }
 
     /**
+     * Read-only evaluation entry: resolve against an EXPLICIT custom-rule list instead of
+     * the process-wide cache.
+     *
+     * [meta-audit-1028 D4 F-01] This exists because the rule editor's live preview had no
+     * way to resolve a rule that is not saved yet except by PUBLISHING it: it called
+     * `setCustomRules("__preview__", listOf(rule))`, resolved, then removed it. Publishing
+     * is not a read — it mutates the process-wide cache and bumps [customRulesRevision],
+     * and [da1030-C ISSUE-05] made that revision the provider screen's Room reload key. The
+     * preview is evaluated in the dialog's COMPOSITION body, so the dialog bumped it twice
+     * per frame: the provider screen re-subscribed and re-queried every custom rule of the
+     * instance on every frame the dialog was open, and the cache briefly held a rule that
+     * exists nowhere (a throw between publish and cleanup left it there).
+     *
+     * The defect was the borrowed publish channel, not the revision semantics, so the fix
+     * is a read path — [customRulesRevision] keeps bumping exactly once per real mutation.
+     * [draftRules] are prepended exactly like [customRulesFor]'s result, so the trace here
+     * is the trace [apply] produces once the rule is saved.
+     */
+    fun applyDraftRules(
+        body: JSONObject,
+        ctx: ThinkingResolveContext,
+        draftRules: List<ThinkingRule>,
+    ): ThinkingResolveTrace = applyResolved(body, ctx, draftRules)
+
+    /**
      * Resolve and apply the thinking parameters for one request. The body is mutated in
      * place so the call site stays identical to the function this replaced; the trace is
      * returned for logging.
      */
-    fun apply(body: JSONObject, ctx: ThinkingResolveContext): ThinkingResolveTrace {
+    fun apply(body: JSONObject, ctx: ThinkingResolveContext): ThinkingResolveTrace =
+        applyResolved(body, ctx, customRulesFor(ctx.instanceId))
+
+    private fun applyResolved(
+        body: JSONObject,
+        ctx: ThinkingResolveContext,
+        customRules: List<ThinkingRule>,
+    ): ThinkingResolveTrace {
         val before = body.keys().asSequence().toSet()
 
         // ---- AUTO: let the vendor decide ----
@@ -420,7 +452,7 @@ object ThinkingRuleResolver {
         // are prepended above the built-ins, so a custom rule can override a vendor
         // default by matching first — but never remove a built-in. An empty custom
         // list makes `rules` == `builtInRules(ctx)`, byte-identical to Phase 1.
-        val winner = resolveWinner(ctx)
+        val winner = resolveWinner(ctx, customRules)
             ?: return ThinkingResolveTrace(
                 matchedRuleLabel = "none",
                 matchedRuleKind = ThinkingRule.Kind.PROVIDER_TYPE_DEFAULT,
@@ -455,9 +487,17 @@ object ThinkingRuleResolver {
      * prepended above the built-ins, so a custom rule can override a vendor default by
      * matching first — but never remove a built-in. An empty custom list makes the
      * result byte-identical to Phase 1.
+     *
+     * [meta-audit-1028 D4 F-01] The rule list is a PARAMETER, not a cache read: the
+     * preview path hands in a draft the cache must never see (see [applyDraftRules]),
+     * and every request path hands in [customRulesFor]'s result — the same list, read at
+     * the same moment, so the two entries cannot drift.
      */
-    private fun resolveWinner(ctx: ThinkingResolveContext): ThinkingRule? =
-        (customRulesFor(ctx.instanceId) + builtInRules(ctx))
+    private fun resolveWinner(
+        ctx: ThinkingResolveContext,
+        customRules: List<ThinkingRule>,
+    ): ThinkingRule? =
+        (customRules + builtInRules(ctx))
             .firstOrNull { it.scope.matches(ctx.modelId) }
 
     /**

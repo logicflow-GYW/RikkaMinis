@@ -1380,6 +1380,7 @@
     <string name="browser_viewport_width">宽度</string>
     <string name="browser_viewport_height">高度</string>
     <string name="common_loading">加载中…</string>
+    <string name="settings_secret_unreadable">无法读取已存储的值——未保存任何内容。请关闭并重新打开此表单。</string>
     <string name="rootfs_reset_button">重置</string>
     <string name="session_title_label">标题</string>
     <string name="backup_import_too_large">备份文件太大（%1$d MB，上限 %2$d MB）— 未导入任何内容。请把「聊天历史窗口」调短或关掉后重新导出，再导入新文件。</string>

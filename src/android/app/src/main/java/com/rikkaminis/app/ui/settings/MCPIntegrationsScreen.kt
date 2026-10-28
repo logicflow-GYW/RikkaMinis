@@ -401,24 +401,61 @@ private fun MCPFormTab(
     // renders before (not during) the read.
     var oauthClientSecret by remember(editServer) { mutableStateOf("") }
     var oauthAuthorizedSeed by remember(editServer) { mutableStateOf(false) }
+    // [meta-audit-1028 D4 F-04] The secret field is filled by a Keystore read (below),
+    // and Save/Authorize used to be able to run before it landed: `ifBlank { null }` then
+    // turned the still-empty box into a REMOVE of the stored secret. Two extra states fix
+    // the attribution — [oauthSecretLoad] says whether the box's content came from disk,
+    // [oauthSecretEdited] says whether the user touched it at all (an untouched box is not
+    // an instruction to change anything).
+    var oauthSecretLoad by remember(editServer) {
+        mutableStateOf(
+            if (editServer?.oauth == null) SecretLoadState.LOADED else SecretLoadState.PENDING,
+        )
+    }
+    var oauthSecretEdited by remember(editServer) { mutableStateOf(false) }
     LaunchedEffect(editServer) {
+        // `sid` stays a plain `editServer?.id` binding: the off-main gate reads it to
+        // tell "reset the draft" (no server) from "seed it from the store".
         val sid = editServer?.id
         if (sid == null) {
             oauthClientSecret = ""
             oauthAuthorizedSeed = false
+            oauthSecretLoad = SecretLoadState.LOADED
             return@LaunchedEffect
         }
+        // Only a server that SAVED an oauth block has a stored secret whose loss
+        // matters; the add-sheet's empty field is not a pending read.
+        val gated = editServer?.oauth != null
+        if (!gated) oauthSecretLoad = SecretLoadState.LOADED
         // [T-mcp-secret-handoff-import] If the in-guest CLI seeded a client
         // secret via the .secret handoff file, import it first (into the
         // encrypted store) so it pre-fills; otherwise read the stored secret.
         val secret = withContext(Dispatchers.IO) {
-            com.rikkaminis.app.mcp.oauth.MCPOAuthStore.importPendingClientSecret(context, sid)
-                ?: com.rikkaminis.app.mcp.oauth.MCPOAuthStore.clientSecret(context, sid)
+            runCatching {
+                com.rikkaminis.app.mcp.oauth.MCPOAuthStore.importPendingClientSecret(context, sid)
+                    ?: com.rikkaminis.app.mcp.oauth.MCPOAuthStore.clientSecret(context, sid)
+            }
         }
         val authorized = withContext(Dispatchers.IO) {
             com.rikkaminis.app.mcp.oauth.MCPOAuthStore.isAuthorized(context, sid)
         }
-        oauthClientSecret = secret ?: ""
+        secret.fold(
+            onSuccess = { stored ->
+                // A listing reload re-runs this effect (`remember(editServer)` re-seeds
+                // the field with it); text the user already typed wins over the read.
+                if (!oauthSecretEdited) oauthClientSecret = stored ?: ""
+                if (gated) oauthSecretLoad = SecretLoadState.LOADED
+            },
+            onFailure = {
+                // Fail closed: the box shows "" while a secret still exists on disk, so
+                // nothing may be written from it.
+                if (gated) oauthSecretLoad = SecretLoadState.UNREADABLE
+                AppLogger.warning(
+                    "MCPSheet",
+                    "could not read the OAuth client secret for \"$sid\"; save is disabled",
+                )
+            },
+        )
         oauthAuthorizedSeed = authorized
     }
     var oauthAuthEndpoint by remember(editServer) { mutableStateOf(editServer?.oauth?.authorizationEndpoint ?: "") }
@@ -431,6 +468,9 @@ private fun MCPFormTab(
     var oauthRedirectUri by remember(editServer) { mutableStateOf(editServer?.oauth?.redirectUri ?: "") }
     var oauthAuthorized by remember(oauthAuthorizedSeed) { mutableStateOf(oauthAuthorizedSeed) }
     var oauthBusy by remember { mutableStateOf(false) }
+    // [meta-audit-1028 D4 F-04] Both buttons below write the secret; neither may run
+    // while the box does not show what is on disk.
+    val oauthSecretReady = oauthSecretLoad == SecretLoadState.LOADED
 
     fun currentOAuthConfig(): com.rikkaminis.app.mcp.oauth.MCPOAuthConfig? {
         val cfg = com.rikkaminis.app.mcp.oauth.MCPOAuthConfig(
@@ -564,10 +604,27 @@ private fun MCPFormTab(
                 FieldLabel(stringResource(R.string.mcp_form_oauth_client_secret))
                 DialogTextField(
                     value = oauthClientSecret,
-                    onValueChange = { oauthClientSecret = it },
-                    placeholder = stringResource(R.string.mcp_form_oauth_client_secret_placeholder),
+                    onValueChange = {
+                        oauthClientSecret = it
+                        // [meta-audit-1028 D4 F-04] Typing is the only way to express
+                        // "change this": an untouched field must never be written back,
+                        // because it is also the shape a pending read leaves behind.
+                        oauthSecretEdited = true
+                    },
+                    placeholder = if (oauthSecretLoad == SecretLoadState.PENDING) {
+                        stringResource(R.string.common_loading)
+                    } else {
+                        stringResource(R.string.mcp_form_oauth_client_secret_placeholder)
+                    },
                     singleLine = true,
                 )
+                if (oauthSecretLoad == SecretLoadState.UNREADABLE) {
+                    Text(
+                        stringResource(R.string.settings_secret_unreadable),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 FieldLabel(stringResource(R.string.mcp_form_oauth_auth_endpoint))
                 DialogTextField(
                     value = oauthAuthEndpoint,
@@ -599,7 +656,7 @@ private fun MCPFormTab(
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     if (oauthAuthorized) {
                         MinisTextButton(
-                            enabled = !oauthBusy,
+                            enabled = !oauthBusy && oauthSecretReady,
                             onClick = {
                                 val sid = name.trim()
                                 if (sid.isNotEmpty()) {
@@ -624,7 +681,7 @@ private fun MCPFormTab(
                     }
                     Spacer(Modifier.weight(1f))
                     MinisTextButton(
-                        enabled = !oauthBusy,
+                        enabled = !oauthBusy && oauthSecretReady,
                         onClick = {
                             val sid = name.trim()
                             val cfg = currentOAuthConfig()
@@ -654,6 +711,18 @@ private fun MCPFormTab(
                                     }
                                     errorText = null
                                     val secretValue = oauthClientSecret
+                                    // [meta-audit-1028 D4 F-04] Same three-way decision
+                                    // as Save: authorizing is a second path that writes
+                                    // the secret, so it must not turn "the box is empty
+                                    // because the read has not landed" into a REMOVE of
+                                    // the stored client secret. An untouched box means
+                                    // the exchange can read whatever is already stored.
+                                    val secretWrite = decideClientSecretWrite(
+                                        oauthConfigured = true,
+                                        state = oauthSecretLoad,
+                                        editedByUser = oauthSecretEdited,
+                                        text = secretValue,
+                                    )
                                     oauthBusy = true
                                     oauthScope.launch {
                                         // [deep-audit-1040 B-04] Persist the secret
@@ -664,9 +733,12 @@ private fun MCPFormTab(
                                         // above so nothing Compose-owned is read
                                         // off the main thread.
                                         withContext(Dispatchers.IO) {
-                                            com.rikkaminis.app.mcp.oauth.MCPOAuthStore.setClientSecret(
-                                                context, sid, secretValue.trim().ifBlank { null },
-                                            )
+                                            if (secretWrite != SecretWrite.LEAVE_UNTOUCHED) {
+                                                com.rikkaminis.app.mcp.oauth.MCPOAuthStore.setClientSecret(
+                                                    context, sid,
+                                                    if (secretWrite == SecretWrite.CLEAR) null else secretValue.trim(),
+                                                )
+                                            }
                                         }
                                         val result = com.rikkaminis.app.mcp.oauth.MCPOAuthController(context)
                                             .authorize(sid, url.trim(), cfg)
@@ -899,16 +971,30 @@ private fun MCPFormTab(
                 // navigation callback fires back on Main once it lands, so the
                 // sheet never closes ahead of a failed write.
                 val secretValue = oauthClientSecret
+                // [meta-audit-1028 D4 F-04] What to do with the stored secret is a
+                // THREE-way decision, not `ifBlank { null }`:
+                //   • the box still shows a value the read never produced → touch nothing
+                //     (that is the wipe this fixes: the read was in flight, the box said
+                //     "" and `null` means REMOVE downstairs);
+                //   • the user never edited the box → touch nothing (the stored value is
+                //     still their answer; the `[fix/audit0917-b8]` clear-on-STDIO rule
+                //     below is the exception, and it is a CONFIG fact, not a field one);
+                //   • the user edited the box → their text wins, and an emptied box is an
+                //     explicit clear.
+                val secretWrite = decideClientSecretWrite(
+                    oauthConfigured = isUrlTransport && server.oauth != null,
+                    state = oauthSecretLoad,
+                    editedByUser = oauthSecretEdited,
+                    text = secretValue,
+                )
                 oauthScope.launch {
                     withContext(Dispatchers.IO) {
-                        com.rikkaminis.app.mcp.oauth.MCPOAuthStore.setClientSecret(
-                            context, server.id,
-                            if (isUrlTransport && server.oauth != null) {
-                                secretValue.trim().ifBlank { null }
-                            } else {
-                                null
-                            },
-                        )
+                        if (secretWrite != SecretWrite.LEAVE_UNTOUCHED) {
+                            com.rikkaminis.app.mcp.oauth.MCPOAuthStore.setClientSecret(
+                                context, server.id,
+                                if (secretWrite == SecretWrite.CLEAR) null else secretValue.trim(),
+                            )
+                        }
                         if (isEdit) mcpRepository.update(server) else mcpRepository.add(server)
                     }
                     onDone()
