@@ -128,6 +128,14 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val bindings = bindingsFor(request)
         val maxEntries = (args.getLong("max-entries") ?: DEFAULT_MAX_ENTRIES)
             .coerceIn(1L, HARD_MAX_ENTRIES)
+        // [meta1028-B05 F-11] ONE entry budget for the whole command, as
+        // DEFAULT_MAX_ENTRIES documents ("one entry budget for the whole
+        // command, not per path"). Handing `maxEntries` to every root made a
+        // `du a b c d e` call bound 5 × 2,000,000 entries — the flag read as a
+        // per-path cap while `tar` spent the same flag once per command, so the
+        // same number meant two different amounts of work. [entryBudget] is
+        // decremented by what each root actually visited.
+        var entryBudget = maxEntries
         val startedNs = System.nanoTime()
 
         val results = JSONArray()
@@ -152,7 +160,8 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
                         entry.put("error", "not_found")
                     } else {
                         val totals = WalkTotals()
-                        walkForSize(path, totals, maxEntries)
+                        walkForSize(path, totals, entryBudget)
+                        entryBudget = (entryBudget - totals.visited).coerceAtLeast(0)
                         entry.put("files", totals.files)
                             .put("dirs", totals.dirs)
                             .put("bytes", totals.bytes)
@@ -314,6 +323,9 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val limit = (args.getInt("limit") ?: DEFAULT_FIND_LIMIT).coerceIn(1, HARD_MATCH_LIMIT)
         val maxEntries = (args.getLong("max-entries") ?: DEFAULT_MAX_ENTRIES)
             .coerceIn(1L, HARD_MAX_ENTRIES)
+        // [meta1028-B05 F-11] see `du`: one budget for the whole command, spent
+        // as the roots are walked rather than granted anew to each.
+        var entryBudget = maxEntries
         val bindings = bindingsFor(request)
         val startedNs = System.nanoTime()
 
@@ -340,7 +352,8 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
                         entry.put("error", "not_found")
                     } else {
                         val outcome = FindOutcome()
-                        findTree(path, resolution.guestPath, matcher, typeFilter, remaining, maxEntries, outcome)
+                        findTree(path, resolution.guestPath, matcher, typeFilter, remaining, entryBudget, outcome)
+                        entryBudget = (entryBudget - outcome.visited).coerceAtLeast(0)
                         val matches = JSONArray()
                         for (match in outcome.matches) {
                             matches.put(
@@ -421,6 +434,9 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val bindings = bindingsFor(request)
         val startedNs = System.nanoTime()
 
+        // [meta1028-B05 F-11] see `du`: one budget for the whole command.
+        var entryBudget = maxEntries
+
         val results = JSONArray()
         var totalMatches = 0L
         var totalScanned = 0L
@@ -448,7 +464,8 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
                         entry.put("error", "not_found")
                     } else {
                         val outcome = GrepOutcome()
-                        grepTree(path, resolution.guestPath, regex, remaining, maxEntries, outcome)
+                        grepTree(path, resolution.guestPath, regex, remaining, entryBudget, outcome)
+                        entryBudget = (entryBudget - outcome.visited).coerceAtLeast(0)
                         val matches = JSONArray()
                         for (match in outcome.matches) {
                             matches.put(
@@ -1297,8 +1314,11 @@ Options:
                      extraction directory. Clustered forms work: -cf, -czf, -xf, -xzf.
   -z, --gzip         (tar) gzip the archive (also accepted as the -z inside a cluster).
   --limit N          (find/grep) max hits to LIST (find default $DEFAULT_FIND_LIMIT, grep default $DEFAULT_GREP_LIMIT).
-                     Totals are still counted over the whole tree.
+                     Totals are still counted over the whole tree. The budget is ONE per command across
+                     every path: a later root that arrives with nothing left lists nothing and is walked
+                     no further (grep's scan stops at the cap; find's walk keeps counting totals).
   --max-entries N    Entry budget for the traversal (default $DEFAULT_MAX_ENTRIES); over budget → "truncated": true
+                     ONE budget per COMMAND, spent across every path argument — not per path.
   --compact, -q      Standard output shaping (see other minis-* tools)
 
 Notes:

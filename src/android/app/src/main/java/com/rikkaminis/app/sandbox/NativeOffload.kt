@@ -187,10 +187,29 @@ object NativeOffloadServer {
         // [D-2] size the offload worker cap from the shared ConcurrencyPrefs
         // knob (runs after ConcurrencyPrefs.prime in MinisApp.onCreate), kept
         // aligned with the shell coordinator + session slot cap.
-        workerConcurrency = java.util.concurrent.Semaphore(
-            com.rikkaminis.app.data.ConcurrencyPrefs.maxConcurrentSessions(),
-            true,
-        )
+        val workers = com.rikkaminis.app.data.ConcurrencyPrefs.maxConcurrentSessions()
+        workerConcurrency = java.util.concurrent.Semaphore(workers, true)
+
+        // [meta1028-B04 F-11] Close the two ledger gaps that survive a knob
+        // change and a process death:
+        //
+        //  * SIZE — the ledger's DEFAULT_CAPACITY (4) assumed the worker pool
+        //    was the old fixed 2. It is now 1..16 (`ConcurrencyPrefs`), and at
+        //    16 the ring would evict a file after TWO newer requests while
+        //    fourteen replies are still in flight and un-cat'd: the exact
+        //    "deleted a file the guest had not read yet" failure the ledger
+        //    exists to prevent.
+        //  * ORPHANS — the ring lives in memory, so a process death (silent
+        //    kill, OOM, debug crash) leaves every `.native-offload-*` file in
+        //    the rootfs /tmp (a tmpfs = RAM) with nothing left to reclaim it.
+        //    Sweeping them at start is the only closure across a process
+        //    boundary; nothing can still be reading them, because the proot
+        //    that would `cat` them died with the old process.
+        rootfsTmpDir?.let { dir ->
+            val swept = sweepStaleTmpFiles(dir)
+            if (swept > 0) Log.i(TAG, "reclaimed $swept orphaned offload tmpfile(s) from a previous process")
+        }
+        tmpLedger.resize(OffloadTmpFileLedger.capacityFor(workers))
 
         // T287-followup: bind with bounded retry. Linux abstract sockets are
         // freed by the kernel only after the owning process is fully reaped —
@@ -373,20 +392,24 @@ object NativeOffloadServer {
             MemorySpikeRecorder.onEvent("offload-latency", detail)
         }
 
-        val tmpDir = rootfsTmpDir ?: throw IllegalStateException("server not started")
-        tmpDir.mkdirs()
-
-        // [audit-RC7] Register the new tmpfile in the bounded ledger. The
-        // ledger evicts (deletes) the oldest tracked file once it exceeds
-        // capacity — an evicted file has survived several full reply→cat
-        // cycles, so the guest has long consumed it. Deletion happens for
-        // exactly one thread per file (ledger-internal lock): no orphan, no
-        // double-delete, no deleting a file the guest hasn't cat'd yet.
-        val seq = counter.incrementAndGet()
-        val tmpHost = File(tmpDir, ".native-offload-$pid-$seq")
-        tmpHost.writeText(result.output)
-        tmpLedger.rotate(tmpHost)
-        val tmpGuest = "/tmp/${tmpHost.name}"
+        // [meta1028-B04 F-11] Deliver the response. A tmpfile that cannot be
+        // WRITTEN is a delivery failure, and the protocol's only channel is a
+        // PATH — inventing a reply here would have the guest `cat` a sentence.
+        // So the exception still propagates (the worker closes the socket, the
+        // guest sees the same hard failure it always did); what changes is that
+        // the half-written file is now reclaimed instead of leaking, and the
+        // failure is logged with its cause instead of vanishing as EOF.
+        val delivered = deliverResponseFile(
+            result.output,
+            rootfsTmpDir ?: throw IllegalStateException("server not started"),
+            pid,
+            counter.incrementAndGet(),
+            tmpLedger,
+        ).getOrElse { cause ->
+            Log.e(TAG, "could not write the response tmpfile for pid=$pid: ${cause.message}")
+            throw IllegalStateException("response delivery failed: ${cause.message}", cause)
+        }
+        val tmpGuest = delivered.guestPath
 
         Log.d(TAG, "reply name='$name' exit=${result.exitCode} outBytes=${result.output.length} " +
             "tmpGuest=$tmpGuest elapsed=${elapsedMs}ms")
@@ -409,6 +432,78 @@ object NativeOffloadServer {
         writeLEInt(bytes.size)
         if (bytes.isNotEmpty()) write(bytes)
     }
+}
+
+/**
+ * Name prefix of every response tmpfile. Shared by the writer and the boot
+ * sweep so a rename cannot make the sweep stop seeing orphans
+ * ([meta1028-B04 F-11]).
+ */
+internal const val OFFLOAD_TMP_PREFIX = ".native-offload-"
+
+/**
+ * Where one delivered response can be found, host side and guest side.
+ */
+internal data class DeliveredResponse(val hostPath: String, val guestPath: String)
+
+/**
+ * Write one handler response into [tmpDir] and register it in [ledger].
+ *
+ * [meta1028-B04 F-11] Two things this ordering buys, both invisible in the
+ * old `writeText(...)` + `rotate(...)` pair:
+ *
+ *  1. a failed write deletes what it created ([writeResponseFile] reclaims the
+ *     file it registered), instead of leaking a partial tmpfile the ledger
+ *     never heard about;
+ *  2. the caller gets a [Result] it must branch on, so "could not deliver" can
+ *     no longer fall through to a success reply carrying a path that does not
+ *     exist — the guest `cat`'d nothing and read an empty answer at exit 0.
+ *
+ * [writeFn] is injectable so both arms run in a JVM test.
+ */
+internal fun deliverResponseFile(
+    output: String,
+    tmpDir: File,
+    pid: Int,
+    seq: Long,
+    ledger: OffloadTmpFileLedger,
+    writeFn: (File, String) -> Unit = { f, s -> f.writeText(s) },
+): Result<DeliveredResponse> {
+    tmpDir.mkdirs()
+    val host = File(tmpDir, "$OFFLOAD_TMP_PREFIX$pid-$seq")
+    return writeResponseFile(host, output, ledger, writeFn)
+        .map { DeliveredResponse(host.absolutePath, "/tmp/${host.name}") }
+}
+
+/**
+ * Delete every response tmpfile left in [dir] by a PREVIOUS process.
+ *
+ * [meta1028-B04 F-11] The in-memory ledger cannot outlive the process that
+ * owns it, and the files are the only part of a response that does: each one
+ * occupies real RAM (the rootfs /tmp is a tmpfs). Called from `start()`, when
+ * nothing can still be reading them — the proot that would `cat` a file is a
+ * child of the process that died. Returns how many were reclaimed.
+ *
+ * Only regular files whose name starts with [OFFLOAD_TMP_PREFIX] are touched,
+ * so a guest's own `/tmp` content is never collateral. [deleteFn] and [names]
+ * are parameters so the sweep is testable without a real rootfs.
+ */
+internal fun sweepStaleTmpFiles(
+    dir: File,
+    deleteFn: (File) -> Boolean = { it.delete() },
+    names: (File) -> Array<String>? = { it.list() },
+): Int {
+    val entries = names(dir) ?: return 0
+    var swept = 0
+    for (name in entries) {
+        if (!name.startsWith(OFFLOAD_TMP_PREFIX)) continue
+        val f = File(dir, name)
+        // A directory can carry the same name only if something inside the
+        // guest created it; `File.delete()` refuses non-empty directories, so
+        // this cannot recurse into content the sweep never inspected.
+        if (runCatching { deleteFn(f) }.getOrDefault(false)) swept++
+    }
+    return swept
 }
 
 /**

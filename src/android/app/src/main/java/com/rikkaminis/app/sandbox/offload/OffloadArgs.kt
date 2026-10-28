@@ -148,6 +148,19 @@ internal class OffloadArgs(
      * caller lists only its own options.
      */
     fun unknownFlags(known: Set<String>): Set<String> = flags - known - OffloadOutput.OUTPUT_FLAGS
+
+    /**
+     * Keys that were filed as `--key value` / `--key=value` and are not in
+     * [known] — the mirror of [unknownFlags], and the channel a typo most
+     * often lands in: `--kewords python` is NOT a flag (the next token does not
+     * start with `-`, and the name is not declared boolean), so it is filed as
+     * a VALUE under the misspelled key and [unknownFlags] never sees it.
+     *
+     * [meta1028-B05 F-12] Added for that reason; a guard reading only
+     * [unknownFlags] lets the single most likely typo through.
+     */
+    fun unknownValueKeys(known: Set<String>): Set<String> =
+        values.keys - known - OffloadOutput.OUTPUT_FLAGS
     fun get(vararg names: String): String? = names.firstNotNullOfOrNull { values[it] }
     fun getInt(vararg names: String): Int? = get(*names)?.toIntOrNull()
     fun getLong(vararg names: String): Long? = get(*names)?.toLongOrNull()
