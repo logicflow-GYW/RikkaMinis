@@ -225,4 +225,25 @@ if (memArr != null && memoryRepo != null) {
 
 ## CI 附录
 
-（本节由 round-trip 核验后填写：run id / job id / head_sha / 步数与日志判读）
+- run **`40657670517`**（分支 dispatch，`2026-10-28T08:33:40Z` 创建）/ job **`122712570266`** / attempt **1** / **success**
+  （`08:33:44Z → 08:54:26Z`，20m42s）。
+- **`head_sha = 84fed05c6e8cb1a001e59a396195817aa2386394`** —— 与本地代码提交 `84fed05c` **逐字符一致**
+  （报告提交 `69f526a1` 在 CI 之后，只动 `fix-reports/`）。
+- 27 步：唯一非 success = 步 23「Move the rolling tag」+ 步 24「Publish to Releases」，均 **skipped**
+  （main 门控，分支构建本就不该发布）。其余全 success，含**步 3 pre-build scan gate** 与
+  **步 15 Run unit tests (full suite)**。
+- 日志 `1,502,489` B / NUL `0`，逐条核：
+  | 判据 | 读数 |
+  |---|---|
+  | `Summary: 113 passed, 0 failed` | **×1** |
+  | `ALL 349 CASES PASS` | **×1**（349 = 本轮基线夹具数） |
+  | 门头 `[N/113]` | 113 条，编号 1..113 **distinct 全齐** |
+  | `^\s*e: `（Kotlin 编译错误） | **0** |
+  | 含 `FAILED` 的行 | 6 条，逐条展开**全是 PASSED 用例名子串**（`RealAgentAdapterSkeletonTest > slot denied produces FAILED…` 等），无真失败 |
+  | `MemoryRestoreGuardTest > … PASSED` | **14**（新增用例在 CI 上真跑，`setLastModified` 夹具断言全过 ⇒ §6.6 的 runner 文件系统疑虑解除） |
+  | `SoulStoreOverwriteBackupTest > a concurrent reader never sees a truncated SOUL md` | **PASSED**（已知 1% 假红未触发，attempt 1 一次过） |
+
+### 报告提交后的收口核验
+
+`git diff --name-only 84fed05c..HEAD -- . ':(exclude)fix-reports'` = **空**（源码树与绿 sha 完全一致）。
+
