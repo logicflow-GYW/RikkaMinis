@@ -795,6 +795,7 @@
     <string name="session_new_chat_default">New Chat</string>
     <string name="storage_section_orphans">可回收空間</string>
     <string name="storage_orphan_banner">來自已刪除會話的 %1$d 個殘留項目 — 共 %2$s</string>
+    <string name="storage_orphan_banner_blocked">%1$d 個項目（共 %2$s）看似殘留，但資料庫中目前沒有任何會話紀錄。為避免刪除應用程式已看不到的資料，清理已被阻止。</string>
     <string name="storage_reclaim_button">回收</string>
     <string name="storage_reclaim_confirm_title">回收殘留檔案？</string>
     <string name="storage_reclaim_confirm_text">這將永久刪除已刪除會話遺留的 %1$d 個殘留項目（%2$s）。其餘對話不受影響。此操作無法撤銷。</string>

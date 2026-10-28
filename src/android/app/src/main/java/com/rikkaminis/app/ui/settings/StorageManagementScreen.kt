@@ -284,14 +284,20 @@ fun StorageManagementScreen(
                 // reclaimOrphans() deletes, which is why the tab half is measured
                 // with the same predicate the delete path uses.
                 val orphanTabsPart = sessionFiles.scanOrphanBrowserTabFiles(liveIds)
-                val orphans = SessionFileStore.ReclaimReport(
-                    sessionIds = orphanSessionPart.sessionIds,
-                    sessionDirs = orphanSessionPart.sessionDirs,
-                    sessionBytes = orphanSessionPart.sessionBytes,
-                    mediaDirs = mediaScan.orphanDirs,
-                    mediaBytes = mediaScan.orphanBytes,
-                    browserTabsDirs = orphanTabsPart.browserTabsDirs,
-                    browserTabsBytes = orphanTabsPart.browserTabsBytes,
+                // [P1-D FINDING-26] Same empty-live-set floor the delete half
+                // applies: with no DB sessions, these candidates are not proven
+                // residue, and the banner must not offer them as reclaimable.
+                val orphans = sessionFiles.withEmptyLiveFloor(
+                    SessionFileStore.ReclaimReport(
+                        sessionIds = orphanSessionPart.sessionIds,
+                        sessionDirs = orphanSessionPart.sessionDirs,
+                        sessionBytes = orphanSessionPart.sessionBytes,
+                        mediaDirs = mediaScan.orphanDirs,
+                        mediaBytes = mediaScan.orphanBytes,
+                        browserTabsDirs = orphanTabsPart.browserTabsDirs,
+                        browserTabsBytes = orphanTabsPart.browserTabsBytes,
+                    ),
+                    liveIds,
                 )
 
                 // Size every session directory in parallel (async) instead of
@@ -388,34 +394,49 @@ fun StorageManagementScreen(
         // [B: orphan reclamation] Auto-scanned banner. Discovery is automatic,
         // deletion is always an explicit user confirmation — never silent.
         if (orphanInfo != null && orphanInfo!!.totalBytes > 0) {
+            // [P1-D FINDING-26] A blocked report is still shown (the space is
+            // real and the user deserves to know why it cannot be freed), but it
+            // is NOT clickable: the sweep would refuse anyway, and offering the
+            // action would end in a no-op that reads as success.
+            val orphanBlocked = orphanInfo!!.blocked
             SettingsSection(header = stringResource(R.string.storage_section_orphans)) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = !isScanningOrphans && !isReclaiming) {
+                        .clickable(enabled = !orphanBlocked && !isScanningOrphans && !isReclaiming) {
                             showReclaimDialog = true
                         }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        stringResource(
-                            R.string.storage_orphan_banner,
-                            orphanInfo!!.totalDirs,
-                            Formatter.formatFileSize(context, orphanInfo!!.totalBytes),
-                        ),
+                        if (orphanBlocked) {
+                            stringResource(
+                                R.string.storage_orphan_banner_blocked,
+                                orphanInfo!!.totalDirs,
+                                Formatter.formatFileSize(context, orphanInfo!!.totalBytes),
+                            )
+                        } else {
+                            stringResource(
+                                R.string.storage_orphan_banner,
+                                orphanInfo!!.totalDirs,
+                                Formatter.formatFileSize(context, orphanInfo!!.totalBytes),
+                            )
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.weight(1f),
                     )
-                    if (!isScanningOrphans && !isReclaiming) {
-                        Text(
-                            stringResource(R.string.storage_reclaim_button),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    } else {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    if (!orphanBlocked) {
+                        if (!isScanningOrphans && !isReclaiming) {
+                            Text(
+                                stringResource(R.string.storage_reclaim_button),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        } else {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        }
                     }
                 }
             }
@@ -545,18 +566,29 @@ fun StorageManagementScreen(
                     showReclaimDialog = false
                     isReclaiming = true
                     scope.launch {
-                        withContext(Dispatchers.IO) {
+                        // [P1-D FINDING-26] The sweep can REFUSE (empty live set):
+                        // keep its report instead of assuming it deleted, so a
+                        // refusal is shown as a refusal and not as "reclaimed".
+                        val outcome = withContext(Dispatchers.IO) {
                             val live = chatRepository.dao.listSessions().map { it.id }.toSet()
                             sessionFiles.reclaimOrphans(live)
                         }
-                        orphanInfo = null
                         isReclaiming = false
-                        // [storage-rescan-jank] force=true + drop the cached
-                        // snapshot: the pre-reclaim scan must not be re-rendered
-                        // by the freshness gate (it still lists the just-reclaimed
-                        // orphans), and the rescan must not be skipped.
-                        invalidateStorageSnapshot()
-                        reload(force = true)
+                        if (outcome.blocked) {
+                            // Nothing was touched: keep the banner (now rendered
+                            // as blocked) and skip the rescan — nothing on disk
+                            // changed, and the snapshot still lists the same
+                            // candidates.
+                            orphanInfo = outcome
+                        } else {
+                            orphanInfo = null
+                            // [storage-rescan-jank] force=true + drop the cached
+                            // snapshot: the pre-reclaim scan must not be re-rendered
+                            // by the freshness gate (it still lists the just-reclaimed
+                            // orphans), and the rescan must not be skipped.
+                            invalidateStorageSnapshot()
+                            reload(force = true)
+                        }
                     }
                 }) {
                     Text(stringResource(R.string.storage_reclaim_confirm_button))
