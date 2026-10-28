@@ -168,7 +168,20 @@ F10-PREFIX: no deletion in any landing path = True
 
 ## 6. CI 判读
 
-> 待回填（run `40691529839`，head_sha `3b1ecbdb6fce0a5919822302a647c9e1c3affe42`）
+run **`40691529839`** / **#2831** / job `build` / attempt 1 — **success**，12:53:09 → 13:14:56（**21m41s**）。
+
+| 判据 | 读数 |
+|---|---|
+| `head_sha` 逐字符一致 | `3b1ecbdb6fce0a5919822302a647c9e1c3affe42` == 本地 HEAD ✅（报告提交 `e86e262c` 是 CI 已经起跑之后才推送的：本 run 钉住的是**代码提交** `3b1ecbdb`，报告不进任何 step 的输入） |
+| 27 步非 success | 恰 2：**rolling tag + Publish 双双 skipped**（main 门控，分支构建的正确形状） |
+| 日志体量 | zip 656,449 B → 解压 3,006,396 B / 3,007,796 字符 / **NUL 0** |
+| 静态门 | `║  Summary: 113 passed, 0 failed` 恰 1 次；`[N/113]` 编号 **1..113 连续互异**；80 条 selftest 标记；其中 `SKILL_FRONTMATTER_ROUNDTRIP_SELFTEST=PASS` / `SKILL_IMPORT_OFFMAIN_SELFTEST` 均在 |
+| 夹具 | `ALL 349 CASES PASS` 恰 1 次（12:58:40） |
+| Kotlin 编译 | gradle step `BUILD SUCCESSFUL`、`^ *e: ` **0** |
+| 判读陷阱复核 | UT step 含 `FAILED` 的行 **6 条，全部是 PASSED 用例名子串**（`RealAgentAdapterSkeletonTest > slot denied produces FAILED…`、`ChatAgentTraceObserverSchemaTest > reason PERSISTENCE_FAILED…` 等）——本仓库的常规误读点，逐条看过 |
+| 本支四个测试类 | `SkillFrontmatterMergeTest` 11/`SkillFrontmatterPolarityTest` 13/`SkillFrontmatterBlockScalarAndEolTest` 12/`SkillStaleSiblingCleanupTest` 8 = **44 PASSED，0 非 PASSED**（与本地 harness 读数同数） |
+
+> 注：第一版判读脚本把整个 zip 拼成一份全文再 grep，于是 summary / 夹具计数被 `0_build.txt` 与各 step 分文件同时命中而翻倍（看起来像"计数异常"）。改成**按 step 文件读**（`build/3_Run pre-build scan gate.txt`、`build/15_Run unit tests (full suite).txt`）后，上表才是每个计数器的真实出现次数。判本仓 CI 一律按 step 文件读，不要全文 grep。
 
 ---
 
