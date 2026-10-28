@@ -49,6 +49,11 @@ class ProviderPersistDegradedMirrorTest {
     // the same call sites through [ProbeLog] to keep "the failure is
     // logged" assertable).
     // ------------------------------------------------------------------
+    /** Counts the F-01 repairs the persist replica performs. */
+    private object ProbeRepairs {
+        var count = 0
+    }
+
     private object ProbeLog {
         val errors = mutableListOf<String>()
         val warnings = mutableListOf<String>()
@@ -71,8 +76,16 @@ class ProviderPersistDegradedMirrorTest {
     // Fake prefs mirror: production `prefs.edit().putString("config",
     // mirrorStr).commit()` chain.
     // ------------------------------------------------------------------
-    private class FakePrefs(private val commitResult: Boolean = true) {
-        var committed: String? = null
+    private class FakePrefs(
+        private val commitResult: Boolean = true,
+        initial: String? = null,
+    ) {
+        /**
+         * What a read-back sees. A REJECTED commit must not move it — real
+         * SharedPreferences keeps the previous value when commit() returns false,
+         * and that is exactly what makes the sync token a lie in the first place.
+         */
+        var committed: String? = initial
         private var pending: String? = null
         fun edit() = this
         fun putString(key: String, value: String): FakePrefs {
@@ -83,27 +96,20 @@ class ProviderPersistDegradedMirrorTest {
             return this
         }
         fun commit(): Boolean {
-            committed = pending
+            if (commitResult) committed = pending
             return commitResult
         }
     }
 
     // ------------------------------------------------------------------
-    // Replica of persistToDbAndMirror's write sequence. [fix/meta1028-d1 F-01]
-    // changes only ONE thing in it: the hash is now taken from what prefs holds
-    // AFTER the commit ([decideSyncHash]) instead of from the string we hoped to
-    // write. Only the LOG branches are reproduced below, because those are what
-    // the arms assert — see ProviderMirrorHashTest for the arbitration itself.
+    // Replica of persistToDbAndMirror's write sequence, matching the production
+    // order after [fix/meta1028-d1 F-01]: DB sync → mirror commit → repair the
+    // sync token to whatever prefs really holds. The arbitration itself lives in
+    // [decideSyncHash] and is covered by [ProviderMirrorHashTest]; only the LOG
+    // branches and the repair trigger are reproduced here.
     // ------------------------------------------------------------------
     private fun persistReplica(dao: FakeDao, prefs: FakePrefs, mirrorStr: String): Boolean {
-        val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
-        if (!mirrorWritten) {
-            ProbeLog.w(
-                "[ProviderStore] prefs mirror commit() returned false — the DB rows will keep " +
-                    "the previous json_sync_hash so the two stores stay in step; this save is " +
-                    "lost in BOTH stores (disk full? prefs corruption?)",
-            )
-        }
+        val mirrorHash = hashJsonMirror(mirrorStr)
         val dbWrite = try {
             dao.syncAllIncremental()
             true
@@ -114,6 +120,28 @@ class ProviderPersistDegradedMirrorTest {
                     "launch re-imports it: ${e.message}",
             )
             false
+        }
+        val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
+        if (!mirrorWritten) {
+            // Order-aware, same as production: "the save is lost" would be a lie
+            // when provider.db accepted the rows.
+            ProbeLog.w(
+                if (dbWrite) {
+                    "[ProviderStore] prefs mirror commit() returned false — provider.db has " +
+                        "this save; json_sync_hash is repaired to name the mirror that " +
+                        "exists, so the two stores stay in step (disk full? prefs corruption?)"
+                } else {
+                    "[ProviderStore] prefs mirror commit() returned false — the JSON mirror " +
+                        "still holds the previous config (disk full? prefs corruption?)"
+                },
+            )
+        }
+        val truthfulHash = decideSyncHash(
+            intendedMirror = mirrorStr,
+            liveMirror = prefs.committed,
+        )
+        if (dbWrite && truthfulHash != mirrorHash) {
+            ProbeRepairs.count += 1
         }
         if (!dbWrite && !mirrorWritten) {
             ProbeLog.w(
@@ -198,6 +226,7 @@ class ProviderPersistDegradedMirrorTest {
     private fun resetProbes() {
         ProbeLog.errors.clear()
         ProbeLog.warnings.clear()
+        ProbeRepairs.count = 0
     }
 
     // ==================================================================
@@ -242,6 +271,8 @@ class ProviderPersistDegradedMirrorTest {
         assertEquals(mirror, prefs.committed)
         assertEquals(1, dao.syncCalls)
         assertTrue("no failure log on the healthy path", ProbeLog.errors.isEmpty())
+        assertTrue("no warning on the healthy path", ProbeLog.warnings.isEmpty())
+        assertEquals("a landed mirror is its own truth — no repair", 0, ProbeRepairs.count)
     }
 
     // ==================================================================
@@ -257,15 +288,21 @@ class ProviderPersistDegradedMirrorTest {
         val mirrorWritten = persistReplica(dao, prefs, "mirror")
 
         assertFalse(mirrorWritten)
-        assertEquals(1, ProbeLog.warnings.size)
+        // Two warnings now: the rejected commit, then the "neither store" one.
+        assertEquals(2, ProbeLog.warnings.size)
         assertFalse(
             "double failure must not claim the DB is authoritative",
-            ProbeLog.warnings[0].contains("DB remains authoritative"),
+            ProbeLog.warnings.any { it.contains("DB remains authoritative") },
+        )
+        assertTrue(
+            "both failures must be named separately",
+            ProbeLog.warnings.any { it.contains("still holds the previous config") },
         )
         assertTrue(
             "double failure must state neither store took the write",
-            ProbeLog.warnings[0].contains("neither store took this write"),
+            ProbeLog.warnings.last().contains("neither store took this write"),
         )
+        assertEquals("nothing to repair: the DB was never told a hash", 0, ProbeRepairs.count)
     }
 
     // ==================================================================
@@ -276,16 +313,21 @@ class ProviderPersistDegradedMirrorTest {
     fun mirrorOnlyFailureStillReportsDbAuthoritative() {
         resetProbes()
         val dao = FakeDao()
-        val prefs = FakePrefs(commitResult = false)
+        // The interesting shape is a store that ALREADY holds the previous
+        // mirror: the rejected commit leaves that string in place, so the hash
+        // the DB was given names a mirror that is not there.
+        val prefs = FakePrefs(commitResult = false, initial = """{"entries":[{"id":"old"}]}""")
 
         val mirrorWritten = persistReplica(dao, prefs, "mirror")
 
         assertFalse(mirrorWritten)
+        assertEquals("the rejected value never landed", """{"entries":[{"id":"old"}]}""", prefs.committed)
         assertEquals(1, ProbeLog.warnings.size)
         assertTrue(
             "the DB rows keep the previous hash so the stores stay in step",
             ProbeLog.warnings[0].contains("the two stores stay in step"),
         )
+        assertEquals("the token is repaired to name the mirror that exists", 1, ProbeRepairs.count)
     }
 
     // ==================================================================

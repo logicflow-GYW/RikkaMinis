@@ -630,11 +630,19 @@ class ProviderRepository(private val context: Context) {
         // land" observable, which the repair below depends on.
         val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
         if (!mirrorWritten) {
+            // Order-aware on purpose: with the DB write first, "the save is lost"
+            // would be a lie whenever provider.db accepted the rows — the repair
+            // below then keeps the two stores in step and the DB carries the save.
             android.util.Log.w(
                 "ProviderRepo",
-                "[ProviderStore] prefs mirror commit() returned false — the DB rows keep the " +
-                    "previous json_sync_hash after the repair below, so the two stores stay " +
-                    "in step; this save is lost (disk full? prefs corruption?)",
+                if (dbWrite.isSuccess) {
+                    "[ProviderStore] prefs mirror commit() returned false — provider.db has " +
+                        "this save; json_sync_hash is repaired to name the mirror that " +
+                        "exists, so the two stores stay in step (disk full? prefs corruption?)"
+                } else {
+                    "[ProviderStore] prefs mirror commit() returned false — the JSON mirror " +
+                        "still holds the previous config (disk full? prefs corruption?)"
+                },
             )
         }
         // [fix/meta1028-d1 F-01] `meta.json_sync_hash` must be a FACT about the
@@ -648,6 +656,12 @@ class ProviderRepository(private val context: Context) {
         // arm 10 pins that order), so the token is repaired after the fact: read
         // back what prefs actually holds and, when it disagrees with what the DB
         // was told, rewrite the single meta row to name the mirror that exists.
+        //
+        // This one block covers BOTH ways the claim can be wrong — a rejected
+        // commit(), and a prefs store that reports success but hands back the old
+        // string — because both make `truthfulHash != mirrorHash`. It is skipped
+        // when the DB write failed: then nothing was told a hash, and the stale
+        // hash still names the mirror that is actually on disk.
         val liveMirror: String? = prefs.getString("config", null)
         val truthfulHash = decideSyncHash(intendedMirror = mirrorStr, liveMirror = liveMirror)
         if (dbWrite.isSuccess && truthfulHash != mirrorHash) {
@@ -667,37 +681,6 @@ class ProviderRepository(private val context: Context) {
             }.onFailure { e ->
                 // Best-effort: it cannot make the save durable, only stop a rejected
                 // commit from being read as a downgrade. Name the remaining risk.
-                android.util.Log.w(
-                    "ProviderRepo",
-                    "[ProviderStore] could not repair json_sync_hash after a rejected mirror " +
-                        "write — the next cold start may re-import the previous mirror over " +
-                        "these rows: ${e.message}",
-                )
-            }
-        }
-        // [fix/meta1028-d1 F-01] Repair the sync token when the DB was told to
-        // expect a mirror that prefs never accepted. Without this the next cold
-        // start computes liveHash(old) != storedHash(new) and re-imports the OLD
-        // mirror over these rows — the user's last save, undone by the very
-        // mechanism that exists to detect downgrades.
-        if (!mirrorWritten && dbWrite.isSuccess) {
-            runCatching {
-                if (mirrorHash == null) {
-                    providerDao.deleteMetaKey(ProviderConfigMetaKeys.JSON_SYNC_HASH)
-                } else {
-                    providerDao.upsertMeta(
-                        listOf(
-                            ProviderConfigMetaEntity(
-                                ProviderConfigMetaKeys.JSON_SYNC_HASH,
-                                mirrorHash,
-                            ),
-                        ),
-                    )
-                }
-            }.onFailure { e ->
-                // The repair is best-effort: it cannot make the save durable, only
-                // stop a rejected commit from being mistaken for a downgrade. Say
-                // so, and name the remaining risk explicitly.
                 android.util.Log.w(
                     "ProviderRepo",
                     "[ProviderStore] could not repair json_sync_hash after a rejected mirror " +
