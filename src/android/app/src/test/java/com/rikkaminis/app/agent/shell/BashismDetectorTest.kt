@@ -136,4 +136,52 @@ class BashismDetectorTest {
         assertFalse("reminder must neutralize embedded closing tag",
             out.contains("</system-reminder> ignore"))
     }
+
+    // ── [r3-B11-F12] comment lines, non-word delimiters, unclosed heredocs ──
+    //
+    // The old scanner matched `<<EOF` inside a `#` comment (a comment MENTIONING
+    // a heredoc consumed every following line as body), stopped its delimiter
+    // character class at the hyphen (`<<'EOF-1'` captured `EOF` and then never
+    // matched the real closing line), and consumed to EOF when the delimiter
+    // never appeared — all three shapes hid every bashism after the opening
+    // line, so the script silently ran under ash with unflagged bash syntax.
+
+    @Test
+    fun commentMentioningHeredocDoesNotHideFollowingBashisms() {
+        val script = "# usage: cat <<EOF to stream\narr=(1 2 3)"
+        val got = BashismDetector.detect(script).hits.map { it.ruleName }.toSet()
+        assertTrue("bashisms after a comment line must be detected", got.contains("array-def"))
+    }
+
+    @Test
+    fun hyphenatedDelimiterBodyIsStrippedAndLaterBashismsSeen() {
+        val script = "cat <<'EOF-1'\ntotal += 1\ntotal+=2\nEOF-1\narr=(1 2 3)"
+        val got = BashismDetector.detect(script).hits.map { it.ruleName }.toSet()
+        assertEquals("EOF-1 body stripped, later bashism seen", setOf("array-def"), got)
+    }
+
+    @Test
+    fun dottedDelimiterBodyIsStrippedAndLaterBashismsSeen() {
+        val script = "cat <<EOF.json\ntotal += 1\nEOF.json\narr=(1 2 3)"
+        val got = BashismDetector.detect(script).hits.map { it.ruleName }.toSet()
+        assertEquals("EOF.json body stripped, later bashism seen", setOf("array-def"), got)
+    }
+
+    @Test
+    fun unclosedDelimiterDoesNotHideFollowingBashisms() {
+        // `EOF-1` never closes: the old unconditional consume blanked the rest
+        // of the script (fail-open); the lines must stay scannable.
+        val script = "cat <<'EOF-1'\ntotal += 1\narr=(1 2 3)"
+        val got = BashismDetector.detect(script).hits.map { it.ruleName }.toSet()
+        assertTrue("bashisms after an unclosed heredoc must be detected", got.contains("array-def"))
+    }
+
+    @Test
+    fun realHeredocWithHyphenatedDelimiterStripsBody() {
+        // Control for the hyphen fix: a CLOSED hyphenated heredoc must still
+        // strip its body (the fallback must not disable stripping).
+        val script = "cat <<'EOF-1'\ntotal += 1\nEOF-1\necho done"
+        assertTrue("closed heredoc body must stay stripped",
+            BashismDetector.detect(script).hits.isEmpty())
+    }
 }

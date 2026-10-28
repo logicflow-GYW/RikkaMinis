@@ -379,4 +379,69 @@ class SubagentSkillTest {
         assertEquals("You are a probe.", SubagentSkill.buildSystemPrompt(skill))
         assertEquals("You are a probe.", SubagentSkill.buildSystemPrompt(skill, emptyList()))
     }
+
+    // ── [r3-B11-F13] double frontmatter strip ate horizontal-rule bodies ────
+    //
+    // `SkillInfo.body` is frontmatter-STRIPPED in production (the block lives on
+    // `frontmatter`), so the extra strip inside skillInstructions only ever
+    // applied to raw-markdown callers. Its trigger, though, was
+    // `lines[0].startsWith("---")` plus any later line starting with `---` —
+    // so an instruction body that OPENS with a horizontal rule lost its first
+    // section silently. The strip is now limited to a real YAML block.
+
+    @Test
+    fun `raw body opening with a horizontal rule is not treated as frontmatter`() {
+        val body = "---\n\nFirst section that must survive.\n\n---\n\nSecond section."
+        assertEquals(body, SubagentSkill.buildSystemPrompt(makeSkill(body)))
+    }
+
+    @Test
+    fun `production body opening with a horizontal rule is kept verbatim`() {
+        val body = "---\n\nFirst section that must survive.\n\n---\n\nSecond section."
+        val skill = makeProductionSkill(body = body, frontmatter = "---\nname: probe\nsubagent: true\n---")
+        val prompt = SubagentSkill.buildSystemPrompt(skill)
+        assertTrue("first section must survive: $prompt", prompt.contains("First section that must survive."))
+        assertTrue("second section must survive", prompt.contains("Second section."))
+    }
+
+    @Test
+    fun `a real raw frontmatter block is still stripped`() {
+        val skill = makeSkill("---\nname: probe\nsubagent: true\n---\nYou are a probe.")
+        assertEquals("You are a probe.", SubagentSkill.buildSystemPrompt(skill))
+    }
+
+    @Test
+    fun `four-dash rule is not a frontmatter delimiter`() {
+        val body = "----\nname: not frontmatter\n----\nReal instructions."
+        assertEquals(body, SubagentSkill.buildSystemPrompt(makeSkill(body)))
+    }
+
+    @Test
+    fun `stripRealFrontmatter rejects a markdown table row`() {
+        val body = "---\n|---|---|\n| a | b |\n---\ntext"
+        assertNull("table rows are not a YAML mapping", SubagentSkill.stripRealFrontmatter(body))
+    }
+
+    @Test
+    fun `stripRealFrontmatter returns the content after a real block`() {
+        assertEquals(
+            "Body line 1\nBody line 2",
+            SubagentSkill.stripRealFrontmatter("---\nname: a\nsubagent: true\n---\nBody line 1\nBody line 2"),
+        )
+    }
+
+    @Test
+    fun `stripRealFrontmatter accepts list continuation lines`() {
+        assertEquals(
+            "Instructions.",
+            SubagentSkill.stripRealFrontmatter(
+                "---\nname: a\nallowed_tools:\n  - file_read\n  - file_write\n---\nInstructions.",
+            ),
+        )
+    }
+
+    @Test
+    fun `stripRealFrontmatter ignores a body with no leading block`() {
+        assertNull(SubagentSkill.stripRealFrontmatter("Plain instructions.\n\n---\n\nMore."))
+    }
 }

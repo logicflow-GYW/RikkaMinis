@@ -20,8 +20,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.log10
 import kotlin.math.sqrt
@@ -69,7 +69,14 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     // an epoch token; a stale job's cleanup only releases the flag when it
     // still belongs to its own session.
     private val captureGuard = CaptureEpochGuard()
-    private val cancelled = AtomicBoolean(false)
+    // [r3-B11-F05] Per-session token, bumped by every start()/cancel()/shutdown().
+    // It replaced a single shared `cancelled: AtomicBoolean`: cancel() set it,
+    // the very next start() cleared it again (selectLocale cancels and restarts
+    // back-to-back), so the OLD capture job walked past its own cancellation
+    // guard and transcribe-and-delivered into the NEW session's listener —
+    // wiping a recording the user had just started. A token only ever moves
+    // forward, so a stale job can never mistake a newer session for its own.
+    private val sessionToken = AtomicLong(0L)
     // [fix/audit0917-b8] @Volatile: written by the engine's IO coroutine
     // (markDegraded is invoked from the transcription failure path), read from
     // whichever thread evaluates `isAvailable` (the UI decides whether to show
@@ -90,6 +97,15 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
 
     private fun repository() =
         (appContext.applicationContext as? MinisApp)?.providerRepository
+
+    /**
+     * [r3-B11-F05] True while [session] is still the live capture session.
+     * Every delivery point (transcribe hand-off, per-candidate loop, callback)
+     * consults this instead of the old shared `cancelled` flag, so a session
+     * superseded by cancel()/start() goes inert even though its coroutine is
+     * still winding down.
+     */
+    private fun isSessionLive(session: Long): Boolean = sessionToken.get() == session
 
     override fun markDegraded() {
         degraded = true
@@ -118,7 +134,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             listener.onError(RecognitionError.RECOGNIZER_BUSY, "A capture is already in flight.")
             return
         }
-        cancelled.set(false)
+        val mySession = sessionToken.incrementAndGet()
 
         captureJob = scope.launch {
             val minBuf = AudioRecord.getMinBufferSize(
@@ -186,7 +202,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                 captureGuard.releaseIfCurrent(myEpoch)
             }
 
-            if (cancelled.get()) return@launch
+            if (!isSessionLive(mySession)) return@launch
             val audio = pcm.toByteArray()
             if (audio.isEmpty()) {
                 listener.onError(RecognitionError.NO_MATCH, "No audio captured.")
@@ -217,7 +233,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                 // skip means nothing was even attempted, so say so.
                 var skipped = 0
                 for ((instance, entry) in ordered) {
-                    if (cancelled.get()) return@launch
+                    if (!isSessionLive(mySession)) return@launch
                     val provider = VoiceProviderFactory.make(instance, repo.loadApiKey(instance.id))
                     if (provider == null) {
                         Log.w(TAG, "candidate ${instance.label} cannot serve voice input — skipping")
@@ -241,7 +257,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                                 resolvedModel = ModelsDevApi.effectiveModel(entry),
                             ),
                         )
-                        if (cancelled.get()) return@launch
+                        if (!isSessionLive(mySession)) return@launch
                         stickyEntryId = entry.id
                         val text = response.text.trim()
                         if (text.isEmpty()) {
@@ -260,7 +276,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                         lastError = e
                     }
                 }
-                if (!cancelled.get()) {
+                if (isSessionLive(mySession)) {
                     val e = lastError
                     // [fix/audit0917-b8] All-skipped is a configuration problem,
                     // not a provider failure — report it as such instead of
@@ -295,11 +311,19 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     }
 
     override fun cancel() {
-        cancelled.set(true)
+        // [r3-B11-F05] Invalidate the in-flight session FIRST: the guard release
+        // below only stops the read loop, and a token bump is what stops the
+        // stale job from transcribing and delivering into whatever session
+        // replaces it.
+        sessionToken.incrementAndGet()
         captureGuard.forceRelease()
-        // captureJob is intentionally NOT cancelled — the capture loop exits
-        // via the capture guard because AudioRecord.read() is a blocking call
-        // that doesn't respond to job cancellation. Only drop the stale handle.
+        // captureJob is deliberately not awaited: the loop exits via the capture
+        // guard because AudioRecord.read() is a blocking call that doesn't
+        // respond to job cancellation. Cancelling the job is still correct —
+        // it guarantees nothing else runs after that read returns (the finally
+        // block releasing the AudioRecord still runs), and the token check
+        // above already makes any residue inert.
+        captureJob?.cancel()
         transcribeJob?.cancel()
         transcribeJob = null
         captureJob = null
@@ -315,7 +339,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
      * [shutdown] as terminal).
      */
     override fun shutdown() {
-        cancelled.set(true)
+        sessionToken.incrementAndGet()
         captureGuard.forceRelease()
         transcribeJob?.cancel()
         captureJob?.cancel()
