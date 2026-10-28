@@ -601,6 +601,11 @@ class WebViewHolder(
     /** [r3-c / B09 F-07] Drop the first-load listeners instead of leaving them
      *  hooked to a view that is about to die. */
     private fun unbindPendingListeners(view: WebView) {
+        // Ownership gate (same family as `pendingAttachListener === this` in
+        // the attach callback): a stale teardown — the rebuild path passes
+        // the previous instance — must not clear the listeners the live view
+        // just bound.
+        if (view !== webView) return
         pendingAttachListener?.let { listener ->
             runCatching { view.removeOnAttachStateChangeListener(listener) }
         }
