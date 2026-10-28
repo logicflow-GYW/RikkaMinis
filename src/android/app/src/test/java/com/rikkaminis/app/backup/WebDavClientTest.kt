@@ -510,6 +510,99 @@ class WebDavClientTest {
         assertEquals(200, e.statusCode)
     }
 
+    // ── Non-WebDAV bodies on PUT / GET / DELETE ───────────────────────────
+    //
+    // [fix/webdav-method-judgement] World W5, the other half of the PROPFIND
+    // seam above: put()/get()/delete() judged only the status code, so a
+    // portal 200 made an upload report success with nothing stored, fed the
+    // login page to ConfigBackup.import as if it were a backup document, and
+    // reported deletions that never happened. The judge reads the FIRST bytes
+    // (a JSON payload never opens with `<`), so a real backup whose message
+    // content merely mentions html keeps working — that arm is a test below,
+    // not an assumption.
+
+    @Test
+    fun `put refuses a portal page served in place of the upload answer`() {
+        enqueuePage(200, loginPage)
+        val e = expectNonDav { dav().put("rikkaminis-backup-1.json", "{}".toByteArray()) }
+        assertEquals(200, e.statusCode)
+        assertTrue("message should name the operation: ${e.message}", e.message!!.contains("Upload"))
+        assertTrue("message should point at the likely cause: ${e.message}", e.message!!.contains("portal"))
+    }
+
+    @Test
+    fun `put refuses a portal page on the create-collection retry path too`() {
+        // First PUT → 409, ensureCollectionExists PROPFIND → 404 + MKCOL → 201,
+        // retry PUT → 200 + login page. Only the retry path is judged here:
+        // a fix applied to just one of the two success branches would leave
+        // this case green.
+        server.enqueue(MockResponse().setResponseCode(409))
+        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse().setResponseCode(201))
+        enqueuePage(200, loginPage)
+        expectNonDav { dav().put("rikkaminis-backup-1.json", "{}".toByteArray()) }
+    }
+
+    @Test
+    fun `put tolerates an empty body and a json body on success`() {
+        server.enqueue(MockResponse().setResponseCode(201)) // empty 201
+        dav().put("rikkaminis-backup-a.json", "{}".toByteArray())
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{\"stored\":true}")) // non-empty 200
+        dav().put("rikkaminis-backup-b.json", "{}".toByteArray())
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `get refuses a portal page instead of feeding it to the importer`() {
+        enqueuePage(200, loginPage)
+        val e = expectNonDav { dav().get("rikkaminis-backup-1.json") }
+        assertEquals(200, e.statusCode)
+        assertTrue("message should name the operation: ${e.message}", e.message!!.contains("Download"))
+    }
+
+    @Test
+    fun `get refuses an empty 200 body`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(""))
+        val e = expectNonDav { dav().get("rikkaminis-backup-1.json") }
+        assertTrue("message should say empty: ${e.message}", e.message!!.contains("empty body"))
+    }
+
+    @Test
+    fun `get tolerates json whose message content merely mentions html`() {
+        // A real backup carries arbitrary user text — a message can contain
+        // "<html". The judge looks at the OPENING bytes only; a substring scan
+        // here would refuse valid backups.
+        val body = """{"messages":[{"text":"see the <html> spec below"}]}"""
+        server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+        val bytes = dav().get("rikkaminis-backup-1.json")
+        assertEquals(body, String(bytes, Charsets.UTF_8))
+    }
+
+    @Test
+    fun `get tolerates a bom and leading whitespace before the json`() {
+        val body = "\uFEFF\n  {\"formatVersion\":1}"
+        server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+        val bytes = dav().get("rikkaminis-backup-1.json")
+        assertEquals(body, String(bytes, Charsets.UTF_8))
+    }
+
+    @Test
+    fun `delete refuses a portal page instead of reporting a deletion that never happened`() {
+        enqueuePage(200, loginPage)
+        val e = expectNonDav { dav().delete("rikkaminis-backup-1.json") }
+        assertEquals(200, e.statusCode)
+        assertTrue("message should name the operation: ${e.message}", e.message!!.contains("Delete"))
+    }
+
+    @Test
+    fun `delete tolerates the normal empty success bodies`() {
+        server.enqueue(MockResponse().setResponseCode(204))
+        dav().delete("rikkaminis-backup-a.json")
+        server.enqueue(MockResponse().setResponseCode(200)) // empty 200 also legal
+        dav().delete("rikkaminis-backup-b.json")
+        assertEquals(2, server.requestCount)
+    }
+
     // ── Transport security (plain-HTTP refusal) ───────────────────────────
 
     private fun clientFor(url: String): WebDavClient =
