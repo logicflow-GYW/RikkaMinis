@@ -132,9 +132,19 @@ fun LogManagementScreen(
             val d = AppLogger.listLogFileMetas(prefix = "minis-", limit = 100)
             val cJ = AppLogger.listLogFileMetas(prefix = "crash-", limit = 100)
             val cN = AppLogger.listLogFileMetas(prefix = "native-crash-", limit = 100)
-            // Merge Java + native crashes, sort newest-first by name (both
-            // share the YYYY-MM-DD_HH-mm-ss suffix that sorts cleanly), cap.
-            val merged = (cJ + cN).sortedByDescending { it.name }.take(100)
+            // [meta-audit-1028 E5 / B06 F-09] Merge Java + native crashes by the
+            // REAL timestamp (the mtime captured by listLogFileMetas), never by
+            // file name: the two families do not share a prefix (`crash-…` vs
+            // `native-crash-…`) nor a stamp format (local `_` vs UTC `T…Z`), so
+            // a name sort put every native report above every Java one and the
+            // cap then dropped the newest Java crashes first. Pure helper below
+            // (JVM-tested) so the ordering + cap are pinned without a device.
+            val merged = newestFirstCapped(
+                cJ + cN,
+                limit = 100,
+                nameOf = { it.name },
+                modifiedOf = { it.lastModified },
+            )
             // totalSize sums only the displayed rows. Older / over-cap files
             // are still on disk but excluded from the cap-100 view; the
             // footer wording matches what the user actually sees here.
