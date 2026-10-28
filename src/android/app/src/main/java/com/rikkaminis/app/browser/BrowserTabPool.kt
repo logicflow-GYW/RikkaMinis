@@ -838,7 +838,9 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
     /** Persist decoded blob: bytes (from the JS bridge) into the workspace. */
     internal fun saveBlobDownload(data: ByteArray, filename: String, mimeType: String?) {
         val dir = sessionWorkspaceDir() ?: run {
-            Log.w(TAG, "blob download rejected: no session bound to pool")
+            // [r3-B09 F-10] Same funnel as every other blob failure: an unbound
+            // pool used to drop the download with a log line only.
+            reportDownloadFailure(filename, "no session is bound to this browser pool")
             return
         }
         // [audit-RC11] The filename comes from page-controlled JS (`<a download>`
