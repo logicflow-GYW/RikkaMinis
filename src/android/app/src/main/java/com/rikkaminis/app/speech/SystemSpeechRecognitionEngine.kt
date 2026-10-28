@@ -47,12 +47,19 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
     /**
      * [T-android-asr-locale-race] Monotonic per-session token. Every [start]
      * bumps it; a callback honours it only if it still matches the live
-     * session. [cancel]/[tearDown] never bump it (a cancelled session just
-     * stops receiving callbacks) — bumped only on a fresh [start], so a
-     * late-dispatch `onResults`/`onError` from a recognizer that was cancelled
-     * right before [selectLocale] restarted the session (a new locale) is
-     * ignored instead of landing on the new session's listener.
+     * session.
+     *
+     * [r3-B11-F06] [cancel] bumps it too. It used not to: cancel() only posted
+     * the teardown to the main looper, so a callback the system had ALREADY
+     * queued (onResults/onError, both delivered on the main thread) ran before
+     * that posted teardown, still matched the live session, and delivered a
+     * late transcript — or an ERROR_CLIENT — into a session the user had just
+     * cancelled (clearing SpeechRecognitionManager's activeEngine and state).
+     * Bumping the token synchronously inside cancel() makes those in-flight
+     * callbacks inert before they can run. A fresh [start] still bumps it, so
+     * the "superseded by a newer session" rule is unchanged.
      */
+    @Volatile
     private var sessionToken: Int = 0
 
     override val isAvailable: Boolean
@@ -241,6 +248,10 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
     }
 
     override fun cancel() {
+        // [r3-B11-F06] Invalidate the session BEFORE posting the teardown: the
+        // bump has to be visible to callbacks that are already queued on the
+        // main looper, which run ahead of the posted lambda below.
+        sessionToken++
         mainHandler.post {
             try { recognizer?.cancel() }
             catch (e: Throwable) { Log.w(TAG, "cancel: ${e.message}") }
