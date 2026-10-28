@@ -43,16 +43,44 @@ object SharedShareStore {
             .edit().remove(KEY_PENDING_SHARE).apply()
     }
 
-    /** Remove all staged binary attachments. Call after consumption or on stale buffer. */
+    /**
+     * Delete staged files that nothing is waiting for, and account for the
+     * rest.
+     *
+     * [FIX-R3-E F-14] This used to walk the whole staging directory and delete
+     * EVERY file, then zero the byte counter. Two things were wrong with that:
+     *
+     *  1. **It deleted files a newer share had just staged.** The consumer's
+     *     `cleanSharedFiles` runs after the previous share is injected, while
+     *     the next share's `ShareReceiverActivity` may already have written
+     *     its files. The only record of "whose files are these" is the pending
+     *     share itself, so that is the keep set: files it references survive,
+     *     everything else is an orphan from an earlier share and goes.
+     *  2. **It zeroed the ledger unconditionally**, which under-counted the
+     *     bytes that survive — the counter is process-lifetime and the keep
+     *     set keeps occupying the budget. The ledger is now reconciled to the
+     *     summed size of what is actually left on disk (see
+     *     [StagedBytesLedger.set]), so neither direction can drift.
+     */
     fun cleanSharedFiles(context: Context) {
         val dir = sharedFileDirectory(context)
-        dir.listFiles()?.forEach { runCatching { it.delete() } }
-        // [fix/audit-s7m2] the staging byte counter in ShareReceiverActivity is
-        // process-lifetime cumulative (survives Activity recreation) but was
-        // never decremented when files were actually deleted. A long-lived
-        // process that staged+consumed many shares would trip the 500MB cap
-        // with NOTHING on disk. Since cleanSharedFiles deletes the entire
-        // staged set, the counter resets to zero here.
-        ShareReceiverActivity.resetStagedBytes()
+        val referenced = loadPendingShare(context)?.items.orEmpty()
+            .filter { it.kind == PendingShare.Item.Kind.ATTACHMENT }
+            .map { it.value }
+            .toSet()
+        var keptBytes = 0L
+        var deleted = 0
+        dir.listFiles()?.forEach { f ->
+            if (f.name in referenced) {
+                keptBytes += f.length()
+            } else if (runCatching { f.delete() }.getOrDefault(false)) {
+                deleted++
+            }
+        }
+        ShareReceiverActivity.setStagedBytes(keptBytes)
+        AppLogger.info(
+            TAG,
+            "cleaned $deleted stale staged file(s); kept ${referenced.size} referenced, ${keptBytes}B on disk",
+        )
     }
 }
