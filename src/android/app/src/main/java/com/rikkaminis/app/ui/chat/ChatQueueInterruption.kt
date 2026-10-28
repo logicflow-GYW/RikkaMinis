@@ -609,11 +609,17 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
  *  - Case 1: any in-flight tool block is flipped to [ToolBlockStatus.CANCELLED]
  *    and a synthetic tool_result with [CANCELLED_MARKER] is persisted so
  *    tool_use/tool_result stays paired.
- *  - Case 2: if there was partial assistant text streamed (and no tool
- *    cancel), commit the partial text + a truncation `<system-reminder>`
- *    to agentHistory so the model knows the prior turn was cut short.
+ *  - Case 2: if the turn still in flight streamed partial assistant text (and
+ *    no tool cancel), commit that text + a truncation `<system-reminder>` to
+ *    agentHistory so the model knows the prior turn was cut short.
+ *    [meta-audit-1028 C2] "That text" is the in-flight turn's slice only —
+ *    every text block after the bubble's last `tool_use` — because both the
+ *    bubble's `content` and its `toolBlocks` accumulate across the run's
+ *    rounds. Slice + arm selection live in `StopCleanupPlan.kt`.
  *
- * Always sets [_canResume] = true when there is something to resume from.
+ * Every bubble it KEEPS becomes resumable ([_canResume]); the only bubble it
+ * removes is the thinking-only placeholder that carries neither text nor tool
+ * activity.
  */
 internal fun ChatViewModel.handleUserCancelledCleanup() {
     val msgs = _messages.value.toMutableList()
@@ -683,17 +689,20 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
     // exists and agentHistory does not already end with the assistant
     // turn we're on, commit the partial text + truncation marker so the
     // model sees an interrupted prior turn on the next call.
-    val partialText = buildString {
-        if (last.content.isNotEmpty()) append(last.content)
-        for (b in last.toolBlocks) {
-            if (b.kind == "text" && b.content.isNotEmpty()) {
-                if (isNotEmpty()) append('\n')
-                append(b.content)
-            }
-        }
-    }
+    // [meta-audit-1028 C2] Decide from the turn that is still in flight, not
+    // from the bubble's cross-turn carriers. Both carriers are run-scoped:
+    // `last.content` is `loopState.accumulatedText + turnText` at every flush
+    // site (accumulatedText = "cross-turn accumulated visible text of the
+    // current bubble") and `last.toolBlocks` is the run's append-only block
+    // list. Collecting them re-committed every earlier round's text as a new
+    // assistant row on each multi-round Stop (duplicate transcript + duplicate
+    // model context). The slice + the arm selection are one pure decision
+    // (`StopCleanupPlan.kt`, pinned by `StopCleanupPlanTest`) so the three
+    // shapes — multi-round tool Stop / pure-tool first round Stop / single-turn
+    // text Stop — are testable without the ViewModel.
     val historyEndsWithAssistant =
         agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT
+    val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant)
 
     // Case 0 (T-ios-stop-clear-thinking-and-partial — Android port):
     // Stop fired while still in the pre-first-chunk thinking gap (no
@@ -704,14 +713,16 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
     // instant the user taps Stop. Mirrors the iOS #566/#569 boundary:
     // a candidate WITH real text or any emitted tool_use is kept (handled
     // by Case 1 / Case 2 below); a thinking-only placeholder is not.
-    val hasAnyToolUse = last.toolBlocks.any { it.kind == "tool_use" }
-    if (partialText.isEmpty() && !hasAnyToolUse && !historyEndsWithAssistant) {
+    // The predicate itself lives in `planStopCleanup` (all three cells:
+    // text / tool_use / committed-history).
+    if (stopPlan.dropPlaceholder) {
         msgs.removeAt(lastIdx)
         _messages.value = msgs
         return
     }
 
-    if (partialText.isNotEmpty() && !historyEndsWithAssistant) {
+    val partialText = stopPlan.persistText
+    if (partialText != null) {
         val parts = listOf<AgentContentPart>(
             AgentContentPart.Text(partialText),
             AgentContentPart.Text(
@@ -729,12 +740,17 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
             val partsJson = buildTextOnlyAssistantPartsJson(parts)
             chatRepository.appendMessage(activeSessionId, "assistant", partsJson)
         }
-        _canResume.value = true
-    } else if (historyEndsWithAssistant) {
-        // Already committed (tool cancel path above handled or prior turn
-        // wrote an assistant row). Still allow resume.
-        _canResume.value = true
     }
+    // [meta-audit-1028 C2 defect B] Every KEPT bubble is resumable — the old
+    // chain ended with `else if (historyEndsWithAssistant)`, so the shape
+    // "round 1 was a pure tool_use round, user stopped in round 2's thinking
+    // gap" (no text of its own, tool activity present, history ending on
+    // USER(tool_result)) matched no arm at all: `_canResume` stayed false, the
+    // Resume banner never appeared and the interrupted multi-step task could
+    // not be continued. `resume()` already treats a trailing
+    // USER(tool_result) as a valid anchor ("no reminder needed"), so nothing
+    // else is required to make that shape resumable.
+    if (stopPlan.canResume) _canResume.value = true
 }
 
 

@@ -458,6 +458,15 @@ object ExecutionCoordinator {
 
                 // Auto-boot PRoot if not already booted
                 if (!PRootKernel.isBooted) {
+                    // [meta1028 D3-F02] False here means one of two things:
+                    // cold start (no shells yet, no-op) or a rootfs rebuild
+                    // under a live process — `RootfsManager.reset()` re-arms
+                    // the gate. In the second case every entry in [shells] was
+                    // spawned against the tree that was deleted: the process is
+                    // still alive but its cwd inode is unlinked, so reusing it
+                    // hands the command a ghost directory. Drop them; the
+                    // post-boot path mints fresh ones.
+                    dropShellsFromRebuiltRootfs()
                     Log.i(TAG, "[$sessionId] Auto-booting PRootKernel")
                     PRootKernel.boot(appContext)
                 }
@@ -980,9 +989,11 @@ object ExecutionCoordinator {
         // brand-new Mutex for the same session, acquire it immediately, and
         // run in parallel with the command still inside this withLock block
         // (breaking per-session command serialization). The mutex is small;
-        // it is now removed only by stopCurrentCommand / dispose paths that
-        // never hold it, and its lifetime is bounded by session id churn,
-        // not by shell recycling.
+        // [meta1028 D3-F04] it is now removed by NO path at all —
+        // stopCurrentCommand's `mutexes.remove`/`clear` were the same defect
+        // through the other door (it is called precisely while a command holds
+        // the lock) and are gone too, so "one live Mutex per session id" holds
+        // process-wide and its lifetime is bounded by session id churn.
         // T124a: drop the snapshot too — a future shell for the same id
         // restarts from a clean baseline, so the next applyEnvironment
         // shouldn't try to `unset` keys that don't exist in the new shell.
@@ -1306,10 +1317,13 @@ object ExecutionCoordinator {
      *  - the directory itself is never deleted — it is part of the rootfs;
      *  - an entry younger than [maxAgeMs] is never touched (see
      *    [AgentRuntimeLimitsPrefs.guestTmpMaxAgeMin] for why the age gate sits on top of isBusy);
-     *  - a symlink is removed as a LINK ([java.nio.file.Files.deleteIfExists],
-     *    which never follows), because `File.deleteRecursively()` lists through
-     *    the link and would delete the TARGET's contents — an aged `tmp/x ->
-     *    /` symlink must not become "wipe the rootfs";
+     *  - the age gate reads the entry's OWN timestamp
+     *    ([internalGuestTmpEntryMtimeMs], i.e. `lstat`) — `File.lastModified()`
+     *    follows links, which aged-out fresh symlinks instantly;
+     *  - a symlink is removed as a LINK, and a directory is removed with
+     *    [internalGuestTmpDeleteTreeNoFollow], which never walks into a link:
+     *    an aged `tmp/x -> /` must not become "wipe the rootfs", and that has
+     *    to hold for links nested INSIDE an aged directory too;
      *  - an aged directory is removed whole; only if that fails do we descend,
      *    re-applying the same gate at each level (so the count reflects real
      *    deletions rather than double-counting a child of a deleted parent).
@@ -1327,15 +1341,28 @@ object ExecutionCoordinator {
         for (child in children) {
             val symlink = runCatching { java.nio.file.Files.isSymbolicLink(child.toPath()) }
                 .getOrDefault(false)
-            if (!internalGuestTmpIsAged(child.lastModified(), now, maxAgeMs)) continue
+            // [meta1028 D3-F05] `lastModified()` is `stat` — it follows the
+            // link, so a fresh dangling link read 0 ("definitely aged") and a
+            // link to an old target inherited the target's timestamp. Either
+            // way a link created seconds ago was reaped on the next 60 s tick.
+            // The ENTRY's own timestamp is what the age gate is asking about.
+            if (!internalGuestTmpIsAged(internalGuestTmpEntryMtimeMs(child.toPath()), now, maxAgeMs)) continue
             // [guest-tmp-activity-probe] Second chance before reaping: the age
             // gate read the entry's own mtime, which does not move when
             // something writes inside it. Probed only for aged candidates, so a
             // fresh entry never pays for it.
             if (guestTmpEntryStillInUse(child, symlink, now, maxAgeMs)) continue
             val ok = runCatching {
-                if (symlink) java.nio.file.Files.deleteIfExists(child.toPath())
-                else child.deleteRecursively()
+                if (symlink) {
+                    java.nio.file.Files.deleteIfExists(child.toPath())
+                } else {
+                    // [meta1028 D3-F05] NOT `deleteRecursively()`: that walks
+                    // with `File.listFiles()`/`isDirectory`, both of which
+                    // follow links, so an aged `/tmp/build` containing
+                    // `out -> /var/minis/workspace` deleted the TARGET's
+                    // contents. Links are unlinked as links, at every depth.
+                    internalGuestTmpDeleteTreeNoFollow(child.toPath())
+                }
             }.getOrDefault(false)
             if (ok) {
                 removed++
@@ -1367,6 +1394,35 @@ object ExecutionCoordinator {
     }
 
     /**
+     * [meta1028 D3-F02] Drop every shell that was spawned against a rootfs
+     * tree which has since been deleted and re-extracted
+     * ([RootfsManager.reset] → hook → `bootGate.invalidate`).
+     *
+     * Called only from [execute]'s `!isBooted` branch, i.e. under this
+     * session's mutex and before the re-boot. Shells of OTHER sessions are
+     * dropped too, deliberately: they were spawned into the same deleted tree,
+     * so any command issued through one is running against unlinked inodes —
+     * keeping it alive only converts "rebuild in progress" into a confusing
+     * per-command failure later. A reset is a process-wide event; a command
+     * caught mid-flight by it fails either way, and failing at the boundary is
+     * the honest place.
+     *
+     * Mutexes are NOT touched (same contract as [sessionDidTerminate], see the
+     * `[fix/audit-s4h4]` note there).
+     */
+    private fun dropShellsFromRebuiltRootfs() {
+        if (shells.isEmpty()) return
+        val dropped = shells.size
+        for ((id, shell) in shells) {
+            runCatching { shell.stop() }
+            lastInjectedKeys.remove(id)
+            lastActiveMs.remove(id)
+        }
+        shells.clear()
+        Log.i(TAG, "rootfs rebuilt — dropped $dropped shell(s) spawned into the pre-rebuild tree")
+    }
+
+    /**
      * Stop the shell for a specific session (e.g. user tapped cancel).
      * The shell process is killed; next command will recreate it.
      */
@@ -1376,10 +1432,30 @@ object ExecutionCoordinator {
             // T124a: snapshot belongs to the now-dead shell.
             lastInjectedKeys.remove(sessionId)
             lastActiveMs.remove(sessionId)
-            // [fix/audit-s4l2] sessionDidTerminate() also removes the session
-            // mutex; this stop path did not, so the mutex map grew forever on
-            // sessions stopped (not terminated). Keep the two paths consistent.
-            mutexes.remove(sessionId)
+            // [meta1028 D3-F04] NO `mutexes.remove(sessionId)` here. The
+            // `[fix/audit-s4l2]` line that used to sit here justified itself
+            // with "sessionDidTerminate also removes the mutex" — which had
+            // already been retracted by `[fix/audit-s4h4]` (it removed the map
+            // entry while the lock was HELD, letting a concurrent
+            // `mutexes.getOrPut` mint a second Mutex for the same session and
+            // run in parallel with the command still inside `withLock`).
+            //
+            // s4l2's premise was that this path "never holds the lock". That is
+            // exactly backwards: stopCurrentCommand's whole job is to interrupt
+            // a RUNNING command, and that command's coroutine is inside
+            // `mutex.withLock` right now. Removing the entry there reproduced
+            // the s4h4 defect through a different door — and the victim was the
+            // NEXT command: it got a fresh mutex, entered immediately, created
+            // a new PersistentShell, which the old coroutine's tail
+            // (`sessionDidTerminate` → `shells.remove(id)?.stop()`) then killed
+            // mid-command (`exitCode = -1`, `outcomeKnown = false`).
+            //
+            // The mutex map is therefore never pruned. Cost: one small Mutex
+            // per session id ever used — the same lifetime trade s4h4 already
+            // accepted, and the only one that keeps "one live Mutex object per
+            // session id" true. A refcount (or `if (!mutex.isLocked) remove`)
+            // does not help: the check and the remove are still a race against
+            // a newcomer that already holds the reference.
             shell?.stop()
             Log.i(TAG, "[$sessionId] Shell stopped by user")
         } else {
@@ -1388,8 +1464,11 @@ object ExecutionCoordinator {
             shells.clear()
             lastInjectedKeys.clear()
             lastActiveMs.clear()
-            // [fix/audit-s4l2] see above: clear the per-session mutexes too.
-            mutexes.clear()
+            // [meta1028 D3-F04] NO `mutexes.clear()`: same defect as above, and
+            // worse in blast radius — it rewrote EVERY session's mutex identity
+            // while their commands were mid-`withLock`. The map entry is the
+            // identity the serialization contract is built on; clearing it does
+            // not free anything the sweeper needs.
             // [audit-0919 F-217] No ShellExecutor.destroyCurrent() here. It was
             // a silent no-op: its only effect is `currentProcess?.let { … }`,
             // and `currentProcess` is assigned exclusively inside

@@ -460,15 +460,46 @@ private fun EnvVarFormSheet(
     // value and the same `valueText` key as before — only the dispatcher moves:
     // a produceState effect reads it on Dispatchers.IO, keyed on the entry it
     // belongs to plus the deep-link prefill.
+    // [meta-audit-1028 D4 F-03] Declared BEFORE the effect above so the effect can
+    // publish into it; it says whether the value box's content can be attributed to the
+    // user at all. Edit mode starts PENDING (the box is showing "" until the Keystore
+    // read lands); add mode is LOADED from the first frame (nothing is stored).
+    var secretLoad by remember(editEntry?.id, editEntry?.key) {
+        mutableStateOf(
+            if (editEntry == null) SecretLoadState.LOADED else SecretLoadState.PENDING,
+        )
+    }
     val currentSecretValue by produceState(
         initialValue = prefillValue,
         editEntry?.id,
         editEntry?.key,
         prefillValue,
     ) {
-        value = withContext(Dispatchers.IO) {
-            editEntry?.let { envVarRepository.getValue(it.key) } ?: prefillValue
+        val entry = editEntry
+        if (entry == null) {
+            // Add mode: no stored secret to lose, and the deep-link prefill IS the value
+            // the user is about to save.
+            value = prefillValue
+            secretLoad = SecretLoadState.LOADED
+            return@produceState
         }
+        // [meta-audit-1028 D4 F-03] The Save gate below needs more than the value: an
+        // empty box means three different things (still loading / nothing stored /
+        // unreadable), and only one of them is safe to write back. The value alone
+        // cannot say — in edit mode it starts as "" either way.
+        val read = withContext(Dispatchers.IO) {
+            runCatching { envVarRepository.getValue(entry.key) }
+        }
+        read.fold(
+            onSuccess = { stored ->
+                value = stored ?: ""
+                secretLoad = SecretLoadState.LOADED
+            },
+            // Fail closed. The old code let the exception escape, which left the box
+            // empty AND Save enabled — a note-only edit then wrote "" over a secret the
+            // user could not see. An unreadable secret now blocks Save and says why.
+            onFailure = { secretLoad = SecretLoadState.UNREADABLE },
+        )
     }
     var keyText by remember(editEntry?.id, editEntry?.key, prefillKey) {
         mutableStateOf(editEntry?.key ?: prefillKey)
@@ -487,11 +518,22 @@ private fun EnvVarFormSheet(
     val normalizedKey = keyText.trim().uppercase()
     val isValid = envVarRepository.isValidKey(normalizedKey)
     val isDuplicate = envVarRepository.isDuplicateKey(normalizedKey, excludeId = editEntry?.id)
-    val canSave = isValid && !isDuplicate && keyText.isNotBlank()
+    // [meta-audit-1028 D4 F-03] Save used to depend on the key alone, so a tap during
+    // the Keystore read wrote the not-yet-loaded value ("" in edit mode) into the
+    // encrypted store — the variable survived with an empty secret and every consumer
+    // of it started failing auth. The load state is now part of the gate.
+    val canSave = canSaveWithSecretField(
+        state = secretLoad,
+        otherFieldsValid = isValid && !isDuplicate && keyText.isNotBlank(),
+    )
 
     val errorText = when {
         keyText.isNotBlank() && !isValid -> stringResource(R.string.env_var_error_invalid_key)
         isDuplicate -> stringResource(R.string.env_var_error_duplicate)
+        else -> null
+    }
+    val valueError = when (secretLoad) {
+        SecretLoadState.UNREADABLE -> stringResource(R.string.settings_secret_unreadable)
         else -> null
     }
 
@@ -548,10 +590,25 @@ private fun EnvVarFormSheet(
             DialogTextField(
                 value = valueText,
                 onValueChange = { valueText = it },
+                // While the Keystore read is in flight the box is not showing what is on
+                // disk; say so instead of showing a blank that reads as "no value".
+                placeholder = if (secretLoad == SecretLoadState.PENDING) {
+                    stringResource(R.string.common_loading)
+                } else {
+                    null
+                },
                 singleLine = false,
                 maxLines = 3,
                 textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
             )
+            if (valueError != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = valueError,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
 
             // iOS parity: optional human-readable note explaining what the
             // variable is for. Stored alongside the metadata, surfaced in the
@@ -593,6 +650,10 @@ private fun EnvVarFormSheet(
                 }
                 MinisTextButton(
                     onClick = {
+                        // [meta-audit-1028 D4 F-03] Belt and braces behind the disabled
+                        // button: `update()` writes the value unconditionally, so a save
+                        // whose box does not show what is on disk would erase it.
+                        if (secretLoad != SecretLoadState.LOADED) return@MinisTextButton
                         // [deep-audit-1041 B-03] The write touches Keystore and
                         // rewrites env-vars.json. Capture the Compose-owned values on
                         // Main, run the repository call on IO, and dismiss only on

@@ -111,9 +111,32 @@ class ChatRepository(
      * then the SAME interrupted-tail predicate as ChatViewModel.loadSession's
      * detection (kept in sync intentionally). Mirrors iOS
      * ChatStore.interruptedSessionIds.
+     *
+     * Returns `null` when the tail query itself failed — the caller must then
+     * leave the persisted PAUSED badges alone rather than treat the failure as
+     * "nothing is interrupted" (see [badgeReconcileInput]).
      */
-    suspend fun interruptedSessionIds(): Set<String> {
-        val tails = runCatching { dao.lastMessageTailPerSession() }.getOrElse { emptyList() }
+    suspend fun interruptedSessionIds(): Set<String>? {
+        // [fix/meta1028-d1 F-03] A FAILED read is not an empty answer. The
+        // consumer (SessionBadgeStore.reconcileInterruptedSessions) is a
+        // set-difference: everything it is not told about gets its PAUSED badge
+        // dropped AND the pruned map persisted, so collapsing this failure into
+        // an empty set silently cleared every badge in the app (cold start +
+        // every foreground transition, forever, until each session is reopened).
+        // The query materialises one `parts_json` per session for the whole
+        // history in a single cursor, so a single oversized / corrupt row can
+        // abort it — see [badgeReconcileInput] and the two MinisApp call sites,
+        // which now SKIP the reconcile on null instead of reconciling to empty.
+        val tails = try {
+            dao.lastMessageTailPerSession()
+        } catch (e: Exception) {
+            android.util.Log.w(
+                "ChatRepository",
+                "interruptedSessionIds: tail query failed — reporting UNKNOWN " +
+                    "(PAUSED badges left untouched): ${e.message}",
+            )
+            return null
+        }
         val result = HashSet<String>()
         for (row in tails) {
             if (isInterruptedTail(row.role, row.partsJson)) result.add(row.sessionId)
@@ -464,8 +487,8 @@ class ChatRepository(
         sessionId: String,
         offset: Int,
         limit: Int,
-        startMs: Long?,
-        endMs: Long?,
+        startMs: Long? = null,
+        endMs: Long? = null,
     ): List<MessageEntity> = if (startMs == null && endMs == null) {
         dao.loadMessagesPage(sessionId, offset, limit)
     } else {
@@ -514,6 +537,92 @@ class ChatRepository(
             createdAt = 0L,
             sortOrder = sortOrder,
         )
+    }
+
+    /**
+     * [fix/meta1028-d1 F-04] Result of [loadMessagesTailTolerant]: the rows that
+     * COULD be materialised, plus how many could not.
+     *
+     * The count is the whole point. The backup packer receives an empty list for
+     * a session it cannot read, which is indistinguishable from "this session has
+     * no messages" — the exported document then carries the session header with
+     * zero messages and NO truncation note, i.e. a backup that reports success
+     * while dropping a conversation. Returning the miss count lets the export
+     * account for it (readFailures / chatTruncated) instead.
+     */
+    data class MessageTailLoad(
+        val messages: List<MessageEntity>,
+        /** Rows that exist in the DB but could not be read (never silently 0-by-0). */
+        val unreadableRows: Int,
+    )
+
+    /**
+     * [fix/meta1028-d1 F-04] Tail read for the backup path, with the same
+     * CursorWindow degradation policy as [loadPageTolerant] (which only serves
+     * the per-session transcript reads).
+     *
+     * `dao.messagesLast` materialises up to 200 full rows — `parts_json` +
+     * `reasoning_content` per row, each capped at 500 KB but never SUM-capped —
+     * into one cursor. A single row past the window ceiling aborts the whole
+     * read with [SQLiteBlobTooBigException]; ConfigBackup used to
+     * `getOrDefault(emptyList())` that, so the session silently lost its entire
+     * history in the backup. Here the failure degrades to one-row reads: the
+     * healthy rows still ship, and the ones that genuinely cannot be read are
+     * counted back to the caller instead of vanishing.
+     *
+     * Order matches `messagesLast` (newest first) on both paths — the packer
+     * packs newest-first so the most recent context survives the budget.
+     */
+    suspend fun loadMessagesTailTolerant(sessionId: String, limit: Int): MessageTailLoad {
+        try {
+            return MessageTailLoad(dao.messagesLast(sessionId, limit).asReversed(), unreadableRows = 0)
+        } catch (e: Exception) {
+            if (!isCursorWindowFailure(e)) throw e
+            android.util.Log.w(
+                "ChatRepository",
+                "loadMessagesTailTolerant: batch read hit the CursorWindow ceiling " +
+                    "(session=$sessionId, limit=$limit) — degrading to one-row reads: ${e.message}",
+            )
+        }
+        val total = dao.messageCountForSession(sessionId)
+        if (total == 0) return MessageTailLoad(emptyList(), unreadableRows = 0)
+        val start = maxOf(0, total - limit)
+        val out = ArrayList<MessageEntity>(minOf(limit, total))
+        var unreadable = 0
+        // Newest first, matching messagesLast's contract on the fast path.
+        //
+        // The single-row reads go through [loadPageSlice] rather than calling
+        // `dao.loadMessagesPage` directly: parts_json_funnel_check [R1] pins that
+        // shape to ONE call site (loadPageSlice), and a second raw call would be
+        // a third way to reach the DAO with no byte cap on the way in.
+        for (offset in (total - 1) downTo start) {
+            try {
+                out.addAll(loadPageSlice(sessionId, offset, 1))
+            } catch (e: Exception) {
+                if (!isCursorWindowFailure(e)) throw e
+                unreadable += 1
+            }
+        }
+        if (unreadable > 0) {
+            android.util.Log.w(
+                "ChatRepository",
+                "loadMessagesTailTolerant: $unreadable message row(s) unreadable in " +
+                    "session=$sessionId — they will be reported as dropped, not silently skipped",
+            )
+        }
+        return MessageTailLoad(out, unreadable)
+    }
+
+    /**
+     * [fix/meta1028-d1 F-04] The two exception shapes Android uses for "this row
+     * does not fit in a CursorWindow" (see [loadPageTolerant], which inlines the
+     * same test). Kept separate so the read paths added here do not copy it a
+     * third time.
+     */
+    private fun isCursorWindowFailure(e: Throwable): Boolean = when (e) {
+        is SQLiteBlobTooBigException -> true
+        is IllegalStateException -> e.message?.contains("CursorWindow", ignoreCase = true) == true
+        else -> false
     }
 
     // [F-234] `fromSortOrder` = delete boundary (inclusive), NOT a row count.
@@ -891,9 +1000,20 @@ class ChatRepository(
             }
         }
         val where = if (conditions.isEmpty()) "" else "WHERE " + conditions.joinToString(" AND ")
+        // [fix/meta1028-d1 F-04] The preview column is BOUNDED. `preview` is
+        // `.take(60)` of the first user message's TEXT, but the subquery used to
+        // hand the whole `parts_json` (legally up to MAX_MESSAGE_PARTS_JSON_BYTES
+        // = 500 KB per row) to the cursor for every session in `limit` — the
+        // aggregate is unbounded, and an oversized row aborts the query
+        // (CursorWindow), which the CLI surfaces as an INTERNAL error instead of
+        // a listing. 8 KB of the array covers a text-first message several times
+        // over; when the text part sits behind a large binary part the preview
+        // degrades to absent (it is an optional field) instead of failing the
+        // whole call. SUBSTR counts CHARACTERS in SQLite, so a CJK-heavy row
+        // still reads at most ~24 KB.
         val sql = """
             SELECT s.id, s.title,
-                   (SELECT m2.parts_json FROM messages m2
+                   (SELECT SUBSTR(m2.parts_json, 1, $PREVIEW_JSON_CHARS) FROM messages m2
                     WHERE m2.session_id = s.id AND m2.role = 'user'
                     ORDER BY m2.sort_order ASC LIMIT 1) AS first_user_msg,
                    s.source, s.created_at, s.updated_at,
@@ -970,9 +1090,53 @@ class ChatRepository(
         """.trimIndent()
         args += (limit * 3)
 
-        val rows = dao.runMessageSearchQuery(
-            androidx.sqlite.db.SimpleSQLiteQuery(sql, args.toTypedArray()),
-        )
+        // [fix/meta1028-d1 F-04] `limit * 3` full rows in one cursor: the same
+        // CursorWindow exposure as the listing above, except here the payload is
+        // load-bearing (the snippet is extracted from it), so it cannot simply be
+        // truncated. On a window failure fall back to a two-phase read: the same
+        // WHERE/ORDER/LIMIT with an empty `parts_json` projection, then one row at
+        // a time by id. A row that still cannot be materialised costs that single
+        // match, not the whole command (and every other row is still searchable).
+        val rows = try {
+            dao.runMessageSearchQuery(
+                androidx.sqlite.db.SimpleSQLiteQuery(sql, args.toTypedArray()),
+            )
+        } catch (e: Exception) {
+            if (!isCursorWindowFailure(e)) throw e
+            android.util.Log.w(
+                "ChatRepository",
+                "searchMessages: batch read hit the CursorWindow ceiling — reading matches " +
+                    "one row at a time: ${e.message}",
+            )
+            val refsSql = """
+                SELECT m.session_id, m.id, m.role, m.created_at, '' AS parts_json
+                FROM messages m
+                WHERE $where
+                ORDER BY m.created_at DESC
+                LIMIT ?
+            """.trimIndent()
+            val refs = dao.runMessageSearchQuery(
+                androidx.sqlite.db.SimpleSQLiteQuery(refsSql, args.toTypedArray()),
+            )
+            refs.mapNotNull { ref ->
+                val parts = try {
+                    dao.getMessage(ref.id)?.partsJson
+                } catch (rowError: Exception) {
+                    if (!isCursorWindowFailure(rowError)) throw rowError
+                    null
+                }
+                if (parts == null) {
+                    android.util.Log.w(
+                        "ChatRepository",
+                        "searchMessages: message ${ref.id} could not be materialised — " +
+                            "that single match is dropped, the rest of the search still runs",
+                    )
+                    null
+                } else {
+                    ref.copy(partsJson = parts)
+                }
+            }
+        }
         val out = mutableListOf<MessageSearchMatch>()
         for (r in rows) {
             val text = extractTextForOffload(r.partsJson, r.role)
@@ -1193,6 +1357,14 @@ class ChatRepository(
         // keeps a normal-shaped CursorWindow well under 2 MB while
         // still amortising query overhead for long sessions.
         private const val LOAD_PAGE_SIZE = 200
+
+        /**
+         * [fix/meta1028-d1 F-04] How much of `parts_json` `querySessionsMeta`
+         * may pull per session for its 60-char preview — see the SQL comment.
+         * SQLite's SUBSTR counts characters, so the worst case (3-byte CJK) is
+         * ~24 KB per row.
+         */
+        private const val PREVIEW_JSON_CHARS = 8192
 
         // Issue #17 — hard cap on a single message's parts_json. 500_000
         // BYTES (not chars — [F-226]): a payload truncated to this many

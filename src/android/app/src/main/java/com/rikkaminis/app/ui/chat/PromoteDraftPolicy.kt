@@ -57,3 +57,40 @@ internal fun composerTextForPromotion(pendingBurst: String?, committed: String):
  */
 internal fun promoteTitle(text: String, maxChars: Int = 50): String =
     text.take(maxChars).trim()
+
+/**
+ * [meta-audit-1028 C1 / F-01] Is there anything worth promoting?
+ *
+ * `send()` accepts an attachments-only turn in so many words ("T180: allow
+ * attachments-only sends (no caption). Mirrors iOS, where an empty text +
+ * non-empty attachments still produces a valid user message") and
+ * [shouldSkipCleanup] carries a `hasAttachments` bit for the same reason: a
+ * staged upload IS user input. The promotion's early return used to test the
+ * text alone — and both New-Chat entrances call it and then navigate
+ * regardless of the answer, so a draft holding nothing but images/files was
+ * dropped: no session row, and the staged list lives only in memory (the draft
+ * slot stores text), so it evaporated with the abandoned ViewModel.
+ */
+internal fun hasPromotableInput(text: String, stagedAttachments: Int): Boolean =
+    text.isNotBlank() || stagedAttachments > 0
+
+/**
+ * [meta-audit-1028 C1 / F-01] Row label for a promoted draft.
+ *
+ * Text first — the same 50-char prefix [promoteTitle] writes. An
+ * attachments-only draft has no body, so the first attachment's file name is the
+ * only thing that says what the row is; without it the new row would read as an
+ * empty "New Chat" the user cannot connect to the images they just attached.
+ *
+ * May return an empty string when neither source has content; the caller applies
+ * its own "New Chat" fallback (`updateTitleAndCategory` uses the same literal).
+ */
+internal fun promoteTitleForDraft(
+    text: String,
+    firstAttachmentName: String?,
+    maxChars: Int = 50,
+): String {
+    val fromText = promoteTitle(text, maxChars)
+    if (fromText.isNotEmpty()) return fromText
+    return (firstAttachmentName ?: "").trim().take(maxChars).trim()
+}

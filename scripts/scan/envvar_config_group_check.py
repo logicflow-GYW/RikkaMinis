@@ -54,6 +54,31 @@ Criteria 8–11 only run when the caller supplies a ConfigBackup.kt path; the
 legacy mini-tree fixtures (which hold only the three config files) leave the
 parameter out and are judged by 1–7 exactly as before.
 
+[meta-audit-1028 W2] Criteria 14–16 close the **credential face**, which no gate
+scanned at all before: an external audit re-introduced three real defects in
+`EnvVarRedactor.kt` / `EnvVarRepository.kt` and a full 113-gate run stayed green.
+
+  14. `EnvVarRedactor.redactIfEnabled`'s `repo.metadataUnreadable` branch must be
+      LIVE and must answer a shape-masking redactor (transitively — an extracted
+      helper is fine). Witness: `false && repo.metadataUnreadable` keeps every
+      token and removes the decision, so a corrupt `env-vars.json` sends
+      credentials to the model in cleartext while Settings reads "Privacy ON".
+  15. `redactDegradedWithReminder` must run BOTH passes — value first, shape on
+      that result — with the shape pass neither gated on the value pass's hit
+      count nor fed the original output. Witness: `if (valueHits > 0) … else
+      redactUnindexed(byValue)` — one recovered value short-circuits masking for
+      every other credential in the same output.
+  16. `EnvVarRepository.recoverKeysFromValues` must keep the keys the index LOST
+      (set difference), not the keys already known (intersection). Witness: `it
+      !in known` → `it in known` recovers 0 variables, so a corrupt index empties
+      the settings list while the values sit unreachable in encrypted prefs.
+
+14–16 only run when the caller supplies the two credential-face sources; real-tree
+mode (via `locate`) always does, and fails closed if either file is gone.
+`skill_import_offmain_check.py` was reviewed and deliberately left untouched: its
+arm9 subject is the thread context of `EnvVarRepository` calls in the settings
+screen, which shares no decision point with any of the three witnesses.
+
 Usage:
     python3 envvar_config_group_check.py <repo_root>   # real-tree mode
     python3 envvar_config_group_check.py --selftest    # fixture mode
@@ -626,8 +651,309 @@ def check_group_member_resolution(builtins_src: str) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------
+# [meta-audit-1028 W2] C14–C16 — the credential face (witnesses W-B00-05/06/07)
+#
+# All three witnesses keep every token their neighbours match and remove only
+# the DECISION, which is why a full 113-gate run stayed green on a tree with the
+# defect re-introduced:
+#   C14  `EnvVarRedactor.redactIfEnabled` — the unreadable-index branch is made
+#        DEAD (`false && repo.metadataUnreadable`) or made to answer the raw
+#        output. Same call text, no degraded masking.
+#   C15  `EnvVarRedactor.redactDegradedWithReminder` — the shape pass is gated on
+#        the value pass's hit count (`if (valueHits > 0) … else redactUnindexed`):
+#        both passes still spelled, only one ever runs.
+#   C16  `EnvVarRepository.recoverKeysFromValues` — the recovered-key predicate
+#        flips polarity (`it in known`): the set difference that rebuilds the
+#        index from the value store becomes the intersection that recovers zero.
+#
+# Each criterion binds the DECISION POINT, never a spelling: an equivalent
+# refactor (helper extraction, `.filterNot`, a set difference, a renamed
+# variable derived from its initializer) stays green — the selftest arms
+# FIX-38 / FIX-44 / FIX-45 pin exactly that, so "fix it your way" is not punished.
+# --------------------------------------------------------------------------
+
+REDACTOR_REL = "EnvVarRedactor.kt"
+REPO_REL = "EnvVarRepository.kt"
+
+FUN_NAME_RE = re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
+CALL_HEAD_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+
+# The one function whose body IS shape masking (name- and token-based masking on
+# an output with no value list). Everything else is judged by whether it can
+# reach this, so extracting a helper (`maskShapes`) or folding the degraded path
+# into one function stays green.
+SHAPE_MASK_FN = "redactUnindexed"
+
+
+def fun_bodies(text: str) -> dict:
+    """{name: body} —— 文件内每个函数体（同名取首个）。"""
+    out: dict = {}
+    for m in FUN_NAME_RE.finditer(text):
+        name = m.group(1)
+        if name in out:
+            continue
+        span = function_body(text, name)
+        if span is not None:
+            out[name] = text[span[0]:span[1]]
+    return out
+
+
+def reaches_shape_mask(fragment: str, bodies: dict, seen=frozenset()) -> bool:
+    """[fragment] 里是否存在一条调用链能到达形态脱敏（含跨函数一跳以上）。
+
+    [meta-audit-1028 W2] 这一条把"降级脱敏"定义成**效果**而不是名字：
+    `redactDegradedWithReminder` / 新提取的 `maskShapes` / 直接内联都可以，
+    只要最终真的调用到 [SHAPE_MASK_FN]；而只做精确值匹配的
+    `redactWithReminder` 到不了它，所以"降级分支改成值匹配"这条会被判红。
+    """
+    for m in CALL_HEAD_RE.finditer(fragment):
+        name = m.group(1)
+        if name == SHAPE_MASK_FN:
+            return True
+        if name in seen:
+            continue
+        sub = bodies.get(name)
+        if sub is not None and reaches_shape_mask(sub, bodies, seen | {name}):
+            return True
+    return False
+
+
+def check_degraded_branch(redactor_src: str) -> str | None:
+    """Criterion 14 [W-B00-05]: `redactIfEnabled` 的"索引读不出"分支必须**活着**，
+    并且把输出交给仍然按形态脱敏的处理（不是原样 / 不是只做值匹配）。
+
+    决定点 = 该 if 的条件是否可为真 + 分支返回的表达式是否经过形态脱敏。
+    见证形态 `if (false && repo.metadataUnreadable)` 保留了全部 token，只把
+    决定去掉：env-vars.json 损坏时退回值匹配（或直接原样返回），而设置页仍
+    显示"隐私模式：开"。
+    """
+    text = literal_view(redactor_src)
+    body = fn_body(text, "redactIfEnabled")
+    if body is None:
+        return ("C14 EXTRACT_FAIL: EnvVarRedactor.redactIfEnabled body not found "
+                "(fail-closed)")
+    bodies = fun_bodies(text)
+    blocks = [b for b in if_blocks(body) if "metadataUnreadable" in b[0]]
+    if not blocks:
+        return (
+            "C14 RED: redactIfEnabled no longer branches on repo.metadataUnreadable — an "
+            "unreadable env-vars.json yields no values, so Privacy Mode reads ON in "
+            "Settings while every credential in shell output reaches the model in cleartext"
+        )
+    dead: list = []
+    problems: list = []
+    live = 0
+    for cond, ts, te, _es, _ee in blocks:
+        if not path_feasible(body, ts):
+            dead.append(cond.strip()[:70])
+            continue
+        live += 1
+        then = body[ts:te]
+        rets = [(p, e) for p, e in _return_sites(then) if path_feasible(then, p)]
+        raw = [e for _p, e in rets
+               if re.match(r"^output\b", e) and not reaches_shape_mask(e, bodies)]
+        if raw:
+            problems.append(
+                "the metadataUnreadable branch answers the RAW output (`return %s`) — with a "
+                "corrupt env-var index every credential flows to the model unmasked" % raw[0][:50])
+        elif not any(reaches_shape_mask(e, bodies) for _p, e in rets):
+            problems.append(
+                "the metadataUnreadable branch never returns a shape-masked result — the "
+                "degraded redactor is called and discarded, or a value-only redactor is used")
+    if not live:
+        return (
+            "C14 RED: the metadataUnreadable branch is dead (`%s`) — every token is spelled, "
+            "the fail-closed decision removed: with a corrupt env-var index the plain "
+            "value-matching path runs while Settings still shows Privacy Mode ON"
+            % (dead[0] if dead else "")
+        )
+    if problems:
+        return "C14 RED: " + problems[0]
+    return None
+
+
+def _val_names_before(text: str, pos: int) -> list:
+    """[pos] 之前紧邻的 `val x =` / `val (a, b) =` 左侧名（派生，不看拼写）。"""
+    pre = text[:pos].rstrip()
+    m = re.search(r"\bval\s*\(([^)]*)\)\s*=\s*$", pre)
+    if m:
+        return [n.strip() for n in m.group(1).split(",") if n.strip()]
+    m = re.search(r"\bval\s+([A-Za-z_]\w*)\s*=\s*$", pre)
+    return [m.group(1)] if m else []
+
+
+def check_both_passes(redactor_src: str) -> str | None:
+    """Criterion 15 [W-B00-06]: 降级路径的两遍必须**都跑**——先已知值遍、再形态遍，
+    且形态遍吃的是值遍的输出，值遍的输出不能因为自己命中就短路形态遍。
+
+    决定点 = 形态遍调用处覆盖着哪些条件（是否引用了值遍自己的结果/命中数）+
+    实参是否派生自值遍结果 + 形态遍结果是否流到 return。
+    """
+    text = literal_view(redactor_src)
+    body = fn_body(text, "redactDegradedWithReminder")
+    if body is None:
+        return ("C15 EXTRACT_FAIL: EnvVarRedactor.redactDegradedWithReminder body not "
+                "found (fail-closed)")
+    shape = [m.start() for m in re.finditer(r"\bredactUnindexed\s*\(", body)]
+    if not shape:
+        return (
+            "C15 RED: the degraded path no longer applies shape matching — with an "
+            "unreadable index the only defence left is the exact-value list, so every "
+            "credential the index never held (`API_KEY=…`, `sk-…`, `ghp_…`, "
+            "`Authorization: Bearer …`) reaches the model in cleartext"
+        )
+    value = [m.start() for m in re.finditer(r"\bredact\s*\(", body)]
+    if not value or not any(v < shape[0] for v in value):
+        return (
+            "C15 RED: the shape pass is not preceded by the value pass — the two passes "
+            "must compose value-first, then shape on that result"
+        )
+    value_names = _val_names_before(body, value[0])
+    if not value_names:
+        return ("C15 EXTRACT_FAIL: cannot derive the value pass's result names "
+                "(fail-closed)")
+    pos = shape[0]
+    if not path_feasible(body, pos):
+        return (
+            "C15 RED: the shape pass sits behind a condition that can never hold — the "
+            "token is spelled, the pass never runs"
+        )
+    for kind, cond in enclosing_conditions(body, pos):
+        if any(contains_ident(cond, n) for n in value_names):
+            return (
+                "C15 RED: the shape pass is gated on the value pass's own result (`%s`, "
+                "in the enclosing %s) — one recovered value short-circuits shape masking "
+                "for every other credential in the same output" % (cond.strip()[:70], kind)
+            )
+    open_idx = body.find("(", pos)
+    args = call_args(body, open_idx) if open_idx >= 0 else []
+    if not args:
+        return ("C15 EXTRACT_FAIL: redactUnindexed(…) argument list unreadable "
+                "(fail-closed)")
+    if not any(contains_ident(body[s:e], n) for s, e in args for n in value_names):
+        return (
+            "C15 RED: the shape pass is fed the ORIGINAL output instead of the value "
+            "pass's result — the value-masked text is returned without shape masking"
+        )
+    shape_names = _val_names_before(body, pos)
+    rets = [(p, e) for p, e in _return_sites(body) if path_feasible(body, p)]
+    if shape_names:
+        if not any(any(contains_ident(e, n) for n in shape_names) for _p, e in rets):
+            return (
+                "C15 RED: the shape pass result never reaches a return — the masked text "
+                "is computed and thrown away"
+            )
+    elif not body[:pos].rstrip().endswith("return"):
+        return ("C15 EXTRACT_FAIL: cannot tell what the shape pass result feeds "
+                "(fail-closed)")
+    return None
+
+
+def check_recover_polarity(repo_src: str) -> str | None:
+    """Criterion 16 [W-B00-07]: `recoverKeysFromValues` 的谓词方向必须是**差集**
+    （保留"索引里没有的键"），不是交集。
+
+    决定点 = 谓词的极性。锚点从 `_entries.value…key` 这个**初始化表达式**派生
+    集合变量名，不锚 `known` 这个拼写；等价写法（`filterNot { it in known }`、
+    `.keys - known`）判绿。
+    见证形态把 `it !in known` 翻成 `it in known`：整个索引损坏时 known 为空集，
+    恢复集合恒为空 ⇒ 密钥明明还在 EncryptedSharedPreferences 里，环境变量列表
+    却清空、沙箱脚本全部读不到变量。
+    """
+    text = literal_view(repo_src)
+    body = fn_body(text, "recoverKeysFromValues")
+    if body is None:
+        return ("C16 EXTRACT_FAIL: EnvVarRepository.recoverKeysFromValues body not found "
+                "(fail-closed)")
+    m = re.search(r"\bval\s+([A-Za-z_]\w*)\s*=\s*_entries\.value[^\n]*?\.key\b", body)
+    if not m:
+        return ("C16 EXTRACT_FAIL: cannot derive the known-keys set from "
+                "`_entries.value…key` (fail-closed: the polarity is undecidable without "
+                "knowing what the excluded set holds)")
+    known = m.group(1)
+    k = re.escape(known)
+    src = re.search(r"\bencryptedPrefs\.all\.keys\b", body)
+    if src is None:
+        return ("C16 EXTRACT_FAIL: the encrypted value store is no longer the recovery "
+                "source (fail-closed)")
+    region = body[src.end():]
+    exclusion = False
+    inclusive: list = []
+    for mm in re.finditer(r"\.(filterNot|filter|filterKeys|partition|takeIf)\s*[({]", region):
+        open_idx = mm.end() - 1
+        args = call_args(region, open_idx)
+        if not args:
+            continue
+        lam = " ".join(region[s:e] for s, e in args)
+        if not contains_ident(lam, known):
+            continue
+        neg = (re.search(r"!\s*in\s+" + k, lam)
+               or re.search(r"!\s*" + k + r"\s*\.\s*contains\s*\(", lam)
+               or re.search(k + r"\s*\.\s*contains\s*\([^()]*\)\s*\.\s*not\s*\(", lam))
+        pos_in = (re.search(r"\bin\s+" + k, lam)
+                  or re.search(k + r"\s*\.\s*contains\s*\(", lam))
+        if mm.group(1) == "filterNot" and pos_in and not neg:
+            exclusion = True          # filterNot { it in known } —— 同一件事的另一拼写
+        elif neg:
+            exclusion = True
+        elif pos_in:
+            inclusive.append(lam.strip()[:80])
+        else:
+            continue
+        if exclusion and any(const_bool(lam[a:b]) is True
+                             for a, b in split_top(lam, ("||",))):
+            return (
+                "C16 RED: the recovered-key predicate is short-circuited to a constant "
+                "(`%s`) — the exclusion decides nothing" % lam.strip()[:80]
+            )
+    if exclusion:
+        return None
+    if inclusive:
+        return (
+            "C16 RED: the recovered-key predicate keeps the keys that are ALREADY known "
+            "(`%s`) instead of the keys the index lost — the set difference became an "
+            "intersection, so a corrupt env-vars.json recovers 0 variables and the values "
+            "sit unreachable in the encrypted store" % inclusive[0]
+        )
+    if (re.search(r"\.\s*keys\s*-\s*" + k, body)
+            or re.search(r"\b" + k + r"\s*-\s*", body)
+            or re.search(r"\.\s*keys\b[^\n]*\bminus\b", body)):
+        return None                   # 差集写法：同一件事的第三种拼写
+    return (
+        "C16 RED: the recovered-key set no longer relates to the known-keys set at all "
+        "(`%s` is computed but never used to select keys) — recovery cannot rebuild a "
+        "damaged index" % known
+    )
+
+
+def check_credentials(redactor_path: str, repo_path: str) -> list[str]:
+    """C14–C16 over the two credential-face sources (real-tree arms)."""
+    failures: list = []
+    with open(redactor_path, encoding="utf-8") as f:
+        rd = f.read()
+    with open(repo_path, encoding="utf-8") as f:
+        rp = f.read()
+    for name, fn in (("C14", check_degraded_branch), ("C15", check_both_passes)):
+        try:
+            r = fn(rd)
+        except KotlinLexError as exc:
+            r = "%s LEX_FAIL: %s (fail-closed: the source cannot be lexed)" % (name, exc)
+        if r is not None:
+            failures.append(r)
+    try:
+        r = check_recover_polarity(rp)
+    except KotlinLexError as exc:
+        r = "C16 LEX_FAIL: %s (fail-closed: the source cannot be lexed)" % exc
+    if r is not None:
+        failures.append(r)
+    return failures
+
+
 def check(envvars_path: str, builtins_path: str, groups_path: str,
-          backup_path: str | None = None) -> list[str]:
+          backup_path: str | None = None,
+          redactor_path: str | None = None,
+          repo_path: str | None = None) -> list[str]:
     with open(envvars_path, encoding="utf-8") as f:
         ev = f.read()
     with open(builtins_path, encoding="utf-8") as f:
@@ -672,12 +998,19 @@ def check(envvars_path: str, builtins_path: str, groups_path: str,
                 r = "%s LEX_FAIL: %s (fail-closed: the source cannot be lexed)" % (name, exc)
             if r is not None:
                 failures.append(r)
+
+    # Criteria 14-16 (meta-audit-1028 W2 / W-B00-05..07). Same gate on the
+    # caller: the pre-1028 fixtures hold only the config/backup sources and keep
+    # their one-criterion-per-fixture shape, so the credential face is judged
+    # only when those two files are handed over.
+    if redactor_path is not None and repo_path is not None:
+        failures.extend(check_credentials(redactor_path, repo_path))
     return failures
 
 
-def locate(root: str) -> tuple[str, str, str, str]:
-    """Locate the four production files under repo_root. Fail-closed."""
-    ev = cb = gr = bk = None
+def locate(root: str) -> tuple[str, str, str, str, str, str]:
+    """Locate the six production files under repo_root. Fail-closed."""
+    ev = cb = gr = bk = rd = rp = None
     for dirpath, _dirnames, filenames in os.walk(root):
         if "build" in dirpath.split(os.sep) or "test" in dirpath.split(os.sep):
             continue
@@ -690,6 +1023,10 @@ def locate(root: str) -> tuple[str, str, str, str]:
                 gr = os.path.join(dirpath, fn)
             elif fn == BACKUP_REL and bk is None and "backup" in dirpath.split(os.sep):
                 bk = os.path.join(dirpath, fn)
+            elif fn == REDACTOR_REL and rd is None:
+                rd = os.path.join(dirpath, fn)
+            elif fn == REPO_REL and rp is None:
+                rp = os.path.join(dirpath, fn)
     if ev is None:
         raise SystemExit("LOCATE_FAIL: EnvVarsCollection.kt not found under " + root)
     if cb is None:
@@ -698,7 +1035,14 @@ def locate(root: str) -> tuple[str, str, str, str]:
         raise SystemExit("LOCATE_FAIL: GroupsCollection.kt not found under " + root)
     if bk is None:
         raise SystemExit("LOCATE_FAIL: ConfigBackup.kt not found under " + root)
-    return ev, cb, gr, bk
+    # [meta-audit-1028 W2] The credential face (C14-C16) is fail-closed too: a
+    # renamed/deleted redactor would otherwise silently drop the only criteria
+    # that watch the degraded path.
+    if rd is None:
+        raise SystemExit("LOCATE_FAIL: EnvVarRedactor.kt not found under " + root)
+    if rp is None:
+        raise SystemExit("LOCATE_FAIL: EnvVarRepository.kt not found under " + root)
+    return ev, cb, gr, bk, rd, rp
 
 
 # --------------------------------------------------------------------------
@@ -923,6 +1267,113 @@ PRIVACY_FN_OK = '''    private fun registerEnvVars(r: ConfigRegistry, context: C
         )
     }
 '''
+
+
+# ── [meta-audit-1028 W2] credential-face fixtures (C14–C16) ────────────────
+
+FIXTURE_REDACTOR_OK = '''package fake
+
+object EnvVarRedactor {
+    const val MIN_MATCH_LEN = 5
+
+    @Volatile
+    var envVarRepository: EnvVarRepository? = null
+
+    fun mask(value: String): String {
+        val n = value.length
+        if (n < 8) return "*".repeat(n)
+        return value.substring(0, 2) + "*".repeat(n - 4) + value.substring(n - 2, n)
+    }
+
+    fun redactIfEnabled(output: String): Pair<String, Int> {
+        if (!EnvVarPrivacyStore.isEnabled) return output to 0
+        val repo = envVarRepository ?: return output to 0
+        if (repo.metadataUnreadable) {
+            val values = repo.allAsDict().values.filter { it.isNotEmpty() }
+            return redactDegradedWithReminder(output, values)
+        }
+        val values = repo.allAsDict().values.filter { it.isNotEmpty() }
+        if (values.isEmpty()) return output to 0
+        return redactWithReminder(output, values)
+    }
+
+    fun redact(output: String, values: Collection<String>): Pair<String, Int> {
+        val candidates = values.filter { it.length >= MIN_MATCH_LEN }.toSet()
+        if (candidates.isEmpty()) return output to 0
+        var current = output
+        var hits = 0
+        for (v in candidates) {
+            if (current.contains(v)) {
+                current = current.replace(v, mask(v))
+                hits++
+            }
+        }
+        return current to hits
+    }
+
+    internal fun redactWithReminder(output: String, values: List<String>): Pair<String, Int> {
+        val (masked, hits) = redact(output, values)
+        if (hits == 0) return masked to 0
+        return (masked + "\\n\\n" + SYSTEM_REMINDER) to hits
+    }
+
+    internal fun redactDegradedWithReminder(output: String, values: List<String>): Pair<String, Int> {
+        val (byValue, valueHits) = redact(output, values)
+        val (byShape, shapeHits) = redactUnindexed(byValue)
+        val hits = valueHits + shapeHits
+        if (hits == 0) return byShape to 0
+        return (byShape + "\\n\\n" + UNINDEXED_SYSTEM_REMINDER) to hits
+    }
+
+    fun redactUnindexed(output: String): Pair<String, Int> {
+        val (byName, nameHits) = applySpans(output, nameBoundValueSpans(output))
+        val (byToken, tokenHits) = applySpans(byName, bareTokenSpans(byName))
+        return byToken to (nameHits + tokenHits)
+    }
+}
+'''
+
+FIXTURE_ENVVAR_REPO_OK = '''package fake
+
+class EnvVarRepository(
+    private val encryptedPrefs: EncryptedPrefs,
+) {
+    private val _entries = MutableStateFlow<List<EnvVarEntry>>(emptyList())
+
+    @Volatile
+    var metadataUnreadable = false
+
+    fun allAsDict(): Map<String, String> =
+        _entries.value.associate { it.key to (encryptedPrefs.getString(it.key) ?: "") }
+
+    private fun loadMetadata() {
+        metadataUnreadable = true
+        recoverKeysFromValues()
+    }
+
+    private fun recoverKeysFromValues() {
+        val known = _entries.value.map { it.key }.toSet()
+        val recovered = try {
+            encryptedPrefs.all.keys
+                .filter { it.isNotEmpty() && it !in known }
+                .sorted()
+                .map { EnvVarEntry(key = it) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to recover env-var keys: ${e.message}")
+            return
+        }
+        if (recovered.isEmpty()) return
+        _entries.value = _entries.value + recovered
+    }
+}
+'''
+
+CRED_REDACTOR_BRANCH = (
+    "        if (repo.metadataUnreadable) {\n"
+    "            val values = repo.allAsDict().values.filter { it.isNotEmpty() }\n"
+    "            return redactDegradedWithReminder(output, values)\n"
+    "        }"
+)
 
 def inject_members(src: str, members: str) -> str:
     """Append members just before the object's closing brace (fixture sugar:
@@ -1452,6 +1903,148 @@ object ConfigBuiltins {
             "old.takeIf { (1 == 2) && SystemVoiceEntries.isSystemEntryId(it) }"),
         check_sentinel_remap, "C12 RED:")
 
+
+    # ── [meta-audit-1028 W2] W-B00-05/06/07 witness arms (C14–C16) ──────────
+    # 三条见证的共同形态：token 一个不少，只把**决定**去掉。所以每条违规臂都
+    # 按"把真实见证 patch 打回夹具"施工，另外配等价改写臂（helper 抽离 /
+    # filterNot / 变量改名），证明判据钉的是决定点而不是拼写——同一件事换种
+    # 写法必须仍然绿。
+
+    def cred_arm(label: str, redactor: str, repo: str, wants) -> bool:
+        d = full_fixture(BUILTINS_OK4, FIXTURE_BACKUP_OK)
+        fds.append(d)
+        rd = os.path.join(d, "fake", "data", "EnvVarRedactor.kt")
+        rp = os.path.join(d, "fake", "data", "repository", "EnvVarRepository.kt")
+        for path in (rd, rp):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(rd, "w", encoding="utf-8") as f:
+            f.write(redactor)
+        with open(rp, "w", encoding="utf-8") as f:
+            f.write(repo)
+        fails = check(
+            os.path.join(d, "fake", "config", "collections", "EnvVarsCollection.kt"),
+            os.path.join(d, "fake", "config", "ConfigBuiltins.kt"),
+            os.path.join(d, "fake", "config", "collections", "GroupsCollection.kt"),
+            os.path.join(d, "fake", "backup", "ConfigBackup.kt"),
+            rd,
+            rp,
+        )
+        if not wants:
+            if fails:
+                print(f"[SELFTEST] {label}: expected GREEN, got {fails}")
+                return False
+            print(f"[SELFTEST] {label}: GREEN as expected")
+            return True
+        return expect_prefixes(label, fails, wants)
+
+    ok &= cred_arm("FIX-35 credential fixtures complete (16 criteria)",
+                   FIXTURE_REDACTOR_OK, FIXTURE_ENVVAR_REPO_OK, ())
+
+    # W-B00-05 原样见证：`if (false && repo.metadataUnreadable)`。
+    ok &= cred_arm(
+        "FIX-36 (W-B00-05) unreadable-index branch dead-guarded",
+        FIXTURE_REDACTOR_OK.replace(
+            "if (repo.metadataUnreadable) {", "if (false && repo.metadataUnreadable) {"),
+        FIXTURE_ENVVAR_REPO_OK, ("C14 RED:",))
+
+    # 同一决定点的第二种去掉方式：分支活着，但直接把原文交出去。
+    ok &= cred_arm(
+        "FIX-37 (W-B00-05) unreadable-index branch answers the raw output",
+        FIXTURE_REDACTOR_OK.replace(
+            CRED_REDACTOR_BRANCH,
+            "        if (repo.metadataUnreadable) {\n"
+            "            return output to 0\n"
+            "        }"),
+        FIXTURE_ENVVAR_REPO_OK, ("C14 RED:",))
+
+    # 等价改写：降级脱敏抽成私有 helper（名字完全不是 redactDegradedWithReminder）。
+    ok &= cred_arm(
+        "FIX-38 (C14) degraded path extracted into a differently-named helper",
+        inject_members(
+            FIXTURE_REDACTOR_OK.replace(
+                CRED_REDACTOR_BRANCH,
+                "        if (repo.metadataUnreadable) {\n"
+                "            val values = repo.allAsDict().values.filter { it.isNotEmpty() }\n"
+                "            return maskDegradedOutput(output, values)\n"
+                "        }"),
+            "    private fun maskDegradedOutput(output: String, values: List<String>): "
+            "Pair<String, Int> {\n"
+            "        val (byValue, _) = redact(output, values)\n"
+            "        return redactUnindexed(byValue)\n"
+            "    }\n"),
+        FIXTURE_ENVVAR_REPO_OK, ())
+
+    # W-B00-06 原样见证：值遍一命中就短路形态遍。
+    ok &= cred_arm(
+        "FIX-39 (W-B00-06) shape pass gated on the value pass hit count",
+        FIXTURE_REDACTOR_OK.replace(
+            "        val (byShape, shapeHits) = redactUnindexed(byValue)\n",
+            "        val (byShape, shapeHits) = "
+            "if (valueHits > 0) (byValue to 0) else redactUnindexed(byValue)\n"),
+        FIXTURE_ENVVAR_REPO_OK, ("C15 RED:",))
+
+    # 形态遍整条消失（C14 也一并变红：降级路径不再到达形态脱敏）。
+    ok &= cred_arm(
+        "FIX-40 (C15) shape pass removed entirely",
+        FIXTURE_REDACTOR_OK.replace(
+            "        val (byShape, shapeHits) = redactUnindexed(byValue)\n",
+            "        val (byShape, shapeHits) = byValue to 0\n"),
+        FIXTURE_ENVVAR_REPO_OK, ("C14 RED:", "C15 RED:"))
+
+    # 两遍都在，但形态遍吃的是原文（值遍结果没流过去）。
+    ok &= cred_arm(
+        "FIX-41 (C15) shape pass fed the original output",
+        FIXTURE_REDACTOR_OK.replace(
+            "val (byShape, shapeHits) = redactUnindexed(byValue)",
+            "val (byShape, shapeHits) = redactUnindexed(output)"),
+        FIXTURE_ENVVAR_REPO_OK, ("C15 RED:",))
+
+    # token 在、条件恒假：形态遍挂在死分支上。
+    ok &= cred_arm(
+        "FIX-42 (C15) shape pass behind a constant-dead guard",
+        FIXTURE_REDACTOR_OK.replace(
+            "val (byShape, shapeHits) = redactUnindexed(byValue)",
+            "val (byShape, shapeHits) = if (false) redactUnindexed(byValue) else (byValue to 0)"),
+        FIXTURE_ENVVAR_REPO_OK, ("C15 RED:",))
+
+    # W-B00-07 原样见证：差集翻成交集。
+    ok &= cred_arm(
+        "FIX-43 (W-B00-07) recovered-key predicate flipped to an intersection",
+        FIXTURE_REDACTOR_OK,
+        FIXTURE_ENVVAR_REPO_OK.replace(
+            "it.isNotEmpty() && it !in known", "it.isNotEmpty() && it in known"),
+        ("C16 RED:",))
+
+    # 等价改写 1：filterNot { it in known } —— 同一件事的另一种拼写。
+    ok &= cred_arm(
+        "FIX-44 (C16) exclusion spelled as filterNot",
+        FIXTURE_REDACTOR_OK,
+        FIXTURE_ENVVAR_REPO_OK.replace(
+            ".filter { it.isNotEmpty() && it !in known }", ".filterNot { it in known }"),
+        ())
+
+    # 等价改写 2：集合变量改名 —— 判据从初始化表达式派生，不锚 `known`。
+    ok &= cred_arm(
+        "FIX-45 (C16) known-keys set renamed",
+        FIXTURE_REDACTOR_OK,
+        FIXTURE_ENVVAR_REPO_OK.replace("known", "present"),
+        ())
+
+    # 谓词与 known 完全脱钩：恢复通道还在，但不再"挑索引里没有的键"。
+    ok &= cred_arm(
+        "FIX-46 (C16) recovered-key predicate loses the relation to known",
+        FIXTURE_REDACTOR_OK,
+        FIXTURE_ENVVAR_REPO_OK.replace(
+            "it.isNotEmpty() && it !in known", "it.isNotEmpty()"),
+        ("C16 RED:",))
+
+    # `|| true` 把差集短路成常量：谓词还在，决定没了。
+    ok &= cred_arm(
+        "FIX-47 (C16) exclusion short-circuited to a constant",
+        FIXTURE_REDACTOR_OK,
+        FIXTURE_ENVVAR_REPO_OK.replace("it !in known", "it !in known || true"),
+        ("C16 RED:",))
+
     for dd in fds:
         shutil.rmtree(dd, ignore_errors=True)
 
@@ -1470,14 +2063,14 @@ def main() -> int:
     if not roots:
         print("usage: envvar_config_group_check.py <repo_root> | --selftest")
         return 2
-    ev, cb, gr, bk = locate(roots[0])
-    failures = check(ev, cb, gr, bk)
+    ev, cb, gr, bk, rd, rp = locate(roots[0])
+    failures = check(ev, cb, gr, bk, rd, rp)
     if failures:
         for f in failures:
             print(f)
         print(f"envvar_config_group_check: {len(failures)} violation(s)")
         return 1
-    print("envvar_config_group_check: OK (13 criteria green)")
+    print("envvar_config_group_check: OK (16 criteria green)")
     return 0
 
 

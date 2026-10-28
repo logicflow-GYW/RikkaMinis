@@ -692,6 +692,9 @@
     <string name="skill_import_error_no_url">Enter a URL</string>
     <string name="skill_import_error_invalid">Invalid SKILL.md or skill already exists</string>
     <string name="skill_import_error_format">Invalid SKILL.md. Ensure YAML frontmatter with \'name:\' field.</string>
+    <string name="skill_file_error_read">Could not read the selected file</string>
+    <string name="skill_file_error_archive">Invalid skill archive: no SKILL.md found inside</string>
+    <string name="skill_file_error_detail">Import failed: %1$s</string>
     <string name="skill_import_in_progress">Importing...</string>
     <string name="skill_import_submit">Import</string>
     <string name="skill_detail_label_name">Name</string>
@@ -890,6 +893,10 @@
     <string name="modeldetail_capabilities_footer">Context window and max output tokens (in tokens). Leave empty to use provider defaults. Enable Thinking for models that support extended reasoning.</string>
     <string name="modeldetail_provider_default">Provider default</string>
     <string name="modeldetail_max_tokens_exceeds_warning">Exceeds provider-reported limit (%1$d). The value is saved but may cause errors.</string>
+    <!-- [meta-audit-1028 E5 / B06 F-07] Shown when updateEntry refuses the save (the id is already used by another model of this provider). The screen stays open so the edit is not lost. -->
+    <string name="modeldetail_error_model_id_exists">"%1$s" is already used by another model of this provider. Choose a different Model ID.</string>
+    <!-- [meta-audit-1028 E5 / B06 F-07] Shown when addEntry refuses to add (same id already exists). -->
+    <string name="add_custom_model_error_model_id_exists">"%1$s" already exists for this provider. Choose a different Model ID.</string>
     <string name="modeldetail_section_input_modality">Input Modality</string>
     <string name="modeldetail_image_input">Image Input</string>
     <string name="modeldetail_pdf_input">PDF Input</string>
@@ -1454,6 +1461,9 @@
     <string name="browser_viewport_width">Width</string>
     <string name="browser_viewport_height">Height</string>
     <string name="common_loading">Loading…</string>
+    <!-- [meta-audit-1028 D4] A secret whose Keystore read failed: the box shows nothing
+         while a value exists on disk, so saving would erase it. Save stays disabled. -->
+    <string name="settings_secret_unreadable">Could not read the stored value — nothing was saved. Close and reopen this form.</string>
     <string name="rootfs_reset_button">Reset</string>
     <string name="session_title_label">Title</string>
     <string name="backup_import_too_large">Backup file is too large (%1$d MB, max %2$d MB) — nothing was imported. Shorten the chat history window (or turn it off) and export again, then import the new file.</string>

@@ -511,14 +511,28 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
     }
 
     private fun displaySet(args: OffloadArgs): NativeOffloadResult {
+        // [meta1028-B05 F-09] Decide BEFORE touching `wm`. The old body ran
+        // whatever it could parse and answered `{"ok":true,"data":{}}` for the
+        // rest, so three different misspellings all read as a successful
+        // override: a bare `display set`, `--density abc` (getInt → null → the
+        // call was skipped), and `--width 1080` alone (`wm size` needs WxH, the
+        // half-specified pair was dropped). A no-op reported as success is worse
+        // than a refusal — the caller re-reads the resolution believing it
+        // changed. [planDisplaySet] holds the whole decision so it is testable
+        // off-device.
+        val plan = planDisplaySet(args)
+        if (plan is DisplaySetPlan.Refused) {
+            return errEnvelope("INVALID_ARGS", "${plan.message}\n$DISPLAY_HELP", args)
+        }
+        plan as DisplaySetPlan.Ready
         var ok = true
         val results = JSONObject()
-        args.getInt("density")?.let {
+        plan.density?.let {
             val r = ShizukuManager.runProcess(arrayOf("wm", "density", it.toString()))
             results.put("density", r.exitCode == 0)
             ok = ok && r.exitCode == 0
         }
-        val w = args.getInt("width"); val h = args.getInt("height")
+        val w = plan.width; val h = plan.height
         if (w != null && h != null) {
             val r = ShizukuManager.runProcess(arrayOf("wm", "size", "${w}x${h}"))
             results.put("size", r.exitCode == 0)
@@ -1377,7 +1391,11 @@ Usage:
 
 Usage:
   android-shizuku-cli display list
-  android-shizuku-cli display set [--width N] [--height N] [--density DPI]
+  android-shizuku-cli display set [--width N --height N] [--density DPI]
+                                  (pass --density and/or the width+height PAIR; a size
+                                   needs both, a value that is not a whole number in
+                                   range is refused, and an empty `set` is an error —
+                                   it never reports a change it did not make)
   android-shizuku-cli display reset
 """
 

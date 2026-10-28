@@ -39,6 +39,7 @@ import com.rikkaminis.app.data.repository.ChatRepository
 import com.rikkaminis.app.ui.sessions.categoryStyle
 import com.rikkaminis.app.ui.sessions.relativeDate
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
 /**
@@ -70,7 +71,26 @@ fun MoveToSessionSheet(
     // the now-current row instead of the stale draft key.
     LaunchedEffect(currentSessionId) {
         sessions = withContext(Dispatchers.IO) {
-            chatRepository.dao.listSessions().filter { it.id != currentSessionId }
+            // [FIX-C8/F-11] Ghost rows must not be offered as a move target.
+            // The sheet used to exclude only the current session, so sessions
+            // the history drawer deliberately hides — a materialised-but-empty
+            // chat from a /memory or /thinking toggle, or an abandoned draft
+            // with no preview — showed up here as untitled rows the user could
+            // "move into" and see nothing. isDrawerRowVisible is the drawer's
+            // own contract (dv24-b3), so the two lists now agree on what counts
+            // as a real session; message counts come from the same live map the
+            // drawer reads (one snapshot per sheet open).
+            val messageCounts = chatRepository.observeMessageCountsPerSession().first()
+            chatRepository.dao.listSessions()
+                .filter { session ->
+                    isMoveToTargetVisible(
+                        sessionId = session.id,
+                        currentSessionId = currentSessionId,
+                        pinnedAt = session.pinnedAt,
+                        messageCount = messageCounts[session.id] ?: 0,
+                        lastMessage = session.lastMessage,
+                    )
+                }
         }
     }
 
@@ -109,6 +129,34 @@ fun MoveToSessionSheet(
         }
     }
 }
+
+/**
+ * [FIX-C8/F-11] Which sessions the move-to picker may offer.
+ *
+ * Two terms, and only two:
+ *  - never the session the composer is already in (the caller's original
+ *    filter, unchanged);
+ *  - only rows the history drawer would render — [isDrawerRowVisible] is that
+ *    contract (pinned ∨ has messages ∨ has a non-blank preview), so a ghost
+ *    row the user cannot see in the drawer is not offered as a destination
+ *    either. Before this the picker listed them as untitled "empty" targets.
+ *
+ * Pure on purpose: the sheet is a @Composable (not JVM-drivable), so the
+ * decision lives here where a unit test can pin the ghost-row cases against the
+ * drawer's own predicate instead of a copy of it.
+ */
+internal fun isMoveToTargetVisible(
+    sessionId: String,
+    currentSessionId: String,
+    pinnedAt: Long?,
+    messageCount: Int,
+    lastMessage: String?,
+): Boolean = sessionId != currentSessionId &&
+    isDrawerRowVisible(
+        pinnedAt = pinnedAt,
+        messageCount = messageCount,
+        lastMessage = lastMessage,
+    )
 
 /**
  * Single row in the Move-to picker. Visual parity with SessionRow in

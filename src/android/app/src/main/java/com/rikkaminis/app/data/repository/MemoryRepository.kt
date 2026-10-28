@@ -307,8 +307,17 @@ class MemoryRepository(private val memoryDir: File) {
                 // Return file preview
                 val lines = content.lines()
                 val take = minOf(lines.size, budget)
-                val preview = lines.take(take).joinToString("\n")
-                val truncated = if (lines.size > take) " (showing first $take of ${lines.size} lines)" else ""
+                // [E2-F07] Keep the TAIL, not the head. writeMemory appends
+                // ([P1-append]), so line 0 is the OLDEST entry of the day: taking
+                // the head under the 500-line dump cap meant memory_get with no
+                // keywords returned this morning's entries and silently dropped
+                // everything written since — the exact opposite of what an agent
+                // asking "what do I remember" needs, and invisible in the result
+                // (the note said "showing first N" only in the label). Only the
+                // truncated branch changes: an untruncated file is returned
+                // verbatim below, so short logs are byte-identical to before.
+                val truncated = if (lines.size > take) " (showing last $take of ${lines.size} lines)" else ""
+                val preview = if (lines.size > take) lines.takeLast(take).joinToString("\n") else content
                 totalLines += take
                 totalMatchedFiles += 1
                 "[$label$truncated]\n$preview"
@@ -335,18 +344,29 @@ class MemoryRepository(private val memoryDir: File) {
                     val merged = mergeRanges(matchedRanges)
                     val fileMatches = mutableListOf<String>()
 
-                    for (range in merged) {
+                    // [E2-F07] Fill the line budget from the NEWEST match
+                    // backwards, then print in file order. The scan above walks
+                    // line 0 upward, so the old forward fill spent the whole
+                    // budget on the oldest matches and dropped the recent ones —
+                    // the same append-ordering inversion as the full dump above.
+                    // A partial chunk now keeps its TAIL (the newest lines of
+                    // that ±2 window) for the same reason.
+                    val keptNewestFirst = mutableListOf<IntRange>()
+                    for (range in merged.asReversed()) {
                         val chunkLines = range.last - range.first + 1
                         if (totalLines + chunkLines > lineCap) {
                             val remaining = lineCap - totalLines
                             if (remaining > 0) {
-                                fileMatches.add(lines.subList(range.first, range.first + remaining).joinToString("\n"))
+                                keptNewestFirst.add((range.last - remaining + 1)..range.last)
                                 totalLines += remaining
                             }
                             break
                         }
-                        fileMatches.add(lines.subList(range.first, range.last + 1).joinToString("\n"))
+                        keptNewestFirst.add(range)
                         totalLines += chunkLines
+                    }
+                    for (range in keptNewestFirst.asReversed()) {
+                        fileMatches.add(lines.subList(range.first, range.last + 1).joinToString("\n"))
                     }
 
                     if (fileMatches.isNotEmpty())
@@ -681,7 +701,21 @@ class MemoryRepository(private val memoryDir: File) {
     fun revokeEntry(writtenContent: String): EntryMutationResult {
         val trimmedTarget = writtenContent.trim()
         val candidates = candidateDateStrings()
-        val markerRegex = Regex("""<!-- \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} -->\n""")
+        // [E2-F07] Single-sourced from [TIMESTAMP_MARKER_LINE]. The local copy
+        // used to spell the boundary as `--> \n` — no in-line whitespace
+        // tolerance at all — while the read paths (newestFirstPreview) use the
+        // canonical pattern with `[^\S\n]*`. The two disagreed on exactly the
+        // files a *human* touched: a marker line that picked up trailing spaces
+        // (or CRLF, which is what restoring a log written on another platform
+        // leaves behind) was invisible here, so the preceding entry's body
+        // swallowed the next marker and `body.trim() == target` could never hold:
+        // the revoke/edit button became a silent no-op (NotFound) with no error
+        // shown, and — worse — the reverse case (a body match that spans an
+        // invisible marker) would have taken the next entry's text with it in
+        // removeRange below. `[^\S\n]*` keeps the tolerance inside the line: it
+        // accepts trailing blanks and `\r` but never crosses a newline, so the
+        // marker can't glue two entries together.
+        val markerRegex = TIMESTAMP_MARKER_LINE
 
         for (dateStr in candidates) {
             val file = File(memoryDir, "$dateStr.md")
@@ -720,7 +754,8 @@ class MemoryRepository(private val memoryDir: File) {
         val trimmedOld = oldContent.trim()
         val trimmedNew = newContent.trim()
         val candidates = candidateDateStrings()
-        val markerRegex = Regex("""<!-- \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} -->\n""")
+        // [E2-F07] Same single-sourcing as [revokeEntry] — see the comment there.
+        val markerRegex = TIMESTAMP_MARKER_LINE
 
         for (dateStr in candidates) {
             val file = File(memoryDir, "$dateStr.md")

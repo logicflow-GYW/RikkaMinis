@@ -328,6 +328,9 @@
     <string name="skill_import_error_no_url">URL 을 입력하세요</string>
     <string name="skill_import_error_invalid">SKILL.md 가 잘못되었거나 skill 이 이미 존재합니다</string>
     <string name="skill_import_error_format">SKILL.md 가 잘못되었습니다. \'name:\' 필드가 포함된 YAML frontmatter 를 확인하세요.</string>
+    <string name="skill_file_error_read">선택한 파일을 읽을 수 없습니다</string>
+    <string name="skill_file_error_archive">잘못된 skill 압축 파일입니다: SKILL.md 를 찾을 수 없습니다</string>
+    <string name="skill_file_error_detail">가져오기 실패: %1$s</string>
     <string name="skill_import_in_progress">가져오는 중…</string>
     <string name="skill_import_submit">가져오기</string>
     <string name="skill_detail_label_name">이름</string>
@@ -1082,6 +1085,7 @@
     <string name="browser_viewport_width">너비</string>
     <string name="browser_viewport_height">높이</string>
     <string name="common_loading">로딩 중…</string>
+    <string name="settings_secret_unreadable">저장된 값을 읽을 수 없습니다. 아무것도 저장하지 않았습니다. 이 양식을 닫았다가 다시 열어 주세요.</string>
     <string name="rootfs_reset_button">초기화</string>
     <string name="session_title_label">제목</string>
     <string name="backup_import_too_large">백업 파일이 너무 큽니다(%1$d MB, 최대 %2$d MB). 아무것도 가져오지 않았습니다. 채팅 기록 기간을 줄이거나 끈 뒤 다시 내보내고 새 파일을 가져오세요.</string>

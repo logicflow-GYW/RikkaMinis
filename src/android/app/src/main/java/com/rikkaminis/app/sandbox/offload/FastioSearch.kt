@@ -68,6 +68,20 @@ internal class FindOutcome : EntryBudget {
  * The traversal itself is bounded by [maxEntries] via [charge] (shared with
  * `du`), so a runaway tree degrades to `truncated: true` instead of pinning an
  * offload worker thread.
+ *
+ * [meta1028-B05 F-10] A non-positive [limit] means "list nothing": it answers
+ * as capped WITHOUT entering a single directory — the same contract [grepTree]
+ * documents and has always implemented. The caller spends ONE budget across
+ * several roots, so the roots after the first are handed `remaining == 0`
+ * ([FastioOffloadHandler]), and `find` used to walk each of them end to end —
+ * stat'ing and matching every entry to drop it on the floor.
+ *
+ * Deliberately NOT carried further: unlike `grep`, `find`'s totals are a
+ * deliverable ("totals cover the WHOLE tree even when the listing is capped"),
+ * so the walk must not stop at the cap the way [grepTree]'s does. Stopping
+ * there would trade a cost cap for an under-reported count — the opposite of
+ * the contract. Only the empty-budget case is aligned, because in that case the
+ * caller asked for zero hits and none of the totals can matter.
  */
 internal fun findTree(
     root: Path,
@@ -78,6 +92,15 @@ internal fun findTree(
     maxEntries: Long,
     out: FindOutcome,
 ) {
+    // [meta1028-B05 F-10] Non-positive budget ⇒ list no hit at all, and do not
+    // walk to discover that: `remaining` is the caller's SHARED budget, so a
+    // later root is legitimately handed 0 after an earlier one listed the
+    // caller's quota. Mirrors [grepTree]'s early exit (same wording, same
+    // direction) — the two engines agreed on `--limit` only for the first root.
+    if (limit <= 0) {
+        out.matchesCapped = true
+        return
+    }
     try {
         Files.walkFileTree(
             root,

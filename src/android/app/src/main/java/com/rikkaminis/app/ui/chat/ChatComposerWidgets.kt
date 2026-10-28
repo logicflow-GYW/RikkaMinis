@@ -523,6 +523,40 @@ private fun ToolPreviewThumbnail(
 
 // ─── Floating Tool Status Bar (iOS: thumbnail + status capsule + pagination) ─
 
+/**
+ * [FIX-C8/F-07] Where the floating bar's page cursor lands after [toolBlocks]
+ * changed.
+ *
+ * Three cases, in priority order:
+ *  - the newest block is live → follow it (unchanged behaviour, T261 note);
+ *  - the cursor points past the end (edit-and-resend / retry / session switch
+ *    shorten the list) → clamp to the newest surviving block, i.e. keep the bar
+ *    on screen instead of early-returning an empty composable;
+ *  - everything else → keep the user's paged position (paging is deliberate).
+ *
+ * Pure so the shrink transition can be pinned by a JVM test: the bar itself is
+ * a @Composable and cannot be driven from a unit test.
+ */
+internal fun floatingToolIndexAfterUpdate(
+    currentIndex: Int,
+    lastIndex: Int,
+    newestActive: Boolean,
+): Int {
+    val clamped = lastIndex.coerceAtLeast(0)
+    if (newestActive) return clamped
+    if (currentIndex > lastIndex) return clamped
+    return currentIndex.coerceAtLeast(0)
+}
+
+/**
+ * [FIX-C8/F-07] The index the bar may *read* — [currentIndex] clamped into
+ * `0..lastIndex`. Composed separately from [floatingToolIndexAfterUpdate]
+ * because the state write happens in a [LaunchedEffect] (one frame late) while
+ * the read happens on the frame that shrank the list.
+ */
+internal fun floatingToolSafeIndex(currentIndex: Int, lastIndex: Int): Int =
+    currentIndex.coerceIn(0, lastIndex.coerceAtLeast(0))
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun FloatingToolStatusBar(
@@ -549,9 +583,20 @@ internal fun FloatingToolStatusBar(
         val newestActive = newest?.toolStatus == ToolBlockStatus.RUNNING ||
             newest?.toolStatus == ToolBlockStatus.STREAMING ||
             newest?.toolStatus == ToolBlockStatus.PENDING
-        if (newestActive) currentIndex = lastIndex.coerceAtLeast(0)
+        // [FIX-C8/F-07] Also shrink when the list itself shrank. currentIndex is
+        // raw `remember` state (no key on toolBlocks), so an edit-and-resend, a
+        // retry or a session switch can leave it past the new lastIndex. The
+        // old code only moved it forward, so `getOrNull` returned null and this
+        // whole composable early-returned: the bar vanished (no thumbnail, no
+        // stop button, no chevrons) while ChatScreen's bottomReserve — driven by
+        // `hasFloatingTools`, not by this composable — kept reserving 83 dp of
+        // empty space above the composer.
+        currentIndex = floatingToolIndexAfterUpdate(currentIndex, lastIndex, newestActive)
     }
-    val block = toolBlocks.getOrNull(currentIndex) ?: return
+    // Clamp at the read site too: the effect above runs one frame after the
+    // shrink, and that frame must still render a block rather than vanish.
+    val shownIndex = floatingToolSafeIndex(currentIndex, lastIndex)
+    val block = toolBlocks.getOrNull(shownIndex) ?: return
     // T261: sheet is hoisted to ChatScreen top-level; this bar only emits
     // open events. The current-displayed block id is what we want shown
     // when the user opens the sheet from this surface (not necessarily
@@ -646,18 +691,18 @@ internal fun FloatingToolStatusBar(
                     Icon(
                         Icons.Default.ChevronLeft,
                         contentDescription = stringResource(R.string.chat_nav_previous),
-                        tint = if (currentIndex > 0) MaterialTheme.colorScheme.onSurface
+                        tint = if (shownIndex > 0) MaterialTheme.colorScheme.onSurface
                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
                         modifier = Modifier
                             .size(18.dp)
                             .clickable(
-                                enabled = currentIndex > 0,
+                                enabled = shownIndex > 0,
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
-                            ) { if (currentIndex > 0) currentIndex-- },
+                            ) { if (shownIndex > 0) currentIndex = shownIndex - 1 },
                     )
                     Text(
-                        "${currentIndex + 1}/${toolBlocks.size}",
+                        "${shownIndex + 1}/${toolBlocks.size}",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
                         fontFamily = FontFamily.Monospace,
@@ -666,15 +711,15 @@ internal fun FloatingToolStatusBar(
                     Icon(
                         Icons.Default.ChevronRight,
                         contentDescription = stringResource(R.string.chat_nav_next),
-                        tint = if (currentIndex < toolBlocks.lastIndex) MaterialTheme.colorScheme.onSurface
+                        tint = if (shownIndex < lastIndex) MaterialTheme.colorScheme.onSurface
                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
                         modifier = Modifier
                             .size(18.dp)
                             .clickable(
-                                enabled = currentIndex < toolBlocks.lastIndex,
+                                enabled = shownIndex < lastIndex,
                                 indication = null,
                                 interactionSource = remember { MutableInteractionSource() },
-                            ) { if (currentIndex < toolBlocks.lastIndex) currentIndex++ },
+                            ) { if (shownIndex < lastIndex) currentIndex = shownIndex + 1 },
                     )
                 }
             }

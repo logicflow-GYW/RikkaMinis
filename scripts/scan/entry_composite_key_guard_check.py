@@ -40,6 +40,23 @@ from `ConfigRegistry.resolveField` into the pure top-level function that
 owns the grammar, wherever the KDoc/comments sit (block comments are
 stripped first — the old shape is allowed to appear in prose).
 
+Arm 10 [meta-audit-1028 W-B00-08] the QUARANTINE delete-set. An entry row that
+       failed to parse is deliberately skipped on load and remembered in
+       `quarantinedEntryRowIds` — the DAO's delete-set is derived from the
+       entries that are PRESENT, so the skipped row is physically deleted by
+       the next `syncAllIncremental` unless those ids are handed over. The
+       gate reads the value the save path actually passes (named OR positional,
+       parameter order derived from the DAO, not hardcoded) and rejects:
+         a) no `preserveEntryIds` argument at all  → the DAO default (`emptySet()`)
+            is silent, so an unrelated rename / reorder / refresh deletes the row;
+         b) a constant-empty collection literal (`emptySet()`, `setOf()`,
+            `mutableSetOf<String>()`, `listOf()` …) — the audited witness;
+         c) an id set that is NEVER fed a non-empty value anywhere in the file
+            (declared `emptySet()` and never assigned) — same defect one level
+            up: every save passes an empty set.
+       Any other spelling (member property, local val, call result, a chain) is
+       accepted: the criterion is the VALUE, not the token.
+
 Usage: python3 scripts/scan/entry_composite_key_guard_check.py [root]
        python3 scripts/scan/entry_composite_key_guard_check.py --root <root>
        python3 scripts/scan/entry_composite_key_guard_check.py --selftest
@@ -75,6 +92,8 @@ PR_REL = APP + "/data/repository/ProviderRepository.kt"
 MC_REL = APP + "/config/collections/ModelsCollection.kt"
 PM_REL = APP + "/debug/ProviderMutationMethods.kt"
 REG_REL = APP + "/config/ConfigRegistry.kt"
+# Arm 10 — the DAO owns the parameter ORDER (positional call sites are legal).
+DAO_REL = APP + "/data/db/ProviderConfigDao.kt"
 
 # Arm 1 — unified guard wiring inside addEntry.
 ARM1_ANCHORS = (
@@ -719,8 +738,155 @@ def check_resolver(src, rel):
     return out
 
 
+# ── Arm 10 — [meta-audit-1028 W-B00-08] the delete-set the save path hands over
+# The quarantined rows are the ones the LOAD path skipped. The DAO derives its
+# delete-set from the entries it is given, so "skip on load" is only a promise
+# if the save path names them on the way back. Everything below judges the
+# VALUE at the call site (named or positional), never the spelling.
+SYNC_CALL = "syncAllIncremental"
+PRESERVE_ARG = "preserveEntryIds"
+EMPTY_CTORS = {
+    "emptySet", "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf", "sortedSetOf",
+    "emptyList", "listOf", "mutableListOf", "arrayListOf", "setOfNotNull",
+    "emptyArray", "arrayOf", "emptySequence", "sequenceOf", "emptyMap", "mapOf",
+}
+_CTOR_RE = re.compile(r"^(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*(?:<[^<>]*>)?\s*\((.*)\)$", re.S)
+_NAMED_ARG = re.compile(r"^([A-Za-z_]\w*)\s*=(?!=)")
+_IDENT_ONLY = re.compile(r"^`?[A-Za-z_]\w*`?$")
+
+
+def _calls(code, name):
+    """[(pos, [arg texts])] for every real call to `name(…)` (decls skipped)."""
+    out = []
+    for m in re.finditer(r"\b%s\s*\(" % re.escape(name), code):
+        if re.search(r"\bfun\s+$", code[:m.start()]):
+            continue
+        spans = call_args(code, m.end() - 1)
+        out.append((m.start(), [code[a:b].strip() for a, b in spans]))
+    return out
+
+
+def _constant_empty(expr):
+    """`emptySet()` / `setOf()` / `mutableSetOf<String>()` — a single empty ctor."""
+    e = strip_parens(" ".join(expr.split()))
+    m = _CTOR_RE.match(e)
+    return bool(m) and m.group(1) in EMPTY_CTORS and not m.group(2).strip()
+
+
+def _param_index(dao_src):
+    """Index of `preserveEntryIds` in the DAO's `syncAllIncremental` signature."""
+    if dao_src is None:
+        return None
+    code = code_only(dao_src)
+    m = re.search(r"\bfun\s+%s\s*\(" % re.escape(SYNC_CALL), code)
+    if m is None:
+        return None
+    close = match_bracket(code, m.end() - 1)
+    if close < 0:
+        return None
+    inner = code[m.end():close]
+    parts = [inner[a:b] for a, b in split_top(inner, (",",))]
+    names = []
+    for part in parts:
+        head = part.split(":", 1)[0]
+        head = re.sub(r"@\w+(\([^)]*\))?", " ", head)
+        head = re.sub(r"\b(?:vararg|noinline|crossinline|val|var)\b", " ", head)
+        names.append(head.strip())
+    return names.index(PRESERVE_ARG) if PRESERVE_ARG in names else None
+
+
+def _rhs_list(code, name):
+    """Every expression assigned to `name` (declaration initialisers included)."""
+    pat = re.compile(r"(?<![\w.`])(?:(?:val|var)\s+)?`?" + re.escape(name) +
+                     r"`?\s*(?::[^=\n]+?)?=(?!=)")
+    out = []
+    for m in pat.finditer(code):
+        out.append(code[m.end():expr_end(code, m.end())].strip())
+    return out
+
+
+def _fed_non_empty(code, name, depth=3):
+    """Is `name` ever given a value that is not a constant-empty collection?"""
+    for rhs in _rhs_list(code, name):
+        if not rhs or _constant_empty(rhs):
+            continue
+        if _IDENT_ONLY.match(strip_parens(rhs.strip())):
+            if depth and _fed_non_empty(code, strip_parens(rhs.strip()), depth - 1):
+                return True
+            continue
+        return True
+    return False
+
+
+def check_preserve_entry_ids(src, rel, dao_src, dao_rel):
+    """Arm 10 — the save path must hand the quarantined ids to the DAO."""
+    try:
+        code = code_only(src)
+    except KotlinLexError as exc:
+        return [(rel, 0, "10", "unlexable source (%s) — fail closed" % exc)]
+    calls = _calls(code, SYNC_CALL)
+    if not calls:
+        return [(rel, 0, "10",
+                 "no `%s(` call in the repository — the write path was moved and "
+                 "the quarantine delete-set cannot be judged (gate ROT)" % SYNC_CALL)]
+    idx = _param_index(dao_src)
+    if idx is None:
+        return [(dao_rel, 0, "10",
+                 "`%s` no longer takes a `%s` parameter — the delete-set has no name "
+                 "at the DAO boundary, so every skipped row is droppable (gate ROT)"
+                 % (SYNC_CALL, PRESERVE_ARG))]
+    out = []
+    for pos, args in calls:
+        line = line_of(src, pos)
+        named = {}
+        positional = []
+        for a in args:
+            m = _NAMED_ARG.match(a)
+            if m:
+                named[m.group(1)] = a[m.end():].strip()
+            else:
+                positional.append(a)
+        if PRESERVE_ARG in named:
+            value = named[PRESERVE_ARG]
+        elif len(positional) > idx:
+            value = positional[idx]
+        else:
+            out.append((rel, line, "10",
+                        "`%s(` is called WITHOUT `%s`: the DAO falls back to its own "
+                        "`emptySet()` default, so the rows the load path only meant to "
+                        "SKIP are physically deleted by any unrelated save "
+                        "(rename / reorder / refresh)" % (SYNC_CALL, PRESERVE_ARG)))
+            continue
+        if not value.strip():
+            out.append((rel, line, "10",
+                        "`%s = ` is blank — the delete-set cannot be established "
+                        "(fail closed)" % PRESERVE_ARG))
+            continue
+        if _constant_empty(value):
+            out.append((rel, line, "10",
+                        "`%s = %s` is a CONSTANT EMPTY collection: the quarantined rows are "
+                        "absent from the entries list by construction, so the very next save "
+                        "deletes them (the load path's skip is defeated at the write path)"
+                        % (PRESERVE_ARG, " ".join(value.split()))))
+            continue
+        roots = [t for t in re.findall(r"(?<![\w.])`?([A-Za-z_]\w*)`?(?![\w(])",
+                                       strip_parens(value))
+                 if t not in ("this", "it", "true", "false", "null")]
+        holders = [r for r in roots
+                   if re.search(r"\b(?:val|var)\s+`?" + re.escape(r) + r"`?\s*[:\s=]",
+                                code)]
+        if holders and not any(_fed_non_empty(code, r) for r in holders):
+            out.append((rel, line, "10",
+                        "`%s = %s` never receives a non-empty value anywhere in the file "
+                        "(declared empty and never assigned): every save still passes an "
+                        "empty delete-set"
+                        % (PRESERVE_ARG, " ".join(value.split()))))
+    return out
+
+
 def run_checks(root, rels=None):
-    rels = rels or {"pr": PR_REL, "mc": MC_REL, "pm": PM_REL, "reg": REG_REL}
+    rels = rels or {"pr": PR_REL, "mc": MC_REL, "pm": PM_REL, "reg": REG_REL,
+                    "dao": DAO_REL}
     srcs = {k: read(rel, root) for k, rel in rels.items()}
     missing = [(rel, 0, "?", "file not found — gate ROT")
                for k, rel in rels.items() if srcs[k] is None]
@@ -758,12 +924,51 @@ def _run_checks(srcs, rels):
     checks += check_response_persisted(srcs["pm"], rels["pm"], "fun modelsUpdate(", "5",
                                        "modelsUpdate RPC")
     checks += check_resolver(srcs["reg"], rels["reg"])
+    checks += check_preserve_entry_ids(srcs["pr"], rels["pr"], srcs["dao"], rels["dao"])
     return checks
 
 
 # ----------------------------------------------------------------------
 # Selftest fixtures — minimal Kotlin-shaped files exercising every arm.
 # ----------------------------------------------------------------------
+SAVE_PATH = """
+private var quarantinedEntryRowIds: Set<String> = emptySet()
+
+private suspend fun loadFromDb() {
+    val loaded = loadRows()
+    quarantinedEntryRowIds = loaded.quarantinedEntryRowIds
+}
+
+private suspend fun persistToDbAndMirror(config: ProviderConfig): ProviderConfig {
+    val snapshot = config.toSnapshot()
+    providerDao.syncAllIncremental(
+        instances = snapshot.instances,
+        entries = snapshot.entries,
+        groups = snapshot.groups,
+        loopIds = snapshot.loopIds,
+        meta = snapshot.meta,
+        preserveEntryIds = quarantinedEntryRowIds,
+    )
+    return config
+}
+"""
+
+FIX_DAO_OK = """package p
+
+interface ProviderConfigDao {
+    suspend fun syncAllIncremental(
+        instances: List<Inst>,
+        entries: List<Entry>,
+        groups: List<Grp>,
+        loopIds: List<Loop>,
+        meta: List<Meta>,
+        preserveEntryIds: Set<String> = emptySet(),
+    ) {
+        clearEntries()
+    }
+}
+"""
+
 FIX_PR_OK = """fun addEntry(entry: ModelEntry): String = synchronized(configLock) {
     ensureConfigLoaded()
     val config = mutationSnapshot(_config.value)
@@ -786,7 +991,7 @@ internal fun decideEntryAdd(a: String, b: String, c: List<Pair<String, String>>)
 internal fun decideCompactPinMigration(p: String, o: String, n: String): String? = TODO()
 
 internal fun decideCompactPinCleanup(p: String, r: Collection<String>): Boolean = TODO()
-"""
+""" + SAVE_PATH
 FIX_PR_BAD_TYPECONDITIONAL = """fun addEntry(entry: ModelEntry) = synchronized(configLock) {
     ensureConfigLoaded()
     val config = mutationSnapshot(_config.value)
@@ -807,7 +1012,7 @@ internal fun decideEntryAdd(a: String, b: String, c: List<Pair<String, String>>)
 internal fun decideCompactPinMigration(p: String, o: String, n: String): String? = TODO()
 
 internal fun decideCompactPinCleanup(p: String, r: Collection<String>): Boolean = TODO()
-"""
+""" + SAVE_PATH
 
 FIX_MC_OK = """override fun add(payload: ConfigValue): String {
     val duplicate = repo.config.value.modelEntries.firstOrNull { it.baseModel.id == modelIdStr }
@@ -1006,13 +1211,15 @@ def _report(checks, fixture_name, label):
 def selftest():
     ok = True
     with tempfile.TemporaryDirectory() as tmp:
-        rels = {"pr": "pr.kt", "mc": "mc.kt", "pm": "pm.kt", "reg": "reg.kt"}
+        rels = {"pr": "pr.kt", "mc": "mc.kt", "pm": "pm.kt", "reg": "reg.kt",
+                "dao": "dao.kt"}
 
         def write(name, text):
             with open(os.path.join(tmp, rels[name]), "w", encoding="utf-8") as f:
                 f.write(text)
 
         write("pr", FIX_PR_OK)
+        write("dao", FIX_DAO_OK)
         write("mc", FIX_MC_OK)
         write("pm", FIX_PM_OK)
         write("reg", FIX_REG_OK)
@@ -1078,7 +1285,7 @@ def selftest():
             else:
                 print("  [OK]   %s trips arm %s only" % (label, arm))
             write(key, {"pr": FIX_PR_OK, "mc": FIX_MC_OK,
-                        "pm": FIX_PM_OK, "reg": FIX_REG_OK}[key])
+                        "pm": FIX_PM_OK, "reg": FIX_REG_OK, "dao": FIX_DAO_OK}[key])
 
         # W1: the dedupe guard is constant-folded dead but keeps every anchor.
         _arm_only("G08-A1 dead duplicate guard", "pr",
@@ -1196,6 +1403,81 @@ def selftest():
             print("  [OK]   fail-closed control: missing resolver reported as gate ROT")
         write("reg", FIX_REG_OK)
 
+        # ── [meta-audit-1028 W-B00-08] Arm 10: the quarantine delete-set ─────
+        # The witness: the shipped call site hands the DAO a constant empty set,
+        # so an unrelated save physically deletes the rows the load path skipped.
+        _arm_only("G10-A1 witness: constant empty delete-set", "pr",
+                  _mutate(FIX_PR_OK, "preserveEntryIds = quarantinedEntryRowIds",
+                          "preserveEntryIds = emptySet()", "G10-A1"),
+                  "10", "CONSTANT EMPTY")
+
+        # Same defect, another spelling of "empty": the DAO default is silent, so
+        # dropping the argument is equal to passing one.
+        _arm_only("G10-A2 the argument is not passed at all", "pr",
+                  _mutate(FIX_PR_OK, "        preserveEntryIds = quarantinedEntryRowIds,\n",
+                          "", "G10-A2"),
+                  "10", "WITHOUT `preserveEntryIds`")
+
+        _arm_only("G10-A3 typed empty constructor", "pr",
+                  _mutate(FIX_PR_OK, "preserveEntryIds = quarantinedEntryRowIds",
+                          "preserveEntryIds = mutableSetOf<String>()", "G10-A3"),
+                  "10", "CONSTANT EMPTY")
+
+        # One level up: the set is named on the call, declared empty, never filled.
+        _arm_only("G10-A4 the id set is never fed", "pr",
+                  _mutate(FIX_PR_OK,
+                          "    quarantinedEntryRowIds = loaded.quarantinedEntryRowIds\n",
+                          "    quarantinedEntryRowIds = quarantinedEntryRowIds\n",
+                          "G10-A4"),
+                  "10", "never receives a non-empty value")
+
+        # Tolerant arms: the SAME value written three other legitimate ways.
+        for label, text in (
+            # Kotlin forbids positional-after-named, so the positional spelling
+            # is the whole argument list written without names.
+            ("G10-T1 positional argument", FIX_PR_OK.replace(
+                "        instances = snapshot.instances,\n"
+                "        entries = snapshot.entries,\n"
+                "        groups = snapshot.groups,\n"
+                "        loopIds = snapshot.loopIds,\n"
+                "        meta = snapshot.meta,\n"
+                "        preserveEntryIds = quarantinedEntryRowIds,\n",
+                "        snapshot.instances,\n"
+                "        snapshot.entries,\n"
+                "        snapshot.groups,\n"
+                "        snapshot.loopIds,\n"
+                "        snapshot.meta,\n"
+                "        quarantinedEntryRowIds,\n")),
+            ("G10-T2 local val bound to the set", FIX_PR_OK.replace(
+                "    val snapshot = config.toSnapshot()\n",
+                "    val snapshot = config.toSnapshot()\n"
+                "    val preserve = quarantinedEntryRowIds\n").replace(
+                "preserveEntryIds = quarantinedEntryRowIds",
+                "preserveEntryIds = preserve")),
+            ("G10-T3 defensive copy of the set", FIX_PR_OK.replace(
+                "preserveEntryIds = quarantinedEntryRowIds",
+                "preserveEntryIds = quarantinedEntryRowIds.toSet()")),
+        ):
+            write("pr", text)
+            checks = run_checks(tmp, rels)
+            if checks:
+                print("  [FAIL] %s stays green: %s" % (label, [(c[2], c[3][:60]) for c in checks]))
+                ok = False
+            else:
+                print("  [OK]   %s stays green" % label)
+        write("pr", FIX_PR_OK)
+
+        # Fail-closed: a DAO that no longer names the parameter cannot be judged.
+        write("dao", FIX_DAO_OK.replace("preserveEntryIds", "keepIds"))
+        checks = run_checks(tmp, rels)
+        got = [c for c in checks if c[2] == "10" and "gate ROT" in c[3]]
+        if not got:
+            print("  [FAIL] fail-closed control: a renamed DAO parameter was not reported")
+            ok = False
+        else:
+            print("  [OK]   fail-closed control: renamed DAO parameter reported as gate ROT")
+        write("dao", FIX_DAO_OK)
+
     print("ENTRY_COMPOSITE_KEY_SELFTEST=%s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
@@ -1220,7 +1502,7 @@ def main():
 
     checks = run_checks(root)
     if not checks:
-        print("entry_composite_key_guard_check: OK (9 arms clean)")
+        print("entry_composite_key_guard_check: OK (10 arms clean)")
         return 0
     for rel, line, arm, msg in checks:
         print("%s:%s [arm %s] %s" % (rel, line, arm, msg))

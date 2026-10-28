@@ -76,6 +76,44 @@ class PRootKernelBootGateTest {
         assertTrue(gate.isDone)
     }
 
+    // ---- [meta1028 D3-F02] the reset edge -------------------------------
+
+    @Test
+    fun `invalidate re-arms the gate and the body runs again`() = runBlocking {
+        val gate = BootOnceGate()
+        var runs = 0
+        assertTrue(gate.run { runs++ })
+        assertTrue(gate.isDone)
+        assertFalse("a second caller skips", gate.run { runs++ })
+        assertEquals(1, runs)
+
+        gate.invalidate()  // RootfsManager.reset() deleted the tree this body built
+
+        assertFalse("isBooted must read false again", gate.isDone)
+        assertTrue("the next caller must re-run the body", gate.run { runs++ })
+        assertEquals(2, runs)
+        assertFalse("and it is one-shot again, not every-caller", gate.run { runs++ })
+        assertEquals(2, runs)
+    }
+
+    @Test
+    fun `invalidate inside the body neither deadlocks nor sticks open`() = runBlocking {
+        // The autoRepair Stage-3 shape: the reset happens INSIDE the critical
+        // section, i.e. while this gate's own mutex is held by the body that
+        // calls invalidate(). A lock-taking invalidate would self-deadlock; the
+        // volatile store does not, and `run` re-asserts the flag when the body
+        // returns — which is the right reading, because the tail of that same
+        // body (stubs / overlay / mounts) re-materialized what the reset took.
+        val gate = BootOnceGate()
+        var inside = 0
+        val performed = gate.run { gate.invalidate(); inside++ }
+        assertTrue(performed)
+        assertEquals(1, inside)
+        assertTrue("the body completing must close the gate again", gate.isDone)
+        assertFalse("so the next caller still skips", gate.run { inside++ })
+        assertEquals(1, inside)
+    }
+
     @Test
     fun `boot wiring - gate owns the flag and boot goes through it`() {
         val src = readRepoFile(PROOT_KERNEL)
@@ -125,6 +163,23 @@ class PRootKernelBootGateTest {
         assertTrue(
             "BootOnceGate.run must accept a suspend body (its production caller awaits inside):\n$src",
             Regex("""suspend fun run\(body: suspend \(\) -> Unit\)""").containsMatchIn(src),
+        )
+        // [meta1028 D3-F02] A reset edge that nothing installs is not a fix: the
+        // handler has to be wired where RootfsManager is first obtained, and it
+        // has to be the thing that re-arms the gate.
+        assertTrue(
+            "bootCriticalSection must install the rebuild hook:\n$criticalSection",
+            criticalSection.contains("afterRootfsReinstalled ="),
+        )
+        val handler = declarationSlice(src, "private fun onRootfsReinstalled(")
+        assertTrue(
+            "the rebuild handler must re-arm the gate:\n$handler",
+            handler.contains("bootGate.invalidate()"),
+        )
+        assertTrue(
+            "the hook must be installed BEFORE the first installIfNeeded(), or a reset during " +
+                "the very first boot has nobody to notify:\n$criticalSection",
+            criticalSection.indexOf("afterRootfsReinstalled =") < criticalSection.indexOf("installIfNeeded()"),
         )
     }
 

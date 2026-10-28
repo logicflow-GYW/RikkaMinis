@@ -421,6 +421,9 @@
     <string name="skill_import_error_no_url">请输入 URL</string>
     <string name="skill_import_error_invalid">SKILL.md 无效或 skill 已存在</string>
     <string name="skill_import_error_format">SKILL.md 无效。请确认包含 \'name:\' 字段的 YAML frontmatter。</string>
+    <string name="skill_file_error_read">无法读取所选文件</string>
+    <string name="skill_file_error_archive">技能包无效：其中未找到 SKILL.md</string>
+    <string name="skill_file_error_detail">导入失败：%1$s</string>
     <string name="skill_import_in_progress">导入中…</string>
     <string name="skill_import_submit">导入</string>
     <string name="skill_detail_label_name">名称</string>
@@ -741,6 +744,8 @@
     <string name="modeldetail_capabilities_footer">上下文窗口和最大输出 Token 数（以 tokens 计）。留空使用服务商默认值。对支持扩展推理的模型启用思考模式。</string>
     <string name="modeldetail_provider_default">服务商默认</string>
     <string name="modeldetail_max_tokens_exceeds_warning">超过服务商上报的上限（%1$d）。值已保存，但可能导致请求失败。</string>
+    <string name="modeldetail_error_model_id_exists">"%1$s" 已被该服务商的另一个模型使用。请换一个模型 ID。</string>
+    <string name="add_custom_model_error_model_id_exists">"%1$s" 在该服务商下已存在。请换一个模型 ID。</string>
     <string name="modeldetail_section_input_modality">输入模态</string>
     <string name="modeldetail_image_input">图片输入</string>
     <string name="modeldetail_pdf_input">PDF 输入</string>
@@ -1380,6 +1385,7 @@
     <string name="browser_viewport_width">宽度</string>
     <string name="browser_viewport_height">高度</string>
     <string name="common_loading">加载中…</string>
+    <string name="settings_secret_unreadable">无法读取已存储的值——未保存任何内容。请关闭并重新打开此表单。</string>
     <string name="rootfs_reset_button">重置</string>
     <string name="session_title_label">标题</string>
     <string name="backup_import_too_large">备份文件太大（%1$d MB，上限 %2$d MB）— 未导入任何内容。请把「聊天历史窗口」调短或关掉后重新导出，再导入新文件。</string>

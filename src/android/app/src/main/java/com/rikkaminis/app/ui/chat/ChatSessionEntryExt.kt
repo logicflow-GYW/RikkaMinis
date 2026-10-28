@@ -6,8 +6,13 @@ import kotlinx.coroutines.launch
 
 // [FE-5 batch 8] Session-lifecycle entry cluster (loadSessionEntity /
 // updateTitleAndCategory / promoteDraftIfNeeded / ensureSession /
-// migrateDraftResources / copyRecursive) extracted verbatim from
+// migrateDraftResources) extracted verbatim from
 // ChatViewModel as extension functions.
+//
+// [meta-audit-1028 C1] The filesystem half of `migrateDraftResources` (the
+// rename-or-merge per entry, previously the inline `copyRecursive`) now lives in
+// `DraftResourceMigration.kt`, where the JVM can drive it against real
+// directories.
 
 
 /** T-chat-title-pill-edit: load the persisted [ChatSessionEntity] for the
@@ -100,6 +105,16 @@ fun ChatViewModel.regenerateSessionTitle() {
  *    composer for 150 ms; reading only the ViewModel string promoted the body as it
  *    was BEFORE the burst. `composerTextForPromotion` prefers the pending snapshot.
  *
+ * [meta-audit-1028 C1] Two more entry conditions, both on the same line:
+ *
+ *  - **An attachments-only draft is promotable.** The text guard alone skipped it
+ *    (the attachments live only in this ViewModel's `_attachments`, so nothing
+ *    survived the abandoned draft) while `send()` accepts exactly that message;
+ *    the row is then labelled by the first attachment's file name.
+ *  - **The composer copies are cleared on the main thread and only for the
+ *    snapshot captured here.** The IO half can take hundreds of milliseconds, so
+ *    anything typed or attached during it belongs to the NEXT draft.
+ *
  * Returns true when promotion was triggered — the caller should let
  * onNewChat proceed (the slot is already freed either way).
  */
@@ -110,12 +125,21 @@ fun ChatViewModel.promoteDraftIfNeeded(): Boolean {
     // body. Both New-Chat entrances ignore the return value, so returning false
     // here only says "no new promotion was triggered" — the caller still navigates.
     if (promoteInFlight) return false
+    // [meta-audit-1028 C1/F-01] Read the composer's staged uploads and BOTH text
+    // copies BEFORE the guard: an attachments-only draft is valid input (`send()`
+    // takes it verbatim, `shouldSkipCleanup` has the matching `hasAttachments`
+    // bit), and the two New-Chat entrances ignore this return value and navigate
+    // anyway — so the old `if (text.isBlank()) return false` dropped a draft that
+    // held only images/files, with the attachments living nowhere but this
+    // ViewModel's memory.
+    val stagedAttachments = _attachments.value
+    val committedAtCapture = _inputText.value
+    val pendingAtCapture = _pendingComposerText.value
     // [dv25-B08] `_inputText` commits ordinary typing per keystroke but buffers a
     // large IME burst (voice dictation / pinyin) for 150 ms; the pending snapshot
     // IS the field's live text, so it is the newest copy of what the user typed.
-    val text = composerTextForPromotion(_pendingComposerText.value, _inputText.value)
-    if (text.isBlank()) return false
-    val stagedAttachments = _attachments.value
+    val text = composerTextForPromotion(pendingAtCapture, committedAtCapture)
+    if (!hasPromotableInput(text, stagedAttachments.size)) return false
     // Captured before `ensureSession()`: that call renames the ViewModel onto the
     // real id and the draft slot is released right below.
     val draftId = sessionId
@@ -149,9 +173,11 @@ fun ChatViewModel.promoteDraftIfNeeded(): Boolean {
         try {
             val sid = ensureSession()
             if (sid.isEmpty()) return@launch
-            val title = promoteTitle(text)
+            val title = promoteTitleForDraft(text, stagedAttachments.firstOrNull()?.fileName)
+                // Same fallback the shared title editor applies (`updateTitleAndCategory`):
+                // a blank title must not reach the row label.
+                .ifBlank { "New Chat" }
             chatRepository.updateSessionTitleAndCategory(sid, title, null)
-            _sessionTitle.value = title
             // [dv25-B08] Attachments take the SAME single-source path `send()` uses:
             // copied into the promoted session's media dir, with their mediaRef parts
             // riding the transcript row (so the bubble re-renders after a reload
@@ -165,19 +191,39 @@ fun ChatViewModel.promoteDraftIfNeeded(): Boolean {
                 "user",
                 buildUserPartsJson(text, prepared.mediaRefPartsJson, prepared.attachedFilesXml),
             )
-            _messages.value = _messages.value + ChatMessage(
-                id = promoted.id,
-                role = "user",
-                content = text,
-                imageUris = prepared.imageUris,
-                attachmentNames = prepared.attachmentNames,
-                attachmentUris = prepared.nonImageUris,
-            )
-            persisted = true
-            // Only now are the composer copies redundant. See the KDoc above.
-            _inputText.value = ""
-            _attachments.value = emptyList()
-            publishPendingComposerText(null)
+            // [meta-audit-1028 C1/F-04] Everything above is IO; everything below is
+            // Compose state. The state writes are hopped onto the main thread, and
+            // each one is scoped to WHAT THIS PROMOTION CAPTURED: the IO half can
+            // take tens to hundreds of milliseconds (attachment scaling + disk
+            // writes), and the pre-fix body unconditionally blanked the composer at
+            // the end of it — discarding whatever the user typed or attached in the
+            // meantime, on a screen they can still see. `_messages` is a
+            // read-modify-write as well, so doing it off the main thread raced the
+            // streaming writers that publish on it.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                _sessionTitle.value = title
+                _messages.value = _messages.value + ChatMessage(
+                    id = promoted.id,
+                    role = "user",
+                    content = text,
+                    imageUris = prepared.imageUris,
+                    attachmentNames = prepared.attachmentNames,
+                    attachmentUris = prepared.nonImageUris,
+                )
+                // Only now are the composer copies redundant. See the KDoc above.
+                // Each copy is dropped only if it still holds the snapshot captured
+                // on entry — a newer keystroke, a newer pending burst or an extra
+                // attachment belongs to the next draft, not to this promotion.
+                if (_inputText.value == committedAtCapture) _inputText.value = ""
+                if (_pendingComposerText.value == pendingAtCapture) publishPendingComposerText(null)
+                val stagedIds = stagedAttachments.mapTo(HashSet()) { it.id }
+                if (stagedIds.isNotEmpty()) {
+                    val current = _attachments.value
+                    val remaining = current.filterNot { it.id in stagedIds }
+                    if (remaining.size != current.size) _attachments.value = remaining
+                }
+                persisted = true
+            }
         } catch (c: kotlinx.coroutines.CancellationException) {
             // Termination path: a cancelled scope must stay cancelled (the restore
             // below still runs in `finally`).
@@ -340,19 +386,44 @@ private fun ChatViewModel.migrateDraftResources(fromDraft: String, toReal: Strin
     if (!draftBase.isDirectory) return
     val realBase = java.io.File(base, toReal).apply { mkdirs() }
 
+    // [meta-audit-1028 C1/F-03] "Nothing to move" and "could not read" are
+    // different answers: an unlistable subdirectory leaves the draft tree in place
+    // (it is one of the reasons the `leftover` check below exists), it must not be
+    // reported as a clean migration.
+    var complete = true
     listOf("attachments", "offloads", "workspace", "browser").forEach { subdir ->
         val src = java.io.File(draftBase, subdir)
         if (!src.isDirectory) return@forEach
         val dst = java.io.File(realBase, subdir).apply { mkdirs() }
-        src.listFiles()?.forEach { child ->
+        val children = src.listFiles()
+        if (children == null) {
+            complete = false
+            android.util.Log.w("ChatViewModel",
+                "migrateDraftResources: cannot list ${src.absolutePath} — draft copy kept")
+            return@forEach
+        }
+        children.forEach { child ->
             val target = java.io.File(dst, child.name)
-            runCatching {
-                if (!target.exists() && !child.renameTo(target)) {
-                    copyRecursive(child, target)
-                }
-            }.onFailure {
+            // [meta-audit-1028 C1/F-03] `migrateDraftEntry` is the whole decision:
+            // rename when the name is free, MERGE when the real session already has
+            // that name (the pre-fix `!target.exists() && !child.renameTo(target)`
+            // skipped both branches in exactly that case), and `false` whenever
+            // anything is still sitting in the source — including a directory that
+            // could not be read, which the old `copyRecursive` folded into success.
+            val moved = runCatching { migrateDraftEntry(child, target) }.getOrElse { t ->
                 android.util.Log.w("ChatViewModel",
-                    "migrateDraftResources: failed to move ${child.absolutePath} -> ${target.absolutePath}: ${it.message}")
+                    "migrateDraftResources: failed to move ${child.absolutePath} -> ${target.absolutePath}: ${t.message}")
+                false
+            }
+            // [meta-audit-1028 C1/F-03] The return value used to be dropped, so a
+            // failed entry was only ever noticed by the `leftover` check at the end.
+            // Name the entry: the leftover line says the draft is kept, this says why.
+            if (!moved) {
+                complete = false
+                android.util.Log.w("ChatViewModel",
+                    "migrateDraftResources: ${child.absolutePath} stays in the draft directory " +
+                        "(name already present under ${target.absolutePath} with different " +
+                        "content, or the copy failed)")
             }
         }
     }
@@ -361,7 +432,7 @@ private fun ChatViewModel.migrateDraftResources(fromDraft: String, toReal: Strin
     // whose move had just failed — the user's attachment was logged as
     // "failed to move" and then deleted anyway.
     val leftover = runCatching { draftBase.walkTopDown().any { it.isFile } }.getOrDefault(true)
-    if (!leftover) {
+    if (!leftover && complete) {
         runCatching { draftBase.deleteRecursively() }
     } else {
         android.util.Log.w(
@@ -392,14 +463,3 @@ private fun ChatViewModel.migrateDraftResources(fromDraft: String, toReal: Strin
         }
     }
 }
-
-private fun ChatViewModel.copyRecursive(src: java.io.File, dst: java.io.File): Boolean = runCatching {
-    if (src.isDirectory) {
-        dst.mkdirs()
-        src.listFiles()?.all { copyRecursive(it, java.io.File(dst, it.name)) } ?: true
-    } else {
-        src.copyTo(dst, overwrite = false)
-        src.delete()
-        true
-    }
-}.getOrDefault(false)

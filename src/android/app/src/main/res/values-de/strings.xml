@@ -328,6 +328,9 @@
     <string name="skill_import_error_no_url">URL eingeben</string>
     <string name="skill_import_error_invalid">Ungültige SKILL.md oder Skill existiert bereits</string>
     <string name="skill_import_error_format">Ungültige SKILL.md. YAML-Frontmatter mit \'name:\'-Feld prüfen.</string>
+    <string name="skill_file_error_read">Die ausgewählte Datei konnte nicht gelesen werden</string>
+    <string name="skill_file_error_archive">Ungültiges Skill-Archiv: keine SKILL.md enthalten</string>
+    <string name="skill_file_error_detail">Import fehlgeschlagen: %1$s</string>
     <string name="skill_import_in_progress">Importiert…</string>
     <string name="skill_import_submit">Importieren</string>
     <string name="skill_detail_label_name">Name</string>
@@ -1083,6 +1086,7 @@
     <string name="browser_viewport_width">Breite</string>
     <string name="browser_viewport_height">Höhe</string>
     <string name="common_loading">Laden…</string>
+    <string name="settings_secret_unreadable">Der gespeicherte Wert konnte nicht gelesen werden — es wurde nichts gespeichert. Formular schließen und erneut öffnen.</string>
     <string name="rootfs_reset_button">Zurücksetzen</string>
     <string name="session_title_label">Titel</string>
     <string name="backup_import_too_large">Backupdatei ist zu groß (%1$d MB, max. %2$d MB) – es wurde nichts importiert. Verkürze das Chat-Verlaufsfenster (oder schalte es ab), exportiere erneut und importiere die neue Datei.</string>

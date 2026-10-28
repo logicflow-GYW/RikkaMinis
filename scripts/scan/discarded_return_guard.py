@@ -3161,6 +3161,436 @@ def failure_polarity_self_test():
           "local-negated and non-verdict shapes")
     return 0
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# [meta-audit-1028 W1] 接线三件：恢复警告漏斗 / 图像预算返回值 / 推理降采样
+#
+# 三条见证同一形态：纯函数被正确调用、结果被正确忽略。门要问的是
+# "产物有没有到达它唯一的消费者"，不是"函数名还在不在文件里"——
+# 前者的答案是 yes/no，后者的答案是"在"（而那正是缺陷的形状）。
+# ─────────────────────────────────────────────────────────────────────────
+
+FUNNEL_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/ConfigBackup.kt"
+IMGBUDGET_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatPromptAndTools.kt"
+CHAT_VM_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModel.kt"
+CHAT_HELPERS_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatStreamToolHelpers.kt"
+
+WARNING_PRODUCERS = ("chatTruncationNotes", "conversionNotes")
+COLLECT_CHANNEL = "skipped"
+ELISION_BIND_RE = re.compile(r"\bval\s+(\w+)\s*=\s*planImageElision\s*\(")
+NOOP_RESIZER_RE = re.compile(r"^\s*(?:\{\s*[^}]*->\s*null\s*\}|null)\s*$")
+
+def _wiring_code(root, rel):
+    path = os.path.join(root, rel)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return code_only(fh.read())
+
+def _body_of(code, name):
+    """(body_text, body_offset, error_or_None) for the named function."""
+    span = kast.function_body(code, name)
+    if span is None:
+        return None, None, "`%s` not found (anchor drift)" % name
+    b0, b1, kind = span
+    if kind != "block":
+        return None, None, "`%s` is no longer block-bodied (fail-closed)" % name
+    return code[b0:b1], b0, None
+
+def _stmt_containing(body, pos):
+    for a, b in kast.stmt_spans(body):
+        if a <= pos < b:
+            return body[a:b], a
+    return None, None
+
+def _feeds_channel(body, name):
+    """Is [name] read in a statement that reaches the `skipped` channel?"""
+    for a, b in kast.stmt_spans(body):
+        stmt = body[a:b]
+        if contains_ident(stmt, COLLECT_CHANNEL) and contains_ident(stmt, name):
+            return True
+    return False
+
+def _bare_statement(body, pos):
+    """Is the call at [pos] a statement of its own (result thrown away)?"""
+    line_start = body.rfind("\n", 0, pos) + 1
+    if body[line_start:pos].strip():
+        return False
+    j = pos - 1
+    while j >= 0 and body[j].isspace():
+        j -= 1
+    # `(`/`,` before it ⇒ it is an ARGUMENT (`skipped.addAll(\n  notes(..))` is fine).
+    return j < 0 or body[j] not in "(,"
+
+def _call_head(text, pos):
+    """`receiver.name` of the innermost call whose `(` opens before [pos]."""
+    depth = 0
+    i = pos - 1
+    while i >= 0:
+        ch = text[i]
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            if depth == 0:
+                j = i - 1
+                while j >= 0 and (text[j].isalnum() or text[j] in "_.?`"):
+                    j -= 1
+                return text[j + 1:i].strip()
+            depth -= 1
+        i -= 1
+    return ""
+
+def scan_warning_funnel(root):
+    """[W-B00-03] 恢复的"这份包不完整"必须到达用户。
+
+    `.minisbak` 丢分片 / JSONL 尾行坏 / 技能转换失败 / 语料预算裁剪，全部由
+    `chatTruncationNotes` 与 `conversionNotes` 算出来，而 `ImportResult.skipped`
+    是恢复完成界面唯一的告警通道。两个纯函数被调用、返回值被丢掉 —— 于是
+    100% 残缺的恢复显示"成功，0 条警告"，用户删掉原备份。
+    """
+    code = _wiring_code(root, FUNNEL_REL)
+    if code is None:
+        return ["%s: [C-W1] ConfigBackup.kt not found — the restore warning funnel is "
+                "unaudited" % FUNNEL_REL]
+    body, b0, err = _body_of(code, "import")
+    if err:
+        return ["%s: [C-W1] ConfigBackup.import: %s — re-point this criterion"
+                % (FUNNEL_REL, err)]
+    out = []
+    for producer in WARNING_PRODUCERS:
+        hits = list(re.finditer(r"(?<![\w`])" + producer + r"\s*\(", body))
+        if not hits:
+            out.append("%s: [C-W1] `%s(` is gone from import — the ONLY thing that tells the "
+                       "user a restore was partial (missing shard / bad JSONL line / dropped "
+                       "budget / degraded skill) no longer runs" % (FUNNEL_REL, producer))
+            continue
+        for m in hits:
+            line = code.count("\n", 0, b0 + m.start()) + 1
+            line_start = body.rfind("\n", 0, m.start()) + 1
+            line_end = body.find("\n", m.start())
+            line_text = body[line_start:line_end if line_end >= 0 else len(body)]
+            lead = body[line_start:m.start()].strip()
+            if _bare_statement(body, m.start()):
+                out.append("%s:%d: [C-W1] `%s(…)` sits in STATEMENT position — the warning list "
+                           "is discarded, so a package with missing shards / truncated JSONL / "
+                           "dropped skills imports as a clean 0-warning success (W-B00-03)"
+                           % (FUNNEL_REL, line, producer))
+                continue
+            if contains_ident(line_text, COLLECT_CHANNEL):
+                continue
+            if contains_ident(_call_head(body, m.start()), COLLECT_CHANNEL):
+                continue
+            target = None
+            tm = re.match(r"(?:val|var)\s+(\w+)", lead) or re.search(r"(\w+)\s*\+=", lead)
+            if tm:
+                target = tm.group(1)
+            if target and _feeds_channel(body, target):
+                continue
+            out.append("%s:%d: [C-W1] `%s(…)`'s result lands in `%s`, which never reaches "
+                       "`skipped` — the partial-restore warning is computed and then dropped "
+                       "one hop later (W-B00-03)"
+                       % (FUNNEL_REL, line, producer, target or lead[:40]))
+    return out
+
+def scan_image_budget_return(root):
+    """[W-B00-11] 预算裁剪过的消息列表必须真的被返回。
+
+    `applyRequestImageBudget` 扫出超预算图片、落盘、`planImageElision` 算出裁剪
+    后的列表、发射 UI 事件、打印 `dropped=X/Y` 日志 —— 然后 `return messages`
+    返回入参原表。三家 provider 把原图全量编码进请求体，UI 却在说"旧图已折叠"。
+    门的旧判据只问 `planImageElision(` / `tryEmit(plan)` 在不在。
+    """
+    code = _wiring_code(root, IMGBUDGET_REL)
+    if code is None:
+        return ["%s: [C-W2] ChatPromptAndTools.kt not found — the request image budget is "
+                "unaudited" % IMGBUDGET_REL]
+    body, b0, err = _body_of(code, "applyRequestImageBudget")
+    if err:
+        return ["%s: [C-W2] applyRequestImageBudget: %s — re-point this criterion"
+                % (IMGBUDGET_REL, err)]
+    m = ELISION_BIND_RE.search(body)
+    if m is None:
+        return ["%s: [C-W2] applyRequestImageBudget no longer applies `planImageElision(` — "
+                "the elision is gone, so every request carries the full history images"
+                % IMGBUDGET_REL]
+    elided = m.group(1)
+    returns = [r for r in re.finditer(r"\breturn\b(?!@)", body) if r.start() > m.start()]
+    if not returns:
+        return ["%s: [C-W2] applyRequestImageBudget computes `%s` and never returns it — the "
+                "elided list is dead code (W-B00-11)" % (IMGBUDGET_REL, elided)]
+    out = []
+    for r in returns:
+        stmt, off = _stmt_containing(body, r.start())
+        expr = stmt[r.start() - off + len("return"):] if stmt is not None else ""
+        if contains_ident(expr, elided):
+            continue
+        out.append("%s:%d: [C-W2] applyRequestImageBudget returns `%s` instead of the elided "
+                   "plan `%s.messages` — the UI is told the old images were folded while the "
+                   "request still carries every original byte (HTTP 413) (W-B00-11)"
+                   % (IMGBUDGET_REL, code.count("\n", 0, b0 + r.start()) + 1,
+                      expr.strip()[:40], elided))
+    return out
+
+def _fun_params(code, name):
+    m = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
+    if m is None:
+        return None
+    close = kast.match_bracket(code, m.end() - 1)
+    if close < 0:
+        return None
+    return code[m.end():close]
+
+def scan_inference_resizer_wiring(root):
+    """[W-04] 会话重载的批量路径必须交推理降采样器。
+
+    `buildLlmMessagesFromParsed(parsed, dir, resizeForInference)` 的第三个参数
+    决定历史原图要不要降到 2000px。它曾经有默认值 `{ _, _ -> null }`（= 不降
+    采样），于是漏传既不报错也不红门：单测自己注入 lambda，只测到它注入的那
+    个；`loadSession` 批量恢复因此每轮重发数 MB 原图。判据两侧都钉：声明不许
+    带默认（否则新调用点可以静默退出），每个调用点必须真的交。
+    """
+    out = []
+    helpers = _wiring_code(root, CHAT_HELPERS_REL)
+    vm = _wiring_code(root, CHAT_VM_REL)
+    if helpers is None or vm is None:
+        return ["%s / %s: [C-W3] missing — the batch session-reload path is unaudited "
+                "(fail-closed)" % (CHAT_HELPERS_REL, CHAT_VM_REL)]
+    params = _fun_params(helpers, "buildLlmMessagesFromParsed")
+    if params is None:
+        out.append("%s: [C-W3] buildLlmMessagesFromParsed( is gone — re-point this criterion"
+                   % CHAT_HELPERS_REL)
+    else:
+        pieces = [params[a:b] for a, b in kast.split_top(params)]
+        resizer = [p for p in pieces if re.search(r"\bresizeForInference\s*:", p)]
+        if not resizer:
+            out.append("%s: [C-W3] buildLlmMessagesFromParsed has no `resizeForInference` "
+                       "parameter — the batch reload path cannot downscale at all (W-04)"
+                       % CHAT_HELPERS_REL)
+        elif "=" in resizer[0]:
+            out.append("%s: [C-W3] buildLlmMessagesFromParsed's `resizeForInference` carries a "
+                       "DEFAULT — a call site that forgets it compiles, passes every unit test "
+                       "(they inject their own lambda) and silently re-inlines full-resolution "
+                       "originals after a session reload (W-04)" % CHAT_HELPERS_REL)
+    for rel, code in ((CHAT_VM_REL, vm), (CHAT_HELPERS_REL, helpers)):
+        for m in re.finditer(r"\bbuildLlmMessagesFromParsed\s*\(", code):
+            if re.search(r"\bfun\s+$", code[max(0, m.start() - 60):m.start()]):
+                continue
+            line = code.count("\n", 0, m.start()) + 1
+            named = {}
+            positional = []
+            for a, b in call_args(code, m.end() - 1) or []:
+                seg = code[a:b]
+                am = re.match(r"\s*([A-Za-z_]\w*)\s*=(?!=)", seg)
+                if am:
+                    named[am.group(1)] = seg[am.end():]
+                else:
+                    positional.append(seg)
+            supplied = named.get("resizeForInference")
+            if supplied is None and len(positional) >= 3:
+                supplied = positional[2]
+            if supplied is None:
+                out.append("%s:%d: [C-W3] buildLlmMessagesFromParsed( is called without "
+                           "`resizeForInference` — the default is a no-op, so this reload path "
+                           "hands the providers full-resolution originals every turn (W-04)"
+                           % (rel, line))
+            elif NOOP_RESIZER_RE.match(supplied.strip()):
+                out.append("%s:%d: [C-W3] buildLlmMessagesFromParsed( is passed a NO-OP resizer "
+                           "(`%s`) — downscaling is opted out at the call site (W-04)"
+                           % (rel, line, supplied.strip()[:40]))
+    return out
+
+def scan_wiring_sections(root):
+    """[meta-audit-1028 W1] 接线段的三条判据（C-W1 / C-W2 / C-W3）。"""
+    out = []
+    try:
+        out.extend(scan_warning_funnel(root))
+        out.extend(scan_image_budget_return(root))
+        out.extend(scan_inference_resizer_wiring(root))
+    except KotlinLexError as exc:
+        out.append("接线段: Kotlin 解析失败（fail-closed）: %s" % exc)
+    return out
+
+
+# ── [meta-audit-1028 W1] C-W1 / C-W2 / C-W3 self-test ────────────────────
+_FUNNEL_PKG = "package com.rikkaminis.app.backup\n\n"
+_BUDGET_PKG = "package com.rikkaminis.app.ui.chat\n\n"
+
+_FUNNEL_CLEAN = _FUNNEL_PKG + (
+    "object ConfigBackup {\n"
+    "    suspend fun import(root: JSONObject, skipped: MutableList<String>): Int {\n"
+    "        root.optJSONObject(\"chatTruncated\")?.let { tr ->\n"
+    "            skipped.addAll(chatTruncationNotes(tr))\n"
+    "        }\n"
+    "        skipped.addAll(conversionNotes(root.optJSONArray(\"conversionNotes\")))\n"
+    "        return 0\n"
+    "    }\n"
+    "}\n"
+)
+
+# W-B00-03: both pure functions still run, their lists are dropped.
+_FUNNEL_WITNESS = _FUNNEL_CLEAN.replace(
+    "            skipped.addAll(chatTruncationNotes(tr))\n",
+    "            chatTruncationNotes(tr)\n").replace(
+    "        skipped.addAll(conversionNotes(root.optJSONArray(\"conversionNotes\")))\n",
+    "        conversionNotes(root.optJSONArray(\"conversionNotes\"))\n")
+
+# …and the one-hop-later version: bound to a local that never reaches `skipped`.
+_FUNNEL_BOUND_LOST = _FUNNEL_CLEAN.replace(
+    "            skipped.addAll(chatTruncationNotes(tr))\n",
+    "            val notes = chatTruncationNotes(tr)\n")
+
+# A legal spelling: the local is flushed into the channel a few lines down.
+_FUNNEL_BOUND_FLUSHED = _FUNNEL_CLEAN.replace(
+    "            skipped.addAll(chatTruncationNotes(tr))\n",
+    "            val notes = chatTruncationNotes(tr)\n"
+    "            skipped.addAll(notes)\n")
+
+_FUNNEL_PRODUCERS_GONE = _FUNNEL_CLEAN.replace(
+    "skipped.addAll(chatTruncationNotes(tr))", "Unit").replace(
+    "skipped.addAll(conversionNotes(root.optJSONArray(\"conversionNotes\")))", "Unit")
+
+_BUDGET_CLEAN = _BUDGET_PKG + (
+    "internal fun applyRequestImageBudget(messages: List<LLMMessage>): List<LLMMessage> {\n"
+    "    if (messages.isEmpty()) return messages\n"
+    "    val plan = ImageBudget.planRequestBudget(images.map { it.image })\n"
+    "    val elision = planImageElision(messages = messages, droppedIds = droppedHashes)\n"
+    "    _requestBudgetEvent.tryEmit(plan)\n"
+    "    AppLogger.info(ChatViewModel.TAG, \"applyRequestImageBudget\")\n"
+    "    return elision.messages\n"
+    "}\n"
+)
+
+# W-B00-11: the plan is computed, the log fires, the raw list is returned.
+_BUDGET_WITNESS = _BUDGET_CLEAN.replace(
+    "    return elision.messages\n", "    return messages\n")
+
+# A legal spelling: an EARLY return before the elision decides nothing.
+_BUDGET_EARLY_EXIT = _BUDGET_CLEAN.replace(
+    "    if (messages.isEmpty()) return messages\n",
+    "    if (messages.isEmpty()) return messages\n"
+    "    if (!plan.mutated) return messages\n")
+
+_BUDGET_NO_ELISION = _BUDGET_CLEAN.replace(
+    "    val elision = planImageElision(messages = messages, droppedIds = droppedHashes)\n",
+    "").replace("    return elision.messages\n", "    return messages\n")
+
+_HELPERS_CLEAN = _BUDGET_PKG + (
+    "internal fun buildLlmMessagesFromParsed(\n"
+    "    parsed: List<ParsedRow>,\n"
+    "    mediaBaseDir: File,\n"
+    "    resizeForInference: (ByteArray, String) -> ByteArray?,\n"
+    "): List<LLMMessage> {\n"
+    "    return parsed.map { row ->\n"
+    "        buildSingleLlmMessage(row.entity, row.entity.partsJson, row.parts, row.malformed,\n"
+    "            mediaBaseDir, resizeForInference)\n"
+    "    }\n"
+    "}\n"
+)
+
+_VM_CLEAN = _BUDGET_PKG + (
+    "internal fun buildLlmMessages(parsed: List<ParsedRow>): List<LLMMessage> =\n"
+    "    buildLlmMessagesFromParsed(parsed, mediaStore.mediaBaseDir, ::inferenceImageResizer)\n"
+)
+
+# W-04: the third argument is simply left off (it used to be optional).
+_VM_WITNESS = _BUDGET_PKG + (
+    "internal fun buildLlmMessages(parsed: List<ParsedRow>): List<LLMMessage> =\n"
+    "    buildLlmMessagesFromParsed(parsed, mediaStore.mediaBaseDir)\n"
+)
+
+# …or supplied as the no-op that the removed default used to be.
+_VM_NOOP = _VM_CLEAN.replace("::inferenceImageResizer", "{ _, _ -> null }")
+
+# …or by name — a legal spelling.
+_VM_NAMED = _VM_CLEAN.replace(
+    "mediaStore.mediaBaseDir, ::inferenceImageResizer",
+    "mediaBaseDir = mediaStore.mediaBaseDir, resizeForInference = ::inferenceImageResizer")
+
+# the root cause the witness leaned on: the parameter carries a default again.
+_HELPERS_DEFAULTED = _HELPERS_CLEAN.replace(
+    "    resizeForInference: (ByteArray, String) -> ByteArray?,\n",
+    "    resizeForInference: (ByteArray, String) -> ByteArray? = { _, _ -> null },\n")
+
+def _wiring_fixture(files):
+    root = tempfile.mkdtemp(prefix="wiring_")
+    for rel, content in files.items():
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(content)
+    return root
+
+def wiring_self_test():
+    """[meta-audit-1028 W1] 每条见证在自己的判据下恰好红，合法拼写仍绿。"""
+    failures = []
+
+    def run(scanner, files):
+        root = _wiring_fixture(files)
+        try:
+            return scanner(root)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def arm(name, scanner, files, expect, forbid=()):
+        _ARM_COUNT[0] += 1
+        blob = " ".join(run(scanner, files))
+        ok = all(tok in blob for tok in expect) and not any(tok in blob for tok in forbid)
+        if not ok:
+            failures.append("%s: want %s / forbid %s, got %s"
+                            % (name, list(expect), list(forbid), blob[:300]))
+        else:
+            print("[ok] %s" % name)
+
+    F = FUNNEL_REL
+    B = IMGBUDGET_REL
+    H = CHAT_HELPERS_REL
+    V = CHAT_VM_REL
+    arm("C-W1 clean restore warning funnel", scan_warning_funnel,
+        {F: _FUNNEL_CLEAN}, (), ("[C-W1]",))
+    arm("C-W1 W-B00-03 (statement position) trips", scan_warning_funnel,
+        {F: _FUNNEL_WITNESS}, ("[C-W1]", "STATEMENT position"), ())
+    arm("C-W1 bound but never flushed trips", scan_warning_funnel,
+        {F: _FUNNEL_BOUND_LOST}, ("[C-W1]", "never reaches"), ())
+    arm("C-W1 bound then flushed is a legal spelling", scan_warning_funnel,
+        {F: _FUNNEL_BOUND_FLUSHED}, (), ("[C-W1]",))
+    arm("C-W1 producers removed entirely trips", scan_warning_funnel,
+        {F: _FUNNEL_PRODUCERS_GONE}, ("[C-W1]", "ONLY thing"), ())
+    arm("C-W1 anchor drift fails closed", scan_warning_funnel,
+        {F: _FUNNEL_CLEAN.replace("fun import(", "fun restoreAll(")},
+        ("[C-W1]", "anchor drift"), ())
+
+    arm("C-W2 clean budget return", scan_image_budget_return,
+        {B: _BUDGET_CLEAN}, (), ("[C-W2]",))
+    arm("C-W2 W-B00-11 (raw list returned) trips", scan_image_budget_return,
+        {B: _BUDGET_WITNESS}, ("[C-W2]", "instead of the elided plan"), ())
+    arm("C-W2 early exit before the elision stays green", scan_image_budget_return,
+        {B: _BUDGET_EARLY_EXIT}, (), ("[C-W2]",))
+    arm("C-W2 elision removed trips", scan_image_budget_return,
+        {B: _BUDGET_NO_ELISION}, ("[C-W2]", "planImageElision"), ())
+
+    arm("C-W3 clean resizer wiring", scan_inference_resizer_wiring,
+        {H: _HELPERS_CLEAN, V: _VM_CLEAN}, (), ("[C-W3]",))
+    arm("C-W3 W-04 (argument omitted) trips", scan_inference_resizer_wiring,
+        {H: _HELPERS_CLEAN, V: _VM_WITNESS}, ("[C-W3]", "without `resizeForInference`"), ())
+    arm("C-W3 no-op resizer trips", scan_inference_resizer_wiring,
+        {H: _HELPERS_CLEAN, V: _VM_NOOP}, ("[C-W3]", "NO-OP resizer"), ())
+    arm("C-W3 named argument is a legal spelling", scan_inference_resizer_wiring,
+        {H: _HELPERS_CLEAN, V: _VM_NAMED}, (), ("[C-W3]",))
+    arm("C-W3 a defaulted parameter trips", scan_inference_resizer_wiring,
+        {H: _HELPERS_DEFAULTED, V: _VM_CLEAN}, ("[C-W3]", "carries a DEFAULT"), ())
+    arm("C-W3 missing files fail closed", scan_inference_resizer_wiring,
+        {H: _HELPERS_CLEAN}, ("[C-W3]", "fail-closed"), ())
+
+    if failures:
+        for f in failures:
+            print("SELFTEST FAIL " + f)
+        return 1
+    print("✅ wiring self-test has teeth: C-W1 (restore warnings reach `skipped`), C-W2 "
+          "(applyRequestImageBudget returns the elided list), C-W3 (every batch reload hands "
+          "over a real resizer and the declaration carries no default) each flip red on their "
+          "witness, stay green on the legal spellings, and fail closed on anchor drift")
+    return 0
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -3175,9 +3605,11 @@ def main():
         rc6 = encode_verdict_self_test()
         # [W-1027 W-06] C-B4 arms (counted into the same registration marker).
         rc7 = failure_polarity_self_test()
+        # [meta-audit-1028 W1] C-W1 / C-W2 / C-W3 arms.
+        rc8 = wiring_self_test()
         # [R3-t11] Registration marker: a stable tail the main session asserts on
         # (a gate gutted to `sys.exit(0)` cannot print it with a plausible count).
-        if (rc or rc2 or rc3 or rc4 or rc5 or rc6 or rc7):
+        if (rc or rc2 or rc3 or rc4 or rc5 or rc6 or rc7 or rc8):
             return 1
         print("DISCARDED_RETURN_GUARD_SELFTEST=PASS (%d arms)" % _ARM_COUNT[0])
         return 0
@@ -3205,6 +3637,9 @@ def main():
     # [W-1027 W-06] C-B4: polarity of the keep-the-original guard around
     # saveOutcome(…) — the `!` that decides which branch is the FAILURE one.
     polarity_violations, _polarity_sites = scan_failure_polarity(args[0])
+    # [meta-audit-1028 W1] wiring section: the restore warning funnel, the
+    # request-image-budget return value and the reload downscaler argument.
+    wiring_violations = scan_wiring_sections(args[0])
     if violations:
         print("❌ 丢弃了必须消费的返回值（看似接线，实则没生效）：")
         for rel, line, snippet, fn, why in violations:
@@ -3250,8 +3685,15 @@ def main():
             print("  %s" % msg)
         print("")
         print("  共 %d 处。" % len(polarity_violations))
+    if wiring_violations:
+        print("❌ 接线段：产物算出来了，没到消费者（C-W1/C-W2/C-W3）：")
+        for msg in wiring_violations:
+            print("  %s" % msg)
+        print("")
+        print("  共 %d 处。" % len(wiring_violations))
     if (violations or drain_violations or staged_violations or stream_violations
-            or binary_violations or encode_violations or polarity_violations):
+            or binary_violations or encode_violations or polarity_violations
+            or wiring_violations):
         return 1
     print(
         "✅ discarded-return guard: no watchlisted return value is dropped "
@@ -3266,6 +3708,9 @@ def main():
           "a failure exit)")
     print("✅ discarded-return guard: failure-polarity section green (every keep-the-original "
           "exit hangs off a NEGATED saveOutcome)")
+    print("✅ discarded-return guard: wiring section green (restore warnings reach `skipped`, "
+          "the elided message list is what applyRequestImageBudget returns, every batch reload "
+          "hands over a real inference resizer)")
     return 0
 
 

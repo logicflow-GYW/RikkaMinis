@@ -281,14 +281,24 @@ fun BackupSettingsScreen(
     // JSON can appear), and a failure ABORTS the restore instead — the user is
     // told, nothing was applied, and retrying after freeing space is safe.
     // Declared before the launchers below because their callbacks invoke it.
-    val restoreWithSnapshot: (String) -> Unit = doRestore@{ json ->
+    // [meta-audit-1028 D4 F-02] [preClaimed] says the caller already holds the shared
+    // gate (see [claimRestorePayload]): every restore that has to BUILD a payload — a
+    // WebDAV download, a local snapshot/auto-backup read, the SAF import — now claims it
+    // BEFORE the download/read and hands the claim over here. Without the flag this
+    // function's own check would refuse the very restore that already holds the lock —
+    // the self-collision the [refactor-backup-gate] comment further down works around.
+    //
+    // (A lambda, not a nested `fun`, on purpose: `ime_inset_guard`'s B01-CALLS registry
+    // attributes a `SettingsScaffold(` call to the nearest preceding `fun`, so a nested
+    // one would orphan this screen's own exemption entry.)
+    val restoreWithSnapshot: (String, Boolean) -> Unit = doRestore@{ json, preClaimed ->
         // [fix restore-mutex] Reject a restore while any backup/restore path is
         // already in flight. The pre-restore snapshot export builds another full
         // 70MB+ payload; two such exports concurrently (e.g. restoring while a
         // local backup upload is running) stacks two payloads and blows the
         // 512MB heap. This is the last line of defense behind the button-level
         // guards — the snapshot-restore dialog and WebDAV sheet reach here too.
-        if (operationBusy) {
+        if (!preClaimed && operationBusy) {
             errorMessage = context.getString(R.string.backup_err_busy)
             return@doRestore
         }
@@ -423,6 +433,32 @@ fun BackupSettingsScreen(
         }
     }
 
+    // [meta-audit-1028 D4 F-02] The single claim entry for a restore that has to BUILD a
+    // payload first: the WebDAV manual/auto download, the local snapshot / auto-backup
+    // file read, and the SAF import. Claiming HERE — not inside restoreWithSnapshot — is
+    // what keeps two payloads from being resident at once, because the download/read
+    // window IS the window in which a second 70MB would be allocated. It is also why a
+    // download that finished second used to be thrown away: nothing had stopped it from
+    // starting, so restoreWithSnapshot's own check met "busy" and reported failure after
+    // the bytes were already in the heap.
+    //
+    // Returns false when the caller must not proceed; the reason has been reported.
+    val claimRestorePayload: () -> Boolean = claimRestorePayload@{
+        if (!canStartRestorePayload(
+                operationBusy = operationBusy,
+                minisbakConverting = minisbakConverting,
+            )
+        ) {
+            errorMessage = context.getString(R.string.backup_err_busy)
+            return@claimRestorePayload false
+        }
+        operationBusy = true
+        true
+    }
+
+    /** Lower the claim from [claimRestorePayload]. Never call it after a handoff. */
+    val releaseRestorePayload: () -> Unit = { operationBusy = false }
+
     // [fix-minisbak-import] .minisbak 转换 + 恢复交接的唯一入口：文件选择器
     //（明文包）与口令对话框（加密包）都走这里。
     //
@@ -454,9 +490,14 @@ fun BackupSettingsScreen(
                         pendingMinisbakBytes = pkg
                     }
                     is MinisbakImport.Plain -> {
-                        operationBusy = false
+                        // [meta-audit-1028 D4 F-02] Handoff, not release-then-recheck:
+                        // the old shape dropped the gate here and let restoreWithSnapshot
+                        // re-acquire it, which is a real (if narrow) window — another
+                        // restore could take the lock between the two statements and the
+                        // converted payload would be refused after it was already built.
+                        // Same Main frame, no suspension, so the claim never escapes.
                         handedOff = true
-                        restoreWithSnapshot(sniff.json)
+                        restoreWithSnapshot(sniff.json, true)
                     }
                 }
             } catch (t: Throwable) {
@@ -621,12 +662,28 @@ fun BackupSettingsScreen(
                 // 字节不能先 String 化：UTF-8 解码 ZIP 会丢信息。
                 // [deep-audit-1047 B-02] 上面的 readSafBytes 就是这次读取——
                 // 字节已按 MAX_PAYLOAD_BYTES 封顶，这里不再有第二个读点。
-                when {
-                    OpenMinisBackupCompat.looksLikeMinisBak(bytes) ->
-                        // [fix-minisbak-import] 嗅探/转换/恢复交接统一走
-                        // convertAndRestore（IO 线程 + 忙碌门禁 + 锁交接）。
-                        convertAndRestore(bytes, null)
-                    else -> restoreWithSnapshot(String(bytes, Charsets.UTF_8))
+                // [meta-audit-1028 D4 F-02] `String(bytes, …)` lands on Main right here
+                // and is the exact same tens-of-MB UTF-16 resident as a snapshot read:
+                // one copy is the ByteArray, the other is the String, and the restore's
+                // own snapshot export is a THIRD. Claim the gate before decoding so the
+                // two-payload heap cannot be reached from this entry either (the import
+                // row's `enabled` guard covers only the tap, and the picker callback
+                // arrives after it has been checked).
+                if (OpenMinisBackupCompat.looksLikeMinisBak(bytes)) {
+                    // [fix-minisbak-import] 嗅探/转换/恢复交接统一走
+                    // convertAndRestore（IO 线程 + 忙碌门禁 + 锁交接）。
+                    convertAndRestore(bytes, null)
+                } else if (claimRestorePayload()) {
+                    try {
+                        restoreWithSnapshot(String(bytes, Charsets.UTF_8), true)
+                    } catch (t: Throwable) {
+                        // The claim is ours and the handoff did not happen (the decode
+                        // itself can fail on a big payload) — lower it before rethrowing,
+                        // or the whole backup screen stays wedged behind a gate nobody
+                        // holds.
+                        releaseRestorePayload()
+                        throw t
+                    }
                 }
             } catch (t: Throwable) {
                 errorMessage = t.message ?: errImport
@@ -808,7 +865,15 @@ fun BackupSettingsScreen(
                                 ),
                             ),
                             icon = Icons.Filled.Restore,
-                            onClick = { snapshotRestoreTarget = file },
+                            // [meta-audit-1028 D4 F-02] A restore row cannot open the
+                            // confirm dialog while a restore payload is already being
+                            // built: the dialog's read IS the second payload. `null` is
+                            // this row's own "disabled" (SettingsRow). The claim inside
+                            // the dialog is the real gate — this only stops the tap from
+                            // queueing work that would be refused.
+                            onClick = if (operationBusy || minisbakConverting) null else ({
+                                snapshotRestoreTarget = file
+                            }),
                         )
                     }
                 }
@@ -875,7 +940,15 @@ fun BackupSettingsScreen(
                                 "yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()
                             ).format(java.util.Date(ConfigBackup.snapshotDisplayMillis(file))),
                             icon = Icons.Filled.Restore,
-                            onClick = { snapshotRestoreTarget = file },
+                            // [meta-audit-1028 D4 F-02] A restore row cannot open the
+                            // confirm dialog while a restore payload is already being
+                            // built: the dialog's read IS the second payload. `null` is
+                            // this row's own "disabled" (SettingsRow). The claim inside
+                            // the dialog is the real gate — this only stops the tap from
+                            // queueing work that would be refused.
+                            onClick = if (operationBusy || minisbakConverting) null else ({
+                                snapshotRestoreTarget = file
+                            }),
                             showDivider = index < snapshotFiles.size - 1,
                         )
                     }
@@ -1107,18 +1180,19 @@ fun BackupSettingsScreen(
                 onDismiss = { showRemoteList = false },
                 onRefresh = openRemoteList,
                 onRestore = { item ->
-                    // [refactor-backup-gate] Do NOT claim the global operationBusy
-                    // here. The async download must show progress (sheet busy) but
-                    // must not hold the single mutual-exclusion gate — restoreWith
-                    // Snapshot() is the one-and-only claim entry for restores, so
-                    // its own gate check (reject if a backup is already in flight)
-                    // still works. Holding the gate across the network gap would
-                    // make that check see "busy" and wrongly refuse this very
-                    // restore (self-collision). The download re-enables the sheet
-                    // via remoteLoading to prevent double-taps.
-                    if (!operationBusy) {
+                    // [meta-audit-1028 D4 F-02] Claim the shared gate for the WHOLE
+                    // download and hand it to restoreWithSnapshot (see
+                    // [claimRestorePayload]) instead of checking it only after the
+                    // download. The old shape left the window unguarded and used the
+                    // dialog-local `remoteLoading` for exclusion — which
+                    // `openRemoteList` clears in its own `finally`, so re-opening the
+                    // sheet mid-download re-enabled Restore and stacked a second 70MB
+                    // payload. Holding the gate also stops a download from finishing
+                    // into `backup_err_busy` (bytes paid for, restore refused).
+                    if (claimRestorePayload()) {
                         remoteLoading = true
                         application.applicationScope.launch {
+                            var handedOff = false
                             try {
                                 val json = withContext(Dispatchers.IO) {
                                     WebDavSync.restore(cfg, item, webDavHttpClient)
@@ -1128,9 +1202,14 @@ fun BackupSettingsScreen(
                                 // this block must hop back to Main, exactly like
                                 // the sibling paths in this file (see
                                 // restoreWithSnapshot's [fix-audit-p1-1] note).
+                                // The handoff happens in the same Main frame as the
+                                // read result: no suspension between the download
+                                // ending and restoreWithSnapshot taking over the
+                                // claim, so it can never be dropped on the floor.
                                 withContext(Dispatchers.Main) {
                                     showRemoteList = false
-                                    restoreWithSnapshot(json)
+                                    handedOff = true
+                                    restoreWithSnapshot(json, true)
                                 }
                             } catch (t: Throwable) {
                                 withContext(Dispatchers.Main) {
@@ -1142,7 +1221,10 @@ fun BackupSettingsScreen(
                                     body = webDavErrorMessage(context, t),
                                 )
                             } finally {
-                                withContext(Dispatchers.Main) { remoteLoading = false }
+                                withContext(Dispatchers.Main) {
+                                    remoteLoading = false
+                                    if (!handedOff) releaseRestorePayload()
+                                }
                             }
                         }
                     }
@@ -1170,12 +1252,14 @@ fun BackupSettingsScreen(
                 onDismiss = { autoRemoteOpen = false },
                 onRefresh = openAutoRemoteList,
                 onRestore = { entry ->
-                    // Same gate rationale as the manual sheet: do NOT claim
-                    // the global operationBusy across the network gap —
-                    // restoreWithSnapshot is the single claim entry.
-                    if (!operationBusy) {
+                    // [meta-audit-1028 D4 F-02] Same claim-before-download shape as the
+                    // manual sheet above (twin site, same defect, same fix): the gate is
+                    // held across the network gap and handed to restoreWithSnapshot via
+                    // [claimRestorePayload] / preClaimed.
+                    if (claimRestorePayload()) {
                         autoRemoteLoading = true
                         application.applicationScope.launch {
+                            var handedOff = false
                             try {
                                 val json = withContext(Dispatchers.IO) {
                                     WebDavSync.restoreAuto(cfg, entry, webDavHttpClient)
@@ -1185,7 +1269,8 @@ fun BackupSettingsScreen(
                                 // missed by the same batch of fixes.
                                 withContext(Dispatchers.Main) {
                                     autoRemoteOpen = false
-                                    restoreWithSnapshot(json)
+                                    handedOff = true
+                                    restoreWithSnapshot(json, true)
                                 }
                             } catch (t: Throwable) {
                                 withContext(Dispatchers.Main) {
@@ -1197,7 +1282,10 @@ fun BackupSettingsScreen(
                                     body = webDavErrorMessage(context, t),
                                 )
                             } finally {
-                                withContext(Dispatchers.Main) { autoRemoteLoading = false }
+                                withContext(Dispatchers.Main) {
+                                    autoRemoteLoading = false
+                                    if (!handedOff) releaseRestorePayload()
+                                }
                             }
                         }
                     }
@@ -1465,6 +1553,16 @@ fun BackupSettingsScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
+                        // [meta-audit-1028 D4 F-02] Claim the gate BEFORE the read, not
+                        // after it: `file.readText()` is the same tens-of-MB heap
+                        // resident as a WebDAV download, and the row this dialog was
+                        // opened from (`onClick = { snapshotRestoreTarget = file }`) is
+                        // still on screen behind it — a second row could be tapped while
+                        // the first file was in memory. The claim is handed to
+                        // restoreWithSnapshot in the same Main frame as the read result,
+                        // so a read that succeeds can never be refused by the gate it
+                        // was waiting on.
+                        if (!claimRestorePayload()) return@TextButton
                         snapshotRestoreTarget = null
                         // [audit-0908] Auto-backup files embed the artifact
                         // zip and can be tens of MB — reading them on the
@@ -1476,10 +1574,13 @@ fun BackupSettingsScreen(
                             val content = withContext(Dispatchers.IO) {
                                 runCatching { file.readText() }.getOrNull()
                             }
-                            if (content != null) {
-                                restoreWithSnapshot(content)
-                            } else {
-                                errorMessage = errRead
+                            withContext(Dispatchers.Main) {
+                                if (content != null) {
+                                    restoreWithSnapshot(content, true)
+                                } else {
+                                    releaseRestorePayload()
+                                    errorMessage = errRead
+                                }
                             }
                         }
                     },
@@ -1634,7 +1735,7 @@ fun BackupSettingsScreen(
                             importReport = null
                             snapshotNote = null
                             val snap = snapshotFiles.firstOrNull()
-                            if (snap != null) {
+                            if (snap != null && claimRestorePayload()) {
                                 // [audit-0909 T6-M3] Same off-main-thread read
                                 // as the snapshot-restore dialog above
                                 // (audit-0908): auto-backup snapshots embed the
@@ -1642,12 +1743,23 @@ fun BackupSettingsScreen(
                                 // one sits on the "restore just failed, roll me
                                 // back NOW" path — freezing it is the worst
                                 // possible moment. Last sibling of the trio.
+                                // [meta-audit-1028 D4 F-02] Claimed before the
+                                // read like every other restore payload: this
+                                // button is reachable while a WebDAV download is
+                                // still in flight, which is exactly the two-payload
+                                // heap the gate exists to prevent.
                                 scope.launch {
                                     val content = withContext(Dispatchers.IO) {
                                         runCatching { snap.readText() }.getOrNull()
                                     }
-                                    if (content != null) restoreWithSnapshot(content)
-                                    else errorMessage = errRead
+                                    withContext(Dispatchers.Main) {
+                                        if (content != null) {
+                                            restoreWithSnapshot(content, true)
+                                        } else {
+                                            releaseRestorePayload()
+                                            errorMessage = errRead
+                                        }
+                                    }
                                 }
                             }
                         },

@@ -191,6 +191,14 @@ internal fun ChatInputArea(
     // nothing pending; the job is cancelled+replaced on every new burst.
     var imeBurstBuffer by remember { mutableStateOf<String?>(null) }
     var imeBurstJob by remember { mutableStateOf<Job?>(null) }
+    // [meta-audit-1028 C3/F-03] One-shot bridge from the hardware key handler to
+    // the soft-IME Enter intercept in `onValueChange`. Compose inserts the
+    // newline for a Shift+Enter itself (the key handler returns false), so the
+    // two paths are indistinguishable by text shape alone — only the key event
+    // knows which one it was. Set on KeyDown, consumed by the next
+    // `onValueChange` whatever it is (a flag outliving its insertion would eat
+    // the next genuine soft-keyboard Enter = a lost send).
+    var shiftEnterNewlinePending by remember { mutableStateOf(false) }
     // [fix/dv19-b1] Drop the pending burst flush. Called at every point that acts
     // on — or clears — the composer: send / Enter-send (the two sites that used to
     // spell these three writes out inline) plus the slash dismiss, the slash
@@ -227,6 +235,19 @@ internal fun ChatInputArea(
         viewModel.setInputText("")
         inputFieldValue = androidx.compose.ui.text.input.TextFieldValue("")
         lastTrueCaretEnd = 0
+        // [meta-audit-1028 C3/F-04] Every clear entrance is a send / cancel —
+        // the message leaves the composer, and the pickers that were floating
+        // over it must leave with it. Neither `setInputText("")` nor the field
+        // write above touches menu state (a StateFlow-only write is not an
+        // `onValueChange`), so `@`/`/` used to stay on screen over an empty
+        // composer. Worse, `savedInputBeforeSlash` survived the send: the next
+        // tap on the chat list raises `DismissSlashMenu`, whose resolution
+        // restores that saved draft — a message already sent reappeared in the
+        // box. Drop the saved original FIRST (so `updateSlashMenuState` cannot
+        // take the over-content branch and re-open the menu on the way out).
+        viewModel.dismissMentionMenu()
+        viewModel.savedInputBeforeSlash = null
+        viewModel.updateSlashMenuState("")
     }
     // [dv24/B-05] Single funnel for "replace / append the composer body from
     // outside onValueChange" — the twin of `clearComposerInput` for the two text
@@ -250,9 +271,26 @@ internal fun ChatInputArea(
     // the StateFlow suppresses it, the mirror never re-runs, and the field keeps
     // the old slash prefix. `_pendingCaret` was also left dangling for the next
     // input.
+    // [meta-audit-1028 C3/F-01] The funnel must also DRAIN the ViewModel's
+    // one-shot caret intent. Before: the four slash outlets pass `null` and the
+    // funnel resolved the caret from `lastTrueCaretEnd` alone, so the value
+    // `showSlashMenuOverInput` / `executeSlashCommand` had just parked in
+    // `_pendingCaret` was stranded — and it could never be picked up later
+    // either, because the funnel writes BOTH copies, so the
+    // `inputFieldValue.text != inputText` guard on the mirror effect (the only
+    // reader of `consumePendingCaret()`) is already false when it re-runs.
+    // Left the composer showing `/ hello wor|ld` (caret at the pre-slash index)
+    // and left a stale intent to hijack the caret on the NEXT external write.
+    // Drain unconditionally — a stale intent must never outlive a commit — and
+    // let an explicit caller caret win over it.
     val commitComposerBody: (String, Int?) -> Unit = { text, caret ->
         cancelPendingImeBurst()
-        val at = composerCommitCaret(caret, lastTrueCaretEnd, text.length)
+        val at = composerFunnelCaret(
+            caret = caret,
+            pendingCaret = viewModel.consumePendingCaret(),
+            lastTrueCaretEnd = lastTrueCaretEnd,
+            length = text.length,
+        )
         viewModel.setInputText(text)
         inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(
             text = text,
@@ -276,6 +314,13 @@ internal fun ChatInputArea(
             when (command) {
                 ComposerCommand.ToggleSlashMenu -> {
                     cancelPendingImeBurst()
+                    // [meta-audit-1028 C3/F-04] The two pickers are mutually
+                    // exclusive (`updateMentionMenuState` defers to the slash
+                    // menu), but opening the slash menu over a live `@` token
+                    // used to leave the mention popup underneath it — two
+                    // overlays stacked over one composer. Tapping `/` is an
+                    // explicit "switch pickers" intent, so drop the other one.
+                    viewModel.dismissMentionMenu()
                     // Brace-less if/else on purpose: both resolutions sit in THIS
                     // arm's block, the one that dropped the pending burst.
                     val menuOpen = viewModel.showSlashMenu.value
@@ -1454,28 +1499,31 @@ internal fun ChatInputArea(
                             // send. Guarded to a single added newline so a
                             // paste containing newlines is NOT swallowed —
                             // those increase the count by >1 and fall through
-                            // to the normal multi-line edit. Hardware-keyboard
-                            // Enter / Shift+Enter still go through onKeyEvent
-                            // below (Shift+Enter inserts a newline there and
-                            // never reaches the send path).
-                            if (sendOnEnter && !showMentionMenu) {
-                                val oldText = inputFieldValue.text
-                                val newText = tfv.text
-                                val addedNewline = newText.length == oldText.length + 1 &&
-                                    newText.count { it == '\n' } == oldText.count { it == '\n' } + 1
-                                if (addedNewline) {
-                                    val caret = tfv.selection.end
-                                    // The inserted char sits just before the
-                                    // caret; confirm it is the newline so we
-                                    // don't misfire on an unrelated 1-char edit
-                                    // that happens to keep newline parity.
-                                    if (caret in 1..newText.length &&
-                                        newText[caret - 1] == '\n'
-                                    ) {
-                                        performEnterSend()
-                                        return@BasicTextField
-                                    }
-                                }
+                            // to the normal multi-line edit. Hardware
+                            // Shift+Enter is the exception: `onKeyEvent` below
+                            // deliberately lets it through so Compose inserts a
+                            // newline, and that insertion is byte-identical to
+                            // the soft-IME shape caught here — so the key
+                            // handler flags it and this block stands down
+                            // ([meta-audit-1028 C3/F-03]; before, Shift+Enter
+                            // sent the message instead of breaking the line).
+                            // A single pasted '\n' is still indistinguishable
+                            // from a soft Enter and still sends (see report §6).
+                            val previousFieldText = inputFieldValue.text
+                            val hardwareShiftEnterNewline = shiftEnterNewlinePending
+                            // Consume unconditionally: one key event, at most
+                            // one insertion. A flag that outlived its insertion
+                            // would swallow the next genuine soft Enter.
+                            shiftEnterNewlinePending = false
+                            if (sendOnEnter && !showMentionMenu && !hardwareShiftEnterNewline &&
+                                isEnterSendEdit(
+                                    oldText = previousFieldText,
+                                    newText = tfv.text,
+                                    caretEnd = tfv.selection.end,
+                                )
+                            ) {
+                                performEnterSend()
+                                return@BasicTextField
                             }
                             inputFieldValue = tfv
                             // [Txxx-android-composer-caret] The IME's
@@ -1484,7 +1532,14 @@ internal fun ChatInputArea(
                             // LaunchedEffect can fall back to it instead of
                             // an already-stale inputFieldValue.selection.
                             lastTrueCaretEnd = tfv.selection.end.coerceAtLeast(0)
-                            if (inputText != tfv.text) {
+                            // [meta-audit-1028 C3/F-05] `|| imeBurstBuffer != null`:
+                            // while a burst is buffered the VM string is stale,
+                            // so "text equals the VM copy" is NOT "nothing
+                            // changed" — the user may have just cut / undone the
+                            // paste back to that very string, and this branch is
+                            // the only place that drops the buffered snapshot
+                            // (and the ViewModel's pending copy) on the way out.
+                            if (inputText != tfv.text || imeBurstBuffer != null) {
                                 // [fix/voice-crash-observability tail] IME
                                 // voice dictation drives onValueChange with
                                 // high-frequency, large text bursts. Each
@@ -1500,7 +1555,16 @@ internal fun ChatInputArea(
                                 // Ordinary typing (<=8 chars) and deletes
                                 // go through immediately — instant feedback
                                 // is preserved.
-                                if (shouldDebounceImeBurst(inputText, tfv.text)) {
+                                //
+                                // [meta-audit-1028 C3/F-05] The delta is
+                                // measured against the PREVIOUS FIELD TEXT, not
+                                // `inputText`. The field is the authority and
+                                // is never more than one edit behind; the VM
+                                // string can be a whole burst behind, so after
+                                // a debounced paste every single-char edit kept
+                                // seeing `new - stale > 8` and was debounced
+                                // again — one 150 ms stall per keystroke.
+                                if (shouldDebounceImeBurst(previousFieldText, tfv.text)) {
                                     imeBurstBuffer = tfv.text
                                     imeBurstCaret = tfv.selection.end
                                     // [dv25-B08] Publish the pending snapshot to the
@@ -1554,6 +1618,13 @@ internal fun ChatInputArea(
                                         }
                                     }
                                 } else {
+                                    // [meta-audit-1028 C3/F-05] A concrete edit
+                                    // supersedes any buffered burst: its
+                                    // snapshot is older than what the user just
+                                    // typed, and its 150 ms flush would either
+                                    // be rejected later or (worse) publish a
+                                    // zombie pending copy that `New Chat` reads.
+                                    cancelPendingImeBurst()
                                     viewModel.setInputText(tfv.text)
                                     // [dv25-B08] No burst pending any more — the
                                     // committed string IS the newest copy.
@@ -1565,6 +1636,12 @@ internal fun ChatInputArea(
                                     )
                                 }
                             } else {
+                                // [meta-audit-1028 C3/F-05] Reached only with no
+                                // burst buffered (see the guard above), so the
+                                // cancel is a no-op there — kept as the funnel's
+                                // terminal state assertion: "no edit path exits
+                                // with a live burst job or a pending VM copy".
+                                cancelPendingImeBurst()
                                 // Text unchanged, caret may have moved: the @-mention
                                 // token/filter must still re-scan on a pure selection change
                                 // (the only case that doesn't go through the branches above).
@@ -1637,7 +1714,22 @@ internal fun ChatInputArea(
                                     sendOnEnter
                                 ) {
                                     performEnterSend()
-                                } else false
+                                } else {
+                                    // [meta-audit-1028 C3/F-03] Shift+Enter is
+                                    // "newline", not "send", whatever the
+                                    // Return-Key preference says. Returning
+                                    // false lets Compose insert the `\n`, and
+                                    // the flag tells the soft-IME intercept in
+                                    // `onValueChange` that this newline is the
+                                    // user's line break, not an IME Enter.
+                                    if (event.type == KeyEventType.KeyDown &&
+                                        event.key == Key.Enter &&
+                                        event.isShiftPressed
+                                    ) {
+                                        shiftEnterNewlinePending = true
+                                    }
+                                    false
+                                }
                             },
                         textStyle = mergedTextStyle,
                         cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
@@ -2063,4 +2155,46 @@ internal fun composerCommitCaret(caret: Int?, lastTrueCaretEnd: Int, length: Int
     val wanted = caret ?: lastTrueCaretEnd
     if (length <= 0) return 0
     return wanted.coerceIn(0, length)
+}
+
+/**
+ * [meta-audit-1028 C3/F-01] How the body funnel resolves the caret: an explicit
+ * caller caret wins, then the ViewModel's one-shot intent
+ * (`_pendingCaret`, parked by the slash flows and the mention insert), then the
+ * user's true caret.
+ *
+ * The middle term is the one that used to be missing. `composerCommitCaret`
+ * alone cannot see it, and the intent's only other reader (the
+ * `LaunchedEffect(inputText)` mirror) is skipped precisely when the funnel runs,
+ * because the funnel writes the field copy too. Pure so the precedence is
+ * pinned on the JVM: the funnel itself calls `viewModel.consumePendingCaret()`,
+ * which needs a composition.
+ */
+internal fun composerFunnelCaret(
+    caret: Int?,
+    pendingCaret: Int?,
+    lastTrueCaretEnd: Int,
+    length: Int,
+): Int = composerCommitCaret(caret ?: pendingCaret, lastTrueCaretEnd, length)
+
+/**
+ * [meta-audit-1028 C3/F-03] Does this `onValueChange` look like a soft-keyboard
+ * Enter (→ send) rather than an ordinary edit?
+ *
+ * Multi-line composers report Enter as a single inserted `'\n'` (the IME never
+ * fires `KeyboardActions.onSend`), so that is the whole signal: exactly one
+ * character added, exactly one newline more, and the newline sitting before the
+ * caret. A paste with line breaks adds more than one newline and falls through
+ * to the normal multi-line edit.
+ *
+ * The shape cannot separate "IME Enter" from "hardware Shift+Enter" — Compose
+ * inserts the same `'\n'` for both — so that discrimination lives one level up
+ * (the `shiftEnterNewlinePending` flag the key handler raises). A clipboard
+ * paste of a lone newline is likewise indistinguishable from a soft Enter and
+ * still sends; see the fix report's residual section.
+ */
+internal fun isEnterSendEdit(oldText: String, newText: String, caretEnd: Int): Boolean {
+    if (newText.length != oldText.length + 1) return false
+    if (newText.count { it == '\n' } != oldText.count { it == '\n' } + 1) return false
+    return caretEnd in 1..newText.length && newText[caretEnd - 1] == '\n'
 }
