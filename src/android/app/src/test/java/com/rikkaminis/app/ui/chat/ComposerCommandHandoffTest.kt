@@ -2,6 +2,7 @@ package com.rikkaminis.app.ui.chat
 
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -272,6 +273,254 @@ class ComposerCommandHandoffTest {
         assertTrue(
             "the append must be resolved against the field's live text",
             code.contains("composeAppend("),
+        )
+    }
+
+    // ── the source-shape helpers for the meta-audit-1028 C3 arms ───────────
+
+    /** The [size] characters after [marker] — fail-closed when it moved. */
+    private fun windowOf(code: String, marker: String, size: Int): String {
+        val at = code.indexOf(marker)
+        assertTrue("`$marker` is gone from the composer — re-point this arm", at >= 0)
+        return code.substring(at, minOf(code.length, at + size))
+    }
+
+    /** The characters between two markers — fail-closed on either side. */
+    private fun between(code: String, start: String, end: String): String {
+        val a = code.indexOf(start)
+        assertTrue("`$start` is gone from the composer — re-point this arm", a >= 0)
+        val b = code.indexOf(end, a)
+        assertTrue("`$end` no longer follows `$start`", b > a)
+        return code.substring(a, b)
+    }
+
+    // ── [meta-audit-1028 C3 / F-01] the funnel drains the one-shot caret ────
+    //
+    // Pre-fix, verbatim from the baseline (`bfb5b0e6`):
+    //
+    //     val at = composerCommitCaret(caret, lastTrueCaretEnd, text.length)
+    //
+    // and the four slash outlets above it pass `caret = null`, so the value
+    // `showSlashMenuOverInput` / `executeSlashCommand` parks in `_pendingCaret`
+    // could never be read: the funnel writes BOTH copies, so the
+    // `inputFieldValue.text != inputText` guard on the mirror effect (the only
+    // `consumePendingCaret()` reader) is already false when it re-runs.
+
+    @Test
+    fun `a slash outlet's pending caret wins over the remembered one`() {
+        // "/" tapped over the draft "hello world": showSlashMenuOverInput parks
+        // caret 1 and returns "/ hello world" (length 13). The caret belongs
+        // AFTER the slash — the composer used to show "/ hello wor|ld" with the
+        // caret at the pre-slash index 11.
+        assertEquals(1, composerFunnelCaret(null, 1, lastTrueCaretEnd = 11, length = 13))
+        // "/web-search " inserted from the menu: caret after the prefix (12),
+        // not at the caret the body had before the insert.
+        assertEquals(12, composerFunnelCaret(null, 12, lastTrueCaretEnd = 1, length = 12))
+    }
+
+    @Test
+    fun `an explicit caller caret beats a pending one`() {
+        // The mention-completion and caret-tagged intents resolve their own
+        // caret; a stale intent must not displace it.
+        assertEquals(3, composerFunnelCaret(3, 12, lastTrueCaretEnd = 11, length = 20))
+    }
+
+    @Test
+    fun `with no pending caret the funnel keeps its old behaviour`() {
+        assertEquals(7, composerFunnelCaret(null, null, lastTrueCaretEnd = 7, length = 20))
+        // Still clamped into the replacement (TextRange throws past its end).
+        assertEquals(5, composerFunnelCaret(null, 99, lastTrueCaretEnd = 7, length = 5))
+        assertEquals(0, composerFunnelCaret(null, 3, lastTrueCaretEnd = 7, length = 0))
+    }
+
+    @Test
+    fun `the body funnel drains the pending caret on every commit`() {
+        val body = windowOf(
+            codeOnly(read(inputAreaRel)),
+            "val commitComposerBody: (String, Int?) -> Unit = {",
+            700,
+        )
+        assertTrue(
+            "the funnel must drain `consumePendingCaret()`: it writes both copies, so the " +
+                "mirror effect that otherwise reads the intent is skipped — a pending caret " +
+                "would strand here and displace the caret on the NEXT external write",
+            body.contains("consumePendingCaret()"),
+        )
+        assertTrue(
+            "the drain must feed the caret arithmetic (composerFunnelCaret)",
+            body.contains("composerFunnelCaret("),
+        )
+        assertFalse(
+            "the funnel must not resolve the caret from the caller alone any more",
+            body.contains("composerCommitCaret(caret,"),
+        )
+    }
+
+    // ── [meta-audit-1028 C3 / F-03] Shift+Enter is a newline, not a send ────
+    //
+    // Pre-fix, verbatim from the baseline (`bfb5b0e6`): the key handler returned
+    // `false` for Shift+Enter ("so Compose inserts the newline") and the
+    // soft-IME intercept had no way to tell that insertion from an IME Enter —
+    // `sendOnEnter` made it call `performEnterSend()` on the very newline the
+    // user asked for.
+
+    @Test
+    fun `a single added newline behind the caret is the enter shape`() {
+        assertTrue(isEnterSendEdit("hello", "hello\n", 6))
+        // A newline in the middle still sends (the caret is right behind it) —
+        // unchanged from the pre-fix heuristic, pinned so the shape does not
+        // silently widen.
+        assertTrue(isEnterSendEdit("ab", "a\nb", 2))
+    }
+
+    @Test
+    fun `a pasted block of newlines is not the enter shape`() {
+        assertFalse(isEnterSendEdit("hello", "hello\nworld\n", 12))
+        assertFalse(isEnterSendEdit("", "one\ntwo", 7))
+    }
+
+    @Test
+    fun `an ordinary one-character edit is not the enter shape`() {
+        assertFalse(isEnterSendEdit("hello", "hellox", 6))
+        // A newline added but the caret is NOT behind it (e.g. a programmatic
+        // insert above the cursor): the old guard refused, keep refusing.
+        assertFalse(isEnterSendEdit("hello", "hello\n", 5))
+        assertFalse(isEnterSendEdit("hello", "hello\n", 0))
+    }
+
+    @Test
+    fun `the enter shape alone cannot separate shift enter from an ime enter`() {
+        // Why the fix needs a flag rather than a sharper predicate: Compose
+        // inserts the same single '\n' for a hardware Shift+Enter, so both
+        // events arrive here identical.
+        assertTrue(isEnterSendEdit("hello", "hello\n", 6))
+    }
+
+    @Test
+    fun `the key handler flags shift enter and the intercept stands down`() {
+        val code = codeOnly(read(inputAreaRel))
+        val key = windowOf(code, "!event.isShiftPressed", 1000)
+        assertTrue(
+            "the key handler must flag a hardware Shift+Enter (it returns false so Compose " +
+                "inserts the newline; without the flag the intercept below sends instead)",
+            key.contains("event.isShiftPressed") && key.contains("shiftEnterNewlinePending = true"),
+        )
+        val intercept = windowOf(code, "val hardwareShiftEnterNewline = shiftEnterNewlinePending", 500)
+        assertTrue(
+            "the flag must be consumed on the next change whatever it is — a flag that " +
+                "outlives its insertion swallows the following genuine soft Enter",
+            intercept.contains("shiftEnterNewlinePending = false"),
+        )
+        assertTrue(
+            "the intercept must stand down for the flagged newline",
+            intercept.contains("!hardwareShiftEnterNewline"),
+        )
+        assertTrue(
+            "the intercept must go through the shared predicate",
+            intercept.contains("isEnterSendEdit("),
+        )
+    }
+
+    // ── [meta-audit-1028 C3 / F-04] a clear takes its pickers with it ───────
+    //
+    // Pre-fix, verbatim from the baseline (`bfb5b0e6`): `clearComposerInput` was
+    // the four writes below and nothing else — no `dismissMentionMenu()`, no
+    // slash reset, no `savedInputBeforeSlash = null`. A StateFlow-only write is
+    // not an `onValueChange`, so the `@`/`/` popups stayed on screen over the
+    // empty composer, and the next `DismissSlashMenu` restored the draft that
+    // had just been sent.
+
+    @Test
+    fun `the clear funnel takes the mention and slash menus with it`() {
+        val body = windowOf(codeOnly(read(inputAreaRel)), "val clearComposerInput: () -> Unit = {", 1400)
+        assertTrue(
+            "the clear must dismiss the @-mention popup",
+            body.contains("dismissMentionMenu()"),
+        )
+        assertTrue(
+            "the clear must drop the slash menu's saved original — otherwise the next " +
+                "`DismissSlashMenu` restores the message that was just sent",
+            body.contains("savedInputBeforeSlash = null"),
+        )
+        assertTrue(
+            "the clear must reset the slash menu filter/visibility",
+            body.contains("updateSlashMenuState(\"\")"),
+        )
+        // Order matters: the saved original goes first, or updateSlashMenuState
+        // takes the over-content branch and re-opens the menu on the way out.
+        assertTrue(
+            "drop `savedInputBeforeSlash` BEFORE `updateSlashMenuState`",
+            body.indexOf("savedInputBeforeSlash = null") < body.indexOf("updateSlashMenuState("),
+        )
+    }
+
+    @Test
+    fun `tapping the slash button drops an open mention menu`() {
+        val code = codeOnly(read(inputAreaRel))
+        val arm = between(code, "ComposerCommand.ToggleSlashMenu ->", "ComposerCommand.DismissSlashMenu ->")
+        assertTrue(
+            "opening the slash menu over a live `@` token must not leave two pickers stacked",
+            arm.contains("dismissMentionMenu()"),
+        )
+        assertTrue(
+            "the dismiss must run before the menu is resolved (a resolution that prepends " +
+                "`/ ` over a mention token would keep the mention menu alive underneath)",
+            arm.indexOf("dismissMentionMenu()") < arm.indexOf("showSlashMenuOverInput("),
+        )
+    }
+
+    // ── [meta-audit-1028 C3 / F-05] the burst delta is measured on the field ─
+    //
+    // Pre-fix, verbatim from the baseline (`bfb5b0e6`):
+    //
+    //     if (inputText != tfv.text) {
+    //         if (shouldDebounceImeBurst(inputText, tfv.text)) { … }
+    //         else { viewModel.setInputText(tfv.text); … }
+    //     } else { viewModel.updateMentionMenuState(…) }
+    //
+    // `inputText` is the 150 ms-debounced ViewModel copy, so after a debounced
+    // paste it still holds the PRE-paste text.
+
+    @Test
+    fun `the burst delta must be measured against the field not the debounced copy`() {
+        // Paste lands in the field, the ViewModel is still empty → the paste
+        // itself is (correctly) a burst.
+        assertTrue(shouldDebounceImeBurst("", "hello world!"))
+        // One more char typed against the FIELD: +1, commit immediately.
+        assertFalse(shouldDebounceImeBurst("hello world!", "hello world!@"))
+        // The same keystroke measured against the debounced copy: still "a
+        // burst", i.e. one 150 ms stall per keystroke after every paste — the
+        // defect, pinned as a literal so the comparison base cannot drift back.
+        assertTrue(shouldDebounceImeBurst("", "hello world!@"))
+    }
+
+    @Test
+    fun `the debounce decision reads the previous field text`() {
+        val code = codeOnly(read(inputAreaRel))
+        assertTrue(
+            "the delta must be measured on the previous FIELD text (the authority)",
+            code.contains("shouldDebounceImeBurst(previousFieldText,"),
+        )
+        assertFalse(
+            "…never on the debounced ViewModel copy",
+            code.contains("shouldDebounceImeBurst(inputText,"),
+        )
+    }
+
+    @Test
+    fun `a buffered burst cannot outlive an edit back to the debounced copy`() {
+        val code = codeOnly(read(inputAreaRel))
+        val onValueChange = between(code, "onValueChange = { tfv ->", "modifier = Modifier")
+        assertTrue(
+            "`text == the debounced copy` is NOT `nothing changed` while a burst is " +
+                "buffered — cutting the paste back to it used to skip every cleanup",
+            onValueChange.contains("if (inputText != tfv.text || imeBurstBuffer != null)"),
+        )
+        assertTrue(
+            "both non-debounce exits must drop the buffered snapshot (nothing else " +
+                "cancels the flush job on that path); found " +
+                "${count(onValueChange, "cancelPendingImeBurst()")}",
+            count(onValueChange, "cancelPendingImeBurst()") >= 2,
         )
     }
 }
