@@ -240,7 +240,31 @@ OK (83 tests)
 
 ## 7. CI
 
-见提交信息与后续回填（本节在 CI 绿后补写 run id / head_sha / 日志读数）。
+- run **`40700295367`**（`build-apk.yml`，workflow_dispatch，ref `fix/meta1028-e3-terminal`）
+- `head_sha` = `a49599d2b0c5fd1189c58561434569cb08afa988` —— 与本地 HEAD **逐字符一致**
+- `conclusion = success`，13:51:27Z → 14:08:55Z（**17 min 28 s**）
+- 步骤：27 步里唯一两个非 success = 滚动 tag（step 23）与 Publish to Releases（step 24），
+  两者都是 `refs/heads/main` 门控 ⇒ 分支上必须 skip，**不是**失败
+- 日志读数（`/tmp/e3logs`，1 513 393 B，NUL 0）：
+  - `Summary: 113 passed, 0 failed` ×1（另有 6 条分段 Summary 16/18/19/25/30/44 —— 分片，**不是**门数变了）
+  - `ALL 349 CASES PASS` ×1
+  - 门头 `[n/113]` 编号 **1..113 互异**
+  - `^ e: ` **0**
+  - 含 `FAILED` 的行 **6 条，逐条确认全是 PASSED 用例名子串**（`slot denied produces FAILED…`、
+    `reason PERSISTENCE_FAILED…` 等），无真失败
+  - `BUILD SUCCESSFUL` ×4
+  - 单元测试步骤日志里本支四个新类全部执行：
+    `TrackedTerminalSanitizerTest` 16、`TerminalSessionEnvScriptTest` 13、
+    `TrackedStallAndTimeoutTest` 9、`TrackedShellDecisionShapeTest` 11
+
+### 与并行支的冲突面（合并时需人工核）
+
+D3 支（`fix/meta1028-d3-sandbox-p0`）也改了 `sandbox/TerminalSession.kt`：
+
+- D3 的改动：**一个 hunk**，`@@ -120,6 +120,18 @@`（`start()` 里加 rootfs-rebuilt 检测）；
+- 本支的改动块：`@@ -13,6` / `-41,6` / `-308,6` / `-328,21` / `-466,19` / `-579,6` / `-711,3`
+  —— **与 D3 的 hunk 无重叠** ⇒ 文本合并零冲突；
+- 但两支共享同一生产文件 ⇒ 并集时仍应**人工核一遍** `buildTermuxEnv` 与 `start()` 的语义没被对方改动波及。
 
 ---
 
