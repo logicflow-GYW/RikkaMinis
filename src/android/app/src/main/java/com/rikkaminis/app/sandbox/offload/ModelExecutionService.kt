@@ -271,7 +271,11 @@ class ModelExecutionService : Service() {
                     }
                 }
                 writeResultAtomically(dir, JSONObject().apply {
-                    put("error", if (poisoned) WorkerKeyFreshness.STALE_KEY_CACHE else "worker_queue_full")
+                    // [meta1028-D2 F-01] The code literal lives in the retry policy
+                    // (single source): it is the wire contract that decides whether
+                    // the non-streaming dispatcher re-dispatches onto a fresh
+                    // process, and an admission rejection never touched a provider.
+                    put("error", if (poisoned) WorkerKeyFreshness.STALE_KEY_CACHE else ModelExecutionRetryPolicy.WORKER_QUEUE_FULL)
                     put("message", "provider worker rejected: $why")
                     put("exit_code", 3)
                 }.toString())
@@ -929,7 +933,20 @@ class ModelExecutionService : Service() {
         WorkerKeyFreshness.captureBaseline(getDataDir())
         if (WorkerKeyFreshness.isStaleNow(getDataDir())) {
             abortOnStaleKeyCache(runIdOf(dir), dir)
-            return JSONObject().apply { put("error", WorkerKeyFreshness.STALE_KEY_CACHE) }.toString()
+            // [meta1028-D2 F-01] Same envelope shape as the streaming path's
+            // stale-key result (:1362): the code plus a human message, so a
+            // caller whose retries are EXHAUSTED (concurrent siblings kept the
+            // poisoned process alive past the retry budget) shows the user why
+            // instead of a bare `stale_key_cache`. exit_code stays the default
+            // 1 (runtime failure) — 2 means "invalid args" in this CLI family.
+            return JSONObject().apply {
+                put("error", WorkerKeyFreshness.STALE_KEY_CACHE)
+                put(
+                    "message",
+                    "The provider API key was replaced while this worker was alive; " +
+                        "retry the call so a fresh worker reads the new key.",
+                )
+            }.toString()
         }
         val apiKey = try {
             com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")

@@ -454,8 +454,12 @@ class CalendarOffloadHandler(private val context: Context) : NativeOffloadHandle
         // [da1031-C] ISSUE-05 B: an explicit --end at or before --start used to
         // be written as-is → DTSTART > DTEND, and the provider then hides the
         // row from list/instances/freebusy (the all-day half of this shape was
-        // fixed in da1017-D2). Only TIMED ranges are a contradiction — all-day
-        // canonical rows are dtstart == dtend (see allDayEndRepairMs).
+        // fixed in da1017-D2). [meta1028-D2 F-04] The predicate now also covers
+        // an INVERTED all-day request (`--all-day --start D20 --end D15` used
+        // to answer created:true and write the hidden row); an all-day end
+        // EQUAL to its start stays legal — that is the canonical single-day
+        // shape ([allDayEndRepairMs]), which is why the guard cannot simply
+        // drop its all-day branch.
         if (invertedTimedRange(isAllDay, startMs, endMs)) {
             return NativeOffloadResult(2, "android-calendar create: --end must be after --start\n")
         }
@@ -642,13 +646,15 @@ class CalendarOffloadHandler(private val context: Context) : NativeOffloadHandle
             return NativeOffloadResult(1, OffloadOutput.formatBody(body, args) + "\n")
         }
 
-        // [da1031-C] ISSUE-05 B: refuse a TIMED range that still ends at or
-        // before it starts once the request is resolved — an explicitly
-        // inverted --end, or an unreadable/degenerate stored row the repairs
-        // above could not replace. Fires only when the caller actually touched
-        // the range (--start / --end present): a title-only update of a
-        // pre-existing inverted row keeps working (editing notes must not be
-        // blocked by legacy data this app itself once wrote).
+        // [da1031-C] ISSUE-05 B: refuse a range that still ends at or before it
+        // starts once the request is resolved — an explicitly inverted --end, or
+        // an unreadable/degenerate stored row the repairs above could not
+        // replace. Fires only when the caller actually touched the range
+        // (--start / --end present): a title-only update of a pre-existing
+        // inverted row keeps working (editing notes must not be blocked by
+        // legacy data this app itself once wrote).
+        // [meta1028-D2 F-04] All-day updates answer to the same guard now; only
+        // their zero-width half is legal (`invertedTimedRange` KDoc).
         if (newStartMs != null || newEndMs != null) {
             val effectiveStart = newStartMs ?: stored.startMs
             val effectiveEnd = newEndMs ?: values.getAsLong(CalendarContract.Events.DTEND) ?: stored.endMs
@@ -1467,13 +1473,29 @@ class CalendarOffloadHandler(private val context: Context) : NativeOffloadHandle
          * [da1031-C] A TIMED `[start, end)` is contradictory when it ends at or
          * before it starts — the provider then hides the row from
          * list/instances/freebusy (same filter as the all-day case fixed in
-         * [da1017-D2]). All-day rows are exempt: the canonical single-day row
-         * is stored as dtstart == dtend, so an all-day end equal to its start
-         * is the CORRECT shape, not a contradiction. Pure so the truth table is
-         * JVM-testable next to [updateUsesAllDaySemantics].
+         * [da1017-D2]).
+         *
+         * [meta1028-D2 F-04] ALL-DAY rows are NOT exempt from the guard, only
+         * from its ZERO-WIDTH half: the canonical single-day row is stored as
+         * dtstart == dtend ([allDayEndRepairMs]), so `end == start` is correct
+         * there — but `end < start` is exactly the inverted row [da1017-D2]
+         * measured disappearing from `list`/`freebusy`, and the old blanket
+         * `!isAllDay` exemption let `create --all-day --start D20 --end D15`
+         * answer `created: true` while writing that row. Verified against both
+         * producers: `createEndMs` gives an all-day caller-without-`--end` a
+         * +1h span (accepted), and a caller-stated end is used verbatim.
+         *
+         * Pure so the truth table is JVM-testable next to
+         * [updateUsesAllDaySemantics].
          */
-        internal fun invertedTimedRange(isAllDay: Boolean, startMs: Long?, endMs: Long?): Boolean =
-            !isAllDay && startMs != null && endMs != null && endMs <= startMs
+        internal fun invertedTimedRange(isAllDay: Boolean, startMs: Long?, endMs: Long?): Boolean {
+            if (startMs == null || endMs == null) return false
+            // All-day: dtstart == dtend is the canonical row; only a NEGATIVE
+            // span is a contradiction.
+            if (isAllDay) return endMs < startMs
+            // Timed: an empty `[start, start)` range is degenerate too.
+            return endMs <= startMs
+        }
 
         /**
          * [da1032-C] doCreate's DTEND resolution. Three cases, and the whole

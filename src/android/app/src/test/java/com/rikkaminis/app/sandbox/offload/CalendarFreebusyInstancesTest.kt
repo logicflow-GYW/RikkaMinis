@@ -193,18 +193,34 @@ class CalendarFreebusyInstancesTest {
     }
 
     @Test
-    fun `inverted timed ranges are refused while all-day stays canonical`() {
+    fun `inverted timed ranges are refused while all-day keeps its canonical zero-width shape`() {
         assertTrue(CalendarOffloadHandler.invertedTimedRange(false, 1_795_651_200_000L, 1_795_651_200_000L))
         assertTrue(CalendarOffloadHandler.invertedTimedRange(false, 1_795_651_200_000L, 1_795_564_800_000L))
         assertFalse(CalendarOffloadHandler.invertedTimedRange(false, 1_795_651_200_000L, 1_795_656_600_000L))
         // All-day rows: the provider stores dtstart == dtend (canonical
-        // single-day shape), so end == start is CORRECT there, and the
-        // repair always lands end after start — never a contradiction.
+        // single-day shape), so end == start is CORRECT there and must stay
+        // accepted — the repair always lands end at or after start.
         assertFalse(CalendarOffloadHandler.invertedTimedRange(true, 1_795_651_200_000L, 1_795_651_200_000L))
-        assertFalse(CalendarOffloadHandler.invertedTimedRange(true, 1_795_651_200_000L, 1_795_564_800_000L))
+        // [meta1028-D2 F-04] …but a NEGATIVE all-day span is not canonical: it
+        // is exactly the inverted row da1017-D2 measured disappearing from
+        // list/freebusy, and `create --all-day --start D20 --end D15` used to
+        // answer created:true while writing it.
+        assertTrue(CalendarOffloadHandler.invertedTimedRange(true, 1_795_651_200_000L, 1_795_564_800_000L))
         // Missing bound: nothing to judge (the repair/1h default decides).
         assertFalse(CalendarOffloadHandler.invertedTimedRange(false, null, 1_795_656_600_000L))
         assertFalse(CalendarOffloadHandler.invertedTimedRange(false, 1_795_651_200_000L, null))
+        assertFalse(CalendarOffloadHandler.invertedTimedRange(true, null, 1_795_564_800_000L))
+    }
+
+    @Test
+    fun `an all-day create without --end keeps the 1h default and stays accepted`() {
+        // The guard cannot simply drop its all-day branch in the other
+        // direction either: doCreate's documented default (createEndMs →
+        // start + 1h) must keep passing for all-day callers.
+        val start = 1_795_651_200_000L
+        val defaultEnd = CalendarOffloadHandler.createEndMs(null, start) { null }
+        assertEquals(start + 3_600_000L, defaultEnd)
+        assertFalse(CalendarOffloadHandler.invertedTimedRange(true, start, defaultEnd))
     }
 
     @Test
