@@ -6,6 +6,7 @@ import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.LLMError
 import com.rikkaminis.app.data.model.parseRetryAfterMs
 import com.rikkaminis.app.provider.LegacyMediaPlan
+import com.rikkaminis.app.provider.sseDataPayload
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
@@ -265,12 +266,33 @@ class GeminiProvider(
             var line: String?
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
-                if (!l.startsWith("data: ")) continue
+                // [r3-b08 F-13] `data:{…}` (no space) is legal SSE and relays do
+                // emit it; the strict `data: ` prefix dropped every frame.
+                val payload = sseDataPayload(l)?.trim() ?: continue
+                if (payload.isEmpty()) continue
                 firstDataArrived.set(true)
                 firstDataWatchdog.cancel()
-                val payload = l.removePrefix("data: ")
 
                 val json = try { JSONObject(payload) } catch (_: Exception) { continue }
+
+                // [r3-b08 F-03] A 200 stream can carry the failure IN the body:
+                // Gemini/its relays send `data: {"error":{"code":429,…}}`. With
+                // no branch for it, the frame fell through `optJSONArray
+                // ("candidates")` and the loop ended at EOF — which the EOF
+                // guard (correctly, for a cut stream) re-signalled as truncated,
+                // so a rate limit became an EOF-continuation retry of a request
+                // the server had already refused. Mirrors the two siblings that
+                // already do this: AnthropicProvider's `"error"` event arm
+                // ([FIX-1 / F-195]) and OpenAIProvider's inline-error branch.
+                json.optJSONObject("error")?.let { err ->
+                    throw mapHttpError(
+                        geminiStreamErrorStatus(
+                            code = err.optInt("code", 0),
+                            googleStatus = err.optString("status", ""),
+                        ),
+                        payload,
+                    )
+                }
 
                 if (!started) {
                     send(LLMStreamChunk.Started)
@@ -840,3 +862,34 @@ internal fun geminiEofTerminal(
     } else {
         GeminiEofTerminal(stopReason = lastFinishReason, truncated = false)
     }
+
+/**
+ * [r3-b08 F-03] HTTP status to use for a Google-style error body
+ * (`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED",…}}`).
+ *
+ * `code` is already the HTTP status in Google's error model, so it is used
+ * verbatim whenever it is a plausible status. `status` is the fallback for the
+ * relays that keep the enum but drop/zero the code — that enum is what decides
+ * whether the stream error becomes a retryable RateLimited, a fatal
+ * InvalidApiKey, or a generic ProviderError in [GeminiProvider.mapHttpError].
+ *
+ * Pure + top-level so the table is unit-testable (see GeminiStreamErrorStatusTest)
+ * without a network stack.
+ */
+internal fun geminiStreamErrorStatus(code: Int, googleStatus: String): Int {
+    if (code in 400..599) return code
+    return when (googleStatus.trim().uppercase()) {
+        "INVALID_ARGUMENT" -> 400
+        "FAILED_PRECONDITION" -> 400
+        "OUT_OF_RANGE" -> 400
+        "UNAUTHENTICATED" -> 401
+        "PERMISSION_DENIED" -> 403
+        "NOT_FOUND" -> 404
+        "RESOURCE_EXHAUSTED" -> 429
+        "DEADLINE_EXCEEDED" -> 504
+        "INTERNAL" -> 500
+        "UNAVAILABLE" -> 503
+        "ABORTED" -> 503
+        else -> 500
+    }
+}

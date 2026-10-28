@@ -77,6 +77,15 @@ object GeminiModelsApi {
         if (cloudCodeFallback) return@withContext LLMModel.allGemini
 
         val base = normalizeBase(baseUrl)
+        // [r3-b08 F-02] A third-party relay is NOT Google: when its model list
+        // cannot be read there is no "builtin catalog" to answer with, and
+        // returning `LLMModel.allGemini` made a 404/502/parse failure look like a
+        // successful refresh whose result happened to be five Google models —
+        // ProviderRepository then replaced the relay's rows (and pruned group
+        // memberships) instead of preserving them. Same verdict the OpenAI
+        // fetcher reaches with `isCustomBase`.
+        val fallback: List<LLMModel> =
+            if (isOfficialGeminiBase(baseUrl)) LLMModel.allGemini else emptyList()
         val cacheKey = "key|$base|" + apiKey
         if (context != null && !forceRefresh) {
             cache.load(context, cacheKey)?.let { return@withContext it }
@@ -100,11 +109,11 @@ object GeminiModelsApi {
             // and hand back the builtin list.
             throw e
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "models fetch failed, using builtin list: ${e.message}")
-            return@withContext LLMModel.allGemini
+            android.util.Log.w(TAG, "models fetch failed (fallback=${fallback.size} rows): ${e.message}")
+            return@withContext fallback
         }
         try {
-            val body = response.body?.string() ?: return@withContext LLMModel.allGemini
+            val body = response.body?.string() ?: return@withContext fallback
 
             if (!response.isSuccessful) {
                 // [FIX-1 / F-196] 401/403 is an AUTH answer, not "this endpoint
@@ -130,12 +139,12 @@ object GeminiModelsApi {
                     )
                     return@withContext emptyList()
                 }
-                return@withContext LLMModel.allGemini
+                return@withContext fallback
             }
 
             val models = try {
                 val json = JSONObject(body)
-                val arr = json.optJSONArray("models") ?: return@withContext LLMModel.allGemini
+                val arr = json.optJSONArray("models") ?: return@withContext fallback
                 val result = mutableListOf<LLMModel>()
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
@@ -152,10 +161,10 @@ object GeminiModelsApi {
                         result.add(LLMModel(name, displayName, "Google"))
                     }
                 }
-                if (result.isEmpty()) return@withContext LLMModel.allGemini
+                if (result.isEmpty()) return@withContext fallback
                 ModelsDevApi.enrichModels(result)
             } catch (_: Exception) {
-                return@withContext LLMModel.allGemini
+                return@withContext fallback
             }
 
             if (context != null) cache.save(context, cacheKey, models)
@@ -164,4 +173,29 @@ object GeminiModelsApi {
             response.close()
         }
     }
+}
+
+/**
+ * [r3-b08 F-02] Whether this model-list request addresses Google itself.
+ *
+ * Blank/null (no custom base) means the public endpoint — the historical
+ * official instance. Any other host is a user relay, where the builtin catalog
+ * is not an answer to "what models does this endpoint serve".
+ *
+ * Host-based rather than `customBaseURL != null` so a user who pasted the
+ * public endpoint into the custom-base field is still treated as official.
+ *
+ * Callers branch on this because an official instance keeps the builtin Google
+ * list as its network-failure net, while a relay gets EMPTY: `ProviderRepository
+ * .refreshModels` then takes its `models.isEmpty()` path and PRESERVES the rows
+ * the user already has instead of replacing them with five Google models. (The
+ * `oauthCredential` 403 case is handled separately and deliberately keeps the
+ * builtin list — the documented Cloud Code Assist scope fallback,
+ * `[FIX-1 / F-196]`.)
+ */
+internal fun isOfficialGeminiBase(baseUrl: String?): Boolean {
+    val lower = baseUrl?.trim()?.lowercase()
+    if (lower.isNullOrEmpty()) return true
+    return lower.contains("generativelanguage.googleapis.com") ||
+        lower.contains("cloudcode-pa.googleapis.com")
 }

@@ -188,7 +188,17 @@ class DoubaoVoiceProvider(providerId: String, baseUrl: String, apiKey: String?) 
         val out = ByteArrayOutputStream()
         for (line in String(raw, Charsets.UTF_8).split('\n')) {
             val frame = runCatching { JSONObject(line) }.getOrNull() ?: continue
-            if (frame.optInt("code", -1) != 0) continue
+            // [r3-b08 F-12] A non-zero `code` frame is the server REPORTING A
+            // FAILURE (bad speaker/resource id, quota, mid-stream timeout).
+            // `continue` swallowed it: the stream then ended "normally" and a
+            // half-synthesised clip was returned as a success, so the caller had
+            // no way to fall over to another voice and the user just heard the
+            // first half of the sentence. Xunfei (same file) throws for exactly
+            // this case. `code` defaults to 0: the audio frames are the ones
+            // that may carry no code field at all.
+            doubaoFrameError(frame.optInt("code", 0), frame.optString("message", ""))?.let { err ->
+                throw VoiceProviderException.Parse(err)
+            }
             val b64 = frame.optString("data").takeIf { it.isNotEmpty() } ?: continue
             val chunk = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull() ?: continue
             out.write(chunk)
@@ -815,3 +825,21 @@ class MimoVoiceProvider(providerId: String, baseURL: String, apiKey: String?) :
             ?: throw VoiceProviderException.Parse("Unexpected MiMo TTS response format")
     }
 }
+
+/**
+ * [r3-b08 F-12] Error text for one Doubao v3 TTS response frame, or null when
+ * the frame is a normal one.
+ *
+ * Doubao's unidirectional TTS answers HTTP 200 and reports business errors
+ * INSIDE the frame stream (`{"code":30000001,"message":"invalid voice_type"}`),
+ * so the only place a failure can be noticed is here. `code == 20000000` is the
+ * vendor's "stream finished OK" sentinel and must not be read as an error.
+ *
+ * Pure + top-level for JVM testing (see DoubaoFrameErrorTest).
+ */
+internal fun doubaoFrameError(code: Int, message: String): String? =
+    if (code == 0 || code == 20000000) {
+        null
+    } else {
+        "Doubao v3 TTS error [$code]: ${message.ifBlank { "unknown error" }}"
+    }

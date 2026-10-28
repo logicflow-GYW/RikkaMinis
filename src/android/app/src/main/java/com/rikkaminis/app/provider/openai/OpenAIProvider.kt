@@ -23,6 +23,7 @@ import com.rikkaminis.app.provider.extractHttpErrorMessage
 import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
 import com.rikkaminis.app.provider.hasWirePayload
+import com.rikkaminis.app.provider.sseDataPayload
 import com.rikkaminis.app.provider.LegacyMediaPlan
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
@@ -32,6 +33,7 @@ import com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER
 import com.rikkaminis.app.provider.openai.explicitOffEffortFor
 import com.rikkaminis.app.provider.thinking.EffortTierLearner
 import com.rikkaminis.app.provider.thinking.GatewayEffortTruth
+import com.rikkaminis.app.provider.thinking.ThinkingEffortLadder
 import com.rikkaminis.app.provider.thinking.ReasoningEchoDecider
 import com.rikkaminis.app.provider.thinking.ReasoningEchoPolicy
 import com.rikkaminis.app.provider.thinking.ThinkingResolveContext
@@ -581,6 +583,12 @@ class OpenAIProvider constructor(
         val textBuf = StringBuilder()
         var stopReason: String? = null
         var usage: LLMUsage? = null
+        // [r3-b08 F-05] The stream's own truncation verdict. `Finished.truncated`
+        // is what the EOF guards raise when the upstream cut a partial answer
+        // (dv28/dv29); dropping it here turned "half a reply" into a clean
+        // success for every non-streaming caller (minis-model-use), which read
+        // the partial text as the whole answer.
+        var truncated = false
         // [T-codex-gpt-image2-oauth-android] Collect model-generated media
         // (gpt-image-2 images) so non-streaming callers — notably
         // minis-model-use (ModelUseOffloadHandler) — get them on
@@ -610,10 +618,26 @@ class OpenAIProvider constructor(
             when (chunk) {
                 is LLMStreamChunk.Text -> textBuf.append(chunk.text)
                 is LLMStreamChunk.Usage -> usage = chunk.usage
-                is LLMStreamChunk.Finished -> stopReason = chunk.stopReason
+                is LLMStreamChunk.Finished -> {
+                    stopReason = chunk.stopReason
+                    truncated = chunk.truncated
+                }
                 is LLMStreamChunk.MediaAttachment -> media.add(chunk.attachment)
+                // [r3-b08 F-05, registered] Tool calls and thinking deltas are
+                // still dropped here: LLMResponse has no field to carry either
+                // (data/model/LLMMessage.kt is outside this branch's file set),
+                // so a tool-only non-streamed turn still returns "" — see the
+                // report's residual R-F05.
                 else -> Unit
             }
+        }
+        if (truncated) {
+            // Fail loudly instead of returning half an answer as if complete.
+            // TransientError is the same class the streaming path uses for an
+            // EOF-cut stream, so callers already treat it as retryable.
+            throw LLMError.TransientError(
+                "Stream ended before completion (no finish_reason): the reply is truncated"
+            )
         }
         LLMResponse(textBuf.toString(), stopReason, usage, media)
     }
@@ -907,22 +931,20 @@ class OpenAIProvider constructor(
 
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
-                if (l.startsWith("data:")) {
-                    // First SSE payload row proves the stream is live — disarm
-                    // the first-data watchdog before we parse the row.
-                    firstDataArrived.set(true)
-                    firstDataWatchdog.cancel()
-                }
                 // Tolerate `data:` with or without the optional space — the
                 // HTML5 SSE spec only treats one leading space as ignorable,
                 // and some OpenAI-compatible servers (e.g. China Telecom's
                 // eaichat.ctyun.cn deepseek-v4-oc endpoint) emit `data:{...}`
                 // with no space. Strict `data: ` matching dropped every
                 // chunk on those providers, surfacing as empty-stream errors.
-                if (!l.startsWith("data:")) continue
-                val payload = l.removePrefix("data:").let {
-                    if (it.startsWith(" ")) it.removePrefix(" ") else it
-                }
+                // [r3-b08 F-13] The rule now lives in [sseDataPayload] so the
+                // Anthropic and Gemini parsers share it instead of each
+                // rediscovering the same relay one provider at a time.
+                val payload = sseDataPayload(l) ?: continue
+                // First SSE payload row proves the stream is live — disarm
+                // the first-data watchdog before we parse the row.
+                firstDataArrived.set(true)
+                firstDataWatchdog.cancel()
                 if (payload == "[DONE]") {
                     // Flush any remaining buffered content from think tag extraction
                     if (hasThinkTags) {
@@ -1264,7 +1286,16 @@ class OpenAIProvider constructor(
                         // Text content (with think-tag extraction — enabled for
                         // all models; extractThinkTags is a no-op when no tags
                         // are present, so this path is safe for plain text)
-                        delta?.safeOptString("content", "")?.let { text ->
+                        //
+                        // [r3-b08 F-01] The field is read through
+                        // [chatCompletionsDeltaText], NOT `safeOptString`: the
+                        // Mistral dialect above sends `content` as an ARRAY of
+                        // typed blocks, and `JSONObject.optString` on an array
+                        // returns the WHOLE array serialised as JSON — which
+                        // then went out as the assistant's visible reply while
+                        // the `{"type":"text"}` blocks inside it were skipped by
+                        // the thinking-only loop above.
+                        chatCompletionsDeltaText(delta).let { text ->
                             if (text.isNotEmpty()) {
                                 val extracted = extractThinkTags(text, thinkState)
                                 if (extracted.thinking.isNotEmpty()) send(LLMStreamChunk.ThinkingDelta(extracted.thinking))
@@ -2514,23 +2545,12 @@ class OpenAIProvider constructor(
      * - DeepSeek (pre-V4) / GLM / Kimi / MiniMax: no params (model decides).
      */
     /**
-     * [T-android-xhigh-effort-clamp] Clamp the reasoning-effort string for
-     * model families whose backend only accepts low/medium/high and 400/422 on
-     * our `xhigh` tier: MiMo-2.5/Pro and Agnes. For these, `xhigh` → `high`;
-     * every other value passes through untouched, and every other model is
-     * unaffected. Applied at the single point where each branch would emit an
-     * effort string (Chat Completions reasoning_effort / reasoning.effort AND
-     * the Responses API reasoning.effort) so no branch can leak a raw xhigh.
-     * lowercase-contains match, mirroring the T-reasoning-effort-fallback keys.
+     * [T-android-xhigh-effort-clamp] The MiMo/Agnes `xhigh` clamp lived here as
+     * a private copy of [ThinkingEffortLadder.clampEffortForModel]. [r3-b08 F-08]
+     * routed the Responses path through the shared ladder, which left this copy
+     * with zero callers — two copies of one rule is how the two paths drifted
+     * apart, so it is gone rather than kept as a second source.
      */
-    private fun clampEffortForModel(effort: String): String {
-        val lid = model.id.lowercase()
-        // [T-fallback-thinking-preclamp] Match the FAMILY substring, not one
-        // spelling: catalog docs say "MiMo-2.5" but the live API returns
-        // "mimo-v2.5" / "mimo-v2.5-pro", which the old "mimo-2.5" match missed
-        // (mirrors iOS 72968c4f).
-        return if (effort == "xhigh" && (lid.contains("mimo") || lid.contains("agnes"))) "high" else effort
-    }
 
     /**
      * [T-relay-host-adaptation] Whether this model accepts an explicit
@@ -2958,8 +2978,23 @@ class OpenAIProvider constructor(
         // [T-thinking-auto-level] AUTO maps to null effort; the effort branch
         // below skips, and the OFF branch is gated by !isEnabled (AUTO is
         // enabled), so AUTO emits NO reasoning object — vendor default applies.
+        // [r3-b08 F-08] The tier is snapped onto what the endpoint ACTUALLY
+        // accepts — the same two sources the Chat-Completions path reads (a
+        // gateway's own 400-measured enum via EffortTierLearner, then the
+        // catalog's declared set via model.reasoningEffortValues). Before this
+        // only the MiMo/Agnes family clamp ran, so a gateway that answers 400
+        // with its legal enum was recorded by the error path (`record` at the
+        // HTTP-error catch) and then IGNORED by the next request on this path —
+        // the retry re-sent the same illegal tier forever.
         val effort = if (thinkingLevel.isEnabled) {
-            mapThinkingLevelToResponsesEffort(thinkingLevel)?.let { clampEffortForModel(it) }
+            clampResponsesEffort(
+                effort = mapThinkingLevelToResponsesEffort(thinkingLevel),
+                modelId = model.id,
+                learnedEffortValues = EffortTierLearner.learned(
+                    basePath.toHttpUrlOrNull()?.host ?: "", model.id,
+                ),
+                declaredEffortValues = model.reasoningEffortValues,
+            )
         } else null
         when {
             // [T-android-mistral-reasoning-422] Mistral rejects the reasoning
@@ -3555,4 +3590,69 @@ internal object OpenAIToolResultImages {
         }
         return out
     }
+}
+
+/**
+ * [r3-b08 F-01] Text carried by one Chat-Completions `delta.content` field.
+ *
+ * `content` has TWO legal wire shapes:
+ *  - a STRING — every plain OpenAI-compatible vendor (the historical path);
+ *  - an ARRAY of typed blocks — the Mistral Magistral dialect:
+ *    `[{"type":"thinking","thinking":[{"type":"text","text":"…"}]},
+ *      {"type":"text","text":"…"}]`.
+ *
+ * `JSONObject.optString` (and therefore `safeOptString`) answers an array with
+ * the array's own JSON text, so the old string-only read put
+ * `[{"type":"thinking",…}]` into the assistant's VISIBLE reply while the
+ * `type:"text"` blocks — the actual answer — were skipped by the
+ * thinking-only loop that consumes the same array. Thinking blocks stay that
+ * loop's business; this function returns ONLY the visible text.
+ *
+ * Pure and top-level so the shape table is unit-testable
+ * (see ChatCompletionsDeltaTextTest) instead of being pinned by a streaming
+ * fixture.
+ */
+internal fun chatCompletionsDeltaText(delta: JSONObject?): String {
+    if (delta == null) return ""
+    if (delta.isNull("content")) return ""
+    val array = delta.optJSONArray("content") ?: return delta.optString("content", "")
+    val out = StringBuilder()
+    for (i in 0 until array.length()) {
+        val block = array.optJSONObject(i) ?: continue
+        if (block.optString("type", "") != "text") continue
+        out.append(block.optString("text", ""))
+    }
+    return out.toString()
+}
+
+/**
+ * [r3-b08 F-08] Tier resolution for the Responses API `reasoning.effort` field.
+ *
+ * The Chat-Completions builder resolves an effort string through
+ * `EffortTierLearner.learned(host, model)` (a gateway's own enum, learned from a
+ * 400 body) and `model.reasoningEffortValues` (the catalog's declaration), then
+ * snaps the requested tier with [ThinkingEffortLadder.clampEffort]. The
+ * Responses builder did none of that: it applied only the MiMo/Agnes family
+ * clamp, so a gateway that had already TOLD us its legal enum (via the same
+ * `EffortTierLearner.record` call the HTTP-error path makes) got the same
+ * rejected tier on every retry.
+ *
+ * Delegates both steps to [ThinkingEffortLadder] — the shared implementation —
+ * instead of copying the ladder here: two copies of "walk down, then up" is how
+ * the two paths drifted apart in the first place.
+ *
+ * `learned` outranks `declared`: a measured enum is one-hand truth, and with
+ * nothing learned the expression is exactly `declared`.
+ *
+ * Pure + top-level for direct JVM testing (see ResponsesEffortClampTest).
+ */
+internal fun clampResponsesEffort(
+    effort: String?,
+    modelId: String,
+    learnedEffortValues: List<String>?,
+    declaredEffortValues: List<String>?,
+): String? {
+    if (effort == null) return null
+    val familyClamped = ThinkingEffortLadder.clampEffortForModel(effort, modelId.lowercase())
+    return ThinkingEffortLadder.clampEffort(familyClamped, learnedEffortValues ?: declaredEffortValues)
 }

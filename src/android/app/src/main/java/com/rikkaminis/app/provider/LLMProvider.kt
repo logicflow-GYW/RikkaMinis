@@ -1,5 +1,6 @@
 package com.rikkaminis.app.provider
 
+import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.LLMError
 import com.rikkaminis.app.data.model.LLMMessage
@@ -107,7 +108,7 @@ interface LLMProvider {
                     beforeRss = beforeKb,
                     afterRss = afterKb,
                     peakRss = peakKb,
-                    inputBytes = approxInputBytes(messages, maxTokens),
+                    inputBytes = approxInputBytes(messages, imageParts),
                     outputBytes = response?.let { approxOutputBytes(it) } ?: -1L,
                 )
             )
@@ -139,12 +140,7 @@ interface LLMProvider {
                     messages, systemPrompt, maxTokens, temperature, imageParts, tools,
                     clampThinkingLevel(thinkingLevel),
                 ).onEach { chunk ->
-                    when (chunk) {
-                        is LLMStreamChunk.Text -> outBytes += chunk.text.length.toLong()
-                        is LLMStreamChunk.ThinkingDelta -> outBytes += chunk.text.length.toLong()
-                        is LLMStreamChunk.ReasoningContent -> outBytes += chunk.content.length.toLong()
-                        else -> Unit
-                    }
+                    outBytes += approxOutputChunkBytes(chunk)
                 }
             )
         } finally {
@@ -156,7 +152,7 @@ interface LLMProvider {
                     beforeRss = beforeKb,
                     afterRss = afterKb,
                     peakRss = peakKb,
-                    inputBytes = approxInputBytes(messages, maxTokens),
+                    inputBytes = approxInputBytes(messages, imageParts),
                     outputBytes = outBytes,
                 )
             )
@@ -251,15 +247,58 @@ fun Flow<LLMStreamChunk>.failOnSilentEmptyCompletion(providerName: String): Flow
 }
 
 // [provider-rss v2] 入参估算（kB 粒度即可，观测用不追求精确；含 image/audio 字节）。
-private fun approxInputBytes(messages: List<LLMMessage>, maxTokens: Int): Long {
+//
+// [r3-b08 F-14] The estimate walked `content` + per-message media only, and since
+// T132 moved tool calls / tool results / history images into `contentParts`,
+// `content` is EMPTY on exactly the heavy turns the probe exists to explain — so
+// a multi-MB tool-result round logged `in=0` and could not be correlated with an
+// RSS jump. `contentParts` and the REQUEST-level images (attached to the last
+// user turn only) are now counted. Units: UTF-16 chars stay ×2 ("~2B/char"), the
+// same convention the media branches already use in bytes.
+internal fun approxInputBytes(
+    messages: List<LLMMessage>,
+    turnImageParts: List<LLMMessage.ImagePart>,
+): Long {
     var bytes = 0L
     for (m in messages) {
-        bytes += m.content.length.toLong() * 2L // UTF-16 → ~2B/char 保守
+        bytes += m.content.length.toLong() * 2L
+        for (part in m.contentParts) bytes += approxContentPartBytes(part)
         for (img in m.imageParts) bytes += img.data.size.toLong()
         for (aud in m.audioParts) bytes += aud.base64Data.length.toLong()
     }
+    for (img in turnImageParts) bytes += img.data.size.toLong()
     return bytes
 }
 
+/** [r3-b08 F-14] One structured part's wire size. Pure — see ProviderRssEstimateTest. */
+internal fun approxContentPartBytes(part: AgentContentPart): Long = when (part) {
+    is AgentContentPart.Text -> part.text.length.toLong() * 2L
+    is AgentContentPart.ToolUse -> (part.name.length + part.input.toString().length).toLong() * 2L
+    is AgentContentPart.ToolResult ->
+        part.content.length.toLong() * 2L + (part.imageData?.size?.toLong() ?: 0L)
+    is AgentContentPart.ImageData -> part.data.size.toLong()
+}
+
 // [provider-rss v2] 非流式响应体估算（文本 UTF-16 长度近似）。
-private fun approxOutputBytes(r: LLMResponse): Long = r.text.length.toLong() * 2L
+// [r3-b08 F-14] Media the model GENERATED (image generation via the Codex
+// backend) is part of the response's memory footprint; the old text-only
+// formula logged `out=0` for a turn that materialised a multi-MB image.
+internal fun approxOutputBytes(r: LLMResponse): Long =
+    r.text.length.toLong() * 2L + r.mediaAttachments.sumOf { it.data.size.toLong() }
+
+/**
+ * [r3-b08 F-14] Per-chunk output estimate for the streaming probe. Tool-call
+ * deltas and model-generated media are output too — the previous version counted
+ * only text/thinking, so a tool-only or image-only stream logged `out=0`.
+ * `ToolInputDelta.accumulated` is the CUMULATIVE argument text (not the delta), so
+ * it is counted once at `ToolCallComplete` and the delta contributes nothing —
+ * counting both would square the argument size.
+ */
+internal fun approxOutputChunkBytes(chunk: LLMStreamChunk): Long = when (chunk) {
+    is LLMStreamChunk.Text -> chunk.text.length.toLong() * 2L
+    is LLMStreamChunk.ThinkingDelta -> chunk.text.length.toLong() * 2L
+    is LLMStreamChunk.ReasoningContent -> chunk.content.length.toLong() * 2L
+    is LLMStreamChunk.ToolCallComplete -> chunk.args.toString().length.toLong() * 2L
+    is LLMStreamChunk.MediaAttachment -> chunk.attachment.data.size.toLong()
+    else -> 0L
+}
