@@ -330,11 +330,16 @@ object AccessibilityRecoveryManager {
 
         invalidateCache()
         _revoked.value = isGrantRevoked(context)
-        AppLogger.info(TAG, "repair via Shizuku wrote grant; rebound=$bound")
-        // Report on the write succeeding: on a slow device the rebind can land
-        // just after our window, and the grant itself is what we were asked to
-        // restore. `bound` is logged for diagnosis.
-        return true
+        // [r3-B11-F09] The KDoc promises "true once the service has actually
+        // rebound", and both callers act on exactly that: the Settings row
+        // shows "repaired" and the a11y CLI proceeds straight to
+        // `svcOrThrow()`. Returning the write's exit code instead of the
+        // rebind made the CLI path fail with "service is not running" in the
+        // same turn the user was told the repair worked. One last read covers
+        // a rebind that landed during the cache refresh above.
+        val usable = bound || MinisAccessibilityService.getInstance() != null
+        AppLogger.info(TAG, "repair via Shizuku wrote grant; rebound=$bound usable=$usable")
+        return usable
     }
 
     /**
