@@ -59,16 +59,40 @@ object AutoBackupManager {
             .edit().putBoolean(KEY_ENABLED, on).apply()
     }
 
-    /** Local auto-backup files, newest first. */
+    /** Local auto-backup files, newest first.
+     *
+     *  [FIX-1028 / B-12] "Newest" is the stamp in the NAME, not `lastModified`:
+     *  a run that happens after a clock rollback writes a file whose mtime
+     *  looks older than yesterday's, and mtime ordering then makes rotation
+     *  delete the copy it just wrote. Files whose name carries no stamp (a
+     *  fetched copy keeps the server's own stamp) sort last and are never
+     *  rotation victims — see [BackupRotation.rotationVictims]. */
     fun listLocal(context: Context): List<File> {
         val dir = File(context.filesDir, DIR)
         // [FIX-P1B / FINDING-14] One matching rule for the list, rotation and
         // the settings screen (AutoBackupLocalStore.isBackupName): a finished
         // backup must end with .json, so a `.json.tmp` left by a killed run is
         // invisible here instead of showing up as the newest "backup".
+        //
+        // [FIX-1028 / B-12] The naming rule (writer) and the stamp reader
+        // (order) must agree, or every backup becomes "age unknown" and
+        // rotation stops reclaiming anything — BackupRotationTest pins the
+        // writer/reader pair, AutoBackupFetchHardeningTest the selection.
         return dir.listFiles { f -> f.isFile && AutoBackupLocalStore.isBackupName(f.name, LOCAL_FILE_PREFIX) }
-            ?.sortedByDescending { it.lastModified() } ?: emptyList()
+            ?.let { files ->
+                BackupRotation.newestFirst(
+                    files.toList(),
+                    name = { it.name },
+                    key = { BackupRotation.stampMillis(it.name, LOCAL_FILE_PREFIX) },
+                )
+            } ?: emptyList()
     }
+
+    /** [FIX-1028 / B-12] Rotation key for one local auto backup: the stamp in
+     *  its name, or null when it has none. Exposed so the settings screen's
+     *  fetch-to-local path and the nightly run order/rotate identically. */
+    fun localStampMillis(file: File): Long? =
+        BackupRotation.stampMillis(file.name, LOCAL_FILE_PREFIX)
 
     /**
      * [fix/da1023-backup-streaming-fetch] Pure selection behind
@@ -78,8 +102,17 @@ object AutoBackupManager {
      * a victim, which is what the caller asked for; both branches are
      * explicit so the boundary is unit-testable.
      */
-    fun selectLocalRotationVictims(files: List<File>, keep: Int): List<File> =
-        if (keep <= 0) files else files.drop(keep)
+    fun selectLocalRotationVictims(
+        files: List<File>,
+        keep: Int,
+        // [FIX-1028 / B-12] Deletion eligibility is a separate question from
+        // position: production passes "the name carries a stamp", so a copy
+        // whose age cannot be established is kept rather than evicted. The
+        // default (everything eligible) is the pure boundary this function has
+        // always been, and its tests pin exactly that.
+        victimEligible: (File) -> Boolean = { true },
+    ): List<File> =
+        (if (keep <= 0) files else files.drop(keep)).filter(victimEligible)
 
     /**
      * [fix/da1023-backup-streaming-fetch] Enforce the local auto-backup cap:
@@ -90,8 +123,13 @@ object AutoBackupManager {
      * rotation — every fetch added an unbounded local copy.
      */
     fun rotateLocalAutoBackups(context: Context) {
-        selectLocalRotationVictims(listLocal(context), WebDavSync.AUTO_BACKUP_KEEP)
-            .forEach { runCatching { it.delete() } }
+        selectLocalRotationVictims(
+            files = listLocal(context),
+            keep = WebDavSync.AUTO_BACKUP_KEEP,
+            // [FIX-1028 / B-12] Never delete a copy whose age we cannot read off
+            // its name: "unknown" is not "oldest".
+            victimEligible = { localStampMillis(it) != null },
+        ).forEach { runCatching { it.delete() } }
     }
 
     /** Human-readable last-run timestamp, or null when never run. */
@@ -170,7 +208,8 @@ object AutoBackupManager {
         // killed mid-write (listLocal cannot see them by design, so nothing
         // else would). Best-effort: a failed delete must never fail the backup.
         AutoBackupLocalStore.deleteStaleTemps(dir, LOCAL_FILE_PREFIX)
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        // [FIX-1028 / B-12] One stamp format for writer and reader.
+        val stamp = BackupRotation.stamp()
         val local = File(dir, AutoBackupLocalStore.fileName(LOCAL_FILE_PREFIX, stamp))
         // exportToWriter returns the count of fields it could not read. The
         // unattended path has no UI to surface them in, so a nonzero count is
@@ -218,8 +257,15 @@ object AutoBackupManager {
         val cfg = WebDavConfigStore(app).load()
         if (cfg != null && cfg.url.isNotBlank() && cfg.username.isNotBlank()) {
             runCatching {
-                WebDavSync.backupAuto(cfg, local)
-                WebDavSync.pruneAutoBackups(cfg, keep = WebDavSync.AUTO_BACKUP_KEEP)
+                // [FIX-1028 / B-12] The copy just uploaded is never a rotation
+                // victim, even when a rolled-back clock gave it an old-looking
+                // name (the remote list orders by that same name stamp).
+                val remoteName = WebDavSync.backupAuto(cfg, local)
+                WebDavSync.pruneAutoBackups(
+                    cfg,
+                    keep = WebDavSync.AUTO_BACKUP_KEEP,
+                    protectName = remoteName,
+                )
             }.onFailure { Log.w(TAG, "remote push failed: ${it.message}") }
         }
 

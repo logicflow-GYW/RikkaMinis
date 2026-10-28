@@ -243,4 +243,115 @@ class WebDavAutoBackupTest {
         val entries = WebDavSync.listAutoBackupEntries(config, client)
         assertTrue(entries.isEmpty())
     }
+    // ── [FIX-1028 / B-12] rotation keyed on the name, not `getlastmodified` ──
+
+    /** `auto/` as a server that omits `getlastmodified` reports it, plus one
+     *  copy whose name carries a foreign (unparseable) stamp. */
+    private fun autoListingWithoutLastModified(): String = multistatus(
+        davResponse("/dav/RikkaMinis_backups/auto/", "auto", isCollection = true),
+        // Listing order is deliberately NOT newest-first: with no dates a
+        // lastModified-keyed sort is a stable sort over exactly this order, so
+        // an order-blind implementation picks 10-27 as "newest" (what the
+        // server happened to list first) and deletes 10-28 — the fresh copy.
+        davResponse(
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20261027-120000.json",
+            "rikkaminis-backup-auto-20261027-120000.json", size = 200,
+        ),
+        davResponse(
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20261028-120000.json",
+            "rikkaminis-backup-auto-20261028-120000.json", size = 100,
+        ),
+        davResponse(
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-pushed-by-hand.json",
+            "rikkaminis-backup-auto-pushed-by-hand.json", size = 300,
+        ),
+    )
+
+    @Test
+    fun `prune keeps a copy whose age cannot be established`() {
+        // W5: the server tells us nothing about time. Before B-12 every entry
+        // collapsed to Instant.EPOCH, so "newest first" was listing order and
+        // rotation deleted an arbitrary copy — possibly the newest.
+        enqueue207(autoListingWithoutLastModified())
+        enqueue207(rootDir())
+        server.enqueue(MockResponse().setResponseCode(204))
+
+        val deleted = WebDavSync.pruneAutoBackups(config, keep = 1, client = client)
+        assertEquals(1, deleted)
+        server.takeRequest() // PROPFIND auto/
+        server.takeRequest() // PROPFIND root
+        val req = server.takeRequest()
+        assertEquals("DELETE", req.method)
+        assertEquals(
+            "the oldest NAMED copy dies; the unparseable one is never a victim",
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20261027-120000.json",
+            req.path,
+        )
+    }
+
+    /** Four auto copies in `auto/` (09-08 … 09-05). */
+    private fun autoListingFour(): String = multistatus(
+        davResponse("/dav/RikkaMinis_backups/auto/", "auto", isCollection = true),
+        davResponse(
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260908-080000.json",
+            "rikkaminis-backup-auto-20260908-080000.json", size = 100,
+            lastModified = "Tue, 08 Sep 2026 00:00:00 GMT",
+        ),
+        davResponse(
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260907-080000.json",
+            "rikkaminis-backup-auto-20260907-080000.json", size = 200,
+            lastModified = "Mon, 07 Sep 2026 00:00:00 GMT",
+        ),
+        davResponse(
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260906-080000.json",
+            "rikkaminis-backup-auto-20260906-080000.json", size = 300,
+            lastModified = "Sun, 06 Sep 2026 00:00:00 GMT",
+        ),
+        davResponse(
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260905-080000.json",
+            "rikkaminis-backup-auto-20260905-080000.json", size = 400,
+            lastModified = "Sat, 05 Sep 2026 00:00:00 GMT",
+        ),
+    )
+
+    @Test
+    fun `prune never deletes the copy that was just pushed`() {
+        enqueue207(autoListingFour())
+        enqueue207(rootDir())
+        server.enqueue(MockResponse().setResponseCode(204))
+
+        // A rolled-back clock named the fresh upload 09-06, i.e. it is past the
+        // keep window (2) — without protection this DELETE would hit it.
+        val deleted = WebDavSync.pruneAutoBackups(
+            config,
+            keep = 2,
+            client = client,
+            protectName = "rikkaminis-backup-auto-20260906-080000.json",
+        )
+        assertEquals(1, deleted)
+        server.takeRequest() // PROPFIND auto/
+        server.takeRequest() // PROPFIND root
+        val req = server.takeRequest()
+        assertEquals(
+            "the protected copy is skipped; the next-oldest dies instead",
+            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260905-080000.json",
+            req.path,
+        )
+    }
+
+    @Test
+    fun `listAutoBackupEntries orders by name when the server sends no dates`() {
+        enqueue207(autoListingWithoutLastModified())
+        enqueue207(rootListing())
+        val entries = WebDavSync.listAutoBackupEntries(config, client)
+        val autoNames = entries.filter { it.subdir == "auto" }.map { it.item.displayName }
+        assertEquals(
+            listOf(
+                "rikkaminis-backup-auto-20261028-120000.json",
+                "rikkaminis-backup-auto-20261027-120000.json",
+                "rikkaminis-backup-auto-pushed-by-hand.json",
+            ),
+            autoNames,
+        )
+    }
 }

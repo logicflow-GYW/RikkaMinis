@@ -201,6 +201,74 @@ class AutoBackupFetchHardeningTest {
             r3.body.readUtf8(),
         )
     }
+
+    // ── [FIX-1028 / B-12] local rotation: name stamp, not mtime ───────────
+
+    private fun namedBackup(dir: File, name: String): File =
+        File(dir, name).apply { writeText("""{"n":"$name"}""") }
+
+    private fun freshDir(): File = File.createTempFile("autos", "").let { f ->
+        f.delete()
+        f.mkdirs()
+        f
+    }
+
+    @Test
+    fun `local rotation deletes the oldest by name and never an unreadable copy`() {
+        val dir = freshDir()
+        try {
+            val prefix = "rikkaminis-auto-"
+            val newest = namedBackup(dir, "${prefix}20261028-120000.json")
+            val older = namedBackup(dir, "${prefix}20261027-120000.json")
+            // A copy fetched from a server that named it something we cannot
+            // date. Age unknown => never a victim.
+            val foreign = namedBackup(dir, "${prefix}fetched-copy.json")
+            // mtime contradicts the names, exactly like a rolled-back clock.
+            newest.setLastModified(1_000_000_000_000L)
+            older.setLastModified(2_000_000_000_000L)
+            foreign.setLastModified(3_000_000_000_000L)
+
+            val ordered = BackupRotation.newestFirst(
+                listOf(older, foreign, newest),
+                name = { it.name },
+                key = { AutoBackupManager.localStampMillis(it) },
+            )
+            assertEquals(
+                listOf(newest.name, older.name, foreign.name),
+                ordered.map { it.name },
+            )
+
+            val victims = AutoBackupManager.selectLocalRotationVictims(
+                files = ordered,
+                keep = 1,
+                victimEligible = { AutoBackupManager.localStampMillis(it) != null },
+            )
+            assertEquals(listOf(older.name), victims.map { it.name })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `localStampMillis only answers for names the writer could have minted`() {
+        val dir = freshDir()
+        try {
+            assertTrue(
+                AutoBackupManager.localStampMillis(
+                    namedBackup(dir, "rikkaminis-auto-20261028-120000.json"),
+                ) != null,
+            )
+            // A fetched remote stamp (sanitized, arbitrary) carries no age.
+            assertNull(
+                AutoBackupManager.localStampMillis(namedBackup(dir, "rikkaminis-auto-2026_10_17.json")),
+            )
+            assertNull(
+                AutoBackupManager.localStampMillis(namedBackup(dir, "rikkaminis-auto-backup.json")),
+            )
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }
 
 /** Indirection so the rotation tests read like production usage without
