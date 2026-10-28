@@ -181,13 +181,13 @@ class OpenMinisBackupCompatTest {
         )
         .toString()
 
-    private fun messageLine() = JSONObject()
+    private fun messageLine(id: String = "msg-1") = JSONObject()
         .put("t", "MessageV2")
         .put("v", 1)
         .put(
             "d",
             JSONObject()
-                .put("id", "msg-1")
+                .put("id", id)
                 .put("sessionId", "sess-1")
                 .put("role", "user")
                 .put(
@@ -879,5 +879,127 @@ class OpenMinisBackupCompatTest {
         assertFalse(g.has("lastContextLimitTokens"))
         // fallbackStrategy 有默认值语义（导入端 create 路径 default）⇒ 照写
         assertEquals("default", g.getString("fallbackStrategy"))
+    }
+
+    // ------------------------------------------------------------------
+    // [FIX-P1B / RT-S1] JSONL 分片缺失：缺片不是序列终点
+    // ------------------------------------------------------------------
+
+    private fun missingShardPackage(vararg entries: Pair<String, ByteArray>): ByteArray {
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/sessions.jsonl" to textEntry(sessionLine(true) + "\n")
+        members += entries
+        return zipOf(*members.toTypedArray())
+    }
+
+    private fun idsOf(arr: JSONArray): List<String> =
+        (0 until arr.length()).map { arr.getJSONObject(it).getString("id") }
+
+    private fun namesOf(arr: JSONArray): List<String> =
+        (0 until arr.length()).map { arr.getString(it) }
+
+    /**
+     * 世界 W3（分片文件消失）：`data/messages.jsonl` 与 `data/messages-0003.jsonl`
+     * 都在，`-0002` 不在。
+     *
+     * 原实现 `readMember(...) ?: break` 把第一个空洞当序列终点 ⇒ 只读到 1 条，
+     * `-0003` 及其后全部丢弃，且不留任何标记（导入侧看到的是一个「成功」的
+     * 短历史）。判据 = 读到的条数等于**实际能读到的那几片之和**，且缺片数
+     * 被报告出来。
+     */
+    @Test
+    fun `missing middle message shard keeps later shards and reports the hole`() {
+        val pkg = missingShardPackage(
+            "data/messages.jsonl" to textEntry(messageLine("msg-1") + "\n"),
+            "data/messages-0003.jsonl" to textEntry(messageLine("msg-3") + "\n"),
+        )
+        val doc = JSONObject(OpenMinisBackupCompat.convert(pkg, null))
+
+        assertEquals(listOf("msg-1", "msg-3"), idsOf(doc.getJSONArray("chatMessages")))
+        val trunc = doc.optJSONObject("chatTruncated")
+        assertNotNull("缺片必须留下标记，不允许静默的部分恢复", trunc)
+        assertEquals(1, trunc!!.getInt("shardsMissing"))
+        assertEquals(1, trunc.getInt("messagesShardsMissing"))
+        assertEquals(0, trunc.getInt("sessionsShardsMissing"))
+        assertEquals(0, trunc.getInt("thinkingRulesShardsMissing"))
+        assertEquals(listOf("data/messages-0002.jsonl"), namesOf(trunc.getJSONArray("missingShards")))
+    }
+
+    /**
+     * 缺的是**第一片**（没有 `data/messages.jsonl`，只有 `-0002`）：仍要读到
+     * `-0002` 的记录，并把第 1 片报成缺片。
+     */
+    @Test
+    fun `missing first message shard still reads the second one`() {
+        val pkg = missingShardPackage(
+            "data/messages-0002.jsonl" to textEntry(messageLine("msg-2") + "\n"),
+        )
+        val doc = JSONObject(OpenMinisBackupCompat.convert(pkg, null))
+        assertEquals(listOf("msg-2"), idsOf(doc.getJSONArray("chatMessages")))
+        val trunc = doc.getJSONObject("chatTruncated")
+        assertEquals(1, trunc.getInt("shardsMissing"))
+        assertEquals(listOf("data/messages.jsonl"), namesOf(trunc.getJSONArray("missingShards")))
+    }
+
+    /**
+     * 终点判据的反面：**末尾连续读不到的序号不是缺片**。
+     *
+     * 正常包在最后一片之后必然有一串读不到的序号（这里是 2、3、4…）。若把它们
+     * 当成缺片，每个正常包的导入都会报「N 片缺失」。所以正常包必须完全不出现
+     * `chatTruncated` 段（文档形状与升级前逐键一致）。
+     */
+    @Test
+    fun `a complete package reports no shard loss`() {
+        val doc = JSONObject(OpenMinisBackupCompat.convert(plainPackage(), null))
+        assertFalse(
+            "正常包不得出现缺片标记（末尾探测不算缺片）",
+            doc.has("chatTruncated"),
+        )
+        assertEquals(1, doc.getJSONArray("chatMessages").length())
+    }
+
+    /**
+     * 会话流与消息流各自独立：会话缺片不能牵连消息，反之亦然。
+     */
+    @Test
+    fun `session shard hole does not implicate the message stream`() {
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/sessions.jsonl" to textEntry(sessionLine(true) + "\n")
+        members += "data/sessions-0003.jsonl" to textEntry(sessionLine(true) + "\n")
+        members += "data/messages.jsonl" to textEntry(messageLine() + "\n")
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+
+        assertEquals(2, doc.getJSONArray("chatSessions").length())
+        assertEquals(1, doc.getJSONArray("chatMessages").length())
+        val trunc = doc.getJSONObject("chatTruncated")
+        assertEquals(1, trunc.getInt("sessionsShardsMissing"))
+        assertEquals(0, trunc.getInt("messagesShardsMissing"))
+        assertEquals(listOf("data/sessions-0002.jsonl"), namesOf(trunc.getJSONArray("missingShards")))
+    }
+
+    /**
+     * 关掉聊天迁移时根本不读聊天分片 ⇒ 聊天缺片不该报告（没读就不能声称缺）。
+     * 但同一次转换里 thinking_rules 的缺片仍要报告 —— 报告段是「这个包不完整」，
+     * 不只是「聊天不完整」。
+     */
+    @Test
+    fun `skipping chats neither reports chat holes nor hides rule holes`() {
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/provider_config.json" to jsonEntry(providerConfig())
+        members += "data/thinking_rules.jsonl" to textEntry(thinkingRulesLine() + "\n")
+        members += "data/thinking_rules-0003.jsonl" to textEntry(thinkingRulesLine() + "\n")
+        members += "data/messages.jsonl" to textEntry(messageLine() + "\n")
+        val doc = JSONObject(
+            OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray()), null, includeChats = false),
+        )
+        assertEquals(0, doc.getJSONArray("chatMessages").length())
+        val trunc = doc.getJSONObject("chatTruncated")
+        assertEquals(0, trunc.getInt("messagesShardsMissing"))
+        assertEquals(0, trunc.getInt("sessionsShardsMissing"))
+        assertEquals(1, trunc.getInt("thinkingRulesShardsMissing"))
+        assertEquals(listOf("data/thinking_rules-0002.jsonl"), namesOf(trunc.getJSONArray("missingShards")))
     }
 }

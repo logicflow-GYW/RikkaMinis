@@ -1209,9 +1209,20 @@ fun BackupSettingsScreen(
                                 }
                                 val local = File(
                                     dir,
-                                    com.rikkaminis.app.backup.AutoBackupManager.LOCAL_FILE_PREFIX + stamp + ".json",
+                                    com.rikkaminis.app.backup.AutoBackupLocalStore.fileName(
+                                        com.rikkaminis.app.backup.AutoBackupManager.LOCAL_FILE_PREFIX,
+                                        stamp,
+                                    ),
                                 )
-                                withContext(Dispatchers.IO) { local.writeText(json) }
+                                // [FIX-P1B / FINDING-14] Second writer into the
+                                // same directory: a plain writeText leaves a
+                                // truncated document after a kill mid-write, and
+                                // it looks like a legal backup to listLocal (the
+                                // nightly path had the same hole). Route it
+                                // through the repo's existing atomic write.
+                                withContext(Dispatchers.IO) {
+                                    com.rikkaminis.app.tools.AtomicFileWrite.write(local, json)
+                                }
                                 // [fix/da1023-backup-streaming-fetch] The
                                 // fetched copy joins the SAME local rotation
                                 // as the nightly writes — before this, every
