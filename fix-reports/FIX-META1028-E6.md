@@ -192,7 +192,22 @@ Compose 屏无法在沙箱编译（无 Android SDK），但 F-13 两处改动的
 
 - [x] 本地 27 例绿；13 臂变异各钉其红；协程探针 14 断言绿；5 个邻门 rc=0
 - [x] push + `gh-actions-dispatch`（run created 2026-10-28T13:15:00Z）
-- [ ] CI 绿 + head_sha 逐字符一致 = **停止节点**
-- [x] 本报告提交后 push；非报告差异为空
+- [x] **CI 绿**：run [`40694700743`](https://github.com/logicflow-GYW/RikkaMinis/actions/runs/40694700743) — conclusion `success`，20.7 min（13:15:03 → 13:35:43），job `122838263175`，**head_sha `2628d8ce739546a21677c3480dc0aff0bcfcbb10` 与门提交逐字符一致**
+- [x] 本报告提交后 push；`git diff --name-only 2628d8ce..HEAD -- . ':(exclude)fix-reports'` = **空**
+
+**CI 日志逐条判读**（1,503,788 字符 / NUL 0）：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 113 passed, 0 failed` | ×1 |
+| `ALL 349 CASES PASS` | ×1 |
+| 门头 `[N/113]` | 113 个，编号 1..113 互异 |
+| `^ e: `（Kotlin 编译错） | **0** |
+| `BUILD SUCCESSFUL` | ×4 |
+| 含 `FAILED` 的行 | 6 条，**逐条确认全是 PASSED 用例名子串**（`RealAgentAdapterSkeletonTest` / `ChatAgentTraceObserverSchemaTest` ×4 / `TerminalErrorSurfacedTest`） |
+| 新类 `ChatMenuDragReorderTest` | **17 条全 PASSED**（本地 27 = 本类 17 + `SkillsImportRenameGuardTest` 10） |
+| 新类 `SkillsImportRenameGuardTest` | **10 条全 PASSED** |
+
+**停止节点达成**，停在分支。
 
 **合并 main 的起手权在用户**（本支有 `.kt` 验证面，不适用纯文本例外）。
