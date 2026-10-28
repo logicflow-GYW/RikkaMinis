@@ -39,7 +39,7 @@
             ...
             _entries.value = entries
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load metadata: ${e.message}")    // :193 只记日志
+            Log.e(TAG, "Failed to load metadata: ${e.message}")    // :192 只记日志
         }
     }
 ```
