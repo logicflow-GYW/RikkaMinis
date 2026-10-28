@@ -264,8 +264,17 @@ object MemoryRollupEngine {
      * (`NOTHING_TO_DISTILL`) — starving every smaller log behind it. One
      * judging list, one verdict.
      */
-    fun distillableEntries(entries: List<Entry>): List<Entry> =
-        dedupeEntries(entries).filter { classify(it) != RollupClass.TRANSIENT }
+    fun distillableEntries(rawEntries: List<Entry>): List<Entry> {
+        // Dedup FIRST, then classify — the merged list is the only judging
+        // list. Kept as two statements on purpose: `scripts/scan/
+        // backup_remap_rollup_check.py` pins this filter expression as its
+        // fixture anchor (arm M21 mutates it to reconstruct the old defect),
+        // and that gate may not be edited by this branch.
+        val entries = dedupeEntries(rawEntries)
+        val distillable =
+            entries.filter { classify(it) != RollupClass.TRANSIENT }
+        return distillable
+    }
 
     // ── Dedup ────────────────────────────────────────────────────────────
 

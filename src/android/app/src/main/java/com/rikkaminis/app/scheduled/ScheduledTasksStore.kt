@@ -372,6 +372,16 @@ object ScheduledTasksStore {
         }
         return try {
             val raw = file.readText()
+            // [FIX-R3-E F-07] A zero-length / whitespace-only file is "this
+            // device really has no tasks" — NOT a read failure. Treating it as
+            // unreadable would lock the user out of saving anything (the only
+            // escape would be a whole-document restore) for a state that holds
+            // no data to protect. Only non-empty bytes that fail to become a
+            // document count as unreadable.
+            if (raw.isBlank()) {
+                unreadable = false
+                return ScheduledTasksFile()
+            }
             val parsed = ScheduledTasksCodec.parse(raw)
             // [FIX-R3-E F-07] A document written by a newer build must not be
             // re-encoded by this one: `parse` reads unknown fields leniently,
