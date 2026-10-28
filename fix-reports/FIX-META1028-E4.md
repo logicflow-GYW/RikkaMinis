@@ -153,7 +153,7 @@ tmpLedger.rotate(tmpHost)            // ← 抛了就到不了这里
 
 ## 5. 门
 
-禁跑全量（任务书 + 负载纪律），只跑自家面的 7 门，全 rc=0：
+禁跑全量（任务书 + 负载纪律），只跑自家面的门，全 rc=0：
 
 ```
 shizuku_args_check                 rc=0
@@ -163,6 +163,8 @@ offload_host_path_check            rc=0
 fastio_tar_bounds_check            rc=0
 rss_probe_lock_scope_check         rc=0
 debug_leak_guard                   rc=0
+modelsvc_single_read_check         rc=0
+readonly_mount_write_guard         rc=0   ← 第一轮 CI 红的就是它，见 §7
 ```
 
 `scripts/scan/**`、`scan.sh`、`test_scan.py` **零触碰**。
@@ -184,7 +186,22 @@ debug_leak_guard                   rc=0
 
 ## 7. 收口
 
-- 门提交：`58b44c21`
+**第一轮 CI（run `40702022868`）failure** —— 红的是我自己写的代码：
+
+```
+FAILED CHECKS:
+  [26/113] Read-only-mount write guard (rc=1)
+    ✗ sandbox/NativeOffload.kt:470 — `.writeText` belongs to no parsed function body
+    ✗ sandbox/OffloadTmpFileLedger.kt:176 — 同
+```
+
+两处都是我注入的默认写函数 `writeFn: (File, String) -> Unit = { f, s -> f.writeText(s) }`。**参数列表里的 lambda 不在任何函数体内**，而那道门的判据是「每个 write 调用必须能归属到一个解析出来的声明」，归属不了的视为**洞**（fail-closed），不是「不是站点」。门是对的 —— 一个它定位不了的写，正是它必须拒绝放行的东西。
+
+修法：默认值改成具名函数引用 `::writeFileText`（`OffloadTmpFileLedger.kt` 里一行 `file.writeText(text)` 的真函数），写调用就落在解析器跟得到的声明里。行为、可注入性、签名都不变。提交 `60b1880c`。
+
+**★ 可复用**：给 offload 侧注入"写"的时候，**默认实现不要用参数列表里的内联 lambda** —— 那会让 write 调用落在所有函数体之外，触发 readonly_mount_write_guard 的 fail-closed 判据。抽成具名函数（`::name`）即可。
+
+- 门提交：`60b1880c`（`58b44c21` 是首轮）
 - push：`fix/meta1028-e4-offload-tools`
 - CI：见 §8
 
@@ -194,4 +211,23 @@ debug_leak_guard                   rc=0
 
 ## 8. CI 判读
 
-（填 run id / head_sha / 结论）
+**绿 run `40705027789`（#2849）**，结论 `success`，14:21:00Z → 14:44:03Z（23m03s）。
+
+- `head_sha` = `60b1880c4e6a3e14ab230cd7d3905d8ce8190157`，与本地 `git rev-parse HEAD` **逐字符一致**（防"绿的是别人分支"的并发假绿）。
+- 日志 1.5 MB 级，NUL 0 字节。
+- 门：`║ Summary: 113 passed, 0 failed`（**恰好 1 条**）；分片 25/44/30/16/19/18 是 scan 并行池的分段输出，**别误读成门数变了**。
+- 夹具：`✅ ALL 349 CASES PASS`（恰好 1 条）。
+- 6 条含 `FAILED` 的行逐条确认**全是 PASSED 用例名的子串**（判读陷阱第 N 次复核）。
+- 8 条 `error:` 全是 workflow 脚本里 `echo "::error::…"` 的**源码文本**，不是运行期错误。
+- 唯一的非 success 步 = 滚动 tag + Publish（均 main 门控 skip，分支上正常）。
+
+### 两轮 CI
+
+| 轮 | run | 结果 | 说明 |
+|---|---|---|---|
+| 1 | `40702022868` | failure | `[26/113] readonly_mount_write_guard` 红 —— 我自己的默认写函数（§7） |
+| 2 | `40705027789` | **success** 23m03s | 具名化后绿 |
+
+### ★ 可复用判据（下次别再撞）
+
+给 offload 侧注入"写"的时候，**默认实现不要写成参数列表里的内联 lambda**（`writeFn: (File, String) -> Unit = { f, s -> f.writeText(s) }`）。参数列表里的 lambda 不在任何函数体内，`readonly_mount_write_guard` 的判据是"每个 write 调用必须能归属到一个解析出来的声明"，归属不了即视为**洞**（fail-closed）—— 它是对的：一个定位不了的写，正是它必须拒绝放行的。抽成具名函数用 `::name` 引用即过。
