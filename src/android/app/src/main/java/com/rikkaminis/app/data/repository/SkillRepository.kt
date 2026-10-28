@@ -124,6 +124,18 @@ class SkillRepository(private val context: Context) {
          * keys); unmanaged keys are carried through verbatim. When [existing] has no
          * frontmatter, a fresh 3-key block is emitted — identical to the pre-fix
          * behaviour for that case.
+         *
+         * [F-06] Both sides now speak YAML block scalars: `key: |` / `key: >` (with
+         * any chomping indicator) opens a block whose blank-or-indented lines belong
+         * to that key. [parseSkillMd] has resolved those blocks into real newlines
+         * since T151, so a document carrying `description: |` reaches this function
+         * with a MULTI-LINE value — writing it raw put the continuation lines at
+         * column 0 inside the frontmatter, where the next read treated them as keys
+         * (a description line `version: 9.9` silently rewrote the version) and
+         * dropped the rest (the description came back truncated to its first line).
+         * Contract: a managed value is emitted as `key: <value>` when it is a single
+         * line and as `key: |` + 2-space-indented lines otherwise, and a managed key
+         * that arrived as a block is emitted with its old BODY removed.
          */
         internal fun mergeFrontmatter(
             existing: String?,
@@ -144,12 +156,15 @@ class SkillRepository(private val context: Context) {
                 }
             }
             // No frontmatter to preserve: emit the canonical 3-key block.
+            // [F-06] Through the same emitter — a description carrying newlines
+            // needs the block form here too, or the very first write of a new skill
+            // puts its continuation lines at column 0 inside the frontmatter.
             if (frontmatterEnd < 0) {
                 return buildString {
                     appendLine("---")
-                    appendLine("name: $name")
-                    appendLine("description: $description")
-                    appendLine("version: $version")
+                    for (entry in frontmatterEntry("name", name)) appendLine(entry)
+                    for (entry in frontmatterEntry("description", description)) appendLine(entry)
+                    for (entry in frontmatterEntry("version", version)) appendLine(entry)
                     appendLine("---")
                     append(body)
                 }
@@ -173,13 +188,24 @@ class SkillRepository(private val context: Context) {
             )
             val seen = mutableSetOf<String>()
             val fm = mutableListOf<String>()
+            // [F-06] A managed BLOCK SCALAR loses its body together with its
+            // header: the value is rebuilt from [managed] below, so keeping the
+            // old `  line one` / `  line two` lines left them behind under a now
+            // single-line key — stale text that never goes away on its own, and
+            // that a strict YAML reader folds back into the value
+            // ("fresh desc line one line two"). [blockBodyUntil] is the first
+            // line after the block that is NOT part of it.
+            var blockBodyUntil = -1
             for (i in 1 until frontmatterEnd) {
+                if (i < blockBodyUntil) continue
                 val line = src[i]
-                val colon = line.indexOf(':')
-                val key = if (colon > 0) line.substring(0, colon).trim().lowercase() else null
+                val key = frontmatterKey(line)
                 val newValue = if (key != null) managed[key] else null
                 if (key != null && newValue != null) {
-                    fm.add("$key: $newValue")
+                    if (isBlockScalarHeader(line.substringAfter(':').trim())) {
+                        blockBodyUntil = blockScalarBodyEnd(src, i + 1, frontmatterEnd)
+                    }
+                    for (entry in frontmatterEntry(key, newValue)) fm.add(entry)
                     seen.add(key)
                 } else {
                     fm.add(line)
@@ -187,13 +213,77 @@ class SkillRepository(private val context: Context) {
             }
             // Managed keys absent from the original block still need to exist.
             for ((key, value) in managed) {
-                if (key !in seen) fm.add("$key: $value")
+                if (key !in seen) for (entry in frontmatterEntry(key, value)) fm.add(entry)
             }
             return buildString {
                 appendLine("---")
                 for (line in fm) appendLine(line)
                 appendLine("---")
                 append(body)
+            }
+        }
+
+        /**
+         * The frontmatter KEY a line declares, or null when the line declares no
+         * key at all.
+         *
+         * [F-06] Keys are recognized only at column 0. The pre-fix rule
+         * (`line.indexOf(':') > 0`, then `trim()`) counted an INDENTED line as a
+         * key, which made a `description: |` body line like `  name: x` look like
+         * a second managed key and clobbered nested mappings — while a body line
+         * without a colon was silently ignored. Column 0 is also YAML's own rule,
+         * and it is what lets [mergeFrontmatter] tell a block body from a key.
+         */
+        private fun frontmatterKey(line: String): String? {
+            if (line.isEmpty() || line[0].isWhitespace()) return null
+            val colon = line.indexOf(':')
+            if (colon <= 0) return null
+            return line.substring(0, colon).trim().lowercase().ifEmpty { null }
+        }
+
+        /**
+         * `|`, `>`, `>-`, `|+`, `>2`, … — a YAML block-scalar header (the marker
+         * followed only by a chomping indicator and/or an explicit indentation
+         * digit). [parseSkillMd] resolves both markers into real newlines, so the
+         * writer has to recognize the same set ([F-06]).
+         */
+        private fun isBlockScalarHeader(value: String): Boolean {
+            if (value.isEmpty() || (value[0] != '|' && value[0] != '>')) return false
+            return value.drop(1).all { it.isDigit() || it == '-' || it == '+' }
+        }
+
+        /**
+         * First line index at or after [from] that is NOT part of the block scalar
+         * opened one line earlier: the body runs while lines are blank or indented,
+         * the same rule [parseSkillMd] applies — so the writer and the reader agree
+         * on where a block ends.
+         */
+        private fun blockScalarBodyEnd(src: List<String>, from: Int, limit: Int): Int {
+            var j = from
+            while (j < limit && (src[j].isEmpty() || src[j][0].isWhitespace())) j++
+            return j
+        }
+
+        /**
+         * Emit one managed key: `key: value` for a single-line value, the block form
+         * `key: |` + 2-space-indented lines when the value carries newlines.
+         *
+         * The block form is not cosmetic ([F-06]): [parseSkillMd] resolves a block
+         * into a value WITH newlines, so an imported document hands that value back
+         * here on the next write. Emitting it raw put its continuation lines at
+         * column 0 inside the frontmatter — the next read then took them for keys
+         * (`version: 9.9` rewrote the version) and the value itself came back
+         * truncated to its first line.
+         */
+        private fun frontmatterEntry(key: String, value: String): List<String> {
+            if (!value.contains('\n')) return listOf("$key: $value")
+            // A trailing newline needs chomping juggling the reader does not model
+            // (it trims the resolved block anyway), so the canonical form is a plain
+            // `|` with every line indented.
+            val lines = value.lines().map { it.trimEnd('\r') }
+            return buildList {
+                add("$key: |")
+                for (line in lines) add(if (line.isEmpty()) "" else "  $line")
             }
         }
 
@@ -239,29 +329,98 @@ class SkillRepository(private val context: Context) {
          * Returns the updated document, or null when there is nothing to
          * rewrite (no frontmatter block, or a frontmatter block without a
          * `name:` line) — callers leave the file untouched in that case.
+         *
+         * [F-09] The rewrite walks (line, terminator) pairs instead of slicing the
+         * document at a char offset. The pre-fix offset (`Σ line.length + 1`, the
+         * `+1` being the newline `String.lines()` strips) is correct for LF only:
+         * on a CRLF document every line contributes one char more than assumed, so
+         * the split point drifted INTO the block — with four frontmatter lines it
+         * landed inside the `name:` value, the head ended mid-value, and the rename
+         * produced `name: new` immediately followed by the old value's leftover
+         * tail (`name: newx`). Splitting per line keeps every terminator byte for
+         * byte, so mixed `\r\n` / `\n` documents survive untouched too.
          */
         internal fun renameFrontmatterName(md: String, newName: String): String? {
-            val lines = md.lines()
+            val parts = splitKeepingLineEndings(md).toMutableList()
+            if (parts.isEmpty() || !parts[0].first.trimStart().startsWith("---")) return null
             var frontmatterEnd = -1
-            if (lines.firstOrNull()?.trimStart()?.startsWith("---") == true) {
-                for (i in 1 until lines.size) {
-                    if (lines[i].trim() == "---") {
-                        frontmatterEnd = i
-                        break
-                    }
+            for (i in 1 until parts.size) {
+                if (parts[i].first.trim() == "---") {
+                    frontmatterEnd = i
+                    break
                 }
             }
             if (frontmatterEnd <= 0) return null
-            // Char offset just past the closing `---` line (each of the lines
-            // above it is followed by a newline because [frontmatterEnd] exists
-            // below it in the split).
-            var frontmatterEndOffset = 0
-            for (i in 0 until frontmatterEnd) frontmatterEndOffset += lines[i].length + 1
-            val head = md.substring(0, frontmatterEndOffset)
-            val tail = md.substring(frontmatterEndOffset)
-            val headUpdated = head.replaceFirst(Regex("(?m)^name:\\s*.*$"), "name: $newName")
-            if (headUpdated == head) return null
-            return headUpdated + tail
+            for (i in 1 until frontmatterEnd) {
+                val (content, terminator) = parts[i]
+                if (!content.startsWith("name:")) continue
+                parts[i] = "name: $newName" to terminator
+                val rebuilt = buildString {
+                    for ((line, eol) in parts) {
+                        append(line)
+                        append(eol)
+                    }
+                }
+                return if (rebuilt == md) null else rebuilt
+            }
+            return null
+        }
+
+        /**
+         * Split [text] into (line content, its own terminator) pairs, so a rewrite
+         * can rejoin the document byte-for-byte apart from what it meant to change.
+         * Terminators can differ line by line (`\r\n`, `\n`, `\r`) — each is kept
+         * exactly as it arrived ([F-09]).
+         */
+        private fun splitKeepingLineEndings(text: String): List<Pair<String, String>> {
+            val out = mutableListOf<Pair<String, String>>()
+            var start = 0
+            var i = 0
+            while (i < text.length) {
+                val c = text[i]
+                if (c == '\n' || c == '\r') {
+                    val end = if (c == '\r' && i + 1 < text.length && text[i + 1] == '\n') i + 2 else i + 1
+                    out.add(text.substring(start, i) to text.substring(i, end))
+                    start = end
+                    i = end
+                } else {
+                    i++
+                }
+            }
+            if (start < text.length) out.add(text.substring(start) to "")
+            return out
+        }
+
+        /**
+         * [F-10] The files a skill directory must give up after a manifest-backed
+         * sync: everything present locally that the incoming manifest does NOT list,
+         * except the top-level SKILL.md (owned by [writeSkillMd], never a sibling).
+         *
+         * Both landing paths only ever WROTE files — an overwrite import
+         * ([importFromArchive]) or an "Update from URL" ([updateFromURL]) re-fetched
+         * what upstream still ships and left everything upstream had DELETED on
+         * disk, so a skill kept running a script its source no longer has while the
+         * UI reported a completed update.
+         *
+         * Deleting is the destructive half of a sync, so the caller has to hand over
+         * a manifest it can prove COMPLETE (every entry written / downloaded). An
+         * empty manifest yields no deletions at all: an empty directory listing is
+         * indistinguishable from a truncated response, and guessing wrong wipes the
+         * skill's payload.
+         */
+        internal fun planStaleSiblingDeletions(
+            existingRelPaths: Collection<String>,
+            keepRelPaths: Collection<String>,
+        ): List<String> {
+            if (keepRelPaths.isEmpty()) return emptyList()
+            fun normalize(path: String): String =
+                path.replace('\\', '/').trimStart('/').removePrefix("./")
+            val keep = keepRelPaths.mapTo(mutableSetOf()) { normalize(it) }
+            return existingRelPaths
+                .map { normalize(it) }
+                .filter { it.isNotEmpty() && it !in keep && !it.equals("SKILL.md", ignoreCase = true) }
+                .distinct()
+                .sorted()
         }
     }
 
@@ -906,6 +1065,11 @@ class SkillRepository(private val context: Context) {
         // so any escape lands outside rootPrefix and is dropped.
         val rootCanonical = skillDir.canonicalPath
         val rootPrefix = rootCanonical + File.separator
+        // [F-10] The archive is the skill's FULL manifest, so what it no longer
+        // ships has to leave the directory as well — the pre-fix loop only wrote,
+        // and a script dropped upstream kept sitting in `scripts/` forever.
+        val writtenRelPaths = mutableSetOf<String>()
+        var writeFailures = 0
 
         for (entry in entries) {
             if (entry.isDirectory) continue
@@ -922,9 +1086,22 @@ class SkillRepository(private val context: Context) {
                 continue
             }
             destFile.parentFile?.mkdirs()
-            try { destFile.writeBytes(entry.data) } catch (e: Exception) {
+            try {
+                destFile.writeBytes(entry.data)
+                writtenRelPaths.add(relativePath.replace('\\', '/'))
+            } catch (e: Exception) {
+                writeFailures++
                 Log.w(TAG, "Failed to write $relativePath: ${e.message}")
             }
+        }
+        // [F-10] Only after a clean write of a non-empty manifest: a partial
+        // extraction means our idea of "what this skill ships" is incomplete, and
+        // a SKILL.md-only archive says nothing about the payload (deleting on that
+        // evidence would wipe a skill's scripts on a paste-shaped import).
+        if (writeFailures == 0 && writtenRelPaths.isNotEmpty()) {
+            deleteStaleSiblingFiles(skillDir, writtenRelPaths)
+        } else if (writeFailures > 0) {
+            Log.w(TAG, "importFromArchive: $writeFailures write failure(s) — skipped stale cleanup")
         }
         return skill
     }
@@ -1233,17 +1410,77 @@ class SkillRepository(private val context: Context) {
      * name. Used by the Skill detail UI to enumerate bundled scripts.
      */
     fun listSkillFiles(skillId: String): List<String> {
-        val dir = File(skillsDir, skillId)
-        if (!dir.isDirectory) return emptyList()
-        val rootLen = dir.absolutePath.length + 1
-        val files = dir.walkTopDown()
-            .filter { it.isFile && !it.name.startsWith(".") }
-            .map { it.absolutePath.substring(rootLen) }
-            .toList()
+        val files = listFilesUnder(File(skillsDir, skillId))
         return files.sortedWith(compareBy(
             { if (it.equals("SKILL.md", ignoreCase = true)) 0 else 1 },
             { it },
         ))
+    }
+
+    /**
+     * Recursively list [root]'s files as `/`-separated paths relative to it.
+     * Hidden entries are skipped (dotted files are host bookkeeping — `.DS_Store`,
+     * editor swap files — never skill payload). Empty when [root] is not a
+     * directory, which is how every caller distinguishes "no skill dir" from "an
+     * empty one".
+     */
+    private fun listFilesUnder(root: File): List<String> {
+        if (!root.isDirectory) return emptyList()
+        val rootPath = root.absolutePath
+        // `absolutePath` of a directory has no trailing separator, except for "/".
+        val prefixLen = if (rootPath.endsWith(File.separator)) rootPath.length else rootPath.length + 1
+        return root.walkTopDown()
+            .filter { it.isFile && !it.name.startsWith(".") }
+            .map { it.absolutePath.substring(prefixLen) }
+            .toList()
+    }
+
+    /**
+     * [F-10] Delete the files [planStaleSiblingDeletions] flags under [root], then
+     * prune the directories they leave empty (an empty `scripts/` still reads as
+     * "this skill ships scripts" in the file browser). Returns how many files were
+     * removed; a delete failure is logged, never thrown — a stale file must not turn
+     * an otherwise successful sync into a failure.
+     *
+     * Callers must only reach here with a manifest they can prove complete; the
+     * decision itself lives in the pure planner.
+     */
+    private fun deleteStaleSiblingFiles(root: File, keepRelPaths: Collection<String>): Int {
+        val stale = planStaleSiblingDeletions(listFilesUnder(root), keepRelPaths)
+        if (stale.isEmpty()) return 0
+        val rootCanonical = runCatching { root.canonicalPath }.getOrNull() ?: return 0
+        var deleted = 0
+        for (rel in stale) {
+            val target = File(root, rel)
+            // The same containment rule the sibling writers apply: a manifest path
+            // never escapes the skill directory (a `..` entry must not delete
+            // somebody else's file).
+            val canonical = runCatching { target.canonicalPath }.getOrNull() ?: continue
+            if (!canonical.startsWith(rootCanonical + File.separator)) {
+                Log.w(TAG, "[F-10] refusing to delete out-of-tree path $rel")
+                continue
+            }
+            if (runCatching { target.delete() }.getOrDefault(false)) {
+                deleted++
+                pruneEmptyParents(target.parentFile, root)
+            } else {
+                Log.w(TAG, "[F-10] could not delete stale $rel")
+            }
+        }
+        if (deleted > 0) Log.i(TAG, "[F-10] removed $deleted stale file(s) under ${root.name}")
+        return deleted
+    }
+
+    /** Delete [dir] and its ancestors while they are empty; never touches [root]. */
+    private fun pruneEmptyParents(dir: File?, root: File) {
+        val rootCanonical = runCatching { root.canonicalPath }.getOrNull() ?: return
+        var current = dir ?: return
+        while (runCatching { current.canonicalPath }.getOrNull() != rootCanonical) {
+            val children = current.list()
+            if (children == null || children.isNotEmpty()) return
+            if (!current.delete()) return
+            current = current.parentFile ?: return
+        }
     }
 
     /**
@@ -1363,6 +1600,14 @@ class SkillRepository(private val context: Context) {
             outcome = agg,
         )
         val finalReason = agg.firstReason
+        // [F-10] Upstream-removed files leave the directory too — but only on a walk
+        // we can prove COMPLETE (no failed download, no bail-out before listing) and
+        // only with a non-empty manifest. A truncated listing is indistinguishable
+        // from "upstream has nothing", and acting on that guess would delete the
+        // skill's whole payload.
+        if (agg.filesFailed == 0 && finalReason == null && agg.seenRelPaths.isNotEmpty()) {
+            deleteStaleSiblingFiles(destDir, agg.seenRelPaths)
+        }
         Log.i(TAG, "[siblings] done skill=${skill.id} written=${agg.filesWritten} failed=${agg.filesFailed} reason=${finalReason ?: "(none)"}")
         return SiblingDownloadOutcome(agg.filesWritten, agg.filesFailed, finalReason)
     }
@@ -1377,6 +1622,12 @@ class SkillRepository(private val context: Context) {
         var filesWritten = 0
         var filesFailed = 0
         var firstReason: String? = null
+        /**
+         * [F-10] Every skill-relative path the walk actually landed (written or
+         * byte-identical), i.e. the manifest upstream currently ships. Consumed by
+         * [downloadSiblingFiles] to drop files upstream no longer has.
+         */
+        val seenRelPaths = mutableSetOf<String>()
         fun recordFailure(reason: String) {
             filesFailed += 1
             if (firstReason == null) firstReason = reason
@@ -1467,6 +1718,7 @@ class SkillRepository(private val context: Context) {
             } else {
                 Log.i(TAG, "[siblings] kept $relPath (unchanged, ${fileData.size}B)")
             }
+            outcome.seenRelPaths.add(relPath.replace('\\', '/'))
             outcome.filesWritten += 1
         }
     }
