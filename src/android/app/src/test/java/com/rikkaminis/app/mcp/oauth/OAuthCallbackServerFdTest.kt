@@ -2,6 +2,7 @@ package com.rikkaminis.app.mcp.oauth
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume
 import org.junit.Test
@@ -87,6 +88,63 @@ class OAuthCallbackServerFdTest {
             "socket FDs grew after $GHOST_CONNECTIONS dead connections: baseline=$baseline after=$after",
             after <= baseline + 1,
         )
+    }
+
+    // ── [r3-B11-F08] a refused authorization must end the wait ─────────────
+
+    /**
+     * RFC 6749 §4.1.2.1: a denial redirects to the callback URI with
+     * `error=...` and no `code`. The listener used to answer "Authorization
+     * complete", fire no callback and stay up, so the in-flight
+     * `suspendCancellableCoroutine` hung for its whole 5-minute timeout with no
+     * way back.
+     */
+    @Test
+    fun `a denial redirect cancels the wait instead of hanging`() {
+        val port = freePort()
+        val codeCalls = CountDownLatch(1)
+        val cancelCalls = CountDownLatch(1)
+        val srv = OAuthCallbackServer(port) { _, _ -> codeCalls.countDown() }
+        server = srv
+        srv.onExternalCancel = { cancelCalls.countDown() }
+        srv.start()
+
+        val response = request(port, "GET /callback?error=access_denied&state=s1 HTTP/1.1")
+        assertTrue(
+            "the browser must be told the authorization was not completed",
+            response.contains("Authorization was not completed"),
+        )
+        assertTrue("the caller's wait must be resumed (cancel), not left hanging",
+            cancelCalls.await(5, TimeUnit.SECONDS))
+        assertEquals("no code exists, so onCode must not fire", 1L, codeCalls.count)
+        // The listener must be closed, not left accepting another 5 minutes of
+        // connections.
+        var refused = false
+        try {
+            Socket(InetAddress.getLoopbackAddress(), port).use { }
+        } catch (_: Exception) {
+            refused = true
+        }
+        assertTrue("the callback server must stop after a denial", refused)
+    }
+
+    @Test
+    fun `a denial error text is html-escaped in the page`() {
+        val port = freePort()
+        val srv = OAuthCallbackServer(port) { _, _ -> }
+        server = srv
+        srv.start()
+
+        val response = request(
+            port,
+            "GET /callback?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E&state=s1 HTTP/1.1",
+        )
+        assertTrue("the error is echoed", response.contains("The authorization server reported"))
+        assertFalse(
+            "the echoed error must not inject markup: $response",
+            response.contains("<script>alert(1)"),
+        )
+        assertTrue("it must appear escaped", response.contains("&lt;script&gt;alert(1)"))
     }
 
     private companion object {
