@@ -226,8 +226,16 @@ class PersistentShell(
      * single-writer usage of [CommandCallback].
      */
     private class StallGuardState(var lastProgressMs: Long) {
-        /** Output length at the previous tick (growth == progress). */
-        var lastOutputLen: Int = 0
+        /**
+         * [CommandCallback.totalCharsReceived] at the previous tick — GROWTH
+         * means output progress.
+         *
+         * [meta-audit-1028 E3 / F-09] Deliberately NOT `output.length`: that
+         * value freezes once the byte budget is exhausted, so a command still
+         * streaming output past `shellOutputKb` was indistinguishable from a
+         * silent one and got killed by the stall guard.
+         */
+        var lastReceivedChars: Long = 0L
 
         /** Tree CPU jiffies at the previous CPU sample. */
         var lastCpuJiffies: Long = -1L
@@ -281,6 +289,41 @@ class PersistentShell(
 
         /** Whether any appended chunk was clipped or skipped. */
         val truncated: Boolean get() = byteBudget.truncated
+
+        /**
+         * [meta-audit-1028 E3 / F-09] Monotonic count of characters the reader
+         * handed to this callback, INDEPENDENT of the output budget.
+         *
+         * [output]/[truncated] both stop moving once the command's cumulative
+         * output reaches `shellOutputKb` — [internalTruncateOutputDetailed]
+         * returns `appendedUtf8Bytes = 0` for every later chunk. The stall
+         * guard used `output.length` as its progress signal, so a command that
+         * kept streaming past the ceiling looked frozen: 180 s later it was
+         * SIGINT'd (then SIGKILL'd) while the UI was still scrolling its output.
+         * This counter advances for every delivered chunk, clipped or not, so
+         * "bytes arrived from the child" stays observable after the capture
+         * buffer is full.
+         *
+         * Atomic (not Int): written on the reader thread, read on the monitor
+         * coroutine.
+         */
+        private val receivedChars = java.util.concurrent.atomic.AtomicLong(0L)
+
+        val totalCharsReceived: Long get() = receivedChars.get()
+
+        /**
+         * Append one reader chunk to [output] (clipped to the byte budget) and
+         * record it as received. Single entry point on purpose: the received
+         * counter and the buffer must never disagree about what arrived.
+         */
+        fun appendOutput(text: String) {
+            if (text.isEmpty()) return
+            receivedChars.addAndGet(text.length.toLong())
+            // [audit-1015 PERF-01] The byte accumulator lives in
+            // [IncrementalUtf8Budget] (pure + JVM-tested) — each chunk measures
+            // ONLY the incoming text, never a full recompute over [output].
+            byteBudget.appendTo(output, text)
+        }
 
         /** Signal completion, but only the first caller wins. Returns whether
          *  THIS caller won (used by the stall guard: if the command completed on
@@ -379,8 +422,12 @@ class PersistentShell(
         // app's whole "user data" footprint, invisible to the /tmp sweeper.
         // The guest /tmp is tmpfs + age-swept (60 min, `.minis-keep` sentinel),
         // which is exactly the lifecycle temp files want.
-        env["TMPDIR"] = "/tmp"
-        env["TMP"] = "/tmp"
+        //
+        // [meta-audit-1028 E3 / F-14] The two assignments themselves live at the
+        // END of this function, after the `customEnvironment` merge — the
+        // ordering is the whole point (a per-instance invariant must be the
+        // final word), and the interactive PTY pins the same pair in
+        // TerminalSession.buildTermuxEnv, which cannot inherit this one.
         if (PRootKernel.nativeLibDir.isNotEmpty()) {
             env["LD_LIBRARY_PATH"] = PRootKernel.nativeLibDir
         }
@@ -397,15 +444,43 @@ class PersistentShell(
         // and now.
         env["TZ"] = PRootKernel.posixTz()
         if (debugOffload) env["MINIS_NOFF_DEBUG"] = "1"
-        // T340: forward the chat session id to native_offload handlers via
-        // proot env. NativeOffloadServer reads this off `request.env` and
-        // hands it to OffloadPermissionManager so ASK_ONCE grants/denials
-        // are scoped per chat session, not globally.
-        env["MINIS_CHAT_SESSION_ID"] = sessionId
-
         for ((key, value) in PRootKernel.customEnvironment) {
             env[key] = value
         }
+
+        // [T340] forward the chat session id to native_offload handlers via
+        // proot env. NativeOffloadServer reads this off `request.env` and
+        // hands it to OffloadPermissionManager so ASK_ONCE grants/denials
+        // are scoped per chat session, not globally.
+        //
+        // [meta-audit-1028 E3 / F-14] Set AFTER the process-global
+        // [PRootKernel.customEnvironment] merge: "last write wins" is the
+        // convention the other PRoot entry points already document (see
+        // TerminalSession.buildTermuxEnv: the session id is applied last so a
+        // process-global map can never point two sessions at one chat). The
+        // same ordering argument is why the guest-tmp pin below is here too —
+        // a per-instance invariant must be the final word, not the first.
+        env["MINIS_CHAT_SESSION_ID"] = sessionId
+
+        // [F-14] Guest temp dir, applied LAST: `TMPDIR`/`TMP` are read by the
+        // tools INSIDE the rootfs (python tempfile, mktemp, gcc, pip …) and must
+        // therefore be a GUEST path. Inherited from the app process they point
+        // at `/data/user/0/<pkg>/cache`, which inside the rootfs is a real,
+        // unswept directory tree — measured 2026-10-27 as 17 213 stale fixture
+        // dirs / 3.26 GiB under `<rootfs>/data/user/0/<pkg>/cache`, ~25 % of the
+        // app's user-data footprint and invisible to the guest /tmp sweeper.
+        // Sitting after the [PRootKernel.customEnvironment] merge makes the
+        // invariant the final word: a process-global `TMPDIR` added there later
+        // cannot silently re-point guest temp writes at a host path.
+        //
+        // [meta-audit-1028 E3 / F-14] The interactive PTY pins the SAME pair in
+        // TerminalSession.buildTermuxEnv (it cannot inherit this one — Termux
+        // execs with an explicit env array). Both must stay in sync; the
+        // remaining PRoot entry points (RootfsManager's host-side `apk`
+        // children, the deprecated ShellExecutor) are registered as residuals
+        // rather than changed here.
+        env["TMPDIR"] = "/tmp"
+        env["TMP"] = "/tmp"
 
         val p = processBuilder.start()
         process = p
@@ -568,13 +643,6 @@ class PersistentShell(
      * afterwards. Counting `String.length` here made a 128 KB setting hold
      * 384 KB of CJK.
      */
-    private fun CommandCallback.appendOutput(text: String) {
-        // [audit-1015 PERF-01] The byte accumulator lives in [IncrementalUtf8Budget]
-        // (pure + JVM-tested) — each chunk measures ONLY the incoming text,
-        // never a full recompute over [output].
-        byteBudget.appendTo(output, text)
-    }
-
     /**
      * Execute a command in the persistent shell and wait for completion.
      *
@@ -654,10 +722,14 @@ class PersistentShell(
                         // cleared the pending callback) — never signal or kill a
                         // shell that is simply between commands.
                         if (pendingCallback !== cb) continue
-                        // Output progress: the callback accumulates every chunk
-                        // (including partials), so a length change is progress.
-                        if (cb.output.length != stall.lastOutputLen) {
-                            stall.lastOutputLen = cb.output.length
+                        // Output progress: the callback counts EVERY chunk the
+                        // reader delivered (including partials, including
+                        // chunks the byte budget clipped), so growth here means
+                        // bytes really arrived — see [CommandCallback.totalCharsReceived]
+                        // for why `output.length` could not be used ([F-09]).
+                        val received = cb.totalCharsReceived
+                        if (received != stall.lastReceivedChars) {
+                            stall.lastReceivedChars = received
                             stall.lastProgressMs = now
                         }
                         // CPU progress, sampled less often (the scan is the
@@ -802,7 +874,19 @@ class PersistentShell(
             if (result == null) {
                 // Timeout — cancel pending, but don't kill the shell
                 pendingCallback = null
-                CommandResult("[Command timed out after ${timeout / 1000}s]", TIMEOUT_EXIT_CODE)
+                // [meta-audit-1028 E3 / F-10] Keep what the command already
+                // printed. This branch used to return the bare notice, so a
+                // build/log command that hung after dumping its last 50 lines
+                // came back as ONE line: the user (and the model) lost every
+                // clue about where it stopped. The stall branch above has
+                // always appended its notice to the captured output; a timeout
+                // is the same situation (we simply stopped waiting, the PTY
+                // produced no completion marker).
+                CommandResult(
+                    internalTimeoutOutput(cb.output.toString(), timeout),
+                    TIMEOUT_EXIT_CODE,
+                    cb.truncated,
+                )
             } else if (stall.intSentAtMs != 0L && stallAfterMs > 0L && result.exitCode != STALL_EXIT_CODE) {
                 // Stage 1 succeeded: the SIGINT killed the command and the wrapped
                 // trailing lines produced a normal completion. Tell the agent why
@@ -923,10 +1007,40 @@ internal fun internalBuildEnvironmentScript(entries: Map<String, String?>): Stri
             append("unset $key\n")
         } else {
             append("export $key='")
-            append(value.replace("'", "'\\''"))
+            append(internalPosixSingleQuote(value))
             append("'\n")
         }
     }
+}
+
+/**
+ * [meta-audit-1028 E3 / F-13] The POSIX single-quote idiom, as ONE function.
+ *
+ * Inside `'…'` every byte is literal, so the only character that can end the
+ * string early is `'` itself; closing the quote, emitting an escaped quote and
+ * re-opening (`'\''`) is the portable escape. Extracted because there are now
+ * two writers of `export KEY='…'` — this file (agent shell, `\n`-terminated)
+ * and [TerminalSession] (interactive PTY, `\r`-terminated). Their line
+ * endings differ by contract, their quoting must not.
+ */
+internal fun internalPosixSingleQuote(value: String): String = value.replace("'", "'\\''")
+
+/**
+ * [meta-audit-1028 E3 / F-10] Text for a timed-out command: everything the
+ * command printed, then the timeout notice as its own final line.
+ *
+ * The notice stays byte-identical to the historical single-line result when no
+ * output was captured, so callers that recognise the timeout by its text (the
+ * coordinator deliberately adds no `(exit code: N)` trailer for 124) keep
+ * working; when there IS captured output the notice is appended rather than
+ * substituted, which is the whole point of the fix.
+ *
+ * Pure + JVM-testable.
+ */
+internal fun internalTimeoutOutput(captured: String, timeoutMs: Long): String {
+    val notice = "[Command timed out after ${timeoutMs / 1000}s]"
+    if (captured.isEmpty()) return notice
+    return if (captured.endsWith("\n")) captured + notice else captured + "\n" + notice
 }
 
 /**
