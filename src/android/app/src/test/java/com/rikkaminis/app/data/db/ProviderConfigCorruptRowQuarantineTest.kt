@@ -330,6 +330,16 @@ private class FakeProviderConfigDao : ProviderConfigDao {
     }
     override suspend fun upsertMeta(rows: List<ProviderConfigMetaEntity>) = Unit
 
+    /**
+     * [fix/meta1028-d1 F-01] the repair path can also DELETE the sync token
+     * (prefs claims success but reads back null). Recorded so a regression that
+     * starts deleting the key on a healthy save shows up here.
+     */
+    val deletedMetaKeys = mutableListOf<String>()
+    override suspend fun deleteMetaKey(key: String) {
+        deletedMetaKeys += key
+    }
+
     override suspend fun clearInstances() {
         clearedTables += "provider_instances"
     }

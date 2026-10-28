@@ -976,6 +976,11 @@ object ConfigBackup {
         val chatSessionList = mutableListOf<JSONObject>()
         val chatMessageList = mutableListOf<JSONObject>()
         var chatTruncated: JSONObject? = null
+        // [fix/meta1028-d1 F-04] Rows that exist in the DB but could not be read
+        // at all. Distinct from the budget counters below: those mean "we chose
+        // not to carry this", these mean "we could not look at it". Both have to
+        // reach the user, otherwise a damaged read looks like a clean backup.
+        var chatReadFailures = 0
         if (chatRepo != null && chatWindowDays > 0) {
             // Serialize the non-chat skeleton ONCE to measure its exact
             // serialized cost IN UTF-8 BYTES (the unit the import side
@@ -1062,11 +1067,32 @@ object ConfigBackup {
                 budgetTotalBytes = documentCapBytes - SAFETY_MARGIN_BYTES,
                 sessionJsons = sessionJsons,
                 messagesAt = { index ->
-                    runCatching {
-                        chatRepo.dao.messagesLast(
+                    // [fix/meta1028-d1 F-04] Was a bare
+                    // `chatRepo.dao.messagesLast(...)` inside
+                    // `runCatching { }.getOrDefault(emptyList())`: one
+                    // CursorWindow overflow (a single oversized parts_json /
+                    // reasoning_content row) turned into "this session has no
+                    // messages", the session header still shipped, and the
+                    // export reported success. Route through the tolerant tail
+                    // read and ACCOUNT for what it could not read.
+                    val tail = try {
+                        chatRepo.loadMessagesTailTolerant(
                             sessions[index].id, MAX_CHAT_MESSAGES_PER_SESSION,
                         )
-                    }.getOrDefault(emptyList()).map { m ->
+                    } catch (e: Exception) {
+                        runCatching {
+                            Log.w(
+                                TAG,
+                                "export: could not read messages for session " +
+                                    "${sessions[index].id}: ${e.message}",
+                            )
+                        }
+                        null
+                    }
+                    if (tail == null) chatReadFailures += 1
+                    else chatReadFailures += tail.unreadableRows
+                    val messages = tail?.messages ?: emptyList()
+                    messages.map { m ->
                         BudgetChatMessage(
                             id = m.id,
                             sessionId = m.sessionId,
@@ -1084,17 +1110,21 @@ object ConfigBackup {
             for (s in packed.sessions) chatSessionList.add(s)
             for (m in packed.messages) chatMessageList.add(m)
 
-            if (packed.sessionsDropped > 0 || packed.messagesDropped > 0) {
+            if (packed.sessionsDropped > 0 || packed.messagesDropped > 0 || chatReadFailures > 0) {
                 chatTruncated = JSONObject().apply {
                     put("sessionsDropped", packed.sessionsDropped)
                     put("messagesDropped", packed.messagesDropped)
+                    // [fix/meta1028-d1 F-04] "could not read" is not "trimmed to
+                    // fit" — see chatTruncationNotes.
+                    if (chatReadFailures > 0) put("messagesUnreadable", chatReadFailures)
                     put("budgetBytes", MAX_PAYLOAD_BYTES)
                 }
                 Log.w(
                     TAG,
-                    "export: chat history budget-trimmed " +
+                    "export: chat history incomplete " +
                         "(sessionsDropped=${packed.sessionsDropped} " +
-                        "messagesDropped=${packed.messagesDropped})",
+                        "messagesDropped=${packed.messagesDropped} " +
+                        "messagesUnreadable=$chatReadFailures)",
                 )
             }
         }
@@ -2084,6 +2114,19 @@ object ConfigBackup {
         // was not parseable JSON (transfer cut mid-line, half-written shard).
         // The converter used to drop such a line silently, so a package that
         // lost records to damage looked exactly like a complete one.
+        // [fix/meta1028-d1 F-04] Fourth kind: the rows were never carried because
+        // reading them failed on THIS device (oversized row past the
+        // CursorWindow, damaged DB) — not because the budget trimmed them and not
+        // because the package lost them. Before the fix this state exported as a
+        // clean backup with the session present and empty.
+        val unreadable = tr.optInt("messagesUnreadable", 0)
+        if (unreadable > 0) {
+            out.add(
+                "chat history was only partially exported: $unreadable message(s) could not be read " +
+                    "from this device's database (oversized/damaged rows); the source device holds " +
+                    "the rest of that conversation"
+            )
+        }
         val unparsable = tr.optInt("unparsableLines", 0)
         if (unparsable > 0) {
             out.add(

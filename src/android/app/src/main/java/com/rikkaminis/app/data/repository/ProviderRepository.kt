@@ -6,10 +6,12 @@ import android.util.Base64
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.data.db.ProviderConfigDao
 import com.rikkaminis.app.data.db.ProviderConfigMetaKeys
+import com.rikkaminis.app.data.db.ProviderConfigMetaEntity
 import com.rikkaminis.app.data.db.ProviderConfigSnapshot
 import com.rikkaminis.app.data.db.ProviderDatabase
 import com.rikkaminis.app.data.db.ProviderThinkingRuleEntity
 import com.rikkaminis.app.data.db.compositeEntryKey
+import com.rikkaminis.app.data.db.restoreFrozenBlobs
 import com.rikkaminis.app.data.db.toProviderConfig
 import com.rikkaminis.app.data.db.toProviderConfigWithDiagnostics
 import com.rikkaminis.app.data.db.toSnapshot
@@ -301,6 +303,27 @@ class ProviderRepository(private val context: Context) {
     @Volatile
     private var quarantinedEntryRowIds: Set<String> = emptySet()
 
+    /**
+     * [fix/meta1028-d1 F-02] Entry ids whose row is IN the in-memory config (so
+     * it shows and behaves normally with DEFAULT overrides) but whose stored
+     * `overrides_json` could not be decoded. Same lifetime rule as
+     * [quarantinedEntryRowIds]: recomputed on load, kept for the process
+     * lifetime, because the persist path has to hand the STORED blob back
+     * instead of re-encoding the placeholder (see [restoreFrozenBlobs]).
+     */
+    @Volatile
+    private var unreadableOverridesEntryIds: Set<String> = emptySet()
+
+    /**
+     * [fix/meta1028-d1 F-02] Group ids whose stored `member_entry_ids_json`
+     * could not be decoded; their in-memory member list is a placeholder (empty).
+     * Two consumers: the persist path substitutes the stored blob, and
+     * [removeInstance] refuses to treat them as "became empty" (deleting the
+     * group would delete the only copy of its real member list).
+     */
+    @Volatile
+    private var unreadableMemberGroupIds: Set<String> = emptySet()
+
     private fun loadConfig(): ProviderConfig = runBlocking { loadConfigSuspending() }
 
     /**
@@ -353,6 +376,8 @@ class ProviderRepository(private val context: Context) {
                 val loaded = snapshot.toProviderConfigWithDiagnostics(json)
                 val cfg = loaded.config
                 quarantinedEntryRowIds = loaded.quarantinedEntryRowIds
+                unreadableOverridesEntryIds = loaded.unreadableOverridesEntryIds
+                unreadableMemberGroupIds = loaded.unreadableMemberGroupIds
                 if (loaded.quarantinedEntryRowIds.isNotEmpty()) {
                     android.util.Log.w(
                         "ProviderRepo",
@@ -360,6 +385,26 @@ class ProviderRepository(private val context: Context) {
                             "entries undecodable — rows preserved in provider.db (kept out of the " +
                             "model list; NOT deleted by the next sync): " +
                             loaded.quarantinedEntryRowIds.take(5).joinToString(","),
+                    )
+                }
+                // [fix/meta1028-d1 F-02] Undecodable BLOBS on otherwise-readable
+                // rows. They stay visible with placeholder values; the stored
+                // bytes are handed back on every save until a build can read them.
+                if (loaded.unreadableOverridesEntryIds.isNotEmpty()) {
+                    android.util.Log.w(
+                        "ProviderRepo",
+                        "[ProviderStore] ${loaded.unreadableOverridesEntryIds.size} model " +
+                            "entries have undecodable overrides — showing defaults, stored blobs " +
+                            "preserved: ${loaded.unreadableOverridesEntryIds.take(5).joinToString(",")}",
+                    )
+                }
+                if (loaded.unreadableMemberGroupIds.isNotEmpty()) {
+                    android.util.Log.w(
+                        "ProviderRepo",
+                        "[ProviderStore] ${loaded.unreadableMemberGroupIds.size} model groups " +
+                            "have undecodable member lists — rendering empty, stored blobs preserved " +
+                            "(and protected from the removeInstance empty-group cascade): " +
+                            loaded.unreadableMemberGroupIds.take(5).joinToString(","),
                     )
                 }
                 val assembleMs = (System.nanoTime() - tAssemble) / 1_000_000
@@ -386,11 +431,23 @@ class ProviderRepository(private val context: Context) {
             val liveHash = rawJson?.let(::hashJsonMirror)
             val hashMs = (System.nanoTime() - tHash) / 1_000_000
             android.util.Log.i("ProviderPerf", "hashJsonMirror: ${hashMs}ms (jsonLen=${rawJson?.length})")
-            if (liveHash == dbHashStored) {
+            // [fix/meta1028-d1 F-01] The hash gate is now a pure decision
+            // ([decideConfigSource]) so that it is unit-tested TOGETHER with the
+            // write order that makes it sound ([persistMirrorThenDb]). The
+            // decision itself is unchanged; what changed is that the mirror can
+            // no longer be older than the DB (see persistToDbAndMirror), which
+            // is the premise "mismatch ⇒ the mirror is fresher" rests on.
+            val source = decideConfigSource(
+                hasDbConfig = true,
+                hasMirror = rawJson != null,
+                liveHashMatchesStored = liveHash != null && liveHash == dbHashStored,
+            )
+            if (source == ConfigLoadSource.DB) {
                 return dbConfig
             }
-            // Hash mismatch: JSON has been written by an older build during
-            // a downgrade window. Re-import JSON → reseed DB so DB catches
+            // Hash mismatch: the JSON mirror was written behind the DB's back
+            // (an older build during a downgrade window, or a hand-edited /
+            // restored prefs file). Re-import JSON → reseed DB so DB catches
             // up to the user's actual current config.
             android.util.Log.i(
                 "ProviderRepo",
@@ -488,22 +545,58 @@ class ProviderRepository(private val context: Context) {
         val t0 = System.nanoTime()
         val mirrorStr = json.encodeToString(ProviderConfig.serializer(), config)
         val serializeMs = (System.nanoTime() - t0) / 1_000_000
+        // [fix/dv22-a1 §1042-A-01] A provider.db that fails to open (migration
+        // abort — ProviderDatabase has no fallbackToDestructiveMigration, see
+        // MIGRATION_9_10's KDoc) would throw out of the sync below and stop the
+        // mirror write from ever running: with the DB down, prefs is the only
+        // surviving store, so the user's change was lost ENTIRELY. The DAO call
+        // is therefore wrapped and its failure logged, leaving the mirror write
+        // reachable — provider_import_id_roundtrip_check arm 10 pins that shape
+        // (envelope around the DAO call, mirror OUTSIDE it).
+        //
+        // The sync token is hashed from the string we are ABOUT to commit, because
+        // the DB write needs a value now. That makes it a CLAIM, not a fact —
+        // [fix/meta1028-d1 F-01] repairs it to the truth right after commit()
+        // answers, see the block below the sync. (The mirror hash sees the string
+        // we put into prefs, not a hash of itself.)
         val mirrorHash = hashJsonMirror(mirrorStr)
-        val snapshot = config.toSnapshot(json, jsonSyncHash = mirrorHash)
+        // [fix/meta1028-d1 F-02] Rows whose blob we could not decode on load now
+        // carry a PLACEHOLDER in the config (default overrides / empty member
+        // list). Re-encoding the placeholder would make the damage permanent, so
+        // the stored blob is substituted back before the snapshot is written.
+        // Costs one extra row read, and only while such a row exists.
+        val storedEntriesForFrozen =
+            if (unreadableOverridesEntryIds.isEmpty()) emptyList()
+            else runCatching { providerDao.loadEntries() }
+                .onFailure {
+                    android.util.Log.w(
+                        "ProviderRepo",
+                        "[ProviderStore] could not re-read entry rows to preserve " +
+                            "${unreadableOverridesEntryIds.size} undecodable override blobs; " +
+                            "they will be rewritten with defaults: ${it.message}",
+                    )
+                }
+                .getOrDefault(emptyList())
+        val storedGroupsForFrozen =
+            if (unreadableMemberGroupIds.isEmpty()) emptyList()
+            else runCatching { providerDao.loadGroups() }
+                .onFailure {
+                    android.util.Log.w(
+                        "ProviderRepo",
+                        "[ProviderStore] could not re-read group rows to preserve " +
+                            "${unreadableMemberGroupIds.size} undecodable member lists; " +
+                            "they will be rewritten empty: ${it.message}",
+                    )
+                }
+                .getOrDefault(emptyList())
+        val snapshot = restoreFrozenBlobs(
+            snapshot = config.toSnapshot(json, jsonSyncHash = mirrorHash),
+            storedEntries = storedEntriesForFrozen,
+            storedGroups = storedGroupsForFrozen,
+            frozenEntryIds = unreadableOverridesEntryIds,
+            frozenGroupIds = unreadableMemberGroupIds,
+        )
         val t1 = System.nanoTime()
-        // [fix/dv22-a1 §1042-A-01] The DAO write used to be BARE here, before
-        // the mirror write below. A provider.db that failed to open
-        // (migration abort — ProviderDatabase has no
-        // fallbackToDestructiveMigration, see MIGRATION_9_10's KDoc) threw
-        // straight out of this function, so the mirror write never ran and
-        // the user's change was lost ENTIRELY: with the DB down, prefs is
-        // the only surviving store, and saveConfig's executor catch logged
-        // "DB+mirror stale" while the mirror was in fact never attempted.
-        // Wrap the DAO call: on failure log loudly and STILL write the
-        // mirror. The mirror carries the new state; on the next launch the
-        // hash-mismatch re-import (loadConfigSuspending) reseeds the DB
-        // from the mirror once the DB opens again, and the next successful
-        // save resyncs meta.json_sync_hash either way.
         val dbWrite = runCatching {
             providerDao.syncAllIncremental(
                 instances = snapshot.instances,
@@ -523,57 +616,97 @@ class ProviderRepository(private val context: Context) {
             android.util.Log.e(
                 "ProviderRepo",
                 "[ProviderStore] DB incremental sync failed (provider.db unavailable?); " +
-                    "writing JSON mirror only — DB stale until next successful save: ${e.message}",
+                    "the JSON mirror already carries this write — DB stale until the next " +
+                    "launch re-imports it: ${e.message}",
                 e,
             )
+        }
+
+        // commit() not apply(): apply() queues the disk write and returns. If the
+        // process dies before it flushes, the next launch sees
+        // DB(hash=new) + JSON-on-disk(content=old) → the hash-mismatch path reads
+        // that as "an old build wrote during a downgrade" and re-imports the stale
+        // JSON. commit() blocks the persist thread (~5–30ms) and makes "did it
+        // land" observable, which the repair below depends on.
+        val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
+        if (!mirrorWritten) {
+            // Order-aware on purpose: with the DB write first, "the save is lost"
+            // would be a lie whenever provider.db accepted the rows — the repair
+            // below then keeps the two stores in step and the DB carries the save.
+            android.util.Log.w(
+                "ProviderRepo",
+                if (dbWrite.isSuccess) {
+                    "[ProviderStore] prefs mirror commit() returned false — provider.db has " +
+                        "this save; json_sync_hash is repaired to name the mirror that " +
+                        "exists, so the two stores stay in step (disk full? prefs corruption?)"
+                } else {
+                    "[ProviderStore] prefs mirror commit() returned false — the JSON mirror " +
+                        "still holds the previous config (disk full? prefs corruption?)"
+                },
+            )
+        }
+        // [fix/meta1028-d1 F-01] `meta.json_sync_hash` must be a FACT about the
+        // mirror, not a claim about the string we tried to write. The cold-start
+        // rule is "mismatch ⇒ the mirror is fresher, re-import it", so a hash
+        // naming a mirror that never landed makes the load path mistake a rejected
+        // commit for a downgrade and back-fill the OLD JSON over the rows the user
+        // just saved.
+        //
+        // The mirror cannot be written before the DB (provider_import_id_roundtrip
+        // arm 10 pins that order), so the token is repaired after the fact: read
+        // back what prefs actually holds and, when it disagrees with what the DB
+        // was told, rewrite the single meta row to name the mirror that exists.
+        //
+        // This one block covers BOTH ways the claim can be wrong — a rejected
+        // commit(), and a prefs store that reports success but hands back the old
+        // string — because both make `truthfulHash != mirrorHash`. It is skipped
+        // when the DB write failed: then nothing was told a hash, and the stale
+        // hash still names the mirror that is actually on disk.
+        val liveMirror: String? = prefs.getString("config", null)
+        val truthfulHash = decideSyncHash(intendedMirror = mirrorStr, liveMirror = liveMirror)
+        if (dbWrite.isSuccess && truthfulHash != mirrorHash) {
+            runCatching {
+                if (truthfulHash == null) {
+                    providerDao.deleteMetaKey(ProviderConfigMetaKeys.JSON_SYNC_HASH)
+                } else {
+                    providerDao.upsertMeta(
+                        listOf(
+                            ProviderConfigMetaEntity(
+                                ProviderConfigMetaKeys.JSON_SYNC_HASH,
+                                truthfulHash,
+                            ),
+                        ),
+                    )
+                }
+            }.onFailure { e ->
+                // Best-effort: it cannot make the save durable, only stop a rejected
+                // commit from being read as a downgrade. Name the remaining risk.
+                android.util.Log.w(
+                    "ProviderRepo",
+                    "[ProviderStore] could not repair json_sync_hash after a rejected mirror " +
+                        "write — the next cold start may re-import the previous mirror over " +
+                        "these rows: ${e.message}",
+                )
+            }
         }
         val dbMs = (System.nanoTime() - t1) / 1_000_000
         // [fix/dv22-a1 §1042-A-01] dbOk makes "did the DB row-set actually
         // land" judgeable from the log line itself, instead of inferring it
-        // from the absence of a follow-up error.
+        // from the absence of a follow-up error. mirrorOk is new with the
+        // order swap (§meta1028-d1): a save is fully durable only when BOTH
+        // bits are true.
         android.util.Log.i(
             "ProviderPerf",
             "persistToDbAndMirror: entries=${snapshot.entries.size} " +
                 "instances=${snapshot.instances.size} groups=${snapshot.groups.size} " +
                 "mirror=${mirrorStr.length / 1024}KB serialize=${serializeMs}ms db=${dbMs}ms " +
-                "dbOk=${dbWrite.isSuccess}",
+                "dbOk=${dbWrite.isSuccess} mirrorOk=$mirrorWritten",
         )
-        // commit() not apply(): the json_sync_hash we just stored to DB is
-        // a hash of THIS mirror string. If apply() queues the disk write
-        // and the process dies before it flushes, the next launch sees
-        // DB(hash=new) + JSON-on-disk(content=old) → the hash-mismatch
-        // path interprets it as "old build wrote during downgrade" and
-        // re-imports the stale JSON, blowing away the write that the DB
-        // already persisted synchronously. commit() blocks the writer
-        // (~5–30ms) but guarantees DB and JSON land together.
-        //
-        // commit() returns false (no exception) on disk-full / permission
-        // failure / corrupted prefs XML. We log so the situation is
-        // observable; the DB already holds the new state authoritatively,
-        // and a subsequent successful save will resync the mirror + hash.
-        // The downside if the next save never comes: a hash mismatch on
-        // next cold-start would try to re-import the stale mirror — but
-        // the dbConfig-fallback at the end of loadConfigSuspending keeps
-        // the DB rows when re-import fails or is rejected, so the user's
-        // data is not lost.
-        val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
-        if (!mirrorWritten) {
-            // [fix/dv22-a1 §1042-A-01] The old wording asserted the DB had
-            // taken the write. That held when a bare DAO throw made this
-            // branch unreachable; now that a failed DB sync still gets here
-            // (mirror-only degradation is the point), both stores can fail —
-            // and "DB remains authoritative" would be a false reassurance
-            // exactly when the user has lost everything but memory.
+        if (!dbWrite.isSuccess && !mirrorWritten) {
             android.util.Log.w(
                 "ProviderRepo",
-                "[ProviderStore] mirror commit() returned false — " +
-                    if (dbWrite.isSuccess) {
-                        "DB updated but JSON write rejected (disk full? prefs corruption?); " +
-                            "DB remains authoritative"
-                    } else {
-                        "DB sync FAILED as well (see the incremental-sync error above); " +
-                            "neither store took this write — in-memory state only"
-                    },
+                "[ProviderStore] DB sync FAILED as well (see the incremental-sync error " +
+                    "above) — neither store took this write, in-memory state only",
             )
         }
         // Return canonicalized form so the caller's _config.value reflects
@@ -929,10 +1062,28 @@ class ProviderRepository(private val context: Context) {
         config.instances.removeAll { it.id == instanceId }
         config.modelEntries.removeAll { it.providerInstanceId == instanceId }
 
+        // [fix/meta1028-d1 F-02] Which groups must be deleted: only the ones
+        // THIS removal emptied. The pre-fix code scanned every group with an
+        // empty member list, which also matched (a) a group that was already
+        // empty before this call, and (b) a group whose member list merely
+        // failed to DECODE on load (the placeholder is empty) — deleting those
+        // removes the only copy of their member list from provider.db.
+        val emptiedGroupIds = LinkedHashSet<String>()
         if (removedEntryIds.isNotEmpty()) {
+            val touchedGroupIds = config.modelGroups
+                .filter { group -> group.memberEntryIds.any { it in removedEntryIds } }
+                .map { it.id }
+                .toSet()
             for (group in config.modelGroups) {
                 group.memberEntryIds.removeAll { it in removedEntryIds }
             }
+            emptiedGroupIds.addAll(
+                decideEmptiedGroupIds(
+                    groups = config.modelGroups.map { it.id to it.memberEntryIds.toList() },
+                    touchedGroupIds = touchedGroupIds,
+                    unreadableGroupIds = unreadableMemberGroupIds,
+                ),
+            )
             config.agentLoopModelEntryIds.removeAll { it in removedEntryIds }
             // [da1023-C] Same compact-pin cleanup as removeEntry, applied to
             // the whole removed set — removeInstance cascades on its own and
@@ -943,7 +1094,7 @@ class ProviderRepository(private val context: Context) {
             // [da1024-C] ...and the per-device refs the same removal orphans.
             clearStaleSecondaryRefs(removedEntryIds)
         }
-        val emptyGroupIds = config.modelGroups.filter { it.memberEntryIds.isEmpty() }.map { it.id }.toSet()
+        val emptyGroupIds = emptiedGroupIds
         if (emptyGroupIds.isNotEmpty()) {
             config.modelGroups.removeAll { it.id in emptyGroupIds }
             if (config.defaultPrimaryGroupId in emptyGroupIds) config.defaultPrimaryGroupId = null

@@ -65,6 +65,18 @@ interface ProviderConfigDao {
     suspend fun deleteMetaNotIn(keepKeys: List<String>)
 
     /**
+     * [fix/meta1028-d1 F-01] Drop a single meta row — the sync-token repair needs
+     * "this key names no mirror" as an expressible state.
+     *
+     * Deleting the row (rather than storing an empty string) is what makes the
+     * next cold start take the re-import branch: `loadConfigSuspending` treats a
+     * missing `json_sync_hash` as "not in step", which is exactly the honest
+     * answer after a rejected mirror write.
+     */
+    @Query("DELETE FROM provider_config_meta WHERE key = :key")
+    suspend fun deleteMetaKey(key: String)
+
+    /**
      * Atomic incremental replace — upsert the incoming rows, then delete only
      * the rows that are no longer present. Unlike [replaceAll], rows that are
      * unchanged keep their position/rowid, so SQLite doesn't pay an
