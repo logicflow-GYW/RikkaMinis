@@ -62,7 +62,11 @@ object AutoBackupManager {
     /** Local auto-backup files, newest first. */
     fun listLocal(context: Context): List<File> {
         val dir = File(context.filesDir, DIR)
-        return dir.listFiles { f -> f.isFile && f.name.startsWith(LOCAL_FILE_PREFIX) }
+        // [FIX-P1B / FINDING-14] One matching rule for the list, rotation and
+        // the settings screen (AutoBackupLocalStore.isBackupName): a finished
+        // backup must end with .json, so a `.json.tmp` left by a killed run is
+        // invisible here instead of showing up as the newest "backup".
+        return dir.listFiles { f -> f.isFile && AutoBackupLocalStore.isBackupName(f.name, LOCAL_FILE_PREFIX) }
             ?.sortedByDescending { it.lastModified() } ?: emptyList()
     }
 
@@ -162,13 +166,23 @@ object AutoBackupManager {
         // (buildSections is the single source of truth for both), so the
         // written document is the same shape as before.
         val dir = File(app.filesDir, DIR).apply { mkdirs() }
+        // [FIX-P1B / FINDING-14] Reclaim `.json.tmp` files from a run that was
+        // killed mid-write (listLocal cannot see them by design, so nothing
+        // else would). Best-effort: a failed delete must never fail the backup.
+        AutoBackupLocalStore.deleteStaleTemps(dir, LOCAL_FILE_PREFIX)
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-        val local = File(dir, "$LOCAL_FILE_PREFIX$stamp.json")
+        val local = File(dir, AutoBackupLocalStore.fileName(LOCAL_FILE_PREFIX, stamp))
         // exportToWriter returns the count of fields it could not read. The
         // unattended path has no UI to surface them in, so a nonzero count is
         // logged and the backup still lands (the String path dropped those
         // fields the same way; only the reporting channel differs).
-        val unreadableFields = local.bufferedWriter().use { writer ->
+        //
+        // [FIX-P1B / FINDING-14] Streamed into a `.json.tmp` sibling and renamed
+        // only on success — writing the final name directly is what left a
+        // truncated document under a legal name (see AutoBackupLocalStore). A
+        // throw here also leaves KEY_LAST_RUN unset, so the next foreground
+        // beat retries instead of waiting a day.
+        val unreadableFields = AutoBackupLocalStore.writeAtomically(local) { writer ->
             ConfigBackup.exportToWriter(
                 providerRepo = app.providerRepository,
                 includeSecrets = false,
