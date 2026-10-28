@@ -11,7 +11,7 @@
 - **F-02** 先证：WebDAV/快照/SAF 三处「先建载荷后抢门」成立；`.minisbak` Plain 先放门再取门成立；**报告两处证伪/补全**——「已写却被报 busy」实为任何写之前 return（浪费的是下载字节）；原代码拒绝持门的原因是自碰撞（文件内有 `[refactor-backup-gate]` 注释），修法必须带交接。修法：唯一占用点 `claimRestorePayload()` + `preClaimed` 交接 + 四入口「取门→建载荷→同一 Main 帧交接」+ 快照行 onClick 门禁 + `remoteLoading` 兼两用一并收敛。证据：`RestorePayloadBusyGateTest` 10 例 + 半径断言（true 7→8、false 11→11，每处注释写明）+ 4 变异臂全红。
 - **F-03** 先证：`canSave` 不看加载态 + `update()` 第 132 行无条件写空串覆盖真密钥——成立。修法：`secretLoad` 三态（PENDING/LOADED/UNREADABLE）+ `canSaveWithSecretField` 门 + 点击回调 fail-closed + 不可读显式提示。证据：`SettingsWriteGatesTest` 11 例真值表 + `SettingsSecretWiringTest` 8 例 + 2 变异臂全红；键入值被落地真值覆盖（不丢数据，[da1028-C] 刻意 key 设计）登记 R4 不动。
 - **F-04** 先证：Save/Authorize **两条**写路径同缺陷（报告只提 Save，已补全）；`ifBlank { null }` 映射成「删除」成立；报告问 da1023 FIX-D `reconcileForServer` 是否已覆盖——**证伪**（它读存储当前值，继承表单写坏的值，不是守卫）。修法：`oauthSecretEdited` 意图位 + `decideClientSecretWrite` 三向决策（LEAVE_UNTOUCHED/SET/CLEAR），两按钮共用并加就绪门。证据：`SettingsSecretWiringTest` 8 例 + 2 变异臂全红 + 15 道相关门改前改后全绿。
-- **CI run id**：待回填（见文末 CI 段）。
+- **CI run id**：`40702497006`（第二轮；第一轮 `40699319582` 失败于既有半径断言，见文末 CI 段）。
 
 ---
 
@@ -187,3 +187,11 @@ Save 与 Authorize 共用同一决策；两个按钮 `enabled = !oauthBusy && oa
 | `run_shape.sh` / `run_restore_shape.sh` / `run_secret_shape.sh` | 三组源码形状断言 |
 | `run_all.sh` / `run_preserve.sh` | 一次 JVM 跑全部新测试 + 邻居 / 既有 22 例 |
 | `mutate.py`（`arm.py` 软链） | 11 个变异臂，一臂一进程，跑前先复原 `.armbak`（防上次被杀的残留污染基线） |
+
+## 10. CI 判读
+
+- **Run 1 `40699319582`（dispatch 13:45:10Z）→ failure @ 8.5 min**：唯一失败用例 = 既有 `MCPOAuthLifecycleTest > the form fields stay keyed on the entry so a reopen re-seeds them`（`:app:testReleaseUnitTest` FAILED，BUILD FAILED in 4m 41s；本地 80+22 例全绿仍漏）。根因：该测试钉住编辑表单 `remember(editServer)` 恰 17 次（[U2] keyed-field 半径守卫），F-04 新增 3 个 keyed 状态（oauthSecretLoad / oauthSecretEdited / oauthAuthorizedSeed）→ 20。三个状态语义上**就该** keyed on entry（reopen 重置 = fail-closed：PENDING 禁保存、意图清零、seed 重算），属**延续契约**而非破坏 → 更新计数 17→20 + 注释写明缘由（提交 `7b23be03`）；python 机械复刻断言 = 20 PASS；全仓 grep 确认无其它 `remember(editServer)` 钉（tests + `scripts/scan/`）。
+- **教训（本地漏跑的机制）**：MCP 的既有邻居测试不在 `ui/settings/` 包而在 `mcp/oauth/`（`MCPOAuthLifecycleTest`）——按包列邻居 = 漏；引用检查要按**文件名全 test 树扫**（`rg -l <文件名> src/test/`），本轮 CI 抓到的正是这个洞。
+- **Run 2 `40702497006`（dispatch 14:05:15Z）→ success @ 14:26:37Z（21.4 min）**：head_sha `7b23be03c5d15a58db90ff82687c71ecf5031f84` 与本地 HEAD 逐字符一致；27 步 0 非 success（skipped = rolling tag + Publish，main 门控）；日志 1,509,043 B / NUL 0；`Summary: 113 passed, 0 failed` 恰 1；`ALL 349 CASES PASS` 恰 1；门头 `[n/113]` 编号 distinct 113；`^ e: ` 0；FAILED 行（排除 PASSED 子串）0 条。
+
+**停止节点达成：分支 CI 绿（head_sha 逐字符一致），合并起手权在用户。**
