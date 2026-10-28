@@ -795,8 +795,13 @@ object ConfigBackup {
                     )
                     artifacts.put("archiveBytes", zipBytes.size)
                     artifacts.put("fileCount", fileCount)
-                    if (artifactSkipped > 0) artifacts.put("skipped", artifactSkipped)
                 }
+                // [FIX-R3-D / F-12] The skip count rides the section even when
+                // nothing survived the cap (fileCount == 0): it used to be
+                // nested inside the archive branch, so "5 files were left out"
+                // was only reported when at least one file made it in — the
+                // all-skipped case read as "there was nothing here".
+                if (artifactSkipped > 0) artifacts.put("skipped", artifactSkipped)
             } finally {
                 runCatching { archiveFile.delete() }
             }
@@ -928,10 +933,21 @@ object ConfigBackup {
             // MEMORY-ROLLUP.md from the settings list — memoryBackupEntries()
             // puts it back for the payload only, so a restored device keeps the
             // distilled rules the daily logs were folded into.
+            //
+            // [FIX-R3-D / F-05] The reader is the export's own "is this file
+            // there" rule, not `readFile`'s folded `""`: `listAllFiles` lists
+            // GLOBAL.md even when it does not exist, and a device without one
+            // used to export `content:""` for it — which the restore side's
+            // guard then (correctly) refuses to apply over real content.
             val entries = memoryBackupEntries(
                 listed = runCatching { memoryRepo.listAllFiles() }
                     .getOrDefault(emptyList()).map { it.name },
-            ) { name -> runCatching { memoryRepo.readFile(name) }.getOrNull() }
+            ) { name ->
+                readMemoryFileForBackup(
+                    runCatching { memoryRepo.memoryDirectory() }.getOrNull(),
+                    name,
+                )
+            }
             for ((name, content) in entries) {
                 memoryFiles.put(JSONObject().apply {
                     put("name", name)
@@ -1290,6 +1306,16 @@ object ConfigBackup {
         // stage can re-attach rules to the instance that now owns the label
         // (merge and append paths both re-mint or reuse ids).
         val providerKeyToId = HashMap<String, String>()
+        // [FIX-R3-D / F-08] Instance ids Stage 1 already created or merged into
+        // during THIS run. A backup legitimately carries two providers with the
+        // same (providerType, label) — e.g. the user duplicated an OpenAI
+        // instance and gave both the same label, or imported one twice before
+        // the conflict rename existed. `mergeImportInstanceJSON` matches on
+        // exactly that pair against the LIVE list, so without this set the
+        // second entry of the pair silently merged into the instance the first
+        // one had just produced: one provider lost, the second one's
+        // credentials/settings overwritten, and `providersImported == 2`.
+        val claimedInstanceIds = HashSet<String>()
         try {
 
         // [T-backup-group-idmap] Order matters. Providers create the model
@@ -1322,9 +1348,23 @@ object ConfigBackup {
                     // otherwise fall back to the classic append-and-pair.
                     // [T-backup-restore-credentials] A restore applies the
                     // backup's credentials to the existing instance.
-                    val merged = providerRepo.mergeImportInstanceJSON(
-                        obj.toString(), srcEntryIds,
-                    )
+                    //
+                    // [FIX-R3-D / F-08] …unless this run already claimed the
+                    // matching instance (the duplicate-label case above): then
+                    // the entry is an ADDITIONAL provider and takes the append
+                    // path, which renames its label instead of overwriting a
+                    // sibling.
+                    val matchedLiveId = providerRepo.instances.firstOrNull {
+                        it.providerType.name == obj.optString("providerType", "") &&
+                            it.label == label
+                    }?.id
+                    val merged = if (shouldMergeIntoExisting(matchedLiveId, claimedInstanceIds)) {
+                        providerRepo.mergeImportInstanceJSON(
+                            obj.toString(), srcEntryIds,
+                        )
+                    } else {
+                        null
+                    }
                     val resolvedLabel: String?
                     if (merged != null) {
                         resolvedLabel = label
@@ -1379,6 +1419,10 @@ object ConfigBackup {
                             it.providerType.name == obj.optString("providerType", "")
                     }?.id
                     if (instId != null) {
+                        // [FIX-R3-D / F-08] Whatever this entry produced/merged
+                        // into is off the table as a merge target for the REST
+                        // of this document.
+                        claimedInstanceIds.add(instId)
                         // [da1031-A] Key by the BACKUP's original label, not the
                         // possibly auto-renamed one: Stage 1.5 looks rules up by
                         // the (providerType, providerLabel) pair the rules export
@@ -1543,6 +1587,12 @@ object ConfigBackup {
         // -- Stage 3: scalar fields (defaults.* group/entry ids remapped) --
         val fields = root.optJSONObject("fields")
         if (fields != null) {
+            // [FIX-R3-D / F-02] This install's own ids, read ONCE before the
+            // loop: they are what makes a same-install restore (or a backup
+            // with no `groups` section) survive remapping verbatim instead of
+            // being filtered away by the field writers.
+            val localGroupIds = providerRepo.config.value.modelGroups.map { it.id }.toSet()
+            val localEntryIds = providerRepo.config.value.modelEntries.map { it.id }.toSet()
             val keys = fields.keys()
             while (keys.hasNext()) {
                 val path = keys.next()
@@ -1580,7 +1630,14 @@ object ConfigBackup {
                 // did carry) or had the remainder silently filtered out (agent
                 // loop lists → a second import CLEARED the local list). Skip the
                 // field, keep the local value, and name it in `skipped`.
-                val remap = remapDefaultsIds(path, decoded, groupIdMap, entryIdMap)
+                val remap = remapDefaultsIds(
+                    path,
+                    decoded,
+                    groupIdMap,
+                    entryIdMap,
+                    localGroupIds = localGroupIds,
+                    localEntryIds = localEntryIds,
+                )
                 val value = remap.value
                 if (value == null) {
                     skipped.add(
@@ -1920,6 +1977,14 @@ object ConfigBackup {
         if (artifactsObj != null && artifactRoots != null && artifactRoots.isNotEmpty()) {
             val archive = artifactsObj.optString("archive", "")
             val estimatedBytes = (archive.length / 4L) * 3L
+            // [FIX-R3-D / F-12] The exporter's own skip count now has a reader
+            // (it was written and never consumed): report it through the same
+            // channel the rest of Stage 9 uses, so "the archive is missing
+            // files" is distinguishable from "the archive is complete".
+            val skippedAtExport = artifactsObj.optInt("skipped", 0)
+            if (skippedAtExport > 0) {
+                skipped.add("artifacts: $skippedAtExport file(s) were left out at export")
+            }
             if (archive.isNotEmpty() && estimatedBytes <= MAX_ARTIFACT_ARCHIVE_BYTES) {
                 try {
                     val bytes = android.util.Base64.decode(archive, android.util.Base64.NO_WRAP)
@@ -1977,9 +2042,15 @@ object ConfigBackup {
                 } catch (t: Throwable) {
                     skipped.add("artifacts: ${t.message ?: "extract failed"}")
                 }
-            } else if (archive.isEmpty()) {
+            } else if (artifactsObj.has("archive") && archive.isEmpty()) {
+                // [FIX-R3-D / F-12] "archive key present but empty" is the
+                // exporter's `includeArtifacts=false` shape. A section that is
+                // a bare `{}` (an older export, or the skip-only one this fix
+                // introduces) carries no claim at all — reporting "archive
+                // empty" for it turned every restore of such a package into a
+                // fake warning.
                 skipped.add("artifacts: archive empty in backup")
-            } else {
+            } else if (estimatedBytes > MAX_ARTIFACT_ARCHIVE_BYTES) {
                 skipped.add("artifacts: archive too large (${estimatedBytes} bytes)")
             }
         } else if (artifactsObj != null && artifactsObj.has("archive") && artifactRoots == null) {
@@ -2766,7 +2837,25 @@ object ConfigBackup {
         for (i in 0 until arr.length()) {
             val el = arr.optJSONObject(i) ?: continue
             val type = el.optString("type")
-            if (type == "image" || type == "image_url" || type == "video" || type == "video_url") {
+            // [FIX-R3-D / F-15] Every row written today carries `mediaRef`
+            // (see ChatMessageJson.buildMediaRefPartJson) — a pointer to a file
+            // under the EXPORTING device's media store (`relativePath`,
+            // `linuxPath`). The attach filter only knew the pre-migration
+            // `"image"`/`"video"` names, so a cross-device backup shipped those
+            // private paths in every affected message: the receiving device
+            // cannot resolve them (renders a broken attachment) and the backup
+            // leaks a filename/path it has no use for. Dropped for the same
+            // reason as the legacy shapes — the media bytes never travel, so
+            // the reference is dead weight that looks live.
+            // The same two names [com.rikkaminis.app.share.countPartsAttachments]
+            // treats as attachments; that file owns the canonical arm table and
+            // this is its drop-side counterpart (kept in step with it).
+            // One line on purpose: this branch treats image and video the SAME
+            // way (drop both), which is what keeps it out of the "media
+            // quantifier" family that parts_json_funnel_check derives — a
+            // dropper that splits the two by name is asserting per-kind
+            // semantics it does not have.
+            if (type == "image" || type == "image_url" || type == "video" || type == "video_url" || type == "mediaRef") {
                 continue
             }
             if (type == "text") {
@@ -2806,6 +2895,12 @@ object ConfigBackup {
                 // Drop the snapshot preview: it duplicates the tail of
                 // output and no UI code reads it (verified 2026-08-11).
                 value.remove("snapshot")
+                // [FIX-R3-D / F-15] …and the tool-produced media pointer, for
+                // the same reason as the `mediaRef` part above: `ToolResult.mediaRef`
+                // is a path into THIS device's media store. The tool result
+                // itself stays (its text is the evidence); only the unresolvable
+                // pointer goes.
+                value.remove("mediaRef")
                 val output = value.optString("output")
                 if (output.length > MAX_BACKUP_TOOL_OUTPUT_CHARS) {
                     value.put(
@@ -2923,6 +3018,26 @@ internal fun summariseIds(ids: List<String>, max: Int = 3): String {
 }
 
 /**
+ * [FIX-R3-D / F-08] May a backup's provider entry merge into the live instance
+ * whose (providerType, label) it matched?
+ *
+ * `mergeImportInstanceJSON` answers that question against the live list, which
+ * grows as this import runs. The second provider of a duplicate-label pair
+ * therefore matched the instance the first one had just created/merged into and
+ * overwrote it — the document claimed two providers, one survived. An instance
+ * this run already claimed is not a merge target: the entry takes the append
+ * path and gets the `"<label> (2)"` rename, exactly like a clash with a
+ * pre-existing instance.
+ *
+ * Pure so [BackupProviderMergeTest] can pin the rule on the JVM (the repository
+ * behind it needs Room).
+ */
+internal fun shouldMergeIntoExisting(
+    matchedLiveInstanceId: String?,
+    claimedThisRun: Set<String>,
+): Boolean = matchedLiveInstanceId != null && matchedLiveInstanceId !in claimedThisRun
+
+/**
  * Rewrite the source group/entry ids embedded in a `defaults.*` field to the
  * ids minted during this import. Group-typed fields
  * (primaryGroup / subGroup / voiceInputGroup / voiceOutputGroup /
@@ -2943,12 +3058,24 @@ internal fun summariseIds(ids: List<String>, max: Int = 3): String {
  *    silently CLEARED the user's agent-loop list. Counts looked normal, the UI
  *    looked fine, the setting was gone.
  *
- * Contract now, mirroring [remapSessionBindingJson]: no map at all ⇒ the field
- * is untouched (a same-install restore has nothing to rewrite); a map that
- * cannot resolve an id ⇒ that id is dropped (and [FieldIdRemap.value] is null
- * when nothing survives), with the ids handed back so the caller can record
- * them in `skipped`. The criterion is "a second import cannot introduce a new
- * dangling reference", not "never remap".
+ * Contract now, mirroring [remapSessionBindingJson]: an id the map cannot
+ * resolve is dropped (and [FieldIdRemap.value] is null when nothing survives),
+ * with the ids handed back so the caller can record them in `skipped`. The
+ * criterion is "a second import cannot introduce a new dangling reference",
+ * not "never remap".
+ *
+ * [FIX-R3-D / F-02] There is no longer an "empty map ⇒ pass the value through"
+ * shortcut. That shortcut read as "same-install restore has nothing to
+ * rewrite", but what it actually handed to `field.write` was the SOURCE
+ * install's ids: a backup without a `groups` / `providers` section (an older
+ * package, or one whose providers were all rejected) produced empty maps, the
+ * writers filter unknown ids against this install's lists, and the intersection
+ * was empty — `defaults.agentLoopGroups` / `agentLoopEntries` were CLEARED and
+ * `runtime.compactModelEntryId` was overwritten with a dangling uuid, while the
+ * restore reported success. Same-install restores keep working because the
+ * caller passes this install's own ids ([localGroupIds] / [localEntryIds]):
+ * an id that already exists here is a legitimate target and is kept verbatim,
+ * anything else is reported instead of written.
  *
  * Pure and Android-free so [BackupIdRemapTest] can pin every branch on the JVM.
  * [FIX-E / ISSUE-09] `runtime.compactModelEntryId` used to be absent here: its
@@ -2964,15 +3091,25 @@ internal fun remapDefaultsIds(
     value: ConfigValue,
     groupIdMap: Map<String, String>,
     entryIdMap: Map<String, String>,
+    // [FIX-R3-D / F-02] Ids that already exist on THIS install. A same-install
+    // restore (or a backup that carried no `groups` / `providers` section)
+    // references them and must keep working; a foreign id must not be written
+    // through to a writer that would filter it away and clear the local list.
+    localGroupIds: Set<String> = emptySet(),
+    localEntryIds: Set<String> = emptySet(),
 ): FieldIdRemap {
     val map = when (path) {
         "defaults.primaryGroup", "defaults.subGroup", "defaults.voiceInputGroup", "defaults.voiceOutputGroup", "defaults.agentLoopGroups" -> groupIdMap
         "defaults.agentLoopEntries", "runtime.compactModelEntryId" -> entryIdMap
         else -> return FieldIdRemap(value)
     }
-    // No map = same-install restore (or a backup taken before groups/entries
-    // existed): nothing to rewrite, and nothing to report.
-    if (map.isEmpty()) return FieldIdRemap(value)
+    // [FIX-R3-D / F-02] Which ids this field's writer would still accept
+    // unchanged. Deliberately read from `path` again rather than from `map`:
+    // an empty map no longer means "the value is fine as-is" (see the KDoc).
+    val localIds = when (path) {
+        "defaults.agentLoopEntries", "runtime.compactModelEntryId" -> localEntryIds
+        else -> localGroupIds
+    }
     return when (value) {
         is ConfigValue.Str -> {
             // A blank id means "nothing selected", not a reference that failed
@@ -2981,23 +3118,39 @@ internal fun remapDefaultsIds(
             if (value.value.isEmpty()) {
                 FieldIdRemap(value)
             } else {
-                map[value.value]
-                    ?.let { FieldIdRemap(ConfigValue.Str(it)) }
-                    ?: FieldIdRemap(value = null, unmapped = listOf(value.value))
+                val resolved = map[value.value]
+                    ?: value.value.takeIf { it in localIds }
+                when {
+                    resolved == null -> FieldIdRemap(value = null, unmapped = listOf(value.value))
+                    // Unchanged: hand back the SAME object so a caller can tell
+                    // "nothing was rewritten" apart from "rewritten to itself".
+                    resolved == value.value -> FieldIdRemap(value)
+                    else -> FieldIdRemap(ConfigValue.Str(resolved))
+                }
             }
         }
         is ConfigValue.Arr -> {
             val kept = ArrayList<ConfigValue>(value.value.size)
             val unmapped = ArrayList<String>(0)
+            var rewritten = false
             for (element in value.value) {
                 if (element !is ConfigValue.Str || element.value.isEmpty()) {
                     kept.add(element)
                     continue
                 }
                 val mapped = map[element.value]
-                if (mapped != null) kept.add(ConfigValue.Str(mapped)) else unmapped.add(element.value)
+                    ?: element.value.takeIf { it in localIds }
+                when {
+                    mapped == null -> unmapped.add(element.value)
+                    mapped == element.value -> kept.add(element)
+                    else -> {
+                        kept.add(ConfigValue.Str(mapped))
+                        rewritten = true
+                    }
+                }
             }
             when {
+                unmapped.isEmpty() && !rewritten -> FieldIdRemap(value)
                 unmapped.isEmpty() -> FieldIdRemap(ConfigValue.Arr(kept))
                 // Nothing survived: writing the empty remainder would CLEAR the
                 // local setting (the silent-wipe shape this fix exists for).
@@ -3066,6 +3219,27 @@ internal fun remapSessionBindingJson(
     } catch (_: Throwable) {
         bindingJson
     }
+}
+
+/**
+ * [FIX-R3-D / F-05] Export-side read for one `memoryFiles` entry: `null` when
+ * the file is not there (or cannot be read), the text when it is.
+ *
+ * `MemoryRepository.readFile` answers `""` for both "absent" and "read failed"
+ * and `listAllFiles` lists `GLOBAL.md` unconditionally, so a device that never
+ * created one exported `{"name":"GLOBAL.md","content":""}` — indistinguishable
+ * from a deliberately emptied file, and the restore side's blank-content guard
+ * has to treat it as "the backup knows nothing about this file". With this
+ * helper the payload simply carries no entry for a file that does not exist;
+ * a genuinely empty file still rides as `""` (its content is the truth).
+ *
+ * Pure `java.io` so [BackupMemoryRollupTest] can pin both halves off device.
+ */
+internal fun readMemoryFileForBackup(dir: File?, name: String): String? {
+    if (dir == null) return null
+    val f = File(dir, name)
+    if (!f.isFile) return null
+    return runCatching { f.readText() }.getOrNull()
 }
 
 /**
