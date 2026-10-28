@@ -1356,8 +1356,17 @@ fun BackupSettingsScreen(
                                 // as the nightly writes — before this, every
                                 // fetch added an unbounded local copy with no
                                 // AUTO_BACKUP_KEEP cap applied.
+                                //
+                                // [FIX-R3-D / F-01] …and the fetched copy is
+                                // protected: a copy fetched from an OLDER date
+                                // sorts as the oldest by name, so the rotation
+                                // deleted it in the same breath as writing it
+                                // (the Toast said "fetched", the list showed
+                                // nothing new).
                                 withContext(Dispatchers.IO) {
-                                    com.rikkaminis.app.backup.AutoBackupManager.rotateLocalAutoBackups(context)
+                                    com.rikkaminis.app.backup.AutoBackupManager.withFreshlyWritten(local) {
+                                        com.rikkaminis.app.backup.AutoBackupManager.rotateLocalAutoBackups(context)
+                                    }
                                 }
                                 // Refresh the local auto-backup list so the
                                 // fetched copy shows up immediately (state

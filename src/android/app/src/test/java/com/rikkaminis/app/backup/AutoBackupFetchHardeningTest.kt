@@ -5,6 +5,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -244,6 +245,93 @@ class AutoBackupFetchHardeningTest {
                 victimEligible = { AutoBackupManager.localStampMillis(it) != null },
             )
             assertEquals(listOf(older.name), victims.map { it.name })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    // ── [FIX-R3-D / F-01] the just-written copy is not history ───────────
+
+    @Test
+    fun `a rolled-back stamp does not make the copy we just wrote the victim`() {
+        // The world: the clock rolled back two days, so the copy written "now"
+        // sorts OLDEST by name and `drop(keep)` puts it first in line. Before
+        // F-01 that meant the run deleted the file it had just written, and the
+        // WebDAV push that follows read a missing file.
+        val dir = freshDir()
+        try {
+            val newest = namedBackup(dir, "rikkaminis-auto-20261029-120000.json")
+            val older = namedBackup(dir, "rikkaminis-auto-20261028-120000.json")
+            val justWritten = namedBackup(dir, "rikkaminis-auto-20261026-120000.json")
+
+            val ordered = BackupRotation.newestFirst(
+                listOf(older, justWritten, newest),
+                name = { it.name },
+                key = { AutoBackupManager.localStampMillis(it) },
+            )
+            assertEquals(
+                listOf(newest.name, older.name, justWritten.name),
+                ordered.map { it.name },
+            )
+
+            val victims = AutoBackupManager.selectLocalRotationVictims(
+                files = ordered,
+                keep = 1,
+                victimEligible = { AutoBackupManager.localStampMillis(it) != null },
+                protectName = justWritten.name,
+            )
+            // `older` is the oldest ELIGIBLE copy; the protected one survives
+            // even though it sorts last.
+            assertEquals(listOf(older.name), victims.map { it.name })
+            assertFalse(victims.any { it.name == justWritten.name })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `the protection is scoped to the block and restored, not leaked`() {
+        val dir = freshDir()
+        try {
+            val marked = namedBackup(dir, "rikkaminis-auto-20261026-120000.json")
+            val inner = namedBackup(dir, "rikkaminis-auto-20261025-120000.json")
+            assertNull(AutoBackupManager.freshlyWrittenName())
+
+            AutoBackupManager.withFreshlyWritten(marked) {
+                assertEquals(marked.name, AutoBackupManager.freshlyWrittenName())
+                // Nested scopes restore the outer mark instead of clearing it.
+                AutoBackupManager.withFreshlyWritten(inner) {
+                    assertEquals(inner.name, AutoBackupManager.freshlyWrittenName())
+                }
+                assertEquals(marked.name, AutoBackupManager.freshlyWrittenName())
+            }
+            assertNull(AutoBackupManager.freshlyWrittenName())
+
+            // An exception must not leave a stale mark behind (a stale mark
+            // would make the next rotation keep the wrong backup forever).
+            runCatching {
+                AutoBackupManager.withFreshlyWritten(marked) { error("boom") }
+            }
+            assertNull(AutoBackupManager.freshlyWrittenName())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `no protection name means the plain keep-N rule`() {
+        // Null (the default) must stay byte-identical to the pre-fix selection:
+        // the cap still prunes.
+        val dir = freshDir()
+        try {
+            val a = namedBackup(dir, "rikkaminis-auto-20261029-120000.json")
+            val b = namedBackup(dir, "rikkaminis-auto-20261028-120000.json")
+            val c = namedBackup(dir, "rikkaminis-auto-20261027-120000.json")
+            assertEquals(
+                listOf(c.name),
+                AutoBackupManager.selectLocalRotationVictims(listOf(a, b, c), keep = 2)
+                    .map { it.name },
+            )
         } finally {
             dir.deleteRecursively()
         }
