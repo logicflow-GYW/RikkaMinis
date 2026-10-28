@@ -294,3 +294,77 @@ object ScheduledTaskRevisionPolicy {
     fun shouldMarkMissing(loadedOnce: Boolean, stillExists: Boolean): Boolean =
         loadedOnce && !stillExists
 }
+
+/**
+ * [FIX-R3-E F-07 / F-04B] The two decisions [ScheduledTasksStore] makes around
+ * every write, extracted so the JVM harness can drive them without a Context
+ * (the store itself is Android-bound; the existing convention for exactly this
+ * split is [ScheduledTaskRevisionPolicy]).
+ *
+ * Why these two:
+ *  - **Visible-after-write**: `mutate` used to hand back the in-memory result
+ *    whether or not the atomic write landed, and `importDocument` reported
+ *    `applied = true` the same way. Both surfaces (the editor's "is my change
+ *    in there" check, the restore report's `scheduledTasksImported`) then
+ *    claimed a success that disk never saw.
+ *  - **Marker admission**: `markRunning` wrote the crash-recovery marker for
+ *    whatever id it was handed. A task deleted while `fire()` was suspended in
+ *    its `prepareSession` window had its marker resurrected on disk (and its
+ *    headless run started) by the fire pass that was already past the
+ *    evaluation gate.
+ */
+internal object ScheduledTaskStorePolicy {
+
+    /**
+     * The document a read-modify-write hands back to its caller.
+     *
+     * @param current the pre-write document (what is still on disk).
+     * @param next the transform's output.
+     * @param writeSucceeded whether the atomic write landed.
+     * @return [next] only when it was persisted; [current] otherwise — a caller
+     *   that inspects the result (the editor checks `tasks.any { id }`) then
+     *   sees the failure instead of a phantom success.
+     */
+    fun visibleAfterWrite(
+        current: ScheduledTasksFile,
+        next: ScheduledTasksFile,
+        writeSucceeded: Boolean,
+    ): ScheduledTasksFile = if (writeSucceeded) next else current
+
+    /**
+     * Whether the crash-recovery marker may be written for [taskId], and what
+     * document to hand back.
+     *
+     * Admission requires the task to still be in the document — and enabled,
+     * and the master switch on: all three are the fire pass's own preconditions
+     * ([ScheduledTaskPolicy.evaluate] checks enabled + the window; the caller
+     * checks `globalEnabled` once per pass). Between that pass and this write
+     * stretch the whole `prepareSession` suspension, so any of them may have
+     * been revoked by the user; a run whose marker no longer has a task to
+     * belong to is a run nobody can settle.
+     *
+     * Refusal returns [file] UNCHANGED (identity), so `mutate` skips the write
+     * entirely — no revision bump, no disk touch.
+     */
+    fun markRunningDecision(
+        file: ScheduledTasksFile,
+        taskId: String,
+        sessionId: String,
+        startedAt: Long,
+    ): ScheduledTasksFile {
+        if (!file.globalEnabled) return file
+        if (file.tasks.none { it.id == taskId && it.enabled }) return file
+        return file.copy(
+            running = ScheduledRunMarker(taskId = taskId, sessionId = sessionId, startedAt = startedAt),
+        )
+    }
+
+    /**
+     * Whether [markRunningDecision] actually admitted [taskId] — the check
+     * [ScheduledTaskRunner.fire] performs on the file it got back before
+     * dispatching. Separate from the decision so the runner's wiring can be
+     * shape-asserted while the decision stays table-driven.
+     */
+    fun markerLanded(file: ScheduledTasksFile, taskId: String): Boolean =
+        file.running?.taskId == taskId
+}

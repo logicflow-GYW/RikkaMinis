@@ -197,6 +197,14 @@ object ScheduledTaskRunner {
     // [B27] The whole read-evaluate-mark-running pass — including the fire —
     // is atomic under checkMutex, so two concurrent foreground beats cannot
     // both observe the same due task and fire it twice.
+    // [FIX-R3-E F-04A] The lock now also excludes [finalizeRun]'s settlement:
+    // `load` snapshot → `evaluate` verdict and "persist the run + reset
+    // runningTaskId" can no longer interleave, which was how a daily task
+    // could fire twice on the same day (evaluate pairing a stale task list —
+    // run not yet credited — with an already-nulled runningTaskId, defeating
+    // ALREADY_RAN and OVERLAP at once). LOCK ORDER still holds: this path
+    // takes checkMutex -> store lock (load/markRunning/completeRun), and the
+    // store's call sites keep onTasksRemoved outside the store lock.
     internal suspend fun checkAndFireToday(app: MinisApp) = checkMutex.withLock {
         val gate = ScheduledTasksStore.load(app)
         if (!gate.globalEnabled) return
@@ -246,7 +254,9 @@ object ScheduledTaskRunner {
             if (!dispatched.remove(sid, d)) continue
             AppLogger.info(TAG, "abort task=${d.taskId} reason=stale-dispatch")
             MemorySpikeRecorder.onEvent(TAG, "abort task=${d.taskId} reason=stale-dispatch")
-            finalizeRun(app, d.taskId, ScheduledTask.RESULT_ERROR, sid, d.scheduledDate)
+            // Already under checkMutex (called from checkAndFireToday) — the
+            // locked body, not the locking entry point ([FIX-R3-E F-04A]).
+            finalizeLocked(app, d.taskId, ScheduledTask.RESULT_ERROR, sid, d.scheduledDate)
         }
     }
 
@@ -274,7 +284,28 @@ object ScheduledTaskRunner {
                     maxEstimatedTokens = task.maxEstimatedTokens,
                 ),
             )
-            ScheduledTasksStore.markRunning(app, task.id, sid, System.currentTimeMillis())
+            // [FIX-R3-E F-04B] Re-admission gate. `prepareSession` suspends
+            // WITHOUT the store lock; a delete/backup-restore that lands in
+            // that window removes the task (and clears any marker), then
+            // blocks on [checkMutex] in [onTasksRemoved] until this fire pass
+            // releases it. The old code wrote the marker back unconditionally
+            // here — resurrecting a `running` entry for a task that no longer
+            // exists — and dispatched the headless run anyway. markRunning now
+            // refuses to admit a task that is no longer in the document (see
+            // [ScheduledTaskStorePolicy.markRunningDecision]); when it
+            // refuses, drop everything this fire pass created: the budget
+            // ceiling, the in-process single-flight lock — no dispatch record,
+            // no prompt. The queued [onTasksRemoved] then finds nothing to
+            // release, and no orphan marker is left on disk (the store never
+            // wrote one; delete/restore already cleared it).
+            val marked = ScheduledTasksStore.markRunning(app, task.id, sid, System.currentTimeMillis())
+            if (!ScheduledTaskStorePolicy.markerLanded(marked, task.id)) {
+                AppLogger.info(TAG, "abandon task=${task.id} reason=removed-mid-fire")
+                MemorySpikeRecorder.onEvent(TAG, "abandon task=${task.id} reason=removed-mid-fire")
+                if (runningTaskId == task.id) runningTaskId = null
+                AgentRunBudgetCeilings.clear(sid)
+                return
+            }
             dispatched[sid] = Dispatch(
                 taskId = task.id,
                 deadlineSec = task.deadlineSec,
@@ -307,7 +338,8 @@ object ScheduledTaskRunner {
                         "dispatch produced no stream task=${task.id} status=$status " +
                             "reason=${result.optString("responseText", "")}",
                     )
-                    finalizeRun(app, task.id, ScheduledTask.RESULT_ERROR, sid, scheduledDate)
+                    // Already under checkMutex via checkAndFireToday.
+                    finalizeLocked(app, task.id, ScheduledTask.RESULT_ERROR, sid, scheduledDate)
                 }
             }
         } catch (t: Throwable) {
@@ -321,7 +353,11 @@ object ScheduledTaskRunner {
                 // the attempt to the day the fire pass observed it due (the
                 // fire-time `today` this function received — available even
                 // when prepareSession threw before a dispatch record existed).
-                finalizeRun(app, task.id, ScheduledTask.RESULT_ERROR, sid, scheduledDate)
+                // fire() is only ever called from checkAndFireToday, which
+                // holds checkMutex — so the locked body is the right call here
+                // too ([FIX-R3-E F-04A]: every settlement funnels through the
+                // same lock as the check pass).
+                finalizeLocked(app, task.id, ScheduledTask.RESULT_ERROR, sid, scheduledDate)
             }
         }
     }
@@ -336,7 +372,36 @@ object ScheduledTaskRunner {
         return sessionId
     }
 
+    /**
+     * Settle a run this process dispatched. [FIX-R3-E F-04A] Takes
+     * [checkMutex]: the settlement (persisted `lastRunDate` + the
+     * [runningTaskId] reset) used to run OUTSIDE it, so a foreground
+     * `checkAndFireToday` interleaving between its `load` snapshot and its
+     * [ScheduledTaskPolicy.evaluate] call saw the STALE task list (the run not
+     * yet credited) together with the FRESH null [runningTaskId] — `ALREADY_RAN`
+     * and `OVERLAP` both failed and the daily task fired a second time the same
+     * day. Under [checkMutex] the two sequences are both safe: check first →
+     * evaluate sees the still-set [runningTaskId] → OVERLAP; settle first →
+     * evaluate's snapshot carries the credited `lastRunDate` → ALREADY_RAN.
+     *
+     * The callers that are ALREADY under [checkMutex] (the reaper and `fire`'s
+     * failure paths, both inside `checkAndFireToday`) call [finalizeLocked]
+     * directly — kotlinx Mutex is not reentrant.
+     */
     private suspend fun finalizeRun(
+        app: MinisApp,
+        taskId: String,
+        outcome: String,
+        sessionId: String?,
+        scheduledDate: String,
+    ) {
+        checkMutex.withLock {
+            finalizeLocked(app, taskId, outcome, sessionId, scheduledDate)
+        }
+    }
+
+    /** The settlement body; caller MUST already hold [checkMutex]. */
+    private suspend fun finalizeLocked(
         app: MinisApp,
         taskId: String,
         outcome: String,

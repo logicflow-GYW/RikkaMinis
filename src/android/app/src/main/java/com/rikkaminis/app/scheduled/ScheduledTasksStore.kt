@@ -34,6 +34,27 @@ object ScheduledTasksStore {
 
     private val lock = Mutex()
 
+    /**
+     * [FIX-R3-E F-07] `scheduled-tasks.json` exists but cannot be turned into a
+     * document — unparseable bytes, or a `version` this build does not read.
+     *
+     * Read failures used to be folded into `ScheduledTasksFile()` (the same
+     * value as "this device really has no tasks"), and the NEXT mutation then
+     * persisted that empty document over the user's tasks: one tap on the
+     * global switch erased every automation. Same failure shape
+     * [MountedFoldersStore.diskUnreadable] was fixed for (E2-F12).
+     *
+     * Contract: while this is set, every read-modify-write path REFUSES to
+     * write (returns the pre-write document) and says so in the log. The file
+     * is deliberately NOT moved aside: `AtomicFileWrite` is what a repair
+     * path would use, and a spurious quarantine of a file we merely failed to
+     * read once would be its own data loss. A whole-document restore
+     * ([importDocument]) is exempt — it replaces the file with bytes we do
+     * have, which is exactly the recovery path a corrupt local file needs.
+     */
+    @Volatile
+    private var unreadable = false
+
     private val _revision = MutableStateFlow(0L)
 
     /**
@@ -58,9 +79,25 @@ object ScheduledTasksStore {
     /**
      * The whole document as a JSON object for the config backup's
      * "scheduledTasks" section (ConfigBackup.export param [scheduledTasks]).
+     *
+     * [FIX-R3-E F-07] When the live file is unreadable this exports an EMPTY
+     * task set — the signature cannot carry the failure (every call site lives
+     * under `backup/` or the backup screens, which this branch must not
+     * touch), and the restore side already refuses an empty section over a
+     * non-empty device ([ScheduledTasksRestorePlan.decide]), so the worst that
+     * survives is a backup that cannot delete tasks elsewhere. Logged loudly
+     * so the export is not mistaken for a good one.
+     * and the restore side already refuses an empty section over a non-empty
+     * device ([ScheduledTasksRestorePlan.decide]), so the worst that survives
+     * is a backup that cannot delete tasks elsewhere. Logged loudly so the
+     * export is not mistaken for a good one.
      */
     suspend fun exportDocument(context: Context): JSONObject = lock.withLock {
-        JSONObject(loadLocked(context).let(ScheduledTasksCodec::encode))
+        val doc = loadLocked(context)
+        if (unreadable) {
+            AppLogger.warning(TAG, "export: scheduled-tasks.json is unreadable — exporting an EMPTY task set")
+        }
+        JSONObject(ScheduledTasksCodec.encode(doc))
     }
 
     /**
@@ -104,8 +141,43 @@ object ScheduledTasksStore {
                 parsedTasks = parsed.tasks.size,
                 liveTasks = live.tasks.size,
             )
-            if (decision.applied) writeLocked(context, parsed.copy(running = null))
-            ScheduledTasksRestoreOutcome(decision.applied, decision.notice)
+            // [FIX-R3-E F-07] While the local file is unreadable, `live` parsed
+            // to empty, so the plan's empty-set guard sees `liveTasks == 0` and
+            // would let an EMPTY backup section through — writing "no tasks"
+            // over bytes we could not read. A non-empty restore stays allowed
+            // (see the [unreadable] KDoc: replacing the file with bytes we do
+            // have is the recovery path), an empty one does not.
+            if (unreadable && parsed.tasks.isEmpty()) {
+                AppLogger.warning(TAG, "restore refused: local file unreadable and backup section is empty")
+                return@withLock ScheduledTasksRestoreOutcome(
+                    applied = false,
+                    notice = "this device's scheduled-tasks.json is unreadable and the backup carries no " +
+                        "task; nothing was overwritten",
+                )
+            }
+            if (decision.applied) {
+                // [FIX-R3-E F-07] A restore that did not land must not report
+                // "applied": ConfigBackup turns that flag into
+                // `scheduledTasksImported = true` and the restore UI shows no
+                // skip line, so a full disk used to report a clean restore of
+                // tasks that are still the old ones.
+                if (writeLocked(context, parsed.copy(running = null))) {
+                    // The bytes on disk are now a document we just produced, so
+                    // an earlier unreadable verdict no longer applies. (A
+                    // whole-document restore is the one write path allowed to
+                    // run while [unreadable] is set — see its KDoc.)
+                    unreadable = false
+                    ScheduledTasksRestoreOutcome(applied = true, notice = decision.notice)
+                } else {
+                    ScheduledTasksRestoreOutcome(
+                        applied = false,
+                        notice = "could not write this device's scheduled-tasks.json; " +
+                            "kept the existing task(s) as-is",
+                    )
+                }
+            } else {
+                ScheduledTasksRestoreOutcome(applied = false, notice = decision.notice)
+            }
         }
         // [FIX-1028 / A-16] A refused restore removed nothing, so the runner's
         // single-flight state must survive it (releasing the lock would drop a
@@ -134,9 +206,27 @@ object ScheduledTasksStore {
     ): ScheduledTasksFile = withContext(Dispatchers.IO) {
         lock.withLock {
             val current = loadLocked(context)
+            // [FIX-R3-E F-07] An unreadable file parsed to an EMPTY document;
+            // transforming it and writing the result back would persist "no
+            // tasks" as the truth. Refuse and hand back the pre-write
+            // document — the same value every refused mutation returns, so a
+            // caller that checks "is my change in there" (the editor's
+            // `saved.tasks.any { it.id == id }`) sees the failure instead of a
+            // phantom success.
+            if (unreadable) {
+                AppLogger.warning(TAG, "mutation refused: scheduled-tasks.json is unreadable")
+                return@withLock current
+            }
             val next = transform(current)
-            if (next !== current) writeLocked(context, next)
-            next
+            if (next === current) return@withLock next
+            val wrote = writeLocked(context, next)
+            if (!wrote) {
+                AppLogger.warning(TAG, "mutation not persisted; handing back the pre-write document")
+            }
+            // [FIX-R3-E F-07] A verified atomic write is the only thing that
+            // may be reported back as the document; anything else hands back
+            // what is actually on disk.
+            ScheduledTaskStorePolicy.visibleAfterWrite(current, next, wrote)
         }
     }
 
@@ -205,13 +295,32 @@ object ScheduledTasksStore {
     suspend fun resumeTask(context: Context, taskId: String): ScheduledTasksFile =
         mutate(context) { ScheduledTaskTransitions.resume(it, taskId) }
 
+    /**
+     * Persist the crash-recovery marker for a run the runner is about to
+     * dispatch.
+     *
+     * [FIX-R3-E F-04B] Returns the file the marker actually landed on, which
+     * is NOT always the input: if the task disappeared from the document
+     * while [ScheduledTaskRunner.fire] was suspended in its `prepareSession`
+     * window (user delete / backup restore — both release the store lock
+     * before taking the runner's [ScheduledTaskRunner.onTasksRemoved]
+     * `checkMutex`), the marker is NOT written and the returned file's
+     * `running` stays null. The runner re-checks the return value before
+     * dispatching, so a deleted task can no longer resurrect its own
+     * `running` marker on disk or start a headless session.
+     */
     suspend fun markRunning(
         context: Context,
         taskId: String,
         sessionId: String,
         startedAt: Long,
     ): ScheduledTasksFile = mutate(context) {
-        it.copy(running = ScheduledRunMarker(taskId = taskId, sessionId = sessionId, startedAt = startedAt))
+        ScheduledTaskStorePolicy.markRunningDecision(
+            file = it,
+            taskId = taskId,
+            sessionId = sessionId,
+            startedAt = startedAt,
+        )
     }
 
     /** A run settled (or was reaped). Applies transitions and clears the marker. */
@@ -223,6 +332,13 @@ object ScheduledTasksStore {
     ): ScheduledTaskTransitions.Result = withContext(Dispatchers.IO) {
         lock.withLock {
             val current = loadLocked(context)
+            // [FIX-R3-E F-07] Refuse on unreadable, like every other
+            // read-modify-write: the settlement would otherwise write an empty
+            // document over the task list. (The caller only logs the result.)
+            if (unreadable) {
+                AppLogger.warning(TAG, "settlement refused: scheduled-tasks.json is unreadable")
+                return@withLock ScheduledTaskTransitions.Result(current, null, fuseTripped = false)
+            }
             val result = ScheduledTaskTransitions.completeRun(current, taskId, outcome, today)
             if (result.file !== current) writeLocked(context, result.file)
             result
@@ -236,6 +352,10 @@ object ScheduledTasksStore {
     ): ScheduledTaskTransitions.Result = withContext(Dispatchers.IO) {
         lock.withLock {
             val current = loadLocked(context)
+            if (unreadable) {
+                AppLogger.warning(TAG, "crash recovery refused: scheduled-tasks.json is unreadable")
+                return@withLock ScheduledTaskTransitions.Result(current, null, fuseTripped = false)
+            }
             val result = ScheduledTaskTransitions.crashFailure(current, taskId)
             if (result.file !== current) writeLocked(context, result.file)
             result
@@ -246,16 +366,59 @@ object ScheduledTasksStore {
 
     private fun loadLocked(context: Context): ScheduledTasksFile {
         val file = fileFor(context)
-        if (!file.exists()) return ScheduledTasksFile()
+        if (!file.exists()) {
+            unreadable = false
+            return ScheduledTasksFile()
+        }
         return try {
-            ScheduledTasksCodec.parse(file.readText())
+            val raw = file.readText()
+            // [FIX-R3-E F-07] A zero-length / whitespace-only file is "this
+            // device really has no tasks" — NOT a read failure. Treating it as
+            // unreadable would lock the user out of saving anything (the only
+            // escape would be a whole-document restore) for a state that holds
+            // no data to protect. Only non-empty bytes that fail to become a
+            // document count as unreadable.
+            if (raw.isBlank()) {
+                unreadable = false
+                return ScheduledTasksFile()
+            }
+            val parsed = ScheduledTasksCodec.parse(raw)
+            // [FIX-R3-E F-07] A document written by a newer build must not be
+            // re-encoded by this one: `parse` reads unknown fields leniently,
+            // so a v2 file round-trips through this codec as a v1 document and
+            // the next mutation would silently strip whatever v2 added. The
+            // backup-restore path already refuses foreign versions
+            // ([ScheduledTasksRestorePlan.decide]); the live file gets the
+            // same gate here, because it is the one that gets overwritten
+            // blind. Counts as [unreadable], like any other read failure.
+            val declared = JSONObject(raw).optInt("version", ScheduledTasksCodec.VERSION)
+            if (declared > ScheduledTasksCodec.VERSION) {
+                unreadable = true
+                AppLogger.warning(
+                    TAG,
+                    "tasks.json is format v$declared, this build reads v${ScheduledTasksCodec.VERSION} — " +
+                        "refusing writes until it is replaced",
+                )
+                return ScheduledTasksFile()
+            }
+            unreadable = false
+            parsed
         } catch (t: Throwable) {
-            AppLogger.warning(TAG, "tasks.json unreadable (${t.javaClass.simpleName}) — treating as empty")
+            // [FIX-R3-E F-07] "Cannot read" is NOT "the device has no tasks".
+            // It used to be folded into an empty document, and the next
+            // mutation (one switch tap) persisted that empty set over the
+            // user's tasks. Now the failure is remembered: every
+            // read-modify-write refuses until the file is replaced by a
+            // whole-document restore (the one path that writes bytes we just
+            // parsed).
+            unreadable = true
+            AppLogger.warning(TAG, "tasks.json unreadable (${t.javaClass.simpleName}) — refusing writes until it is replaced")
             ScheduledTasksFile()
         }
     }
 
-    private fun writeLocked(context: Context, file: ScheduledTasksFile) {
+    /** Returns whether the write LANDED (the revision bumps only when it did). */
+    private fun writeLocked(context: Context, file: ScheduledTasksFile): Boolean {
         val wrote = try {
             AtomicFileWrite.write(fileFor(context), ScheduledTasksCodec.encode(file))
             true
@@ -269,5 +432,6 @@ object ScheduledTasksStore {
         // a document that never changed makes every open screen re-render stale
         // data for nothing.
         _revision.value = ScheduledTaskRevisionPolicy.nextRevision(_revision.value, wrote)
+        return wrote
     }
 }
