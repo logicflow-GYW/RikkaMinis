@@ -46,6 +46,10 @@
 结果为空）全部 `return LLMModel.allGemini`。`ProviderRepository.refreshModels` 见到非空表
 就"成功并替换行"，于是中转 404 会把用户已有模型换成 5 个 Google 型号（还会连带影响分组绑定）。
 
+**设计意图侧证**：`ProviderRepository.kt:2610` 的 `[model-list-source]` 注释原文写着
+"a missing or invalid key must leave the list empty (or untouched), never silently filled
+from a stale directory"——把内置目录当"答案"填回去，正是这段注释禁止的行为。
+
 ### 2.3 F-03 `geminiStreamErrorStatus`
 Gemini 的流循环只认 `candidates`；`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`
 落进 `optJSONArray("candidates") == null → continue`，循环到 EOF。EOF 守卫
@@ -199,9 +203,48 @@ CI 侧另外两个测试类（`ProviderRssEstimateTest`、`MetaR3B08WiringTest`�
    audio/image/请求级图的消息仍然通过（已有测试守住）。
 4. **豆包 code 缺省值变更**：若某天出现"不带 code 的错误帧"，会被当成数据帧收下（R-F12）。
 5. **F-04 的 overrides 写入**：会让详情屏对这三项显示"已覆盖"标记（这是事实，不是回归）。
+6. **既有测试夹具被修正**（`OpenAIProviderTest`，11 处）：这些用例断言的是**请求形状**
+   （鉴权头 / temperature / max_tokens / 流式），夹具只发了 `content` 就 `[DONE]`。
+   按既有截断判据（`truncated = !sawFinishReason`）那确实是一条被截断的流 —— 第一轮 CI
+   （run `40739752564`，head_sha `bdff06a4`）正是被这 10 个用例打红，这本身是修复有效的
+   证据；随后给夹具补 `finish_reason:"stop"`（测试文件自己的注释就写着"real OpenAI
+   streams always carry finish_reason before [DONE]"），断言未改。
 
 ---
 
 ## 8. CI 读数
 
-（待补：run 号 / head_sha 逐字符核对 / 27 步 non-success 清点 / 关键 grep 计数 / 报告提交后非报告差异为空）
+| 项 | 值 |
+|---|---|
+| 分支 CI | `#2858` / run `40742217153` / **success** / 18m52s（18:07:49Z → 18:25:41Z） |
+| head_sha | `181b41e8cdb68cf3a6b1a1beb434dabb422e0a4c` —— 与本地 `git rev-parse HEAD` **逐字符一致** |
+| 步骤清点 | 27 步，唯一非 success = **2 skipped**（`Move the rolling tag android-latest` + `Publish to Releases`，均 `if: main` 门控）⇒ 0 个失败步骤 |
+| 日志体量 | 1,586,563 B / **NUL 0** |
+| 门集 | `Summary: 113 passed, 0 failed` ×1（= 基线 113 道门，未触碰 `scripts/scan/**`） |
+| 夹具 | `ALL 349 CASES PASS` ×1（= 基线 349） |
+| 编译 | `^e: ` **0** 条 |
+| 假 FAILED | 含 `FAILED` 的行 6 条，逐条核对**均为 `PASSED` 用例名子串**（真失败 0 条） |
+
+新增测试类在云端逐类全绿：
+
+| 类 | PASSED |
+|---|---|
+| `ChatCompletionsDeltaTextTest` | 7/7 |
+| `ResponsesEffortClampTest` | 8/8 |
+| `OpenAIModelsUrlAndFallbackTest` | 11/11 |
+| `AnthropicModelsFallbackTest` | 5/5 |
+| `GeminiModelsAndStreamErrorTest` | 8/8 |
+| `SseDataPayloadTest` | 6/6 |
+| `DoubaoFrameErrorTest` | 5/5 |
+| `ProviderRssEstimateTest` | 13/13 |
+| `MetaR3B08WiringTest`（形状接线） | 11/11 |
+| `OpenAIProviderTest`（既有，首轮 10 红） | 24/24 |
+| `MessagePayloadFilterTest`（既有 + F-09 用例） | 11/11 |
+
+**首轮失败记录（有效证据，不是事故）**：run `40739752564` / `#2854` @ `bdff06a4` = **failure**，
+唯一失败步骤是 `Run unit tests`，10 个 `OpenAIProviderTest` 用例报
+`LLMError$TransientError: Stream ended before completion` —— 正是 F-05 的判据命中"只发 content
+就 [DONE]"的旧夹具。修正见 §7.6。
+
+**收口判据**：报告提交后 `git diff --name-only 181b41e8..HEAD -- . ':(exclude)fix-reports'` 为空。
+
