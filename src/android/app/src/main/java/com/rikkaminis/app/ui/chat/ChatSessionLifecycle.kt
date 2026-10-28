@@ -1325,6 +1325,28 @@ internal fun ChatViewModel.applyNewChatDefaultModel(): Boolean {
     _modelName.value = effectiveModel.displayName
     _activeEntryId.value = entry.id
     _providerName.value = decision.instance.label.ifEmpty { effectiveModel.provider }
+    // [meta-audit-1028 F-05] A direct-entry publication LEAVES group mode, so
+    // the group state has to go with it. This function is the one place that
+    // publishes a serving member without establishing it as a member of a
+    // group: every caller reaches it precisely when no group produced a model
+    // (draft load with no default group, `applyDefaultModelFallback`'s
+    // fall-through, the post-config-load retry). Without these three writes a
+    // resident view model kept the PREVIOUS group bound —
+    // `selectedGroupId` feeds the top bar, the picker highlight,
+    // `buildFallbackProviders` and `rotateForNewTurn`, so the next user turn
+    // was rotated onto a member of a group this session is not running under
+    // and the top bar named a model that was never asked.
+    //
+    // Written as the literal inverse operation (`null` / `""`) rather than from
+    // a plan value on purpose: clearing a selection is the inverse of a gated
+    // publication, and spelling it as a literal is what makes that ungated
+    // (scan: session_provider_enabled_check C-SEL-1 — a non-literal group write
+    // must be provable as "the resolution said yes", which a clear never is).
+    _selectedGroupId.value = null
+    _selectedGroupName.value = ""
+    // ...and the pending in-group member pick goes with the group: it names a
+    // member of the group that just stopped being bound.
+    pendingEntryOverride = null
     currentProvider = ProviderFactory.create(decision.instance, decision.apiKey, effectiveModel, context)
     return true
 }
