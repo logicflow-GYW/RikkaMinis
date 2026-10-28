@@ -114,6 +114,59 @@ class TtsSpeakWiringTest {
         )
     }
 
+    // ── [r3-B11-F07] the engine's return code is the success signal ───────
+
+    /**
+     * `TextToSpeech.speak` answers ERROR without enqueueing anything (text over
+     * the engine's limit, dead service) and never delivers onDone/onError. The
+     * old `speak()` ignored that code: it returned true, set `_isSpeaking =
+     * true` forever, and `android-speak` answered `{"status":"speaking"}` for
+     * audio that was never played.
+     */
+    @Test
+    fun `speak treats an engine refusal as not spoken`() {
+        val body = functionBody(managerSrc(), "fun speak(")
+        assertTrue(
+            "speak() must compare the engine's return code with TextToSpeech.SUCCESS",
+            body.contains("if (result != TextToSpeech.SUCCESS)"),
+        )
+        assertTrue(
+            "a refused utterance carries no callback — the drain session must be rolled back",
+            body.contains("drain.invalidate()"),
+        )
+        assertTrue(
+            "the speaking flag must be cleared on the refusal path",
+            body.contains("_isSpeaking.value = false"),
+        )
+    }
+
+    @Test
+    fun `speak no longer reports success unconditionally`() {
+        val body = functionBody(managerSrc(), "fun speak(")
+        assertTrue(
+            "the engine call must be bound to a variable so its result can be judged — " +
+                "a bare call followed by `_isSpeaking.value = true` is exactly the old bug",
+            body.contains("val result = tts?.speak(speakable,"),
+        )
+        assertFalse(
+            "the speaking flag must not be set before the result is checked",
+            Regex("tts\\?\\.speak\\(speakable[^\\n]*\\n\\s*_isSpeaking\\.value = true").containsMatchIn(body),
+        )
+    }
+
+    @Test
+    fun `speakQueued rolls back a refused enqueue`() {
+        val body = functionBody(managerSrc(), "fun speakQueued(")
+        assertTrue(
+            "speakQueued() must compare the engine's return code with TextToSpeech.SUCCESS",
+            body.contains("if (result != TextToSpeech.SUCCESS)"),
+        )
+        assertTrue(
+            "a refused QUEUE_ADD utterance must be removed from the drain counters",
+            body.contains("drain.rejectPending()"),
+        )
+    }
+
     // ── sanitizer wiring (manager side) ───────────────────────────────────
 
     @Test
