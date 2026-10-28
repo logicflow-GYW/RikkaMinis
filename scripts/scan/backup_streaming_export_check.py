@@ -115,6 +115,14 @@ AUTO_MGR_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/AutoBack
 SYNC_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/WebDavSync.kt"
 SCREEN_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/BackupSettingsScreen.kt"
 
+# [meta-audit-1028 W1] Two more files this gate now reads:
+#   ConfigBackup.kt  — the RESTORE side of the same channel (arm9) and the
+#                      warning funnel a refused/partial restore must reach.
+#   WebDavClient.kt  — the response firewall every WebDAV verb goes through
+#                      (arm10). It was scanned by NO gate before this arm.
+BACKUP_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/ConfigBackup.kt"
+CLIENT_REL = "src/android/app/src/main/java/com/rikkaminis/app/backup/WebDavClient.kt"
+
 FILE_OVERLOAD_PAT = re.compile(
     r"fun\s+backupAuto\(\s*config:\s*WebDavConfig\s*,\s*file:\s*File")
 
@@ -284,6 +292,41 @@ def _dest_uses(region, var):
     return False
 
 
+def _raw_atoms(expr, safe_var):
+    """Identifiers in [expr] that carry DATA (not calls, not CONSTANTS).
+
+    [meta-audit-1028 W-B00-12] The sanitizer's INPUT is the untrusted value: the
+    remote display name and whatever the screen stripped off it. Any of those
+    names reaching the destination expression means the sanitized value is not
+    the only source — `rawStamp.ifEmpty { stamp }` reads `stamp` and passes the
+    identifier-containment test while writing the RAW name.
+    """
+    atoms = set()
+    for m in re.finditer(r"(?<![\w.])(?:[a-z][A-Za-z0-9_]*|[A-Z][a-z][A-Za-z0-9_]*)\b(?!\s*\()",
+                         expr or ""):
+        if m.group(0) != safe_var:
+            atoms.add(m.group(0))
+    return atoms
+
+def _dest_leaks_raw(region, raw_atoms, safe_var):
+    """`(source_text)` of a `File(…)` argument fed from an unsanitized name.
+
+    `rawStamp.ifEmpty { stamp }`, `rawStamp ?: stamp` and
+    `rawStamp.takeIf { … } ?: stamp` all spell BOTH names, and in all three the
+    raw value wins whenever it is non-empty — which, after the `stamp == null`
+    guard, is always. Spelling the sanitized name is therefore not evidence
+    that the sanitized VALUE is what lands: the raw identifier appearing at all
+    is the defect.
+    """
+    for f in re.finditer(r"\bFile\s*\(", region):
+        for a_start, a_end in call_args(region, f.end() - 1):
+            arg = region[a_start:a_end]
+            for src in value_sources(arg):
+                for atom in raw_atoms:
+                    if atom != safe_var and contains_ident(src, atom):
+                        return src
+    return None
+
 def check_arm3(screen_code):
     """Fetch-to-local path: sanitize, and USE what the sanitizer returned.
 
@@ -338,6 +381,15 @@ def check_arm3(screen_code):
                     "sanitizer's result is decorative and the destination is derived from "
                     "something else (a discarded `.also { %s }` still evaluates the RAW, "
                     "remote-controlled name)" % (var, var))
+        args = call_args(screen_code, m.end() - 1)
+        raw_atoms = _raw_atoms(screen_code[args[0][0]:args[0][1]] if args else "", var)
+        leak = _dest_leaks_raw(region, raw_atoms, var)
+        if leak is not None:
+            return ("the destination is fed from the UNsanitized name (`%s`) — it spells the "
+                    "sanitized `%s` too, so identifier containment passes while the raw, "
+                    "remote-controlled value is what reaches the file name (path traversal / "
+                    "overwrite into filesDir/backup-autos)"
+                    % (leak.strip(), var))
     return None
 
 
@@ -808,11 +860,196 @@ def check_arm8(auto_code):
     return None
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# [meta-audit-1028 W1] Three arms for witnesses that passed this gate unchanged.
+#
+# All three share one shape: the gate proved a PRESENCE (the call exists, the
+# file name is built from the sanitized token) where the defect lives in an
+# ARGUMENT's reachability or provenance. Each criterion therefore asks a
+# dataflow question and fail-closes when its anchor is gone.
+# ════════════════════════════════════════════════════════════════════════════
+
+WEBDAV_RESTORE_CALL = re.compile(r"\bresolveWebDavRestore\s*\(")
+FUN_HEAD = re.compile(r"\bfun\s+(\w+)\s*\(")
+PRUNE_CALL = re.compile(r"\bWebDavSync\s*\.\s*pruneAutoBackups\s*\(")
+BACKUP_AUTO_CALL = re.compile(r"\bWebDavSync\s*\.\s*backupAuto\s*\(")
+PORTAL_FN = "assertNotPortalBody"
+WHILE_RE = re.compile(r"\bwhile\s*\(")
+WS_BYTE_RE = re.compile(r"0x20|0x0A|0x0D|0x09|isWhitespace|\b0x09\b")
+STEP_RE = re.compile(r"\+\+\s*([A-Za-z_]\w*)|([A-Za-z_]\w*)\s*\+\+|([A-Za-z_]\w*)\s*\+=")
+WS_SKIP_FUNCTIONAL = re.compile(r"\.\s*(?:dropWhile|indexOfFirst|indexOf|firstOrNull)\s*[({]")
+
+def _enclosing_fun_params(code, pos):
+    """(name, parameter names) of the innermost `fun` opened before [pos]."""
+    head = None
+    for m in FUN_HEAD.finditer(code, 0, pos):
+        head = m
+    if head is None:
+        return None, []
+    close = match_bracket(code, head.end() - 1)
+    if close < 0:
+        return head.group(1), []
+    params = code[head.end():close]
+    return head.group(1), [pm.group(1) for pm in
+                           re.finditer(r"(?:^|,)\s*(?:@\w+\s+)*(?:val\s+|var\s+)?(\w+)\s*:", params)]
+
+def _bind_target(code, pos, window=120):
+    """The local a call at [pos] is assigned to (`val x = <call>`), or None."""
+    m = re.search(r"(?:val|var)\s+(\w+)\s*(?::[^=\n]+)?=\s*$", code[max(0, pos - window):pos])
+    return m.group(1) if m else None
+
+def check_arm9(backup_code):
+    """W-B00-02 — the WebDAV bootstrap restore must consult what THIS device holds.
+
+    `resolveWebDavRestore(backup, existing)` has three outcomes, and the third
+    one ("no password on either side") is the fresh-install branch: it builds a
+    config with `password = ""`. [WebDavConfigStore.save] reads a blank password
+    as the explicit command "clear it". So passing `null` for `existing` turns
+    every secrets-free automatic backup — all of them: the nightly runs export
+    with `includeSecrets = false` — into a silent password eraser.
+    Six gates read ConfigBackup.kt and none of them looked at this call site.
+    """
+    if backup_code is None:
+        return "ConfigBackup.kt not found"
+    calls = [m for m in WEBDAV_RESTORE_CALL.finditer(backup_code)
+             if not re.search(r"\bfun\s+$", backup_code[max(0, m.start() - 80):m.start()])]
+    if not calls:
+        return ("resolveWebDavRestore( is gone — the restore no longer merges the backed-up "
+                "WebDAV config with this device's; re-point this arm, do not delete it")
+    for m in calls:
+        args = call_args(backup_code, m.end() - 1)
+        if args is None or len(args) < 2:
+            return ("resolveWebDavRestore( is called without the local config argument — the "
+                    "blank-password branch is then indistinguishable from a fresh install and "
+                    "the stored WebDAV password is cleared on any secrets-free restore "
+                    "(W-B00-02)")
+        arg = backup_code[args[1][0]:args[1][1]]
+        if re.search(r"\bnull\b", arg):
+            return ("resolveWebDavRestore( is passed `%s` — a secrets-free backup then reads as "
+                    "a fresh install, and WebDavConfigStore.save() treats the blank password as "
+                    "`remove(KEY_PASSWORD)`: the stored WebDAV password is wiped and every later "
+                    "nightly run fails 401 (W-B00-02)" % arg.strip())
+        _fun, params = _enclosing_fun_params(backup_code, m.start())
+        sources = " ".join(value_sources(arg))
+        if params and not any(contains_ident(sources, p) for p in params):
+            return ("resolveWebDavRestore( is passed `%s`, which carries nothing this restore was "
+                    "handed — the CURRENT WebDAV config must flow in from the caller, not be "
+                    "fabricated at the call site (W-B00-02)" % arg.strip())
+    return None
+
+def check_arm10(auto_code):
+    """W-B00-04 — the file just uploaded must survive the rotation it triggers.
+
+    `pruneAutoBackups(cfg, keep, protectName)` deletes everything past `keep` by
+    NAME ORDER. The name is a timestamp, so a clock rollback (NTP correction,
+    manual change, DST/timezone collision) can place the file this run just
+    uploaded at index >= keep. `protectName` is the only thing standing between
+    a successful upload and its immediate DELETE; passing `null` re-opens the
+    self-rotation that FIX-1028 / B-12 closed, and `KEY_LAST_RUN` still records
+    the day as backed up.
+
+    Criterion: every `pruneAutoBackups(` call must protect the value the
+    immediately preceding `backupAuto(` produced.
+    """
+    if auto_code is None:
+        return "AutoBackupManager.kt not found"
+    calls = list(PRUNE_CALL.finditer(auto_code))
+    if not calls:
+        return ("AutoBackupManager no longer calls WebDavSync.pruneAutoBackups( — the remote "
+                "auto/ directory grows without bound; if the rotation moved into another call "
+                "site, re-point this arm instead of deleting it")
+    for m in calls:
+        named = _named_args(auto_code, call_args(auto_code, m.end() - 1) or [])
+        if "protectName" not in named:
+            return ("WebDavSync.pruneAutoBackups( is called without `protectName` — the backup "
+                    "this run just uploaded is a rotation candidate, and a rolled-back clock "
+                    "lands it past `keep`: it is DELETEd in the same second it was PUT "
+                    "(W-B00-02/B-12 re-opened)")
+        prot = named["protectName"]
+        if re.search(r"\bnull\b", prot):
+            return ("WebDavSync.pruneAutoBackups( is passed `protectName = %s` — nothing is "
+                    "protected, so a clock rollback DELETEs the file this run just uploaded "
+                    "while KEY_LAST_RUN still stamps the day as backed up (W-B00-04)"
+                    % prot.strip())
+        before = auto_code[:m.start()]
+        uploads = [u for u in BACKUP_AUTO_CALL.finditer(before)
+                   if not re.search(r"\bfun\s+$", before[max(0, u.start() - 80):u.start()])]
+        if uploads:
+            bind = _bind_target(before, uploads[-1].start())
+            if bind and not contains_ident(prot, bind):
+                return ("WebDavSync.pruneAutoBackups( protects `%s`, not `%s` (the name "
+                        "WebDavSync.backupAuto( just returned) — the uploaded file itself stays "
+                        "a rotation candidate (W-B00-04)" % (prot.strip(), bind))
+    return None
+
+def check_arm11(client_code):
+    """W-B00-10 — the portal-body firewall must actually advance past whitespace.
+
+    `assertNotPortalBody` decides by the FIRST bytes: a JSON payload opens with
+    `{`/`[`, an HTML portal opens with `<`. The BOM branch and the
+    whitespace-skip loop exist so that "\n<!DOCTYPE html>" and "  <html>" are
+    still judged. No gate read WebDavClient.kt before this arm, and the unit
+    tests only feed WHITESPACE-prefixed JSON (the correct answer is "pass"
+    either way) — so a dead skip loop is invisible: PUT reports success on a
+    captive portal, DELETE reports success without deleting, and GET hands the
+    login page back as a backup document.
+
+    Criterion: some reachable leading-whitespace skip exists — a live `while`
+    loop that steps an index and tests a whitespace byte, or a functional
+    equivalent (`dropWhile` / `indexOfFirst` / `indexOf` / `firstOrNull`).
+    A loop whose condition folds to a constant is DEAD, not a skip.
+    """
+    if client_code is None:
+        return "WebDavClient.kt not found"
+    span = function_body(client_code, PORTAL_FN)
+    if span is None:
+        return ("WebDavClient.assertNotPortalBody not found (anchor drift) — every WebDAV "
+                "verb's response firewall is unaudited; re-point this arm")
+    b_start, b_end, kind = span
+    if kind != "block":
+        return ("assertNotPortalBody is no longer block-bodied — its leading-whitespace skip "
+                "cannot be audited (fail-closed)")
+    body = client_code[b_start:b_end]
+    for m in WHILE_RE.finditer(body):
+        cond_close = match_bracket(body, m.end() - 1)
+        if cond_close < 0:
+            return "a `while (` in assertNotPortalBody does not balance (fail-closed)"
+        cond = body[m.end():cond_close]
+        brace = body.find("{", cond_close)
+        if brace < 0:
+            continue
+        body_close = match_bracket(body, brace)
+        if body_close < 0:
+            return "a `while {` in assertNotPortalBody does not balance (fail-closed)"
+        loop = body[brace:body_close]
+        step = STEP_RE.search(loop)
+        if not step or not WS_BYTE_RE.search(loop):
+            continue  # not the leading-whitespace skip loop
+        if const_value(cond.strip()) == ("bool", False):
+            return ("assertNotPortalBody's leading-whitespace skip is DEAD-GUARDED (`while "
+                    "(%s)` can never hold) — start stays 0, so a body opening with a newline "
+                    "or indent (`\\n<!DOCTYPE html>`, `  <html>`) is `head.startsWith(\"<…\")` "
+                    "= false and the firewall passes it: PUT/DELETE report success on a "
+                    "captive portal, GET stores the login page as a backup (W-B00-10)"
+                    % cond.strip())
+        step_pos = brace + step.start()
+        if not path_feasible(body, step_pos):
+            return ("assertNotPortalBody's whitespace skip step sits in an unreachable branch "
+                    "— the loop body can never advance `start` (W-B00-10)")
+        return None
+    if WS_SKIP_FUNCTIONAL.search(body):
+        return None
+    return ("assertNotPortalBody has no reachable leading-whitespace skip at all — a portal "
+            "page that opens with a newline or indent escapes the `<!doctype` / `<html` "
+            "judgement and every WebDAV verb reports success (W-B00-10)")
+
 def check_all(root):
     try:
         auto, _auto_lit = read_views(root, AUTO_MGR_REL)
         sync, sync_lit = read_views(root, SYNC_REL)
         screen, _screen_lit = read_views(root, SCREEN_REL)
+        backup, _backup_lit = read_views(root, BACKUP_REL)
+        client, _client_lit = read_views(root, CLIENT_REL)
     except KotlinLexError as exc:
         return ["source is not lexable (%s) — fail-closed" % exc]
     failures = []
@@ -825,6 +1062,9 @@ def check_all(root):
         ("arm6", check_arm6(screen)),
         ("arm7", check_arm7(screen)),
         ("arm8", check_arm8(auto)),
+        ("arm9", check_arm9(backup)),
+        ("arm10", check_arm10(auto)),
+        ("arm11", check_arm11(client)),
     ):
         if err:
             failures.append(f"{name}: {err}")
@@ -848,8 +1088,12 @@ object AutoBackupManager {
         rotateLocalAutoBackups(app)
         val cfg = WebDavConfigStore(app).load()
         if (cfg != null) {
-            WebDavSync.backupAuto(cfg, local)
-            WebDavSync.pruneAutoBackups(cfg, keep = WebDavSync.AUTO_BACKUP_KEEP)
+            val remoteName = WebDavSync.backupAuto(cfg, local)
+            WebDavSync.pruneAutoBackups(
+                cfg,
+                keep = WebDavSync.AUTO_BACKUP_KEEP,
+                protectName = remoteName,
+            )
         }
     }
 }
@@ -1143,7 +1387,8 @@ VIOLATION_LOCAL_EXPORT_GONE = COMPLIANT_SCREEN.replace(
 
 # #11: runLocked never pushes — KEY_LAST_RUN still advances.
 VIOLATION_AUTO_NO_PUSH = COMPLIANT_AUTO.replace(
-    "            WebDavSync.backupAuto(cfg, local)\n", "")
+    "            val remoteName = WebDavSync.backupAuto(cfg, local)\n",
+    '            val remoteName = ""\n')
 
 # #11b: the push survives but uploads a different file than the one written.
 VIOLATION_AUTO_PUSH_OTHER = COMPLIANT_AUTO.replace(
@@ -1170,8 +1415,12 @@ object AutoBackupManager {
         rotateLocalAutoBackups(app)
         val cfg = WebDavConfigStore(app).load()
         if (cfg != null) {
-            WebDavSync.backupAuto(cfg, local)
-            WebDavSync.pruneAutoBackups(cfg, keep = WebDavSync.AUTO_BACKUP_KEEP)
+            val remoteName = WebDavSync.backupAuto(cfg, local)
+            WebDavSync.pruneAutoBackups(
+                cfg,
+                keep = WebDavSync.AUTO_BACKUP_KEEP,
+                protectName = remoteName,
+            )
         }
     }
 }
@@ -1182,6 +1431,100 @@ object AutoBackupManager {
 VIOLATION_AUTO_PUSH_OTHER_ATOMIC = COMPLIANT_AUTO_ATOMIC.replace(
     "WebDavSync.backupAuto(cfg, local)",
     'WebDavSync.backupAuto(cfg, File(app.cacheDir, "other.json"))')
+
+# ── [meta-audit-1028 W1] restore-side + firewall fixtures ────────────────────
+COMPLIANT_BACKUP = """package com.rikkaminis.app.backup
+
+object ConfigBackup {
+    internal fun applyWebDavSection(
+        section: JSONObject?,
+        existingWebDavConfig: WebDavConfig?,
+        apply: (WebDavConfig) -> Unit,
+    ) {
+        if (section != null) {
+            val plan = resolveWebDavRestore(section, existingWebDavConfig)
+            if (plan.config != null) apply(plan.config)
+        }
+    }
+
+    internal fun resolveWebDavRestore(
+        backup: JSONObject,
+        existing: WebDavConfig?,
+    ): WebDavRestorePlan = WebDavRestorePlan(config = null, notice = null)
+}
+"""
+
+# A legal spelling of the same contract: the local config simply arrives under a
+# different name. The criterion is "the caller's own value flows in", not the
+# identifier that happens to spell it today.
+COMPLIANT_BACKUP_RENAMED = COMPLIANT_BACKUP.replace(
+    "existingWebDavConfig", "currentWebDav")
+
+# W-B00-02: the local config is dropped at the call site.
+VIOLATION_WEBDAV_RESTORE_NULL = COMPLIANT_BACKUP.replace(
+    "resolveWebDavRestore(section, existingWebDavConfig)",
+    "resolveWebDavRestore(section, null)")
+
+# …and the same defect with the argument missing entirely.
+VIOLATION_WEBDAV_RESTORE_NOARG = COMPLIANT_BACKUP.replace(
+    "resolveWebDavRestore(section, existingWebDavConfig)",
+    "resolveWebDavRestore(section)")
+
+# W-B00-04: nothing is protected from the rotation it triggers.
+VIOLATION_PRUNE_NULL = COMPLIANT_AUTO.replace(
+    "                protectName = remoteName,", "                protectName = null,")
+VIOLATION_PRUNE_GONE = COMPLIANT_AUTO.replace(
+    "                protectName = remoteName,\n", "")
+VIOLATION_PRUNE_OTHER = COMPLIANT_AUTO.replace(
+    "                protectName = remoteName,", '                protectName = "other.json",')
+
+COMPLIANT_CLIENT = """package com.rikkaminis.app.backup
+
+class WebDavClient {
+    private fun assertNotPortalBody(code: Int, body: ByteArray, what: String) {
+        if (body.isEmpty()) return
+        var start = 0
+        while (start < body.size) {
+            val b = body[start].toInt()
+            if (b == 0x20 || b == 0x0A || b == 0x0D || b == 0x09) start++ else break
+        }
+        val head = String(body, start, minOf(body.size - start, 256), Charsets.UTF_8).lowercase()
+        val isHtml = head.startsWith("<!doctype") || head.startsWith("<html")
+        if (!isHtml) return
+        throw WebDavNonDavResponse("portal", code)
+    }
+}
+"""
+
+# W-B00-10: the skip loop can never hold, so `start` stays 0.
+VIOLATION_PORTAL_DEAD_LOOP = COMPLIANT_CLIENT.replace(
+    "while (start < body.size) {", "while (false && start < body.size) {")
+
+# …and the skip removed outright.
+VIOLATION_PORTAL_NO_SKIP = COMPLIANT_CLIENT.replace(
+    """        while (start < body.size) {
+            val b = body[start].toInt()
+            if (b == 0x20 || b == 0x0A || b == 0x0D || b == 0x09) start++ else break
+        }
+""", "")
+
+# A legal rewrite: the skip expressed functionally.
+COMPLIANT_CLIENT_DROPWHILE = COMPLIANT_CLIENT.replace(
+    """        var start = 0
+        while (start < body.size) {
+            val b = body[start].toInt()
+            if (b == 0x20 || b == 0x0A || b == 0x0D || b == 0x09) start++ else break
+        }
+""",
+    """        val start = body.indexOfFirst { b -> b != 0x20.toByte() && b != 0x0A.toByte() }
+            .takeIf { it >= 0 } ?: body.size
+""")
+
+# W-B00-12: the sanitized name is spelled, and the raw one is what lands.
+VIOLATION_FETCH_IFEMPTY_RAW = COMPLIANT_SCREEN.replace(
+    "val local = File(dir, AutoBackupManager.LOCAL_FILE_PREFIX + stamp + \".json\")",
+    "val local = File(dir, AutoBackupManager.LOCAL_FILE_PREFIX + "
+    "entry.item.displayName.ifEmpty { stamp } + \".json\")")
 
 # A legal spelling: the payload is read through a stream wrapper.
 COMPLIANT_UPLOAD_STREAMED = COMPLIANT_SCREEN.replace(
@@ -1257,11 +1600,13 @@ VIOLATION_ENTRY_OVERWRITE = COMPLIANT_SCREEN.replace(
 )
 
 
-def write_tree(tmp, auto=None, sync=None, screen=None):
+def write_tree(tmp, auto=None, sync=None, screen=None, backup=None, client=None):
     for rel, content in (
         (AUTO_MGR_REL, auto),
         (SYNC_REL, sync),
         (SCREEN_REL, screen),
+        (BACKUP_REL, backup),
+        (CLIENT_REL, client),
     ):
         if content is None:
             continue
@@ -1271,7 +1616,8 @@ def write_tree(tmp, auto=None, sync=None, screen=None):
             f.write(content)
 
 
-def run_fixture(name, expect_ok, auto=None, sync=None, screen=None, contains=None):
+def run_fixture(name, expect_ok, auto=None, sync=None, screen=None, backup=None,
+                client=None, contains=None):
     """`contains` pins WHICH criterion fired — a dirty fixture that goes red on
     an unrelated arm must not count as evidence for the arm under test."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -1280,6 +1626,8 @@ def run_fixture(name, expect_ok, auto=None, sync=None, screen=None, contains=Non
             auto=auto if auto is not None else COMPLIANT_AUTO,
             sync=sync if sync is not None else COMPLIANT_SYNC,
             screen=screen if screen is not None else COMPLIANT_SCREEN,
+            backup=backup if backup is not None else COMPLIANT_BACKUP,
+            client=client if client is not None else COMPLIANT_CLIENT,
         )
         failures = check_all(tmp)
         ok = (not failures) == expect_ok
@@ -1355,6 +1703,29 @@ def selftest():
                       auto=VIOLATION_AUTO_PUSH_OTHER_ATOMIC, contains="uploads `")
     ok &= run_fixture("compliant-upload-streamed", expect_ok=True,
                       screen=COMPLIANT_UPLOAD_STREAMED)
+    # ── [meta-audit-1028 W1] four witnesses that passed this gate unchanged ──
+    ok &= run_fixture("compliant-restore-merges-local-config", expect_ok=True)
+    ok &= run_fixture("compliant-restore-renamed-local-config", expect_ok=True,
+                      backup=COMPLIANT_BACKUP_RENAMED)
+    ok &= run_fixture("violation-webdav-restore-null", expect_ok=False,
+                      backup=VIOLATION_WEBDAV_RESTORE_NULL, contains="W-B00-02")
+    ok &= run_fixture("violation-webdav-restore-noarg", expect_ok=False,
+                      backup=VIOLATION_WEBDAV_RESTORE_NOARG, contains="without the local config")
+    ok &= run_fixture("violation-prune-protect-null", expect_ok=False,
+                      auto=VIOLATION_PRUNE_NULL, contains="W-B00-04")
+    ok &= run_fixture("violation-prune-protect-gone", expect_ok=False,
+                      auto=VIOLATION_PRUNE_GONE, contains="without `protectName`")
+    ok &= run_fixture("violation-prune-protect-other", expect_ok=False,
+                      auto=VIOLATION_PRUNE_OTHER, contains="protects `")
+    ok &= run_fixture("violation-portal-dead-skip-loop", expect_ok=False,
+                      client=VIOLATION_PORTAL_DEAD_LOOP, contains="DEAD-GUARDED")
+    ok &= run_fixture("violation-portal-no-skip", expect_ok=False,
+                      client=VIOLATION_PORTAL_NO_SKIP,
+                      contains="no reachable leading-whitespace skip")
+    ok &= run_fixture("compliant-portal-functional-skip", expect_ok=True,
+                      client=COMPLIANT_CLIENT_DROPWHILE)
+    ok &= run_fixture("violation-fetch-ifempty-raw", expect_ok=False,
+                      screen=VIOLATION_FETCH_IFEMPTY_RAW, contains="UNsanitized")
     print("BACKUP_STREAMING_EXPORT_SELFTEST=" + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
@@ -1371,7 +1742,7 @@ def main():
         for f in failures:
             print("FAIL:", f)
         sys.exit(1)
-    print("backup_streaming_export_check: OK (arm1 + arm2 + arm3 + arm4 + arm5 + arm6 + arm7 + arm8 green)")
+    print("backup_streaming_export_check: OK (arm1..arm11 green)")
 
 
 if __name__ == "__main__":

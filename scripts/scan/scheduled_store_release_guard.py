@@ -49,6 +49,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # backtick identifiers; it reports parse failure instead of guessing.
 from _kotlin_lexer import analyse as _lex_analyse  # noqa: E402
 from _kotlin_ast import const_bool as _const_bool  # noqa: E402
+from _kotlin_ast import enclosing_conditions as _enclosing_conditions  # noqa: E402
+from _kotlin_ast import if_blocks as _if_blocks  # noqa: E402
+from _kotlin_ast import strip_parens as _strip_parens  # noqa: E402
 
 STORE_REL = (
     "src/android/app/src/main/java/com/rikkaminis/app/scheduled/ScheduledTasksStore.kt"
@@ -61,6 +64,17 @@ REMOVAL_RES = (
     re.compile(r"copy\(running *= *null\)"),
 )
 LOCK_RE = re.compile(r"\block\.withLock *\{")
+
+# ── [meta-audit-1028 W-B00-01] the restore write must obey the decision ──────
+# `ScheduledTasksRestorePlan.decide` returning `applied = false` is a promise
+# ("kept this device's tasks as-is"). The document write is where the promise
+# is either kept or broken, and the write is indistinguishable from a legal one
+# by spelling: only reachability under `applied == false` tells them apart.
+RESTORE_WRITE_RE = re.compile(r"\bwriteLocked\s*\(")
+RESTORE_MARKER_RE = re.compile(r"copy\([^()]*\brunning\s*=\s*null\b", re.S)
+DECIDE_ASSIGN_RE = re.compile(
+    r"\bval\s+(\w+)\s*=\s*ScheduledTasksRestorePlan\s*\.\s*decide\s*\("
+)
 
 # ── deep-audit-1030 ISSUE-08 ────────────────────────────────────────────────
 # The editor used to save its WHOLE record, so any run that settled while the
@@ -1382,6 +1396,93 @@ def selftest():
               + ("" if ok else ": " + "; ".join(bad)[:150]))
         if not ok:
             failures += 1
+    # ── [meta-audit-1028 W-B00-01] the restore write must obey the decision ──
+    # Each arm below is the witness patch (tautological guard), a sibling shape
+    # that must stay green (alias binding / early refusal), or a death of the
+    # other direction (the write never lands even when accepted).
+    restore_clean = (
+        "object ScheduledTasksStore {\n"
+        "    suspend fun importDocument(context: Any, document: Any): Any {\n"
+        "        val decision = ScheduledTasksRestorePlan.decide(\n"
+        "            declaredVersion = null,\n"
+        "            supportedVersion = 1,\n"
+        "            rawEntries = 0,\n"
+        "            parsedTasks = 0,\n"
+        "            liveTasks = 2,\n"
+        "        )\n"
+        "        if (decision.applied) writeLocked(context, parsed.copy(running = null))\n"
+        "        return ScheduledTasksRestoreOutcome(decision.applied, decision.notice)\n"
+        "    }\n"
+        "\n"
+        "    private fun writeLocked(context: Any, doc: Any) {\n"
+        "        ScheduledTasksFile.write(context, doc)\n"
+        "    }\n"
+        "}\n"
+    )
+    GUARDED_WRITE = "        if (decision.applied) writeLocked(context, parsed.copy(running = null))\n"
+    restore_arms = [
+        ("restore/clean (write only when applied)", restore_clean, 0, None),
+        ("restore/W-B00-01 tautological guard writes on refusal",
+         restore_clean.replace(
+             GUARDED_WRITE,
+             "        if (decision.applied || !decision.applied) "
+             "writeLocked(context, parsed.copy(running = null))\n"),
+         1, "REFUSED"),
+        ("restore/no guard at all",
+         restore_clean.replace(
+             GUARDED_WRITE, "        writeLocked(context, parsed.copy(running = null))\n"),
+         1, "REFUSED"),
+        ("restore/guard inverted (writes exactly on refusal)",
+         restore_clean.replace(
+             GUARDED_WRITE,
+             "        if (!decision.applied) writeLocked(context, parsed.copy(running = null))\n"),
+         2, "REFUSED"),
+        ("restore/alias binding is a legal spelling",
+         restore_clean.replace(
+             GUARDED_WRITE,
+             "        val go = decision.applied\n"
+             "        if (go) writeLocked(context, parsed.copy(running = null))\n"),
+         0, None),
+        ("restore/early refusal then bare write is a legal spelling",
+         restore_clean.replace(
+             GUARDED_WRITE,
+             "        if (!decision.applied) return ScheduledTasksRestoreOutcome("
+             "decision.applied, decision.notice)\n"
+             "        writeLocked(context, parsed.copy(running = null))\n"),
+         0, None),
+        ("restore/write dead even when accepted (restore never lands)",
+         restore_clean.replace(
+             GUARDED_WRITE,
+             "        if (decision.applied && false) "
+             "writeLocked(context, parsed.copy(running = null))\n"),
+         1, "never restored"),
+        ("restore/decision gone but the plan type remains (fail-closed)",
+         restore_clean.replace(
+             "ScheduledTasksRestorePlan.decide(", "ScheduledTasksRestorePlan.fromBackup("),
+         1, "fail-closed"),
+        ("restore/no restore planner in this store (not applicable)",
+         "object ScheduledTasksStore {\n"
+         "    suspend fun importDocument(context: Any, doc: Any) {\n"
+         "        lock.withLock {\n"
+         "            writeLocked(context, doc.copy(running = null))\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         0, None),
+    ]
+    restore_failures = 0
+    for nm, src, want, frag in restore_arms:
+        masked_src = strip_code(src)
+        assert masked_src is not None, "selftest fixture must lex"
+        bad, _seen = scan_restore_write_guard(masked_src)
+        ok = len(bad) == want and (frag is None or any(frag in b for b in bad))
+        print(f"  {'✅' if ok else '❌'} {nm} → {len(bad)} violation(s), expected {want}"
+              + ("" if ok else ": " + "; ".join(bad)[:150]))
+        if not ok:
+            failures += 1
+            restore_failures += 1
+    print(f"SCHEDULED_RESTORE_SELFTEST={'PASS' if restore_failures == 0 else 'FAIL'}")
+
     # ── [meta-audit wide4] family-hole / parser-death / dataflow arms ──
     w4_clean_policy = (
         "object ScheduledTaskTransitions {\n"
@@ -2054,6 +2155,142 @@ def check_removals(scan):
     return removal_fns, findings
 
 
+def _restore_guard_atoms(scan):
+    """{atom_text: inverted} for every boolean that stands for `decision.applied`.
+
+    `inverted` is True when the atom is TRUE precisely when `applied` is FALSE
+    (`val gaveUp = !decision.applied`). Returns None when the decision itself
+    cannot be located — a restore write without a locatable decision cannot be
+    proven guarded, and this gate fail-closes on that.
+    """
+    m = DECIDE_ASSIGN_RE.search(scan)
+    if m is None:
+        return None
+    var = m.group(1)
+    atoms = {var + ".applied": False}
+    applied = var + ".applied"
+    for am in re.finditer(r"(?m)^[ \t]*(?:val|var)[ \t]+(\w+)[ \t]*(?::[^=\n]+)?=[ \t]*([^\n]+)$", scan):
+        name, rhs = am.group(1), am.group(2).strip().rstrip(" ;")
+        if name == var:
+            continue
+        r = _strip_parens(rhs)
+        if r == applied:
+            atoms[name] = False
+        elif r in (
+            "!" + applied,
+            applied + ".not()",
+            applied + " == false",
+            applied + " != true",
+        ):
+            atoms[name] = True
+    return atoms
+
+def _fold_under(text, atoms, applied):
+    """`text` with every guard atom replaced by the literal it stands for, folded."""
+    sub = text
+    for atom, inverted in atoms.items():
+        literal = "true" if (applied != inverted) else "false"
+        sub = re.sub(r"(?<![\w`])" + re.escape(atom) + r"(?![\w`])", literal, sub)
+    return _const_bool(sub)
+
+_EXIT_RE = re.compile(r"\b(?:return|throw)\b")
+
+def _refused_path_exits(text, pos, atoms):
+    """Does the `applied == false` path LEAVE the function before `pos`?
+
+    A restore may refuse by early-returning the outcome and only then fall
+    through to a bare write. Without this, that (perfectly safe) spelling is
+    indistinguishable from an unguarded write — the gate would report a
+    violation for code that has the guard, just in statement form.
+    """
+    for cond, t_start, t_end, e_start, e_end in _if_blocks(text):
+        if t_end <= pos and _EXIT_RE.search(text[t_start:t_end]):
+            if _fold_under(cond, atoms, False) is True:
+                return True
+        if e_end is not None and e_end <= pos and _EXIT_RE.search(text[e_start:e_end]):
+            if _fold_under(cond, atoms, False) is False:
+                return True
+    return False
+
+def _reaches_with_applied(text, pos, atoms, applied):
+    """Can `pos` be reached while the restore decision holds [applied]?
+
+    Every enclosing condition is re-evaluated with each guard atom replaced by
+    the literal it stands for; one condition folding to `false` means the write
+    is unreachable on that path. Anything the folder cannot decide counts as
+    reachable — the gate must not manufacture a pass out of its own blindness.
+
+    Why not the shared `path_feasible` here: it only knows integer domains, so
+    a boolean symbol stays "unknown" and `if (decision.applied)` would report
+    every restore write as unguarded. The substitution below gives the folder
+    the one bit it needs, and `_kotlin_ast.const_bool` still does the algebra
+    (`false && x`, `!(false)`, `applied || !applied` → tautology, …).
+    """
+    if applied is False and _refused_path_exits(text, pos, atoms):
+        return False
+    for _kind, cond in _enclosing_conditions(text, pos):
+        if _fold_under(cond, atoms, applied) is False:
+            return False
+    return True
+
+def scan_restore_write_guard(scan):
+    """C5 — a REFUSED restore must not write the document.
+
+    [meta-audit-1028 W-B00-01] `ScheduledTasksRestorePlan.decide` exists exactly
+    so that "the backup says zero tasks" and "keep this device's tasks" can be
+    told apart. The decision is only worth its name if the WRITE obeys it: the
+    store reported `applied = false`, printed "kept this device's N task(s)",
+    and then called `writeLocked(context, parsed.copy(running = null))` anyway —
+    the empty document landed on disk, every task was destroyed, and the notice
+    told the user nothing had been touched. The shape is invisible to the
+    spelling criteria above: `if (decision.applied || !decision.applied)`
+    keeps `.copy(running = null)` and the lock layout intact.
+
+    Criterion (reachability, not token presence): a `writeLocked(` call whose
+    arguments carry the restore marker `copy(running = null)` must be
+    UNREACHABLE on the path where the decision refuses (`applied == false`).
+    Fail-closed on an unlocatable decision.
+    """
+    if not re.search(r"\bScheduledTasksRestorePlan\b", scan):
+        # Not applicable: this store has no restore-decision concept at all (the
+        # gate's own minimal fixtures, and any tree that predates the planner).
+        # Keeping the criterion silent here is what lets the SAME file be used
+        # as a fixture without pretending the decision exists.
+        return [], 0
+    atoms = _restore_guard_atoms(scan)
+    findings = []
+    seen = 0
+    for m in RESTORE_WRITE_RE.finditer(scan):
+        if re.search(r"\bfun\s+$", scan[max(0, m.start() - 80):m.start()]):
+            continue
+        args = _paren_args(scan, m.end() - 1)
+        if args is None or not RESTORE_MARKER_RE.search(args):
+            continue
+        seen += 1
+        line = line_of(scan, m.start())
+        if atoms is None:
+            findings.append(
+                "%s:%d: restore write `writeLocked(… copy(running = null))` found but "
+                "ScheduledTasksRestorePlan.decide( is nowhere — the write cannot be "
+                "proven to obey a decision (fail-closed). Restore the decision or "
+                "re-point this criterion." % (STORE_REL, line)
+            )
+            continue
+        if _reaches_with_applied(scan, m.start(), atoms, False):
+            findings.append(
+                "%s:%d: the restore document is written even when the decision REFUSED "
+                "(`applied == false` is reachable at this writeLocked) — an empty / "
+                "unsupported-version / all-rows-corrupt backup wipes this device's tasks "
+                "while the notice tells the user they were kept (W-B00-01)" % (STORE_REL, line)
+            )
+        if not _reaches_with_applied(scan, m.start(), atoms, True):
+            findings.append(
+                "%s:%d: the restore write is unreachable even when the decision ACCEPTED "
+                "(`applied == true` cannot reach this writeLocked) — the backup is never "
+                "restored at all, and the user is told it was" % (STORE_REL, line)
+            )
+    return findings, seen
+
 def main():
     if "--selftest" in sys.argv:
         return selftest()
@@ -2078,6 +2315,10 @@ def main():
 
     removal_fns, removal_findings = check_removals(scan)
     findings.extend(removal_findings)
+
+    # [meta-audit-1028 W-B00-01] …and a REFUSED restore must not write at all.
+    restore_findings, restore_writes = scan_restore_write_guard(scan)
+    findings.extend(restore_findings)
 
     if not spans:
         rot.append("no `fun` at object-member indentation was parsed")
@@ -2197,6 +2438,11 @@ def main():
         "OK: %d removal function(s) release the runner (%s) at top level."
         % (len(removal_fns), ", ".join(n for n, _, _, _ in removal_fns))
     )
+    if restore_writes:
+        print(
+            "OK (C5 refused restore writes nothing): %d restore write(s), none reachable "
+            "on the `applied == false` path" % restore_writes
+        )
     return 0
 
 
