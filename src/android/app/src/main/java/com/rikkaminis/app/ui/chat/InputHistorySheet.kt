@@ -42,6 +42,52 @@ import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.ui.components.MinisTextButton
 import com.rikkaminis.app.ui.components.sanitizeSingleLineInput
 
+/** [FIX-C8/F-12] Rows this sheet must never render: compact markers, model-switch
+ * dividers and injected system notes all arrive as `role = "system"`. */
+internal const val SYSTEM_ROLE = "system"
+
+/** [FIX-C8/F-12] Shown for a message with neither text nor attachment names —
+ * the state an empty assistant turn can still reach. */
+internal const val INPUT_HISTORY_EMPTY_PLACEHOLDER = "[...]"
+
+/**
+ * [FIX-C8/F-12] Does [content] or one of [attachmentNames] match [query]?
+ *
+ * A blank query matches everything (the sheet's "no filter" state). Matching
+ * the attachment names is what makes an attachment-only message findable: the
+ * user remembers `diagram.png`, not the (empty) text of the bubble.
+ *
+ * Pure so the matching rule is JVM-testable; the sheet itself is a @Composable.
+ */
+internal fun inputHistoryMatches(
+    query: String,
+    content: String,
+    attachmentNames: List<String>,
+): Boolean {
+    if (query.isBlank()) return true
+    if (content.contains(query, ignoreCase = true)) return true
+    return attachmentNames.any { it.contains(query, ignoreCase = true) }
+}
+
+/**
+ * [FIX-C8/F-12] Single-line preview for a history row.
+ *
+ * Text first (trimmed). With no text, the attachment file names stand in — an
+ * attachment-only prompt used to render as "[...]", which made every such row
+ * indistinguishable from every other one. "[...]" is now only what it always
+ * meant: genuinely empty.
+ */
+internal fun inputHistoryPreview(
+    content: String,
+    attachmentNames: List<String>,
+): String {
+    val text = content.trim()
+    if (text.isNotEmpty()) return text
+    val named = attachmentNames.map { it.trim() }.filter { it.isNotEmpty() }
+    if (named.isNotEmpty()) return named.joinToString(", ")
+    return INPUT_HISTORY_EMPTY_PLACEHOLDER
+}
+
 /**
  * "历史输入"面板 — 参考 RikkaHub 聊天页右上角（与 New Chat 并排）的消息预览
  * 功能。列出当前会话里所有已加载的消息（用户输入与助手回复），顶栏搜索框可
@@ -60,9 +106,18 @@ fun InputHistorySheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var searchQuery by remember { mutableStateOf("") }
 
-    val filtered = remember(messages, searchQuery) {
-        if (searchQuery.isBlank()) messages
-        else messages.filter { it.content.contains(searchQuery, ignoreCase = true) }
+    // [FIX-C8/F-12] Two gaps in the old one-liner (`messages.filter { it.content
+    // .contains(query) }`):
+    //  1. `role == "system"` rows are *not* user input — they are the compact
+    //     marker / model-switch divider / injected system notes. Rendered here
+    //     they read as left-aligned assistant bubbles and are not clickable
+    //     destinations of any use (the list only scrolls to a row id).
+    //  2. An attachment-only message has `content == ""` (the files live in
+    //     `attachmentNames` / `imageUris`), so it showed as "[...]" and could
+    //     not be found by typing the file name the user remembers.
+    val rows = remember(messages) { messages.filter { it.role != SYSTEM_ROLE } }
+    val filtered = remember(rows, searchQuery) {
+        rows.filter { inputHistoryMatches(searchQuery, it.content, it.attachmentNames) }
     }
 
     ModalBottomSheet(
@@ -135,7 +190,7 @@ fun InputHistorySheet(
                 ) {
                     Text(
                         stringResource(
-                            if (messages.isEmpty()) R.string.input_history_empty
+                            if (rows.isEmpty()) R.string.input_history_empty
                             else R.string.input_history_no_match
                         ),
                         style = MaterialTheme.typography.bodySmall,
@@ -181,7 +236,9 @@ fun InputHistorySheet(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
-                                    text = msg.content.trim().ifBlank { "[...]" },
+                                    // [FIX-C8/F-12] Attachment-only messages name
+                                    // their files instead of showing "[...]".
+                                    text = inputHistoryPreview(msg.content, msg.attachmentNames),
                                     style = MaterialTheme.typography.bodyMedium,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,

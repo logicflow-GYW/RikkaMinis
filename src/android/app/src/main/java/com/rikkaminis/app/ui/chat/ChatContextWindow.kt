@@ -512,15 +512,52 @@ internal fun ChatViewModel.trimContextHistoryWindow(
 }
 internal fun ChatViewModel.estimateContextHistoryTokens(): Int = estimateHistoryTokens(agentHistory)
 
-internal fun ChatViewModel.estimateHistoryTokens(messages: List<LLMMessage>): Int {
-    var totalChars = 0
-    var imageTokens = 0
-    for (msg in messages) {
+/**
+ * Characters one message contributes to the budget scale.
+ *
+ * [FIX-C8/F-13] Two terms were missing, and both are systematic:
+ *
+ *  1. **`content` when `contentParts` is empty.** The loop only ever walked
+ *     `contentParts`, so every message stored in the legacy shape (plain
+ *     `content`, no parts) counted as zero characters — the same rule
+ *     [ContextEstimator.estimateMessageTokensFull] already follows: the parts
+ *     ARE the wire body when present, otherwise `content` is. Double-counting
+ *     is not a risk either way: the two are mutually exclusive at send time.
+ *  2. **`reasoningContent`.** Echoed back on every subsequent turn for the
+ *     interleaved-reasoning providers (DeepSeek V4 / Kimi / GLM), i.e. tens of
+ *     thousands of characters per assistant turn on a thinking model with
+ *     multi-round tool calls — real window, counted by the preflight estimator
+ *     and by the provider, invisible to this one.
+ *
+ * Both omissions only bite where this scale is the *only* reading: the
+ * `lastContextTokens == 0` fallbacks in [offloadContextIfNeeded] /
+ * [trimContextHistoryWindow] — a resumed history or a mid-session model switch
+ * (the engine zeroes the provider reading when the context key changes). There
+ * the estimate is the pressure reading that decides offload/trim, and
+ * under-reading it defers both.
+ */
+internal fun messageCharContribution(msg: LLMMessage): Int {
+    var chars = 0
+    if (msg.contentParts.isEmpty()) {
+        chars += msg.content.length
+    } else {
         for (part in msg.contentParts) {
             // [audit-0920] Same helpers as [countPartTokens] — the offload loop
             // mixes this scale with the candidate scale, so the two MUST use
             // one conversion (see the KDoc on those helpers).
-            totalChars += partCharContribution(part)
+            chars += partCharContribution(part)
+        }
+    }
+    chars += msg.reasoningContent?.length ?: 0
+    return chars
+}
+
+internal fun ChatViewModel.estimateHistoryTokens(messages: List<LLMMessage>): Int {
+    var totalChars = 0
+    var imageTokens = 0
+    for (msg in messages) {
+        totalChars += messageCharContribution(msg)
+        for (part in msg.contentParts) {
             imageTokens += partImageContribution(part)
         }
     }
