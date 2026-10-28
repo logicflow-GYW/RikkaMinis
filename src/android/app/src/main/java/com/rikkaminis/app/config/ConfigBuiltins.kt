@@ -807,10 +807,21 @@ internal object ConfigBuiltins {
                 }
             },
             onDraftWithoutRow = {
+                // [r3-b08 F-11] "Logged" is not "told": the caller is the agent,
+                // and it was still reading `ok: true` / "Settings updated." for a
+                // value that landed nowhere (SessionConfigWriteThrough's own KDoc
+                // says the caller has to be told BECAUSE the write reported
+                // success). Fail the row instead, so `minis-config set` answers
+                // `ok: false` with the reason a retry can act on.
                 AppLogger.warning(
                     TAG,
                     "$path: session '$sessionId' has no persisted row and no resident " +
                         "view model — the UPDATE matched 0 rows, so the value is not retained",
+                )
+                throw ConfigError.InvalidValue(
+                    "$path cannot be retained: session '$sessionId' has no persisted row " +
+                        "and no resident chat view model yet. Open the chat (or send a " +
+                        "first message) and retry."
                 )
             },
         )

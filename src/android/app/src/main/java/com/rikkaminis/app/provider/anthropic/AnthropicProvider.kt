@@ -13,6 +13,7 @@ import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
 import com.rikkaminis.app.provider.sanitizeToolPairing
 import com.rikkaminis.app.provider.hasWirePayload
+import com.rikkaminis.app.provider.sseDataPayload
 import com.rikkaminis.app.provider.anthropicUsageAccounting
 import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.LLMStreamChunk
@@ -330,10 +331,12 @@ class AnthropicProvider(
             var line: String?
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
-                if (!l.startsWith("data: ")) continue
+                // [r3-b08 F-13] Same tolerance as OpenAI/Gemini: the space after
+                // `data:` is optional per the SSE spec, and a relay that omits it
+                // lost every frame → silent empty stream / watchdog timeout.
+                val payload = sseDataPayload(l)?.trim() ?: continue
                 firstDataArrived.set(true)
                 firstDataWatchdog.cancel()
-                val payload = l.removePrefix("data: ")
                 if (payload == "[DONE]") break
 
                 val event = try { JSONObject(payload) } catch (_: Exception) { continue }
@@ -819,10 +822,17 @@ class AnthropicProvider(
                 for (part in msg.contentParts) {
                     when (part) {
                         is AgentContentPart.Text -> {
-                            contentArray.put(JSONObject().apply {
-                                put("type", "text")
-                                put("text", part.text)
-                            })
+                            // [r3-b08 F-09] An empty text block is a hard 400 on
+                            // the Messages API ("text content blocks must be
+                            // non-empty"). hasWirePayload now drops a message
+                            // whose ONLY part is Text(""), but one that survives
+                            // next to a tool_use block still reaches here.
+                            if (part.text.isNotEmpty()) {
+                                contentArray.put(JSONObject().apply {
+                                    put("type", "text")
+                                    put("text", part.text)
+                                })
+                            }
                         }
                         is AgentContentPart.ToolUse -> {
                             // Anthropic requires tool ids to match ^[a-zA-Z0-9_-]+$.

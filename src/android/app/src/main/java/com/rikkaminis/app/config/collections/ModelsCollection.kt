@@ -10,6 +10,7 @@ import com.rikkaminis.app.config.fields.ClosureField
 import com.rikkaminis.app.config.fields.ReadOnlyField
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
+import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.model.directionalModalities
 import com.rikkaminis.app.data.model.expandDirectionalModalities
 import com.rikkaminis.app.data.model.modalityNamesInOrder
@@ -114,9 +115,29 @@ class ModelsCollection(
             maxOutputTokens = maxOut,
             supportsReasoning = supportsReasoning,
         )
+        // [r3-b08 F-04] The explicit numbers ALSO go into `overrides`. They used
+        // to live only on `baseModel`, and `ModelsDevApi.applyDevData` prefers the
+        // registry value (`devModel.contextWindow ?: model.contextWindow`), so for
+        // any id models.dev knows (gpt-4o, claude-…, every popular one) the
+        // agent's `context_window`/`max_output_tokens`/`supports_reasoning` were
+        // silently replaced by the catalog defaults on the very next read — the
+        // entry came back with 128000/16384 while the add call had returned
+        // ok:true. `overrides` is the user-explicit layer and is applied AFTER
+        // enrichment (`effectiveEntryModel` = enrich(baseModel).withOverrides(…)),
+        // which is exactly the precedence a hand-typed value deserves.
+        //
+        // `display_name` stays on baseModel only: it is the row's NAME, not an
+        // override of the registry's name (and duplicating it would make the
+        // detail screen show an "overridden" badge for a field the user never
+        // deliberately pinned).
         val entry = ModelEntry(
             providerInstanceId = instanceId,
             baseModel = model,
+            overrides = ModelOverrides(
+                contextWindow = contextWindow,
+                maxOutputTokens = maxOut,
+                supportsReasoning = supportsReasoning,
+            ),
             isCustom = true,
             isHidden = false,
             userModifiedAt = System.currentTimeMillis(),

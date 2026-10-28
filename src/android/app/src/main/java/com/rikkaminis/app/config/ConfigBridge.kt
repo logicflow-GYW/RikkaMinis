@@ -671,6 +671,20 @@ object ConfigBridge {
                         }
                         AppLogger.warning(TAG, "${r.rawPath}: ${e.message}")
                     } catch (e: Throwable) {
+                        // [r3-b08 F-10] Every ConfigError arm above records
+                        // `earlyError`; this one only logged. A writer/collection
+                        // throwing a plain RuntimeException (IllegalState,
+                        // SQLite, …) therefore fell through to the
+                        // `applied.length() == 0` arm and was reported to the
+                        // caller as `all_rejected` — "User rejected every row."
+                        // for a change the user had just approved.
+                        if (earlyError == null) {
+                            earlyError = JSONObject().apply {
+                                put("ok", false)
+                                put("error", "write_failed")
+                                put("reason", e.message ?: "Write failed.")
+                            }
+                        }
                         AppLogger.error(TAG, "write failed for ${r.rawPath}: ${e.message}")
                     }
                 }
