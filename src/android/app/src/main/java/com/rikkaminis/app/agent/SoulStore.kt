@@ -424,8 +424,39 @@ lang: "auto"
         /** Previous bytes copied to `SOUL.md.recovered-<stamp>`. */
         Written,
 
-        /** Present but unreadable — nothing to copy; the save proceeds. */
-        Unreadable,
+        /**
+         * [1028B-2 / backlog L9089] The bytes could not be read, so there was
+         * nothing to *copy* — but the file itself was moved (`renameTo`) to
+         * `SOUL.md.recovered-<stamp>` before the new content landed.
+         *
+         * Why this is a separate branch instead of another `Unreadable`: a
+         * rename needs only a writable **directory**, not read permission on
+         * the file. That is exactly the W3 world the copy path cannot cover
+         * (chmod / EIO / a foreign editor swapping the inode under us), and
+         * the one where the old persona used to disappear with nothing but an
+         * ERROR line. Renaming is therefore strictly more protective than
+         * copying here, at zero extra read cost.
+         */
+        Renamed,
+
+        /**
+         * Read failed **and** the rename-aside failed too (read-only parent,
+         * EACCES on the directory, filesystem refusing the rename). The save
+         * still proceeds — nothing here may turn a Save into a failure — but
+         * this is logged at ERROR because the previous content is now
+         * genuinely gone.
+         */
+        RenameFailed,
+
+        /**
+         * The path exists but is not a regular file (a directory, a FIFO, a
+         * dangling link). Deliberately NOT moved aside: those are not persona
+         * bytes, and a non-file squatting on the `SOUL.md.recovered-*`
+         * namespace would never be collected by [pruneBackups] (it filters on
+         * `isFile`). Distinct from [RenameFailed] so tests can tell "we chose
+         * not to" from "we tried and could not".
+         */
+        NotARegularFile,
 
         /** Larger than [MAX_BACKUP_BYTES] — not copied; the save proceeds. */
         TooLarge,
@@ -516,12 +547,46 @@ lang: "auto"
         clock: () -> Long = System::currentTimeMillis,
         readExisting: (File) -> ByteArray? = { f -> if (f.isFile) f.readBytes() else null },
     ) {
+        saveRawTo(target, SoulMDParser.serialize(file), clock, readExisting)
+    }
+
+    /**
+     * [1028B-2 / backlog L9096] The write itself for **already-serialized**
+     * text: pre-overwrite backup, then an atomic `.tmp` + rename.
+     *
+     * Exists because SOUL.md has a second write surface that does not own a
+     * [SoulFile] — `MemoryRepository.saveFile(name, content)` receives the raw
+     * editor text (the chat memory sheet and Settings → Memory both splice a
+     * window back into the full text and hand it over verbatim). Routing that
+     * through [saveTo] would silently re-serialize it: frontmatter keys
+     * reordered, `emoji:` dropped, a trailing newline forced. Same protection,
+     * different text semantics — so the protection lives here, below the
+     * parser, and the caller keeps its byte-exact contract.
+     *
+     * Context-free on purpose: `MemoryRepository` holds only the memory
+     * directory, and the two UI surfaces already call
+     * [SoulStore.refreshCache] after saving (a gate pins that pairing).
+     */
+    internal fun saveRawTo(
+        target: File,
+        text: String,
+        clock: () -> Long = System::currentTimeMillis,
+        readExisting: (File) -> ByteArray? = { f -> if (f.isFile) f.readBytes() else null },
+    ) {
         target.parentFile?.mkdirs()
-        val text = SoulMDParser.serialize(file)
         // Backup first: the rename below is atomic, but it is atomic over the
         // *new* bytes — without this copy the previous content is gone the
         // instant rename succeeds.
         backupBeforeOverwrite(target, text, clock, readExisting)
+        writeAtomically(target, text)
+    }
+
+    /**
+     * `.tmp` sibling + rename. Split out so [saveTo] (parsed) and [saveRawTo]
+     * (verbatim) share one write path — a second copy of this block is how the
+     * `.tmp` cleanup fix below would get lost on the next edit.
+     */
+    private fun writeAtomically(target: File, text: String) {
         val tmp = File(target.parentFile, "${target.name}.tmp")
         // [audit-0917] Delete the temp file if the write itself fails. The old
         // code only cleaned up on a rename failure, so a throwing writeText
@@ -543,9 +608,16 @@ lang: "auto"
     }
 
     /**
-     * Copy the bytes currently in [target] to a `SOUL.md.recovered-<stamp>`
-     * sibling before they are overwritten. Best effort by design: nothing here
-     * may turn a user's Save into a failure.
+     * Protect what is currently in [target] before it is overwritten: copy the
+     * bytes to a `SOUL.md.recovered-<stamp>` sibling — or, when the bytes
+     * cannot be read at all, move the file itself aside (see [renameAside]).
+     * Best effort by design: nothing here may turn a user's Save into a
+     * failure.
+     *
+     * The two halves answer two different failures. Copy protects "readable but
+     * about to be replaced by a fallback"; rename protects "present but we are
+     * not allowed to read it", which the copy path can never cover because it
+     * needs the very permission that is broken.
      *
      * **Why a content comparison instead of "is this write falling back to the
      * default?"** — [saveTo]'s callers cannot tell us that. The fallback lives
@@ -583,27 +655,29 @@ lang: "auto"
         val existing = try {
             readExisting(target)
         } catch (t: Throwable) {
-            // Present but unreadable — exactly the W3 world. There is nothing
-            // to copy, so the only honest thing left is to make the overwrite
-            // audible: this line is the signal that the persona on disk was not
-            // what the app thought it was.
-            AppLogger.error(
-                TAG,
-                "SOUL.md at ${target.absolutePath} exists but cannot be read " +
-                    "(${t.message}) — overwriting it without a backup. The previous " +
-                    "content is not recoverable from this device.",
-            )
-            return BackupOutcome.Unreadable
+            // Present but unreadable — the W3 "permission-broken" half. The
+            // [1028B-2 / backlog L9089] answer: COPY needs read permission,
+            // but RENAME only needs a writable directory. Move the file aside
+            // verbatim (no bytes are ever read, so chmod / EIO cannot stop
+            // it) and let the save recreate the path with the new content.
+            // If even the rename fails there is nothing left to do that does
+            // not risk the save itself — say so loudly and move on.
+            return renameAside(target, clock(), "unreadable (${t.message})")
         }
         if (existing == null) {
             // Path exists but is not a regular file (a directory, a FIFO, a
-            // broken link): same "cannot read it" class as above.
+            // broken link): no persona bytes to protect, and moving a
+            // non-file into the `SOUL.md.recovered-*` namespace would put
+            // something [pruneBackups] (isFile filter) never collects next
+            // to real backups. Leave it; the save below will fail on its own
+            // if the path really cannot be replaced, with a filesystem error
+            // that names the true cause.
             AppLogger.error(
                 TAG,
-                "SOUL.md at ${target.absolutePath} exists but is not a readable file " +
-                    "— overwriting it without a backup.",
+                "SOUL.md at ${target.absolutePath} exists but is not a regular file " +
+                    "— not renaming it aside; the save proceeds against it as-is.",
             )
-            return BackupOutcome.Unreadable
+            return BackupOutcome.NotARegularFile
         }
         if (String(existing, Charsets.UTF_8) == newText) return BackupOutcome.Identical
 
@@ -618,6 +692,38 @@ lang: "auto"
             )
             BackupOutcome.Failed
         }
+    }
+
+    /**
+     * [1028B-2 / backlog L9089] Move the unreadable file aside instead of
+     * copying it. Rename is the only operation in this file that preserves a
+     * file we are not allowed to read: it touches the directory entry, never
+     * the bytes, so `chmod 000` / EIO / an inode swapped by a foreign editor
+     * all still leave the user's persona recoverable verbatim.
+     *
+     * Both exits are explicit and both are audible — the save itself is never
+     * blocked (the copy path's contract: "nothing here may turn a Save into a
+     * failure"), but the caller can tell the two apart without parsing logs.
+     */
+    private fun renameAside(target: File, stamp: Long, reason: String): BackupOutcome {
+        val recovered = nextBackupFile(target, stamp)
+        if (target.renameTo(recovered)) {
+            AppLogger.warning(
+                TAG,
+                "SOUL.md at ${target.absolutePath} could not be read ($reason) — moved " +
+                    "aside to ${recovered.name} before overwriting. The previous content " +
+                    "is unchanged on this device (it may still need a chmod to open).",
+            )
+            pruneBackups(target)
+            return BackupOutcome.Renamed
+        }
+        AppLogger.error(
+            TAG,
+            "SOUL.md at ${target.absolutePath} could not be read ($reason) and could not " +
+                "be moved aside either — overwriting it without a backup. The previous " +
+                "content is not recoverable from this device.",
+        )
+        return BackupOutcome.RenameFailed
     }
 
     /**

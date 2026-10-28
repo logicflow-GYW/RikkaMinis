@@ -608,6 +608,27 @@ class MemoryRepository(private val memoryDir: File) {
     }
 
     fun saveFile(name: String, content: String) {
+        // [1028B-2 / backlog L9096] SOUL.md is the one file in this directory
+        // that has a *second* owner with stronger write rules: SoulStore.
+        // Writing it here with a bare `writeText` meant the chat memory sheet
+        // and Settings → Memory's editor got neither the pre-overwrite backup
+        // nor the atomic temp+rename, while every other writer of the same file
+        // (Settings → Soul, minis-config, the five ConfigBuiltins points) got
+        // both. One file, two durability classes.
+        //
+        // Explicit early return, not a change to the shared implementation:
+        // this method is the generic write point for daily logs / GLOBAL.md /
+        // MEMORY-ROLLUP.md, and `ConfigBackup` restores through it by name
+        // (Stage 6), so its signature and its behaviour for every other file
+        // name must stay exactly as they were.
+        //
+        // `saveRawTo` (not `save` / `saveTo`) because the caller hands over the
+        // editor's full text verbatim — re-serializing here would reorder the
+        // frontmatter and drop fields the user typed.
+        if (name == SOUL_FILE) {
+            com.rikkaminis.app.agent.SoulStore.saveRawTo(File(memoryDir, name), content)
+            return
+        }
         File(memoryDir, name).writeText(content)
     }
 
