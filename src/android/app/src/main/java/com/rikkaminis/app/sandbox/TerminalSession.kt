@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArrayList
@@ -40,6 +41,24 @@ class TerminalSession(private val context: Context) {
         private const val TAG = "TerminalSession"
         const val DEFAULT_COLS = 80
         const val DEFAULT_ROWS = 24
+
+        /**
+         * [meta-audit-1028 E3 / F-13] How often a deferred env broadcast
+         * re-checks whether the shell is back at an idle prompt. One /proc
+         * children read per second is negligible next to a terminal running.
+         */
+        private const val ENV_BROADCAST_POLL_MS = 1_000L
+
+        /**
+         * [meta-audit-1028 E3 / F-13] Longest a broadcast may be deferred.
+         * A TUI/build can legitimately own the PTY for hours; typing into it
+         * is unacceptable at any point, so past this budget the update is
+         * dropped and logged instead.
+         */
+        private const val ENV_BROADCAST_MAX_DEFER_MS = 10 * 60 * 1000L
+
+        /** 0x15 — Ctrl-U, "kill the current input line" in readline / ash. */
+        private const val CTRL_U: Byte = 0x15
 
         /**
          * Weak-reference registry of live sessions so the Application can push
@@ -320,6 +339,9 @@ class TerminalSession(private val context: Context) {
         }
         if (_state.value != State.STOPPED) _state.value = State.STOPPED
         liveSessions.removeAll { it.get() === this || it.get() == null }
+        // [F-13] A staged broadcast belongs to the PTY that just died; start()
+        // re-derives TZ/proxy from their single sources.
+        synchronized(pendingEnv) { pendingEnv.clear() }
         Log.i(TAG, "TerminalSession stopped")
     }
 
@@ -340,19 +362,28 @@ class TerminalSession(private val context: Context) {
         val out = mutableListOf<Int>()
         fun walk(p: Int) {
             if (!seen.add(p)) return
-            try {
-                val taskDir = File("/proc/$p/task")
-                val children = taskDir.listFiles()?.flatMap { tidDir ->
-                    runCatching {
-                        File(tidDir, "children").readText().trim()
-                            .split(Regex("\\s+")).filter { it.isNotEmpty() }.map { it.toInt() }
-                    }.getOrElse { emptyList() }
-                } ?: emptyList()
-                for (c in children) { out.add(c); walk(c) }
-            } catch (_: Throwable) { }
+            for (c in readChildPids(p)) { out.add(c); walk(c) }
         }
         walk(pid)
         return out
+    }
+
+    /**
+     * Direct children of [p], read from every `/proc/<p>/task/<tid>/children`.
+     *
+     * [meta-audit-1028 E3 / F-13] Extracted from [collectDescendants] so the
+     * prompt-state probe ([internalTerminalPromptState]) walks the SAME way the
+     * kill path does — one reader, two consumers, no second dialect of /proc.
+     */
+    private fun readChildPids(p: Int): List<Int> = try {
+        File("/proc/$p/task").listFiles()?.flatMap { tidDir ->
+            runCatching {
+                File(tidDir, "children").readText().trim()
+                    .split(Regex("\\s+")).filter { it.isNotEmpty() }.map { it.toInt() }
+            }.getOrElse { emptyList() }
+        } ?: emptyList()
+    } catch (_: Throwable) {
+        emptyList()
     }
 
     /**
@@ -478,19 +509,125 @@ class TerminalSession(private val context: Context) {
     //  Env broadcasts
     // ──────────────────────────────────────────────
 
-    private fun applyTimezone(tz: String) {
-        val line = "export TZ='${tz.replace("'", "'\\''")}'\r"
-        sendRawBytes(line.toByteArray(Charsets.UTF_8))
+    // [meta-audit-1028 E3 / F-13] A broadcast is a top-level `export` block
+    // typed INTO the PTY. Writing it unconditionally — what this class used to
+    // do — corrupts whatever owns the terminal at that instant:
+    //   * a half-typed command at the prompt (`git commit -m "…`): the export
+    //     text is appended to it and the injected `\r` SUBMITS the joined
+    //     line, so a command the user never wrote runs;
+    //   * `vim` / `nano` / a REPL: the export lines are keyboard input and land
+    //     in the file buffer or the interpreter.
+    // [PersistentShell] hit the same defect ([audit-1015 BUG-07]) and stages the
+    // update until no command is in flight. A terminal has no command boundary
+    // to hook, so the equivalent is two guards:
+    //   1. DEFER while a foreground child owns the PTY; an unknowable state also
+    //      defers (fail closed — never inject blind);
+    //   2. once the shell IS at a prompt, send Ctrl-U first so a partially
+    //      typed line is discarded instead of being executed together with the
+    //      export block.
+    // Escaping was never the broken half (the POSIX `'\''` idiom was already
+    // here); this is about WHEN the bytes are written.
+
+    /** Broadcasts waiting for an idle prompt; per-key last-write-wins. */
+    private val pendingEnv = LinkedHashMap<String, String>()
+
+    /** One pump coroutine at a time — coalesces a burst of broadcasts. */
+    private var envPumpRunning = false
+
+    private fun applyTimezone(tz: String) = queueEnvUpdate(mapOf("TZ" to tz))
+
+    private fun applyEnvMap(env: Map<String, String>) = queueEnvUpdate(env)
+
+    private fun queueEnvUpdate(entries: Map<String, String>) {
+        if (entries.isEmpty()) return
+        synchronized(pendingEnv) { pendingEnv.putAll(entries) }
+        startEnvPump()
     }
 
-    private fun applyEnvMap(env: Map<String, String>) {
-        if (env.isEmpty()) return
-        val sb = StringBuilder()
-        for ((k, v) in env) {
-            val escaped = v.replace("'", "'\\''")
-            sb.append("export ").append(k).append("='").append(escaped).append("'\r")
+    private fun startEnvPump() {
+        val start = synchronized(pendingEnv) {
+            if (envPumpRunning || pendingEnv.isEmpty()) {
+                false
+            } else {
+                envPumpRunning = true
+                true
+            }
         }
-        sendRawBytes(sb.toString().toByteArray(Charsets.UTF_8))
+        if (start) scope.launch { pumpEnvUpdates() }
+    }
+
+    private fun drainPendingEnv(): Map<String, String>? = synchronized(pendingEnv) {
+        if (pendingEnv.isEmpty()) {
+            null
+        } else {
+            val out = LinkedHashMap(pendingEnv)
+            pendingEnv.clear()
+            out
+        }
+    }
+
+    /**
+     * Apply the staged broadcast as soon as the shell is back at a prompt.
+     *
+     * Bounded by [ENV_BROADCAST_MAX_DEFER_MS]: a terminal can sit inside a
+     * long-running TUI/build for hours, and dropping the update is the lesser
+     * evil compared to typing six `export` lines into it. Dropping is logged
+     * (`Log.w`) — and it degrades to "the running terminal keeps the previous
+     * TZ/proxy" which the next session start repairs, because
+     * [buildTermuxEnv] re-derives both from their single sources.
+     */
+    private suspend fun pumpEnvUpdates() {
+        try {
+            var waitedMs = 0L
+            while (true) {
+                if (_state.value == State.STOPPED) {
+                    // PTY gone: start() rebuilds the whole env array anyway.
+                    synchronized(pendingEnv) { pendingEnv.clear() }
+                    return
+                }
+                if (isRunning && shellPromptState() == TerminalPromptState.IDLE_AT_PROMPT) {
+                    val entries = drainPendingEnv() ?: return
+                    val script = internalBuildTerminalEnvScript(entries)
+                    if (script.isNotEmpty()) {
+                        // Ctrl-U: kill the line the user may have half typed
+                        // (see the block comment above). Only reached when the
+                        // shell provably has no foreground child, so this
+                        // cannot reach an editor's insert buffer.
+                        sendRawBytes(byteArrayOf(CTRL_U))
+                        sendRawBytes(script.toByteArray(Charsets.UTF_8))
+                        Log.i(TAG, "Env broadcast applied at prompt: ${entries.size} key(s)")
+                    }
+                    return
+                }
+                if (waitedMs >= ENV_BROADCAST_MAX_DEFER_MS) {
+                    Log.w(
+                        TAG,
+                        "Env broadcast dropped after ${ENV_BROADCAST_MAX_DEFER_MS}ms without an idle " +
+                            "prompt: ${pendingEnv.size} key(s) withheld (the PTY owns a foreground " +
+                            "program; injecting there would be read as keyboard input)",
+                    )
+                    synchronized(pendingEnv) { pendingEnv.clear() }
+                    return
+                }
+                kotlinx.coroutines.delay(ENV_BROADCAST_POLL_MS)
+                waitedMs += ENV_BROADCAST_POLL_MS
+            }
+        } finally {
+            // Re-arm under the same lock the queue takes: an entry that landed
+            // while the last block was being written must not be stranded.
+            val restart = synchronized(pendingEnv) {
+                envPumpRunning = false
+                pendingEnv.isNotEmpty()
+            }
+            if (restart) startEnvPump()
+        }
+    }
+
+    /** Prompt state of the live PTY (semantics: [internalTerminalPromptState]). */
+    private suspend fun shellPromptState(): TerminalPromptState = withContext(Dispatchers.IO) {
+        val s = termuxSession ?: return@withContext TerminalPromptState.UNKNOWN
+        val pid = termuxShellPid(s) ?: return@withContext TerminalPromptState.UNKNOWN
+        internalTerminalPromptState(pid) { p -> readChildPids(p) }
     }
 
     // ──────────────────────────────────────────────
@@ -591,6 +728,27 @@ class TerminalSession(private val context: Context) {
         envMap["LC_ALL"] = "C.UTF-8"
         envMap["TZ"] = PRootKernel.posixTz()
         for ((k, v) in PRootKernel.customEnvironment) envMap[k] = v
+        // [meta-audit-1028 E3 / F-14] Guest temp dir, pinned explicitly — the
+        // same pair PersistentShell.startProcess writes, for the same reason
+        // (full measurement there: 17 213 stale dirs / 3.26 GiB of permanent
+        // junk under `<rootfs>/data/user/0/<pkg>/cache`, 2026-10-27).
+        //
+        // Two things this placement buys:
+        //  * after the [PRootKernel.customEnvironment] merge, so a
+        //    process-global value can never re-point guest temp writes at a
+        //    HOST path — the exact regression the pin exists to prevent;
+        //  * before the user env-var repository, so a user who deliberately
+        //    sets `TMPDIR=/var/minis/tmp` still wins. PersistentShell behaves
+        //    the same way (its per-command [PersistentShell.applyEnvironment]
+        //    export lands after the process env).
+        //
+        // It is written here at all because this entry point can NOT inherit
+        // the PersistentShell pin: Termux execs PRoot with an explicit env
+        // ARRAY, not the inherited ProcessBuilder environment, so what the
+        // guest sees depends on Termux's JNI rather than on anything in this
+        // repo. Pinning makes the contract explicit instead of accidental.
+        envMap["TMPDIR"] = "/tmp"
+        envMap["TMP"] = "/tmp"
         ExecutionCoordinator.envVarRepository?.allAsDict()?.forEach { (k, v) -> envMap[k] = v }
         // [T-minis-fastio] The PTY's own proot `-b` table is session-scoped
         // (buildTermuxArgs above), so an offload handler that rebuilds that
@@ -722,4 +880,95 @@ internal fun internalNormalizeLineEndings(text: String): String {
         i++
     }
     return sb.toString()
+}
+
+/**
+ * [meta-audit-1028 E3 / F-13] Where is the interactive PTY?
+ *
+ * Termux execs PRoot as the session process, so the pid we see is the PRoot
+ * tracer: depth 1 is the guest login shell, depth 2+ is whatever that shell is
+ * running (vim, a REPL, a build). An empty depth-1 list means the /proc walk
+ * saw nothing — the process is gone, or `task/<tid>/children` is not readable
+ * on this kernel. That is reported as [TerminalPromptState.UNKNOWN] so callers
+ * fail CLOSED (defer the broadcast) instead of typing into an unknown
+ * foreground.
+ *
+ * [childrenOf] is injected so this stays pure and JVM-testable; the caller
+ * supplies the /proc reader ([TerminalSession.readChildPids]).
+ */
+internal fun internalTerminalPromptState(
+    tracerPid: Int,
+    childrenOf: (Int) -> List<Int>,
+): TerminalPromptState {
+    if (tracerPid <= 0) return TerminalPromptState.UNKNOWN
+    val shellLevel = childrenOf(tracerPid)
+    if (shellLevel.isEmpty()) return TerminalPromptState.UNKNOWN
+    // Background jobs also land here (they are children of the shell). That is
+    // deliberate: a shell with a job attached is not a clean prompt to type a
+    // six-line block into, and deferring is the cheap direction to be wrong in.
+    for (shellPid in shellLevel) {
+        if (childrenOf(shellPid).isNotEmpty()) return TerminalPromptState.FOREGROUND_RUNNING
+    }
+    return TerminalPromptState.IDLE_AT_PROMPT
+}
+
+internal enum class TerminalPromptState {
+    /** Could not tell — treat as busy: never inject blind. */
+    UNKNOWN,
+
+    /** Guest shell with no children: a broadcast may be typed into it. */
+    IDLE_AT_PROMPT,
+
+    /** A foreground program (or a background job) owns the shell. */
+    FOREGROUND_RUNNING,
+}
+
+/**
+ * [meta-audit-1028 E3 / F-13] Build the CR-terminated `export` block an env
+ * broadcast types into the interactive PTY: one `export KEY='value'\r` per
+ * entry, in iteration order.
+ *
+ * Values are quoted with the shared POSIX idiom
+ * ([internalPosixSingleQuote], the same one the agent shell path uses), and
+ * C0 control characters are stripped first: each line is SUBMITTED by its
+ * trailing `\r`, so a raw `\n` inside a value would submit a half-written
+ * `export KEY='…` line and leave the shell in a continuation prompt. A newline
+ * cannot be represented on a TTY input line at all, and no legitimate TZ /
+ * proxy value contains one.
+ *
+ * Keys are not validated: the only producers are [PRootKernel.posixTz]'s `TZ`
+ * and the fixed `http_proxy` / `https_proxy` / `no_proxy` names from
+ * [PRootKernel.systemProxyEnv].
+ *
+ * Pure + JVM-tested ([TerminalSessionEnvScriptTest]) — [TerminalSession] itself
+ * imports Android classes and cannot be loaded on a desktop JVM.
+ */
+internal fun internalBuildTerminalEnvScript(entries: Map<String, String>): String {
+    if (entries.isEmpty()) return ""
+    val sb = StringBuilder()
+    for ((key, value) in entries) {
+        sb.append("export ").append(key).append("='")
+        sb.append(internalPosixSingleQuote(internalStripControlChars(value)))
+        sb.append("'\r")
+    }
+    return sb.toString()
+}
+
+/**
+ * [meta-audit-1028 E3 / F-13] Drop C0 control characters and DEL.
+ *
+ * Returns [value] itself when it is already clean (the overwhelmingly common
+ * case: every proxy URL and POSIX TZ string), so the broadcast path allocates
+ * nothing extra.
+ */
+internal fun internalStripControlChars(value: String): String {
+    var clean = true
+    for (ch in value) {
+        if (ch.code < 0x20 || ch.code == 0x7F) {
+            clean = false
+            break
+        }
+    }
+    if (clean) return value
+    return value.filter { it.code >= 0x20 && it.code != 0x7F }
 }

@@ -16,29 +16,60 @@ object TerminalSanitizer {
     const val DEFAULT_OUTPUT_CAP_BYTES = 50_000
 
     // Matches ANSI/VT escape sequences:
-    //   ESC [ ... final_byte (CSI sequences)
-    //   ESC ] ... ST (OSC sequences terminated by BEL or ESC\)
-    //   ESC followed by single character (simple escapes)
+    //   ESC [ params intermediates final  (CSI sequences, ECMA-48 §5.4)
+    //   ESC ] ... ST                      (OSC, terminated by BEL or ESC\)
+    //   ESC ( X / ESC ) X                 (charset designation)
+    //   ESC X                             (simple escapes)
+    //
+    // [meta-audit-1028 E3 / F-08] Three defects fixed in this one expression —
+    // each was reproduced against this file before the change
+    // (`probe-e3/F08Probe.kt`, `F08_PROBE=FAIL(4)`):
+    //
+    //  * OSC body was `[^\x07]*`, which happily ate ESC and newlines, so the
+    //    greedy match ran from the FIRST `ESC ]` to the LAST terminator in the
+    //    whole output. Two OSC 8 hyperlinks (`ls --hyperlink`, gcc/cargo
+    //    diagnostics) therefore deleted the visible text BETWEEN them:
+    //    `before ESC]8;;url ESC\ TEXT ESC]8;; ESC\ after` → `before  after`.
+    //    The body now excludes ESC, so it can only end at its own terminator.
+    //  * CSI was `\[[0-9;]*[A-Za-z]`, i.e. no DEC private-mode prefix (`?`) and
+    //    no intermediate bytes. `ESC[?25l` / `ESC[?25h` (what `top`, `tqdm`,
+    //    npm and pip emit to hide/show the cursor) never matched, pass 3 then
+    //    deleted only the ESC, and the literal `[?25l` stayed in the output.
+    //    The parameter class is now the full ECMA-48 one (`0x30..0x3F`, which
+    //    includes `?`), followed by intermediates (`0x20..0x2F`) and a final
+    //    byte (`0x40..0x7E`).
     private val ANSI_REGEX = Regex(
-        """\x1B(?:\[[0-9;]*[A-Za-z]|\][^\x07]*(?:\x07|\x1B\\)|\[[0-9;]*m|[()][0-2AB]|[A-Za-z])"""
+        """\x1B(?:\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x7E]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[()][0-2AB]|[A-Za-z])"""
     )
 
     /**
      * Sanitize terminal output in two passes:
-     * 1. CR folding — simulate carriage return overwriting
-     * 2. Strip remaining ANSI/VT escape sequences
+     * 1. Strip ANSI/VT escape sequences
+     * 2. CR folding — simulate carriage return overwriting
+     *
+     * [meta-audit-1028 E3 / F-08] The order matters and used to be the reverse.
+     * CR folding assigns columns by CHAR INDEX, so every escape byte still in
+     * the line counted as a written column. A colored progress line —
+     * `ESC[33mDownloading 50%ESC[0m\rDone!          ` — has 9 invisible bytes
+     * ahead of the 15 visible ones, so the 15-char overwrite only reached
+     * column 15 and the tail of the old line survived the strip:
+     * `Done!          g 50%`. When the new line is shorter than the escape
+     * prefix (`ESC[33mABC\rOK`) it instead overwrites the escape's own head,
+     * leaving `OK33mABC` — the `33m` fragment the report described.
+     * Stripping first makes the fold operate on exactly the bytes a real
+     * terminal would paint, which is what CR semantics are defined over.
      */
     fun sanitize(raw: String): String {
         if (raw.isEmpty()) return raw
 
-        // Pass 1: CR folding
-        val crFolded = foldCarriageReturns(raw)
+        // Pass 1: Strip ANSI sequences (must precede CR folding — see above)
+        val stripped = ANSI_REGEX.replace(raw, "")
 
-        // Pass 2: Strip ANSI sequences
-        val stripped = ANSI_REGEX.replace(crFolded, "")
+        // Pass 2: CR folding
+        val crFolded = foldCarriageReturns(stripped)
 
         // Pass 3: Remove null bytes and non-printable control chars (except \n \t)
-        val cleaned = stripped.filter { it == '\n' || it == '\t' || it.code >= 0x20 }
+        val cleaned = crFolded.filter { it == '\n' || it == '\t' || it.code >= 0x20 }
 
         // Pass 4 (REMOVED 2026-10-15, [verify-1015 BUG-02]): a filter that
         // deleted every line whose trimmed text was "null", plus a
