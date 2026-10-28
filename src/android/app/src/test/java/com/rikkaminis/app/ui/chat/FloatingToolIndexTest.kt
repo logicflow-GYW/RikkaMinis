@@ -93,7 +93,7 @@ class FloatingToolIndexTest {
 
     @Test
     fun `the composable routes its cursor through the pure helpers`() {
-        val src = java.io.File(sourcePath).readText()
+        val src = readRepoFile(sourcePath)
         assertTrue("write site must go through the helper",
             src.contains("currentIndex = floatingToolIndexAfterUpdate(currentIndex, lastIndex, newestActive)"))
         assertTrue("read site must clamp",
@@ -104,5 +104,23 @@ class FloatingToolIndexTest {
             src.contains("val block = toolBlocks.getOrNull(currentIndex) ?: return"))
         assertFalse("the forward-only update is the defect",
             src.contains("if (newestActive) currentIndex = lastIndex.coerceAtLeast(0)"))
+    }
+
+    /**
+     * Walk up from the test working directory to the repo root containing
+     * [relative]. Gradle sets user.dir to the module dir
+     * (`src/android/app`), a sandbox JVM run can start anywhere under the
+     * repo — no fixed relative path works for both, so walk up.
+     */
+    private fun readRepoFile(relative: String): String {
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
+            val f = java.io.File(dir, relative)
+            if (f.exists()) return f.readText()
+            dir = dir.parentFile
+        }
+        throw java.io.FileNotFoundException(
+            "$relative not found from user.dir=${System.getProperty("user.dir")}",
+        )
     }
 }

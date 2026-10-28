@@ -94,7 +94,7 @@ class MoveToTargetVisibilityTest {
 
     @Test
     fun `the sheet filters through the predicate and reads real message counts`() {
-        val src = java.io.File(sourcePath).readText()
+        val src = readRepoFile(sourcePath)
         assertTrue(src.contains("isMoveToTargetVisible("))
         assertTrue("counts must come from the drawer's live map, not a hardcoded 0",
             src.contains("chatRepository.observeMessageCountsPerSession().first()"))
@@ -104,8 +104,26 @@ class MoveToTargetVisibilityTest {
 
     @Test
     fun `the drawer still owns the three-term definition`() {
-        val src = java.io.File(drawerSourcePath).readText()
+        val src = readRepoFile(drawerSourcePath)
         assertTrue(src.contains("internal fun isDrawerRowVisible("))
         assertTrue(src.contains("pinnedAt != null || messageCount > 0 || !lastMessage.isNullOrBlank()"))
+    }
+
+    /**
+     * Walk up from the test working directory to the repo root containing
+     * [relative]. Gradle sets user.dir to the module dir
+     * (`src/android/app`), a sandbox JVM run can start anywhere under the
+     * repo — no fixed relative path works for both, so walk up.
+     */
+    private fun readRepoFile(relative: String): String {
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
+            val f = java.io.File(dir, relative)
+            if (f.exists()) return f.readText()
+            dir = dir.parentFile
+        }
+        throw java.io.FileNotFoundException(
+            "$relative not found from user.dir=${System.getProperty("user.dir")}",
+        )
     }
 }
