@@ -11,6 +11,7 @@ import com.rikkaminis.app.data.db.ProviderConfigSnapshot
 import com.rikkaminis.app.data.db.ProviderDatabase
 import com.rikkaminis.app.data.db.ProviderThinkingRuleEntity
 import com.rikkaminis.app.data.db.compositeEntryKey
+import com.rikkaminis.app.data.db.restoreFrozenBlobs
 import com.rikkaminis.app.data.db.toProviderConfig
 import com.rikkaminis.app.data.db.toProviderConfigWithDiagnostics
 import com.rikkaminis.app.data.db.toSnapshot
@@ -559,6 +560,35 @@ class ProviderRepository(private val context: Context) {
         // answers, see the block below the sync. (The mirror hash sees the string
         // we put into prefs, not a hash of itself.)
         val mirrorHash = hashJsonMirror(mirrorStr)
+        // [fix/meta1028-d1 F-02] Rows whose blob we could not decode on load now
+        // carry a PLACEHOLDER in the config (default overrides / empty member
+        // list). Re-encoding the placeholder would make the damage permanent, so
+        // the stored blob is substituted back before the snapshot is written.
+        // Costs one extra row read, and only while such a row exists.
+        val storedEntriesForFrozen =
+            if (unreadableOverridesEntryIds.isEmpty()) emptyList()
+            else runCatching { providerDao.loadEntries() }
+                .onFailure {
+                    android.util.Log.w(
+                        "ProviderRepo",
+                        "[ProviderStore] could not re-read entry rows to preserve " +
+                            "${unreadableOverridesEntryIds.size} undecodable override blobs; " +
+                            "they will be rewritten with defaults: ${it.message}",
+                    )
+                }
+                .getOrDefault(emptyList())
+        val storedGroupsForFrozen =
+            if (unreadableMemberGroupIds.isEmpty()) emptyList()
+            else runCatching { providerDao.loadGroups() }
+                .onFailure {
+                    android.util.Log.w(
+                        "ProviderRepo",
+                        "[ProviderStore] could not re-read group rows to preserve " +
+                            "${unreadableMemberGroupIds.size} undecodable member lists; " +
+                            "they will be rewritten empty: ${it.message}",
+                    )
+                }
+                .getOrDefault(emptyList())
         val snapshot = restoreFrozenBlobs(
             snapshot = config.toSnapshot(json, jsonSyncHash = mirrorHash),
             storedEntries = storedEntriesForFrozen,

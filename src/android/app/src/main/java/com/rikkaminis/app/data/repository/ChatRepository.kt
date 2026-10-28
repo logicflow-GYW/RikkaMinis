@@ -487,8 +487,8 @@ class ChatRepository(
         sessionId: String,
         offset: Int,
         limit: Int,
-        startMs: Long?,
-        endMs: Long?,
+        startMs: Long? = null,
+        endMs: Long? = null,
     ): List<MessageEntity> = if (startMs == null && endMs == null) {
         dao.loadMessagesPage(sessionId, offset, limit)
     } else {
@@ -1125,7 +1125,16 @@ class ChatRepository(
                     if (!isCursorWindowFailure(rowError)) throw rowError
                     null
                 }
-                parts?.let { ref.copy(partsJson = it) }
+                if (parts == null) {
+                    android.util.Log.w(
+                        "ChatRepository",
+                        "searchMessages: message ${ref.id} could not be materialised — " +
+                            "that single match is dropped, the rest of the search still runs",
+                    )
+                    null
+                } else {
+                    ref.copy(partsJson = parts)
+                }
             }
         }
         val out = mutableListOf<MessageSearchMatch>()
