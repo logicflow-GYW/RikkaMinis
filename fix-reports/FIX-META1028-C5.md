@@ -8,7 +8,7 @@
 | 分支 | `fix/meta1028-c5-tooldetail` |
 | 来源 | 货架报告 **B04 F-10 / F-12**（`ui/chat/ChatToolDetailUI.kt`）+ **F-14**（`ui/chat/ChatAssistantMessageUI.kt`）+ **F-13**（low，同文件顺路捎带） |
 | 改动面 | 生产 2 文件 +299/−82（`ChatToolDetailUI.kt` +219/−65、`ChatAssistantMessageUI.kt` +80/−17）· 测试 1 新文件 356 行（35 例） |
-| 冻结面 | `scripts/scan/**`、`scan.sh`、`test_scan.py`、`strings.xml`（8 语言）**零触碰**；门数 / 夹具数不变 |
+| 冻结面 | `scripts/scan/**`、`scan.sh`、`test_scan.py`、`strings.xml`（8 语言）**零触碰**；门数 **113 不变**、夹具 **349 不变**（CI 日志实测，见 §5.3） |
 | 装置 | `/var/minis/shared/work/meta-audit-1028/probe-c5/`（在仓库树外，不入提交）：`extract.py`（从生产源码逐字取纯函数）· `run.sh`（真 kotlinc + 真 JUnit）· `mut.py`（5 变异臂）· `shape.py`（10 条形状断言 + 基线负控） |
 
 ## 2 缺陷与先证
@@ -103,6 +103,16 @@
 
 **负控是这套证据成立的前提**：同一套断言在基线上 0/10——若只报"现树 10/10"，无法排除"这些字符串在修复前就已存在"。
 
+### 5.3 CI 判读（远端）
+
+run **`40679556550`** / #2823 / job `122786476654` / attempt 1 / **success**（11:23:22 → 11:44:09，~20m47s）。
+
+- **head_sha `975d4b8d64b5514525156751871dcb1179ba2dcd`** 与本地 `git rev-parse 975d4b8d` **逐字符一致**（远端 `origin/…` 尖 = 报告提交 `45f21e85`，符合"绿 sha 之后只有报告"）。
+- 27 步里**唯一非 success = 滚动 tag + Publish**（main 门控 skip，分支构建的预期形态）。
+- 日志 27 文件 / 3,020,627 B，**NUL 0**；`Summary: 113 passed, 0 failed` 出现在 `3_Run pre-build scan gate` 与总日志各 1 次（同一次输出被两处收录，不是跑了两次）；`ALL 349 CASES PASS` 同理 1 次；`^ e: ` **0**；`Function not implemented` **0**。
+- **新测试类 35 例在 CI 上逐条 PASSED**（`ChatToolDetailUiLogicTest` 出现 70 次 = 35 次类名行 + 35 次结果行，`PASSED` 70 / `FAILED` 0）。含 FAILED 且不含 PASSED 的行 = 0（无伪装成红的 PASSED 用例名）。
+- 单测真跑：`gradlew testReleaseUnitTest` → `compileReleaseUnitTestKotlin` → `testReleaseUnitTest`（11:29:14 → 11:35:02）。
+
 ## 6 诚实边界（未验）
 
 - **真机未验**：本支全部改动在 Compose 渲染层，沙箱无 Android 运行时、单文件 kotlinc 也无法编译 Compose。§5 只证明"代码形态变到了预期形态"，不证明"渲染确实不卡 / 确实不滑走"。**行为面的最终判据是分支 CI（编译 + 全量单测 + 门）+ 真机观察。**
@@ -125,5 +135,6 @@
 ## 8 收口状态
 
 - 本地：35 例 JUnit 绿 · 5/5 变异臂变红且各自只红钉住的用例 · 形状断言现树 10/10、基线 0/10。
-- 分支：`fix/meta1028-c5-tooldetail`，生产改动 + 测试一个提交，报告一个提交；报告提交后 `git diff --name-only <绿 sha>..HEAD -- . ':(exclude)fix-reports'` 必须为空（见回报）。
-- **停止节点 = 分支 CI 绿 + head_sha 与本地 HEAD 逐字符一致**；不合 main（合并起手权在用户）。
+- 分支：`fix/meta1028-c5-tooldetail`；生产 + 测试一个提交 **`975d4b8d`**（= CI 绿 sha），报告一个提交 **`45f21e85`**。
+- 收口核验：`git diff --name-only 975d4b8d..HEAD -- . ':(exclude)fix-reports'` = **空**；工作树脏 0。
+- **停止节点达成：分支 CI 绿 + head_sha 逐字符一致**；**不合 main**（合并起手权在用户）。
