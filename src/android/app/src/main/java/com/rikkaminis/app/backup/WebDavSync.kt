@@ -49,10 +49,8 @@ object WebDavSync {
     ) {
         val dav = WebDavClient(config, client)
         dav.ensureCollectionExists()
-        val name = "rikkaminis-backup-${
-            java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
-                .format(java.util.Date())
-        }.json"
+        // [FIX-1028 / B-12] Name stamp is read back by list/prune — one format.
+        val name = "$BACKUP_PREFIX${BackupRotation.stamp()}$BACKUP_SUFFIX"
         dav.put(name, payload, "application/json")
     }
 
@@ -103,10 +101,8 @@ object WebDavSync {
         val dav = WebDavClient(config, client)
         dav.ensureCollectionExists()
         dav.ensureCollectionExists(AUTO_SUBDIR)
-        val name = "rikkaminis-backup-auto-${
-            java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
-                .format(java.util.Date())
-        }.json"
+        // [FIX-1028 / B-12] Same single stamp format the pruner reads back.
+        val name = "$AUTO_BACKUP_PREFIX${BackupRotation.stamp()}$BACKUP_SUFFIX"
         dav.put("$AUTO_SUBDIR/$name", bytes, "application/json")
         return name
     }
@@ -173,11 +169,27 @@ object WebDavSync {
         config: WebDavConfig,
         keep: Int = AUTO_BACKUP_KEEP,
         client: OkHttpClient = WebDavClient.defaultClient(),
+        // [FIX-1028 / B-12] The copy the caller JUST pushed. Rotation must never
+        // delete it, which is exactly what happened when a rolled-back clock
+        // gave that upload the oldest-looking name. Trailing on purpose: an
+        // existing `pruneAutoBackups(cfg, keep = N, client)` call site keeps
+        // binding `client` positionally.
+        protectName: String? = null,
     ): Int {
         val dav = WebDavClient(config, client)
-        val stale = listAutoBackupEntries(config, client)
-            .filter { it.subdir == AUTO_SUBDIR }
-            .drop(keep)
+        // [FIX-1028 / B-12] Order and deletion eligibility both come from the
+        // stamp in the display name; a server that omits `getlastmodified`
+        // therefore can no longer decide which copy dies (every entry used to
+        // collapse to Instant.EPOCH and the order became "whatever the server
+        // listed"). Entries whose age cannot be established — no name stamp and
+        // no real last-modified — are never victims.
+        val stale = BackupRotation.rotationVictims(
+            items = listAutoBackupEntries(config, client).filter { it.subdir == AUTO_SUBDIR },
+            name = { it.item.displayName },
+            key = { autoBackupStampMillis(it.item) },
+            keep = keep,
+            protect = { protectName != null && it.item.displayName == protectName },
+        )
         var deleted = 0
         for (entry in stale) {
             val path = "${entry.subdir}/${entry.item.displayName}"
@@ -213,7 +225,9 @@ object WebDavSync {
                         it.displayName.endsWith(BACKUP_SUFFIX)
                 }
                 .map { resourceToBackupItem(it) }
-                .sortedByDescending { it.lastModified }
+                .let { items ->
+                    BackupRotation.newestFirst(items, name = { it.displayName }, key = { manualBackupStampMillis(it) })
+                }
         } catch (e: WebDavException) {
             // [T-backup-list-nomkcol] A read operation must not create the
             // remote folder (that is upload's job); a missing folder is just
@@ -262,8 +276,34 @@ object WebDavSync {
         } catch (e: WebDavException) {
             if (e.statusCode == 404) emptyList() else throw e
         }
-        return (inAuto + legacyInRoot).sortedByDescending { it.item.lastModified }
+        // [FIX-1028 / B-12] Newest first by the stamp in the NAME (falling back
+        // to a real last-modified), never `lastModified` alone: a server that
+        // omits the property returns EPOCH for every entry, and the previous
+        // comparator then preserved listing order — i.e. rotation deleted an
+        // arbitrary copy, not the oldest one.
+        return BackupRotation.newestFirst(
+            inAuto + legacyInRoot,
+            name = { it.item.displayName },
+            key = { autoBackupStampMillis(it.item) },
+        )
     }
+
+    /** [FIX-1028 / B-12] Age of a remote auto backup: name stamp, else a real
+     *  `getlastmodified`. [resourceToBackupItem] maps a missing property to
+     *  `Instant.EPOCH`, so `<= 0` means "the server did not tell us" — null,
+     *  not "the beginning of time". */
+    private fun autoBackupStampMillis(item: WebDavBackupItem): Long? =
+        BackupRotation.stampMillis(item.displayName, AUTO_BACKUP_PREFIX)
+            ?: item.lastModified.toEpochMilli().takeIf { it > 0L }
+
+    /** [FIX-1028 / B-12] Same key for the manual list (display order only:
+     *  manual copies are never pruned). Accepts both the pre-rename and the
+     *  current prefix, plus the minute-precision name [ConfigBackup.suggestedFileName]
+     *  gives a local export. */
+    private fun manualBackupStampMillis(item: WebDavBackupItem): Long? =
+        BackupRotation.stampMillis(item.displayName, BACKUP_PREFIX)
+            ?: BackupRotation.stampMillis(item.displayName, LEGACY_BACKUP_PREFIX)
+            ?: item.lastModified.toEpochMilli().takeIf { it > 0L }
 
     /** Download a remote automatic backup (see [listAutoBackupEntries]) and
      *  return its JSON document, ready for [ConfigBackup.import] or for

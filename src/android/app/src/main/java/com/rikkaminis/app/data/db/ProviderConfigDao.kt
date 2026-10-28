@@ -79,6 +79,16 @@ interface ProviderConfigDao {
      *
      * Empty incoming lists use the clear* calls because SQLite rejects
      * "NOT IN ()" as a syntax error.
+     *
+     * [fix/p1028-provider-corrupt-row] [preserveEntryIds] are `provider_model_entries`
+     * rows the caller could NOT decode on load (see
+     * [ProviderConfigLoad.quarantinedEntryRowIds]). They are absent from
+     * [entries] by construction, so a plain `NOT IN (entries.map { id })` would
+     * physically delete them on the first unrelated save — the load path's
+     * "skip the unreadable row" guard would then be undone here, irreversibly
+     * (the legacy mirror never carried those models). Passed in explicitly
+     * rather than re-derived here: only the mapping layer can tell "row is
+     * absent from the config" apart from "row could not be read".
      */
     @Transaction
     suspend fun syncAllIncremental(
@@ -87,6 +97,7 @@ interface ProviderConfigDao {
         groups: List<ProviderModelGroupEntity>,
         loopIds: List<ProviderAgentLoopIdEntity>,
         meta: List<ProviderConfigMetaEntity>,
+        preserveEntryIds: Set<String> = emptySet(),
     ) {
         if (instances.isEmpty()) {
             clearInstances() // CASCADE wipes their entries too
@@ -95,11 +106,17 @@ interface ProviderConfigDao {
             deleteInstancesNotIn(instances.map { it.id })
         }
 
-        if (entries.isEmpty()) {
+        // [fix/p1028-provider-corrupt-row] Quarantined rows count as "known":
+        // they stay out of [entries] (so they are never upserted with a
+        // degraded shape) but must survive the delete. When a corrupt row is the
+        // ONLY row (entries empty + preserve non-empty) the clearEntries() fast
+        // path must not run either — that is the same wipe via a different door.
+        val keepEntryIds = entryIdsToKeep(entries, preserveEntryIds)
+        if (keepEntryIds.isEmpty()) {
             clearEntries()
         } else {
-            upsertEntries(entries)
-            deleteEntriesNotIn(entries.map { it.id })
+            if (entries.isNotEmpty()) upsertEntries(entries)
+            deleteEntriesNotIn(keepEntryIds)
         }
 
         if (groups.isEmpty()) {

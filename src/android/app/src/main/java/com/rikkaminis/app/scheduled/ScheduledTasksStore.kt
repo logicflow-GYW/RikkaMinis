@@ -69,12 +69,50 @@ object ScheduledTasksStore {
      * and write atomically. Runs inside the store mutex — the crash-recovery
      * marker never survives a restore (the restored device has no in-flight
      * run), matching the brief's process-local single-flight truth.
+     *
+     * [FIX-1028 / A-16 = B-5] Returns what actually happened instead of `Unit`:
+     * the decision itself ([ScheduledTasksRestorePlan.decide]) may REFUSE to
+     * write, because "the section parsed to zero tasks" is not the same thing
+     * as "the backup says this device should have no tasks". Before this the
+     * empty set landed on disk and the caller reported a successful restore.
      */
-    suspend fun importDocument(context: Context, document: JSONObject) {
-        lock.withLock {
-            val file = ScheduledTasksCodec.parse(document.toString())
-            writeLocked(context, file.copy(running = null))
+    suspend fun importDocument(
+        context: Context,
+        document: JSONObject,
+    ): ScheduledTasksRestoreOutcome {
+        val outcome = lock.withLock {
+            val live = loadLocked(context)
+            val rawEntries = document.optJSONArray("tasks")?.length() ?: 0
+            val declaredVersion = if (document.has("version")) document.optInt("version", -1) else null
+            val parsed = try {
+                ScheduledTasksCodec.parse(document.toString())
+            } catch (t: Throwable) {
+                // Whole document unparseable: nothing is written (the parse
+                // precedes the write), and the caller surfaces this line instead
+                // of the old generic "restore failed" it could not explain.
+                AppLogger.warning(TAG, "backup tasks.json unparseable: ${t.javaClass.simpleName}")
+                return@withLock ScheduledTasksRestoreOutcome(
+                    applied = false,
+                    notice = "section could not be parsed (${t.javaClass.simpleName}); " +
+                        "kept this device's ${live.tasks.size} task(s) as-is",
+                )
+            }
+            val decision = ScheduledTasksRestorePlan.decide(
+                declaredVersion = declaredVersion,
+                supportedVersion = ScheduledTasksCodec.VERSION,
+                rawEntries = rawEntries,
+                parsedTasks = parsed.tasks.size,
+                liveTasks = live.tasks.size,
+            )
+            if (decision.applied) writeLocked(context, parsed.copy(running = null))
+            ScheduledTasksRestoreOutcome(decision.applied, decision.notice)
         }
+        // [FIX-1028 / A-16] A refused restore removed nothing, so the runner's
+        // single-flight state must survive it (releasing the lock would drop a
+        // legitimately running task's gate). Early return keeps the release
+        // below a top-level statement of this function — the placement the
+        // lock-order guard requires.
+        if (!outcome.applied) return outcome
         // [da1016 B-7c] The restore replaces the whole task set and clears the
         // persisted marker; the in-process single-flight state must go with it,
         // or the lock keeps pointing at a run the restored document knows
@@ -83,6 +121,7 @@ object ScheduledTasksStore {
         // ScheduledTaskRunner.onTasksRemoved); guarded by
         // scripts/scan/scheduled_store_release_guard.py.
         ScheduledTaskRunner.onTasksRemoved(removedTaskIds = null)
+        return outcome
     }
 
     suspend fun load(context: Context): ScheduledTasksFile = withContext(Dispatchers.IO) {

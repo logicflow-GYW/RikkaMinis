@@ -1002,4 +1002,69 @@ class OpenMinisBackupCompatTest {
         assertEquals(1, trunc.getInt("thinkingRulesShardsMissing"))
         assertEquals(listOf("data/thinking_rules-0002.jsonl"), namesOf(trunc.getJSONArray("missingShards")))
     }
+    // ------------------------------------------------------------------
+    // [FIX-1028 / A-5] 读到了但解析不了的行：计数而不是静默丢弃
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `truncated jsonl line is counted instead of silently dropped`() {
+        // 半截行（传输截断 / 写入被杀）在修复前被 runCatching 直接丢掉：
+        // 少一条消息，报告仍是「恢复成功」。
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/messages.jsonl" to textEntry(
+            messageLine("msg-1") + "\n" +
+                messageLine("msg-2").take(40) + "\n" +
+                messageLine("msg-3") + "\n",
+        )
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        assertEquals(2, doc.getJSONArray("chatMessages").length())
+        val trunc = doc.getJSONObject("chatTruncated")
+        assertEquals(1, trunc.getInt("unparsableLines"))
+        // 与缺片是两件事：没有缺片就不该冒出 shardsMissing 键。
+        assertFalse(trunc.has("shardsMissing"))
+        assertFalse(trunc.has("messagesShardsMissing"))
+    }
+
+    @Test
+    fun `unparsable lines in session and rule shards are counted too`() {
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/provider_config.json" to jsonEntry(providerConfig())
+        members += "data/thinking_rules.jsonl" to textEntry(thinkingRulesLine().take(25) + "\n")
+        members += "data/sessions.jsonl" to textEntry(sessionLine(true).take(30) + "\n")
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        assertEquals(2, doc.getJSONObject("chatTruncated").getInt("unparsableLines"))
+    }
+
+    @Test
+    fun `a whole package adds neither an unparsable count nor conversion notes`() {
+        // 完好包 ⇒ 文档形状与升级前逐键一致（两个新键都不出现）。
+        val doc = JSONObject(OpenMinisBackupCompat.convert(plainPackage()))
+        assertFalse(doc.has("chatTruncated"))
+        assertFalse(doc.has("conversionNotes"))
+    }
+
+    // ------------------------------------------------------------------
+    // [FIX-1028 / A-6] 转换层 notes 必须有出口
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `provider carried over with no model entries lands in conversion notes`() {
+        val pc = providerConfig()
+        pc.put("modelEntries", JSONArray())
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/provider_config.json" to jsonEntry(pc)
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        // 实例仍在（凭据/实例有价值），但用户得知道它一个模型都没带过来。
+        assertEquals(1, doc.getJSONArray("providers").length())
+        val notes = doc.getJSONArray("conversionNotes")
+        assertEquals(1, notes.length())
+        assertTrue(notes.getString(0).contains("没有模型条目"))
+        // 导入侧（ConfigBackup）读的就是这个键名/形态。
+        assertTrue(
+            ConfigBackup.conversionNotes(notes).single().startsWith("conversion: "),
+        )
+    }
 }

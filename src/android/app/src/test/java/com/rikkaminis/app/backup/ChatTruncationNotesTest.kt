@@ -1,5 +1,6 @@
 package com.rikkaminis.app.backup
 
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -73,5 +74,64 @@ class ChatTruncationNotesTest {
                 tr("sessionsDropped" to 0, "messagesDropped" to 0, "shardsMissing" to 0),
             ),
         )
+    }
+    // ------------------------------------------------------------------
+    // [FIX-1028 / A-5] 第三种不完整：片在，但片里有行解析不了
+    // ------------------------------------------------------------------
+
+    @Test
+    fun unparsableLinesAreReportedOnTheirOwn() {
+        val notes = ConfigBackup.chatTruncationNotes(tr("unparsableLines" to 3))
+
+        assertEquals(1, notes.size)
+        val note = notes.single()
+        assertTrue("must name the line count", note.contains("3 unreadable record line(s)"))
+        // 第三种形态不能借缺片的文案：缺片=包少了一片，坏行=片在内容坏，
+        // 用户能做的事不同（重新导出 vs 接受丢失）。
+        assertTrue("a damaged line is not a missing shard", !note.contains("data shard(s) missing"))
+        assertTrue(!note.contains("budget-trimmed"))
+    }
+
+    @Test
+    fun aDamagedLinePlusAHoleIsTwoLines() {
+        val notes = ConfigBackup.chatTruncationNotes(
+            tr("shardsMissing" to 1, "unparsableLines" to 2),
+        )
+        assertEquals(2, notes.size)
+        assertTrue(notes[0].contains("1 data shard(s) missing"))
+        assertTrue(notes[1].contains("2 unreadable record line(s)"))
+    }
+
+    @Test
+    fun zeroUnparsableLinesStaysSilent() {
+        assertEquals(
+            emptyList<String>(),
+            ConfigBackup.chatTruncationNotes(tr("unparsableLines" to 0)),
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // [FIX-1028 / A-6] 转换层的 notes 进 skipped
+    // ------------------------------------------------------------------
+
+    @Test
+    fun conversionNotesAreForwardedWithAPrefix() {
+        val raw = JSONArray()
+            .put("provider \"X\"：没有模型条目，仍按 0 模型导出")
+            .put("   ")
+            .put("memory \"GLOBAL.md\"：超过上限跳过")
+
+        val lines = ConfigBackup.conversionNotes(raw)
+
+        // 空白项不占一行（否则 skipped 里会出现「conversion: 」这种空壳）。
+        assertEquals(2, lines.size)
+        assertEquals("conversion: provider \"X\"：没有模型条目，仍按 0 模型导出", lines[0])
+        assertEquals("conversion: memory \"GLOBAL.md\"：超过上限跳过", lines[1])
+    }
+
+    @Test
+    fun absentConversionNotesAreSilent() {
+        assertEquals(emptyList<String>(), ConfigBackup.conversionNotes(null))
+        assertEquals(emptyList<String>(), ConfigBackup.conversionNotes(JSONArray()))
     }
 }
