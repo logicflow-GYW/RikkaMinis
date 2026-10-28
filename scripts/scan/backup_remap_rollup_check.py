@@ -955,6 +955,48 @@ REMAP_CALL = re.compile(r"(?<![\w.])remapDefaultsIds\s*\(")
 FIELD_WRITE_CALL = re.compile(r"\bfield\s*\.\s*write\s*\(")
 FIELD_VALIDATE_CALL = re.compile(r"\bfield\s*\.\s*valueSchema\s*\.\s*validate\s*\(")
 
+# [FIX-P1A / RT-S5] One `val <name> = <rhs>` binding. The trace uses the
+# NEAREST binding above the write site (not a fixed window): the alias has to
+# be the one in scope, or a same-named local elsewhere in the 3000-line file
+# would launder any argument into a green.
+_LOCAL_ALIAS = re.compile(r"\bval\s+%s\s*=\s*([^\n;]+?)\s*$")
+
+
+def _nearest_alias_rhs(code, upto, name):
+    """RHS of the last `val <name> = …` BEFORE offset [upto], or None."""
+    rx = re.compile(_LOCAL_ALIAS.pattern % re.escape(name), re.M)
+    last = None
+    for m in rx.finditer(code, 0, upto):
+        last = m.group(1).strip()
+    return last
+
+
+def _traces_to(code, upto, expr, var, depth=2):
+    """True when [expr] at offset [upto] can be traced back to [var].
+
+    [FIX-P1A / RT-S5] The hand-off used to be a single binding
+    (`val value = remapDefaultsIds(…)`), so "the argument mentions the remap
+    local" was the whole judgement. Stage 3 now needs the remap OUTCOME twice
+    (the value to write and the ids that could not be resolved), so it binds
+    the result and projects one field: `val remap = remapDefaultsIds(…);
+    val value = remap.value`. Following one projection hop keeps the original
+    judgement — the written value must still derive from the remap call — while
+    `val value = decoded` / `validate(decoded)` still goes red. Unknown shapes
+    fail closed (no binding ⇒ no trace ⇒ violation).
+    """
+    if contains_ident(expr, var):
+        return True
+    if depth <= 0:
+        return False
+    e = expr.strip()
+    if not re.match(r"^[A-Za-z_]\w*$", e):
+        return False
+    rhs = _nearest_alias_rhs(code, upto, e)
+    if rhs is None:
+        return False
+    return _traces_to(code, upto, rhs, var, depth - 1)
+
+
 
 def check_stage3_remap_consumed(src):
     """Stage 3 must WRITE what remapDefaultsIds returned (r19 #6).
@@ -998,7 +1040,7 @@ def check_stage3_remap_consumed(src):
                      "`%s` arguments cannot be delimited (fail-closed)" % label)]
         got = " ".join(code[args[0][0]:args[0][1]].split())[:48]
         arg_srcs = value_sources(code[args[0][0]:args[0][1]])
-        if not arg_srcs or not all(contains_ident(s, var) for s in arg_srcs):
+        if not arg_srcs or not all(_traces_to(code, h.start(), s, var) for s in arg_srcs):
             return [(CFG_REL, line_of(src, h.start()),
                      "Stage 3 keeps `val %s = remapDefaultsIds(…)` but hands `%s` to "
                      "`%s` — the remapped id is computed and thrown away, so a "
@@ -1853,6 +1895,14 @@ def selftest(root):
             "                    field.valueSchema.validate(decoded)\n"
             "                    field.write(decoded)\n",
         ),
+    )
+    # [FIX-P1A / RT-S5] the alias hop must not launder the hand-off: the local
+    # that IS written has to derive from the remap outcome, so re-pointing that
+    # alias at the pre-remap value is still a violation.
+    arm(
+        "w6b stage3 alias re-pointed at the pre-remap value",
+        on_cfg(check_stage3_remap_consumed),
+        cfg=sub_once(cfg, "val value = remap.value", "val value = decoded"),
     )
 
     failures = []
