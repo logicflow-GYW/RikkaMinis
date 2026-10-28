@@ -197,7 +197,37 @@ s4l2 的前提「这条路径从不持锁」**恰好说反了**：stop 的全部
 
 ---
 
-## 5. 验证边界（诚实交代）
+## 5. CI 判读
+
+| run | sha | 结果 |
+|---|---|---|
+| `40694781982` | `1bdb604c20` | **failure** — `compileReleaseUnitTestKotlin`：`ProcessBuilder.Redirect.DISCARD`（Java 9 API，Android 平台类里没有）。生产代码零编译错误 |
+| `40698474841` | `352ca10173` | **success** — 停节点达成 |
+
+**head_sha 逐字符一致**：`352ca10173e8843826d84a4ab4bab7491634e401` == 本地 HEAD。
+
+日志 3,012,137 字符 / NUL 0：
+`Summary: 113 passed, 0 failed` ×1（另有 6 条分段 Summary 25/16/44/19/30/18 + `0 violation(s) found`）·
+`ALL 349 CASES PASS` ×1 · `e: ` 0 · 6 条含 FAILED 的行**全是 PASSED 用例名子串**。
+
+新增测试在 CI 中全部实跑并通过：
+`MountGuardScriptExecTest` 22 · `SandboxRootfsRebuildShapeTest` 14 ·
+`GuestTmpSweepPlanTest` 42 · `ApkWorldSnapshotTest` 34 ·
+`PRootKernelBootGateTest` 14 · `MountGuardScriptTest` 38。
+
+### ★ 第一轮失败暴露的探针盲区（可复用）
+
+本地探针 105 例全绿，CI 编译失败。差在**classpath**：探针用 JDK 17，CI 用 Android 平台类，
+而 `ProcessBuilder.Redirect.DISCARD` 是 Java 9 才有的。**换掉编译器的装置继承的是 JDK 的 API
+面，不是平台的**——这类差异本地探针结构上看不见。
+
+可复用：**凡是新增代码引用了 `java.*` 里较新的 API，必须在 CI 上过一遍编译**；
+本地探针只能证明逻辑，不能证明 API 面。下一轮开工时直接按「Android 平台类可用性」筛一遍
+新增调用，比等 CI 快。
+
+---
+
+## 6. 验证边界（诚实交代）
 
 - **没有真跑** `reset()` / `autoRepair()` / `/tmp` 清扫。任务书明令禁止，且当前 shell 就跑在这个
   rootfs 上。所有结论来自读码 + JVM 纯函数 + 形状探针。
@@ -207,7 +237,7 @@ s4l2 的前提「这条路径从不持锁」**恰好说反了**：stop 的全部
 
 ---
 
-## 6. 残留（登记，不修）
+## 7. 残留（登记，不修）
 
 | ID | 残留 | 为什么现在不修 |
 |---|---|---|
@@ -220,9 +250,10 @@ s4l2 的前提「这条路径从不持锁」**恰好说反了**：stop 的全部
 
 ---
 
-## 7. 给主会话的指针
+## 8. 给主会话的指针
 
-- 分支：`fix/meta1028-d3-sandbox-p0`，绿 sha 见 CI（head_sha 与本地 HEAD 逐字符一致）
+- 分支：`fix/meta1028-d3-sandbox-p0`，绿 sha `352ca10173e8843826d84a4ab4bab7491634e401`
+- CI run：`40698474841` success，head_sha 与本地 HEAD 逐字符一致
 - 报告：本文件
 - 装置：`/var/minis/shared/work/meta-audit-1028/probe-d3/`（`build.py` 基线 / `arm_run.py <臂>` 单臂）
 - **未并入 backlog**：本批 6 条残留写在本文件 §6（三件套齐），未抢写 backlog（11 会话并行，
