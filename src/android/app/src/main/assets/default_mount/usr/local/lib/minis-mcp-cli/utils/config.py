@@ -18,6 +18,7 @@ stay exactly the mcpServers object form:
 
 import json
 import os
+import time
 
 CONFIG_DIR = "/var/minis/mcp-servers"
 CONFIG_PATH = os.path.join(CONFIG_DIR, "servers.json")
@@ -67,14 +68,49 @@ def load_config():
     return data
 
 
+# [meta-audit-1028 E2 / B07 F-14] Staging files a killed writer left behind are
+# debris once they are this old. A younger one may belong to the other writer
+# mid-write, so the age gate is not optional.
+_STALE_TEMP_SECONDS = 3600
+
+
+def _prune_stale_temps():
+    cutoff = time.time() - _STALE_TEMP_SECONDS
+    try:
+        names = os.listdir(CONFIG_DIR)
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith("servers.json.") and name.endswith(".tmp")):
+            continue
+        path = os.path.join(CONFIG_DIR, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def save_config(config):
     """Write the config back atomically (write temp + rename) so a concurrent
-    reader (Settings UI / agent) never sees a half-written file."""
+    reader (Settings UI / agent) never sees a half-written file.
+
+    The staging name must be UNIQUE PER WRITE. The Android side
+    (`MCPRepository.save` → `ServersJsonIo`) writes this same file, and both
+    used a fixed `servers.json.tmp`: an agent running `minis-mcp-cli add …`
+    while the user saved the Settings form truncated each other's staging file,
+    so one `os.replace` could publish the other's bytes (or an interleaved mix)
+    and the loser then failed its own replace. Unique names make every writer
+    publish exactly its own bytes; `os.replace` stays the single atomic step.
+    """
     _ensure_dir()
-    tmp = CONFIG_PATH + ".tmp"
+    tmp = "%s.%d-%d.tmp" % (CONFIG_PATH, os.getpid(), time.time_ns())
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, CONFIG_PATH)
+    _prune_stale_temps()
 
 
 def get_servers():

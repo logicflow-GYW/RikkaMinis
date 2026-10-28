@@ -89,29 +89,6 @@ class SessionForkManager(
             modelId = source.modelId,
             title = dupTitle,
         )
-        // Mirror iOS: carry over the source's category onto the copy so the
-        // session-list icon + colour stay consistent with the original.
-        if (source.category != null) {
-            chatRepository.updateSessionTitleAndCategory(new.id, dupTitle, source.category)
-        }
-        // Carry over the user's per-session model binding (the "pinned model"
-        // override) so duplicating a coding session pinned to GPT-5 stays
-        // pinned to GPT-5 in the copy.
-        if (source.modelBinding != null) {
-            chatRepository.updateSessionBinding(new.id, source.modelBinding, source.modelId)
-        }
-        // Carry over the per-session memory toggle. Sessions default
-        // memoryEnabled=1, so we only need to push the disabled state through;
-        // the matching state is already in place from createSession.
-        if (source.memoryEnabled == 0) {
-            chatRepository.dao.updateMemoryEnabled(new.id, 0)
-        }
-        // T239: carry over the per-session thinking-mode override so a
-        // duplicate of a "tuned to MEDIUM" session opens at MEDIUM rather
-        // than reverting to the default (parity with memoryEnabled).
-        source.thinkingOverride?.let { override ->
-            chatRepository.dao.updateThinkingOverride(new.id, override)
-        }
         // [T-session-duplicate-compact-marker-android] Track old→new message id
         // and old→new sort_order so copied compact markers (which reference DB
         // message ids + legacy sort_orders) can be remapped onto the freshly
@@ -119,106 +96,38 @@ class SessionForkManager(
         // (id + sortOrder), so no re-query is needed. Aligns iOS e8ac8b82.
         val oldToNewId = HashMap<String, String>()
         val oldToNewSort = HashMap<String, Int>()
-        // [audit-0917] Delete the half-built copy if any append fails. The
-        // session row was already created above, so an exception mid-loop (DB
-        // full, constraint violation, cancellation) left a "(Copy)" session
-        // holding a truncated prefix of the original — indistinguishable from
-        // a real duplicate, and nothing else ever cleans it up.
+        // [meta-audit-1028 E2 / B07 F-11] Every phase that WRITES now sits inside
+        // this try, and the catch unwinds all four through [SessionForkRollback]
+        // instead of trusting a single deleteSession. Before, the try wrapped only
+        // the message loop, and the phases around it were protected by accident or
+        // not at all:
+        //   · the session row's four metadata writes below sat ABOVE the try and
+        //     survived only because they are columns of the row the catch deletes
+        //     — an accident of the storage layout, not something the code said;
+        //   · the compact-marker phase (listCompactMarkers + insertCompactMarker)
+        //     sat BELOW the try and has no cleanup of its own: a constraint or
+        //     disk-full failure there left the row, every copied message and half
+        //     the markers behind, with nothing that would ever remove them;
+        //   · `copySessionArtifacts` is best-effort by contract (it collects
+        //     per-entry failures and logs PARTIAL rather than aborting), but it is
+        //     still the only phase that writes FILES — and no CASCADE removes
+        //     `minis-sessions/<new>/…` or `media/<yyyy>/<MM>/<dd>/<new>`. So once anything
+        //     above it throws, or the coroutine is cancelled while it runs, that
+        //     tree is orphaned with no owner.
+        // The unwind order (files → marker rows → message rows → the row itself)
+        // lives in [SessionForkRollback.plan] as data, not as prose here.
         try {
-            for (msg in messages) {
-                val newMsg = chatRepository.appendMessage(
-                    sessionId = new.id,
-                    role = msg.role,
-                    // [rv1014-D1] Media reference paths inside parts_json embed
-                    // the SOURCE session id (MediaRef.relativePath is
-                    // "yyyy/MM/dd/<sid>/<id>.<ext>", see MediaStore.saveMedia).
-                    // Verbatim copies resolve to the source session's files —
-                    // shared while the source exists, dangling once it is
-                    // deleted — so the source id is remapped onto the
-                    // duplicate's id here, matching the media tree that
-                    // copySessionArtifacts lays out under the new session.
-                    partsJson = remapForkedPartsJson(msg.partsJson, sessionId, new.id),
-                    tokenUsage = msg.tokenUsage,
-                    reasoningContent = msg.reasoningContent,
-                    // [F-233] appendMessage accepts 7 business fields; this copy
-                    // used to pass only 4, silently dropping the usage
-                    // attribution and the terminal error sticker. Consequence:
-                    // the branch session's usage records fell back to the
-                    // session's *current* model (wrong attribution), and
-                    // ChatTranscriptRebuild's error sticker vanished in the copy.
-                    usageModelId = msg.usageModelId,
-                    usageEntryId = msg.usageEntryId,
-                    errorInfo = msg.errorInfo,
-                )
-                oldToNewId[msg.id] = newMsg.id
-                oldToNewSort[msg.id] = newMsg.sortOrder
-            }
+            carryOverSessionMetadata(source, new.id, dupTitle)
+            copyMessages(messages, new.id, sessionId, oldToNewId, oldToNewSort)
+            copyCompactMarkers(sessionId, new.id, oldToNewId, oldToNewSort)
+            copySessionArtifacts(sessionId, new.id)
         } catch (t: Throwable) {
-            AppLogger.warning(TAG, "duplicateSession: copy failed, removing ${new.id}: ${t.message}")
-            runCatching { chatRepository.deleteSession(new.id) }
-                .onFailure { AppLogger.warning(TAG, "duplicateSession: cleanup failed: ${it.message}") }
-            throw t
+            AppLogger.warning(
+                TAG,
+                "duplicateSession: copy failed, unwinding ${new.id}: ${t.javaClass.simpleName}: ${t.message}",
+            )
+            unwindFailedCopy(new.id, t)
         }
-
-        // [T-session-duplicate-compact-marker-android] Copy compact markers
-        // AFTER all messages are appended (so the new sort_orders exist). A
-        // session with zero markers makes this a clean no-op — the normal
-        // duplicate path is untouched. Each marker is remapped independently so
-        // multi-compact sessions copy all dividers, in created_at order
-        // (listCompactMarkers returns ASC by created_at).
-        val markers = chatRepository.dao.listCompactMarkers(sessionId)
-        if (markers.isNotEmpty()) {
-            // Remap a referenced message id through the copy map. null → null.
-            fun remapId(id: String?): String? = id?.let { oldToNewId[it] }
-            // Resolve a legacy sort_order fallback to the NEW message's
-            // sort_order via the referenced id; keep the original when the id
-            // is null or can't be resolved (legacy markers without ids).
-            fun remapSort(messageId: String?, original: Int): Int =
-                messageId?.let { oldToNewSort[it] } ?: original
-            var copied = 0
-            for (marker in markers) {
-                // All source messages are copied, so every non-null id field
-                // MUST resolve. If one doesn't, the source marker is already
-                // dangling — skip it rather than write a dangling copy.
-                val firstKeptNew = remapId(marker.firstKeptMessageId)
-                val lastCompactedNew = remapId(marker.lastCompactedMessageId)
-                val boundaryNew = remapId(marker.boundaryMessageId)
-                if ((marker.firstKeptMessageId != null && firstKeptNew == null) ||
-                    (marker.lastCompactedMessageId != null && lastCompactedNew == null) ||
-                    (marker.boundaryMessageId != null && boundaryNew == null)
-                ) {
-                    AppLogger.warning(
-                        TAG,
-                        "duplicateSession: skipping compact marker ${marker.id} — a referenced message id is not in the copy map (dangling source marker)",
-                    )
-                    continue
-                }
-                val copy = marker.copy(
-                    id = java.util.UUID.randomUUID().toString(),
-                    sessionId = new.id,
-                    firstKeptSortOrder = remapSort(marker.firstKeptMessageId, marker.firstKeptSortOrder),
-                    uiBoundarySortOrder = marker.uiBoundarySortOrder?.let {
-                        remapSort(marker.boundaryMessageId, it)
-                    },
-                    boundaryMessageId = boundaryNew,
-                    firstKeptMessageId = firstKeptNew,
-                    lastCompactedMessageId = lastCompactedNew,
-                    // summary / compactedCount / createdAt / version verbatim.
-                )
-                chatRepository.dao.insertCompactMarker(copy)
-                copied++
-            }
-            AppLogger.info(TAG, "duplicateSession: copied $copied/${markers.size} compact marker(s) to ${new.id}")
-        }
-
-        // [sweep1014-B10] Copy the source session's on-disk artifacts onto the
-        // duplicate: minis-sessions/<sid>/{workspace,attachments,offloads,browser}
-        // and media/<yyyy/MM/dd>/<sid>. Without this, every attachment /
-        // minis://workspace reference / offload file in the copied messages
-        // dangles (File not found) in the new session. The DB copy is already
-        // committed at this point, so the artifact copy is best-effort — a
-        // partial failure is logged but never aborts the clone.
-        copySessionArtifacts(sessionId, new.id)
 
         AppLogger.info(
             TAG,
@@ -228,6 +137,165 @@ class SessionForkManager(
         )
         return new.id
     }
+
+    /**
+     * Carry over the user-meaningful metadata listed in [duplicateSession]'s
+     * KDoc. All four target the COPY's own row, which is why a single row delete
+     * happens to clean them up today — but relying on that accident is what left
+     * the other three phases unprotected, so each is now an explicit step inside
+     * the try.
+     */
+    private suspend fun carryOverSessionMetadata(
+        source: com.rikkaminis.app.data.db.ChatSessionEntity,
+        newSessionId: String,
+        dupTitle: String,
+    ) {
+        // Mirror iOS: carry over the source's category onto the copy so the
+        // session-list icon + colour stay consistent with the original.
+        if (source.category != null) {
+            chatRepository.updateSessionTitleAndCategory(newSessionId, dupTitle, source.category)
+        }
+        // Carry over the user's per-session model binding (the "pinned model"
+        // override) so duplicating a coding session pinned to GPT-5 stays
+        // pinned to GPT-5 in the copy.
+        if (source.modelBinding != null) {
+            chatRepository.updateSessionBinding(newSessionId, source.modelBinding, source.modelId)
+        }
+        // Carry over the per-session memory toggle. Sessions default
+        // memoryEnabled=1, so we only need to push the disabled state through;
+        // the matching state is already in place from createSession.
+        if (source.memoryEnabled == 0) {
+            chatRepository.dao.updateMemoryEnabled(newSessionId, 0)
+        }
+        // T239: carry over the per-session thinking-mode override so a
+        // duplicate of a "tuned to MEDIUM" session opens at MEDIUM rather
+        // than reverting to the default (parity with memoryEnabled).
+        source.thinkingOverride?.let { override ->
+            chatRepository.dao.updateThinkingOverride(newSessionId, override)
+        }
+    }
+
+    private suspend fun copyMessages(
+        messages: List<com.rikkaminis.app.data.db.MessageEntity>,
+        newSessionId: String,
+        sourceSessionId: String,
+        oldToNewId: HashMap<String, String>,
+        oldToNewSort: HashMap<String, Int>,
+    ) {
+        for (msg in messages) {
+            val newMsg = chatRepository.appendMessage(
+                sessionId = newSessionId,
+                role = msg.role,
+                // [rv1014-D1] Media reference paths inside parts_json embed
+                // the SOURCE session id (MediaRef.relativePath is
+                // "yyyy/MM/dd/<sid>/<id>.<ext>", see MediaStore.saveMedia).
+                // Verbatim copies resolve to the source session's files —
+                // shared while the source exists, dangling once it is
+                // deleted — so the source id is remapped onto the
+                // duplicate's id here, matching the media tree that
+                // copySessionArtifacts lays out under the new session.
+                partsJson = remapForkedPartsJson(msg.partsJson, sourceSessionId, newSessionId),
+                tokenUsage = msg.tokenUsage,
+                reasoningContent = msg.reasoningContent,
+                // [F-233] appendMessage accepts 7 business fields; this copy
+                // used to pass only 4, silently dropping the usage
+                // attribution and the terminal error sticker. Consequence:
+                // the branch session's usage records fell back to the
+                // session's *current* model (wrong attribution), and
+                // ChatTranscriptRebuild's error sticker vanished in the copy.
+                usageModelId = msg.usageModelId,
+                usageEntryId = msg.usageEntryId,
+                errorInfo = msg.errorInfo,
+            )
+            oldToNewId[msg.id] = newMsg.id
+            oldToNewSort[msg.id] = newMsg.sortOrder
+        }
+    }
+
+    /**
+     * [T-session-duplicate-compact-marker-android] Copy compact markers AFTER all
+     * messages are appended (so the new sort_orders exist). A session with zero
+     * markers makes this a clean no-op — the normal duplicate path is untouched.
+     * Each marker is remapped independently so multi-compact sessions copy all
+     * dividers, in created_at order (listCompactMarkers returns ASC by created_at).
+     */
+    private suspend fun copyCompactMarkers(
+        sourceSessionId: String,
+        newSessionId: String,
+        oldToNewId: HashMap<String, String>,
+        oldToNewSort: HashMap<String, Int>,
+    ) {
+        val markers = chatRepository.dao.listCompactMarkers(sourceSessionId)
+        if (markers.isEmpty()) return
+        // Remap a referenced message id through the copy map. null → null.
+        fun remapId(id: String?): String? = id?.let { oldToNewId[it] }
+        // Resolve a legacy sort_order fallback to the NEW message's
+        // sort_order via the referenced id; keep the original when the id
+        // is null or can't be resolved (legacy markers without ids).
+        fun remapSort(messageId: String?, original: Int): Int =
+            messageId?.let { oldToNewSort[it] } ?: original
+        var copied = 0
+        for (marker in markers) {
+            // All source messages are copied, so every non-null id field
+            // MUST resolve. If one doesn't, the source marker is already
+            // dangling — skip it rather than write a dangling copy.
+            val firstKeptNew = remapId(marker.firstKeptMessageId)
+            val lastCompactedNew = remapId(marker.lastCompactedMessageId)
+            val boundaryNew = remapId(marker.boundaryMessageId)
+            if ((marker.firstKeptMessageId != null && firstKeptNew == null) ||
+                (marker.lastCompactedMessageId != null && lastCompactedNew == null) ||
+                (marker.boundaryMessageId != null && boundaryNew == null)
+            ) {
+                AppLogger.warning(
+                    TAG,
+                    "duplicateSession: skipping compact marker ${marker.id} — a referenced message id is not in the copy map (dangling source marker)",
+                )
+                continue
+            }
+            val copy = marker.copy(
+                id = java.util.UUID.randomUUID().toString(),
+                sessionId = newSessionId,
+                firstKeptSortOrder = remapSort(marker.firstKeptMessageId, marker.firstKeptSortOrder),
+                uiBoundarySortOrder = marker.uiBoundarySortOrder?.let {
+                    remapSort(marker.boundaryMessageId, it)
+                },
+                boundaryMessageId = boundaryNew,
+                firstKeptMessageId = firstKeptNew,
+                lastCompactedMessageId = lastCompactedNew,
+                // summary / compactedCount / createdAt / version verbatim.
+            )
+            chatRepository.dao.insertCompactMarker(copy)
+            copied++
+        }
+        AppLogger.info(TAG, "duplicateSession: copied $copied/${markers.size} compact marker(s) to $newSessionId")
+    }
+
+    /**
+     * [E2-F11] Undo a failed clone: files first ([SessionForkRollback] owns that
+     * half; it needs no Room), then the session row, whose FK cascade takes the
+     * message and marker rows with it. The ORIGINAL failure is what the caller
+     * needs, so it is always rethrown — swallowing it here would turn a clone
+     * error into a silent half-copy, which is the exact bug being fixed. A
+     * cleanup failure is logged instead of replacing it, but the row delete is
+     * attempted regardless, because a leftover row is visible in the drawer.
+     */
+    private suspend fun unwindFailedCopy(newSessionId: String, cause: Throwable) {
+        try {
+            SessionForkRollback.unwind(
+                newSessionId = newSessionId,
+                sessionsRoot = File(filesDir, "minis-sessions"),
+                mediaRoot = File(filesDir, "media"),
+            )
+        } catch (cleanup: Throwable) {
+            // Logged, never thrown: a file-tree failure must not cost us the row
+            // delete below, or the "(Copy)" session stays visible in the drawer.
+            AppLogger.warning(TAG, "duplicateSession: artifact rollback failed: ${cleanup.message}")
+        }
+        runCatching { chatRepository.deleteSession(newSessionId) }
+            .onFailure { AppLogger.warning(TAG, "duplicateSession: cleanup failed: ${it.message}") }
+        throw cause
+    }
+
 
     /**
      * [sweep1014-B10] Copy the source session's on-disk artifacts to the
