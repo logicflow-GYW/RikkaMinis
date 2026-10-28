@@ -117,9 +117,15 @@ class MountGuardScriptTest {
         // cp/ln-only.
         assertTrue(!PRootKernel.MOUNT_GUARD_LAST_ARG_CMDS.contains("mv"))
         val mv = PRootKernel.mountGuardScript("mv")
-        assertTrue(mv.contains("check_prefix \"\$arg\" || exit 1"))
-        assertTrue(!mv.contains("tdir=1"))
-        assertTrue(!mv.contains("dest=\"\""))
+        assertTrue(mv.contains("*) check_prefix \"\$arg\" || exit 1;;"))
+        // [meta1028 D3-F06] …and it now ALSO parses the flag-value form; a mv
+        // whose target arrives as `-tDIR` used to be inspected on its source
+        // only (the joined form starts with `-` and was skipped outright).
+        assertTrue(PRootKernel.MOUNT_GUARD_TARGET_DIR_CMDS.contains("mv"))
+        assertTrue(mv.contains("tdir=1"))
+        // …while the LAST_ARG rule still does not apply: no positional is ever
+        // stored as "the" destination (every one is checked immediately).
+        assertTrue(!mv.contains("dest=\"\$arg\""))
     }
 
     @Test
@@ -163,14 +169,56 @@ class MountGuardScriptTest {
     fun `cp and ln treat -t as the write target`() {
         for (name in listOf("cp", "ln")) {
             val s = PRootKernel.mountGuardScript(name)
-            assertTrue(s.contains("-t) tdir=1; take=1;;"))
-            assertTrue(s.contains("-t?*) tdir=1; tdest=\"\${arg#-t}\";;"))
-            assertTrue(s.contains("-[!-]*t) tdir=1; take=1;;"))
-            assertTrue(s.contains("-[!-]*t?*) tdir=1; tdest=\"\${arg##*[t]}\";;"))
-            assertTrue(s.contains("--target-directory) tdir=1; take=1;;"))
+            // [meta1028 D3-F06] the target is parsed CHARACTER-WISE out of the
+            // short cluster: `-t`, `-tDIR`, `-rtDIR` and `-rt DIR` all land on
+            // the same value, and nothing else in the argument can move it.
+            assertTrue(s.contains("--target-directory) take=1;;"))
             assertTrue(s.contains("--target-directory=*) tdir=1; tdest=\"\${arg#*=}\";;"))
+            assertTrue(s.contains("rest=\"\${arg#-}\""))
+            assertTrue(s.contains("if [ \"\$ch\" = t ]; then"))
+            assertTrue(s.contains("if [ -n \"\$rest\" ]; then tdest=\"\$rest\"; rest=\"\"; else take=1; fi"))
             assertTrue(s.contains("check_prefix \"\$tdest\" || exit 1"))
             assertTrue(s.contains("elif [ -n \"\$dest\" ]; then"))
+            // the greedy strip and its short-circuit are what made the bypass
+            assertTrue(!s.contains("##*[t]"))
+            assertTrue(!s.contains("[ -z \"\$tdest\" ] ||"))
+        }
+    }
+
+    @Test
+    fun `a -t without a directory is refused instead of allowed`() {
+        for (name in listOf("cp", "ln", "mv")) {
+            val s = PRootKernel.mountGuardScript(name)
+            val refuse = s.indexOf("-t/--target-directory given without a directory")
+            val check = s.indexOf("check_prefix \"\$tdest\" || exit 1")
+            assertTrue("$name: the missing-value refusal must exist", refuse > 0)
+            assertTrue("$name: the refusal must gate the prefix check", refuse < check)
+            assertTrue(s.contains("if [ -z \"\$tdest\" ]; then"))
+        }
+    }
+
+    @Test
+    fun `mv parses the joined -t forms and still checks every positional`() {
+        val mv = PRootKernel.mountGuardScript("mv")
+        // the flag-value parse is shared with cp/ln …
+        assertTrue(mv.contains("--target-directory=*) tdir=1; tdest=\"\${arg#*=}\";;"))
+        assertTrue(mv.contains("if [ \"\$ch\" = t ]; then"))
+        // … but a mv SOURCE is destroyed, so positionals stay targets.
+        assertTrue(mv.contains("*) check_prefix \"\$arg\" || exit 1;;"))
+        assertTrue(!mv.contains("*) dest=\"\$arg\";;"))
+    }
+
+    @Test
+    fun `long options are never parsed as a short cluster`() {
+        // `cp --no-target-directory a b`: without the `--*)` arm the cluster
+        // walk would find the `t` inside "target" and treat "-directory" as
+        // the target, skipping the real destination check entirely.
+        for (name in PRootKernel.MOUNT_GUARD_TARGET_DIR_CMDS) {
+            val s = PRootKernel.mountGuardScript(name)
+            val dashDash = s.lines().indexOfFirst { it.trim() == "--*) ;;" }
+            val cluster = s.lines().indexOfFirst { it.trim() == "-?*)" }
+            assertTrue("$name: the --*) arm must exist", dashDash > 0)
+            assertTrue("$name: --*) must be matched before the cluster arm", dashDash < cluster)
         }
     }
 

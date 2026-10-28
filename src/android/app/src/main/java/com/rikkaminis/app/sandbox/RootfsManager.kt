@@ -241,6 +241,30 @@ class RootfsManager private constructor(private val context: Context) {
                 "gen=$installGeneration",
             )
 
+            // [meta1028 D3-F01] The factory tar carries no bash/readline/
+            // ncurses (they live in assets/apk-offline/*.apk) and
+            // [restoreApkWorld] deliberately filters them out
+            // ([excludeOfflinePackages]) on the assumption that the offline
+            // installer re-adds them "on every rebuild". That assumption only
+            // ever held for autoRepair's Stage 2.6 — THIS function, the single
+            // choke point a manual reset() and Stage 3's reset() both go
+            // through, never called it. So every rebuild came back without
+            // /bin/bash (RootfsHealth.healthy == false), autoRepair then
+            // reported "still missing /bin/bash", and the terminal was pinned
+            // to ash until the user found the repair button.
+            //
+            // Ordered BEFORE the snapshot restore so a user package that
+            // depends on bash resolves in the same pass instead of failing
+            // and landing in the retry queue.
+            val offlineOk = installOfflinePackages()
+            if (!offlineOk) {
+                // Non-fatal: the rootfs is usable (ash), and the next boot's
+                // verifyIntegrity → autoRepair retries Stage 2.6. Recorded
+                // because a silently bash-less rebuild is exactly the state
+                // this fix exists to make visible.
+                Log.w(TAG, "[Install] offline package install failed — /bin/bash may be missing")
+            }
+
             // [Refactor-apk-world] A fresh extraction ships only the factory
             // packages. Re-apply the host-side snapshot of user packages
             // (recorded by dumpApkWorld) so a reset / rebuild doesn't wipe
@@ -643,12 +667,50 @@ class RootfsManager private constructor(private val context: Context) {
                 Log.w(TAG, "[ApkWorld] apk db unreadable (${db.length()} bytes, 0 packages) — keeping previous snapshot")
                 return@withContext
             }
-            apkWorldFile.writeText(formatApkWorld(packages))
-            Log.i(TAG, "[ApkWorld] snapshot ${packages.size} packages -> ${apkWorldFile.name}")
+            // [meta1028 D3-F03] The db alone is NOT the truth about "what the
+            // user had installed": a rebuild whose restore failed leaves the
+            // db at factory content while [apkWorldFailedFile] still names
+            // every package that has to come back. Dumping the db verbatim
+            // after that (boot's post-retry dump, or reset()'s pre-wipe dump
+            // on the NEXT reset) overwrote the good snapshot with the ~15
+            // factory packages, and the follow-up restore then "succeeded"
+            // against that factory list and DELETED the retry queue — user
+            // packages gone for good, with every log line saying OK.
+            // Merging the pending list back in keeps the snapshot a superset
+            // of "installed now" ∪ "still owed", so the state is recoverable.
+            val pending = readApkWorldPending()
+            val merged = mergeApkWorldPending(packages, pending)
+            apkWorldFile.writeText(formatApkWorld(merged))
+            if (pending.isEmpty()) {
+                Log.i(TAG, "[ApkWorld] snapshot ${merged.size} packages -> ${apkWorldFile.name}")
+            } else {
+                Log.i(
+                    TAG,
+                    "[ApkWorld] snapshot ${merged.size} packages (${pending.size} still owed from the retry list) " +
+                        "-> ${apkWorldFile.name}",
+                )
+            }
         } catch (t: Exception) {
             Log.w(TAG, "[ApkWorld] dump failed: ${t.message}")
         }
     }
+
+    /**
+     * [meta1028 D3-F03] The retry list as packages. Best-effort: an unreadable
+     * list yields an empty one (the db-derived snapshot is then written
+     * unchanged, i.e. the pre-fix behaviour, rather than aborting the dump).
+     */
+    private fun readApkWorldPending(): List<ApkPackage> =
+        try {
+            if (!apkWorldFailedFile.exists()) {
+                emptyList()
+            } else {
+                parseApkWorld(apkWorldFailedFile.readText())
+            }
+        } catch (t: Exception) {
+            Log.w(TAG, "[ApkWorld] failed to read retry list for the snapshot merge: ${t.message}")
+            emptyList()
+        }
 
     /**
      * Re-apply the snapshot after a fresh extraction: `apk add name=version`
@@ -908,6 +970,32 @@ class RootfsManager private constructor(private val context: Context) {
         extractTar(input, targetDir, onlyPrefixes = null)
     }
 
+    /**
+     * [meta1028 D3-F02] Invoked after a wipe+reinstall has LANDED (the tail of
+     * [reset]: `deleteRecursively` + [installIfNeeded] both done).
+     *
+     * Wired by PRootKernel's private boot critical section. Two things in the process
+     * outlive the rootfs directory and have to be told:
+     *
+     *  1. `PRootKernel.bootGate` — it has no reset edge, so after a mid-session
+     *     reset `isBooted` stayed true and NOTHING ever re-ran
+     *     `installHandlerStubs` / `applyDefaultMountOverlay` /
+     *     `applyMountedFoldersSnapshot`. Every offload stub
+     *     (`minis-model-use`, `minis-fastio`, `android-*` …) was gone, so the
+     *     next tool call died at PATH lookup with `127: not found`, external
+     *     mounts lost their placeholders and their read-only write guards,
+     *     until the app was restarted.
+     *  2. live `PersistentShell`s — their cwd inode is unlinked by the wipe and
+     *     they are running against a tree that no longer exists.
+     *
+     * A nullable suspend hook, not a direct call: [RootfsManager] is the
+     * sandbox's bottom layer (no PRootKernel / ExecutionCoordinator
+     * dependency, which would be a package cycle in the other direction too),
+     * and this is the only event it needs to publish. Null (unset) is the
+     * legitimate pre-boot state — nothing to invalidate yet.
+     */
+    var afterRootfsReinstalled: (suspend () -> Unit)? = null
+
     suspend fun reset(): Unit = withContext(Dispatchers.IO) {
         // [Refactor-apk-world] Snapshot user packages BEFORE the wipe — the
         // boot path also dumps, but a manual reset can happen mid-session
@@ -919,6 +1007,12 @@ class RootfsManager private constructor(private val context: Context) {
         RootfsEventLog.logEvent(eventLogsDir, RootfsEventLog.Events.MANUAL_RESET)
         rootfsDir.deleteRecursively()
         installIfNeeded()
+        // [meta1028 D3-F02] The tree on disk is new; everything the boot
+        // critical section materialized inside it is gone. Publish BEFORE
+        // returning so a caller that immediately runs a command can't observe
+        // "installed" with a booted-but-stubless kernel.
+        runCatching { afterRootfsReinstalled?.invoke() }
+            .onFailure { Log.w(TAG, "[Reset] post-reinstall hook failed: ${it.message}") }
     }
 
     /**
@@ -1628,10 +1722,42 @@ internal fun parseApkWorld(text: String): List<ApkPackage> {
 
 /**
  * Drop the offline trio (bash/readline/ncurses) from a snapshot before
- * restoring: [RootfsManager.installOfflinePackages] (autoRepair Stage 2.6)
- * re-installs them from bundled APK files on every rebuild — no network,
- * always the same version — so the snapshot restore must not touch them
- * (no duplicate work, no surprise version downgrades).
+ * restoring: [RootfsManager.installOfflinePackages] (called by
+ * [RootfsManager.installIfNeeded] on every rebuild — [meta1028 D3-F01] — and
+ * by autoRepair Stage 2.6) re-installs them from bundled APK files, no
+ * network, always the same version — so the snapshot restore must not touch
+ * them (no duplicate work, no surprise version downgrades).
  */
 internal fun excludeOfflinePackages(packages: List<ApkPackage>): List<ApkPackage> =
     packages.filterNot { it.name in OFFLINE_PACKAGE_NAMES }
+
+/**
+ * [meta1028 D3-F03] The snapshot to persist = what the apk db says is
+ * installed now, PLUS every package still owed from the retry list.
+ *
+ * WHY the union: after a rebuild whose restore failed, the db holds the
+ * factory packages while [RootfsManager.apkWorldFailedFile] holds the user's
+ * packages. Writing the db alone downgrades "what the user had" to "what the
+ * factory shipped", and the *next* restore then succeeds trivially against
+ * that list and deletes the retry queue — the loss becomes permanent and the
+ * logs read as success.
+ *
+ * Precedence + order: the db's entry wins for a name (its version is what is
+ * actually installed), and the result keeps the db's order first, then the
+ * still-owed names in retry-list order. Pure (no IO) so the JVM test can pin
+ * the matrix.
+ */
+internal fun mergeApkWorldPending(
+    installed: List<ApkPackage>,
+    pending: List<ApkPackage>,
+): List<ApkPackage> {
+    if (pending.isEmpty()) return installed
+    val seen = installed.mapTo(HashSet()) { it.name }
+    val merged = ArrayList<ApkPackage>(installed.size + pending.size)
+    merged.addAll(installed)
+    for (p in pending) {
+        if (p.name.isEmpty() || !seen.add(p.name)) continue
+        merged.add(p)
+    }
+    return merged
+}

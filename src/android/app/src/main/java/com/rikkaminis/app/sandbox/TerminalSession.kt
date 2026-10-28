@@ -120,6 +120,18 @@ class TerminalSession(private val context: Context) {
      * executable with the same args the legacy [buildInteractiveCommand] built.
      */
     fun start(sessionId: String? = null, initialCols: Int = DEFAULT_COLS, initialRows: Int = DEFAULT_ROWS) {
+        // [meta1028 D3-F02] A RUNNING PTY whose rootfs was deleted and
+        // re-extracted underneath it (`RootfsManager.reset()` → hook →
+        // `bootGate.invalidate()`) has to be torn down, not kept: its whole
+        // process tree is bound to the tree that no longer exists, and the
+        // early return just below would leave it there until the app restarts.
+        // `!isBooted` is the only signal for "the tree changed under you" — it
+        // is true for every PTY that started normally, so this cannot fire on a
+        // healthy session.
+        if (_state.value == State.RUNNING && !PRootKernel.isBooted) {
+            Log.i(TAG, "rootfs rebuilt under a running PTY — restarting the terminal")
+            stop()
+        }
         if (_state.value == State.RUNNING) return
         _state.value = State.BOOTING
         cols = initialCols
