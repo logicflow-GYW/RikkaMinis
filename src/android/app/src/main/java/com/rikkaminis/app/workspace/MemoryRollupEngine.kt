@@ -245,16 +245,27 @@ object MemoryRollupEngine {
 
     /**
      * The entries a rollup would actually render: everything that is not
-     * [RollupClass.TRANSIENT].
+     * [RollupClass.TRANSIENT], decided on the DEDUPED entry list.
      *
      * The single place that answers "is there anything worth distilling", used
      * by BOTH the candidacy predicate ([isRollupCandidate], i.e. "does this log
      * qualify at all") and the document builder ([buildRollupText], i.e. "what
      * goes into the section") — so the "distillable"口径 cannot fork into a
      * second, drifting copy. [dv28-A3] (deep-audit-1048 A-03)
+     *
+     * [FIX-R3-E F-11] Dedup moved INSIDE this function. The executor's picker
+     * and the candidacy predicate classified the RAW entries while
+     * [buildRollupText] classified the merged ones — and merging can flip the
+     * verdict: two entries with the same title, the first a converged lesson
+     * and the second carrying a weak unfinished signal ("待验证" / "进行中"),
+     * merge into one body that [classify] reads as TRANSIENT. The result was a
+     * log the prompt named as the largest pending one, that `memory_rollup`
+     * picked every time, and whose section always rendered empty
+     * (`NOTHING_TO_DISTILL`) — starving every smaller log behind it. One
+     * judging list, one verdict.
      */
     fun distillableEntries(entries: List<Entry>): List<Entry> =
-        entries.filter { classify(it) != RollupClass.TRANSIENT }
+        dedupeEntries(entries).filter { classify(it) != RollupClass.TRANSIENT }
 
     // ── Dedup ────────────────────────────────────────────────────────────
 
@@ -325,7 +336,10 @@ object MemoryRollupEngine {
         entries: List<Entry>,
         generatedAt: String = "auto",
     ): String {
-        val distilled = distillableEntries(dedupeEntries(entries))
+        // [FIX-R3-E F-11] `distillableEntries` dedupes internally now — passing
+        // the raw list is the same question the candidacy predicate and the
+        // executor's picker ask, so all three answer identically.
+        val distilled = distillableEntries(entries)
 
         if (distilled.isEmpty()) return ""
 
