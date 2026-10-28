@@ -52,6 +52,12 @@ class MCPRepository(private val context: Context) {
     companion object {
         private const val TAG = "MCPRepository"
         private const val DB_NAME = "mcp.db"
+        /**
+         * On-disk config file name, single-sourced because TWO processes write it
+         * (this repository and the in-guest `minis-mcp-cli`); see [ServersJsonIo]
+         * for the staging/publish contract they share.
+         */
+        private const val SERVERS_FILE_NAME = "servers.json"
         private const val DB_VERSION = 1
         private const val MAX_MCPS_IN_PROMPT = 20
         /** [dv22-B4] Ids per batched `IN (…)` SELECT in
@@ -170,7 +176,7 @@ class MCPRepository(private val context: Context) {
         get() = File(context.filesDir, "minis-global/mcp-servers")
 
     private val serversFile: File
-        get() = File(mcpDir, "servers.json")
+        get() = File(mcpDir, SERVERS_FILE_NAME)
 
     init {
         load()
@@ -279,19 +285,25 @@ class MCPRepository(private val context: Context) {
         }
         val root = JSONObject().put("mcpServers", mcpServers)
         try {
-            // [F-227] Write to a sibling temp file and rename over the target so
-            // a process death / storage-full mid-write can never leave a
-            // truncated servers.json behind — a truncated file used to parse as
-            // "zero servers" and then got persisted as the truth.
-            val tmp = File(mcpDir, "servers.json.tmp")
-            tmp.writeText(root.toString(2))
-            if (!tmp.renameTo(serversFile)) {
-                // Some filesystems refuse rename onto an existing path.
-                serversFile.writeText(root.toString(2))
-                tmp.delete()
+            // [F-227] Publish through a staging file so a process death /
+            // storage-full mid-write can never leave a truncated servers.json
+            // behind — a truncated file used to parse as "zero servers" and then
+            // got persisted as the truth.
+            //
+            // [meta-audit-1028 E2 / B07 F-14] The staging name is NOT a constant
+            // any more. `minis-mcp-cli` inside the guest writes this same file
+            // (utils/config.py::save_config) and used the very same
+            // `servers.json.tmp`, so an agent running `minis-mcp-cli add …`
+            // while the user saved the form had two writers truncating one
+            // staging file: one rename could publish the other's bytes, and the
+            // loser fell back to rewriting the live file non-atomically. Both
+            // sides now stage under a unique name and publish with one atomic
+            // rename; see [ServersJsonIo].
+            if (!ServersJsonIo.writeAtomic(mcpDir, SERVERS_FILE_NAME, root.toString(2))) {
+                Log.e(TAG, "Failed to write $SERVERS_FILE_NAME: no rename path succeeded")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to write servers.json: ${e.message}")
+            Log.e(TAG, "Failed to write $SERVERS_FILE_NAME: ${e.message}")
         }
     }
 
