@@ -258,12 +258,47 @@ class SelectionController {
      */
     private val shards = mutableStateMapOf<TextShardId, TextShard>()
 
+    /**
+     * [F-02 meta-audit-1028] Where a shard sat the last time it was laid out,
+     * captured when LazyColumn recycles it (unregister). Ordering a selection
+     * endpoint that scrolled out of the viewport needs SOME position for it —
+     * without this map "endpoint not registered" read as "selection doesn't
+     * exist", and the highlight + handles + toolbar all vanished mid-drag.
+     * Cleared with the selection, so it never outlives the thing it serves.
+     */
+    private val lastKnownPosition = HashMap<TextShardId, ShardOrderPosition>()
+
     fun register(shard: TextShard) {
         shards[shard.id] = shard
     }
 
     fun unregister(id: TextShardId) {
+        val shard = shards[id]
+        if (shard != null) {
+            // Capture before dropping the entry: once the node detaches
+            // positionInWindow() reports Offset.Zero, which would read as "top
+            // of the screen" and invert the ordering, so a zero is skipped in
+            // favour of the previous value.
+            val p = shard.positionInWindow()
+            if (p.x != 0f || p.y != 0f) {
+                lastKnownPosition[id] = ShardOrderPosition(y = p.y, x = p.x)
+            }
+        }
         shards.remove(id)
+    }
+
+    /**
+     * Reading-order position of [id]: its live window position while composed,
+     * otherwise the last one observed before it was recycled. Null when this
+     * controller has never seen the shard laid out.
+     */
+    internal fun windowPositionOf(id: TextShardId): ShardOrderPosition? {
+        val live = shards[id]
+        if (live != null) {
+            val p = live.positionInWindow()
+            return ShardOrderPosition(y = p.y, x = p.x)
+        }
+        return lastKnownPosition[id]
     }
 
     /** Read-only snapshot of currently-composed shards. */
@@ -453,6 +488,9 @@ class SelectionController {
     fun clearSelection() {
         selection.value = null
         messageMarkdownCache.clear()
+        // Selection-scoped ordering evidence; a fresh selection starts from
+        // live shards, so nothing is lost and the map can't grow unbounded.
+        lastKnownPosition.clear()
     }
 
     /**
@@ -778,8 +816,15 @@ class SelectionController {
     /**
      * Returns (firstEndpoint, lastEndpoint) ordered by *visual* position so
      * the caller can iterate left-to-right / top-to-bottom regardless of
-     * which handle the user grabbed. Requires both endpoints' shards to be
-     * registered (so we can compare window-y).
+     * which handle the user grabbed.
+     *
+     * [F-02 meta-audit-1028] Document order (the shardId's block+sub index)
+     * decides first so the answer survives an endpoint scrolling out of the
+     * viewport; window position is the fallback. The fallback no longer bails
+     * out when a shard is unregistered — [windowPositionOf] answers from the
+     * last position observed before the recycle, so a long drag past the
+     * viewport edge keeps both endpoints ordered instead of collapsing the
+     * selection.
      */
     fun orderedEndpoints(sel: TextSelection): Pair<TextPosition, TextPosition>? {
         val a = sel.start
@@ -787,19 +832,14 @@ class SelectionController {
         if (a.shard == b.shard) {
             return if (a.charOffset <= b.charOffset) a to b else b to a
         }
-        // Prefer stable document-order index when both endpoints have one,
-        // because that survives a shard being off-screen / unregistered.
-        // Fall back to y-comparison if we can't get an index for either.
-        val ka = shardOrderKey(a.shard)
-        val kb = shardOrderKey(b.shard)
-        if (ka != null && kb != null && a.shard.messageId == b.shard.messageId) {
-            return if (ka <= kb) a to b else b to a
-        }
-        val sA = shards[a.shard] ?: return null
-        val sB = shards[b.shard] ?: return null
-        val yA = sA.positionInWindow().y
-        val yB = sB.positionInWindow().y
-        return if (yA <= yB) a to b else b to a
+        val sameMessage = a.shard.messageId == b.shard.messageId
+        val aFirst = endpointComesFirst(
+            orderA = if (sameMessage) shardOrderKey(a.shard.shardId) else null,
+            orderB = if (sameMessage) shardOrderKey(b.shard.shardId) else null,
+            posA = windowPositionOf(a.shard),
+            posB = windowPositionOf(b.shard),
+        ) ?: return null
+        return if (aFirst) a to b else b to a
     }
 
     /**
@@ -928,7 +968,15 @@ class SelectionController {
         val tailAnchor = anchorFor(tailSel, fromStart = false)
         if (headAnchor.isEmpty() || tailAnchor.isEmpty()) return null
 
-        val startIdx = md.indexOf(headAnchor)
+        // [F-09 meta-audit-1028] Search for the head anchor from the markdown
+        // offset the shards BEFORE the first endpoint must occupy instead of
+        // from 0. A global indexOf() takes the FIRST occurrence in the whole
+        // message, so when the selected text also appears in the prose above
+        // (a table header cell "Status" that the intro line already used the
+        // word in) the slice began at the message's opening paragraph and
+        // "Copy" produced the entire preface.
+        val searchFrom = rawSearchFloor(first, documentRegistry).coerceIn(0, md.length)
+        val startIdx = md.indexOf(headAnchor, searchFrom)
         if (startIdx < 0) return null
         val tailIdx = md.indexOf(tailAnchor, startIdx + headAnchor.length)
         if (tailIdx < 0) return null
@@ -937,31 +985,67 @@ class SelectionController {
 
         val slice = md.substring(startIdx, endIdx)
         // Only prefer the markdown slice when the selected span actually
-        // crosses a NON-SHARD block — a fenced code block (``` / ~~~), a table
-        // (pipe rows), or display math ($$). Those render via their own Text
-        // composables (no MinisTextKit shard), so the per-shard walk drops them
-        // and the markdown slice is the only way to recover them. For a plain
-        // run of paragraphs / headings / list items (all shards), the walk is
-        // already exact and formatting-free, so prefer it — returning the
-        // markdown slice there would re-introduce `#`, `**`, etc. the user
-        // didn't select as rendered text.
+        // crosses a NON-SHARD block — a fenced code block (``` / ~~~) or
+        // display math ($$ / \[...\]). Those render via their own composables
+        // (no MinisTextKit shard), so the per-shard walk drops them and the
+        // markdown slice is the only way to recover them. For a plain run of
+        // paragraphs / headings / list items (all shards), the walk is already
+        // exact and formatting-free, so prefer it — returning the markdown
+        // slice there would re-introduce `#`, `**`, etc. the user didn't
+        // select as rendered text.
         return if (sliceCrossesNonShardBlock(slice)) slice else null
+    }
+
+    /**
+     * [F-09 meta-audit-1028] Lower bound, in raw-markdown char space, for where
+     * the selection can start: the sum of the plain texts of every shard that
+     * precedes [first] in document order (same message).
+     *
+     * Each preceding shard's markdown span is at least as long as the text it
+     * renders ("## Title" → "Title", "| a |" → "a", "\*\*bold\*\*" → "bold"),
+     * so the sum never overshoots the true head position — it can only skip
+     * occurrences that genuinely sit before the selection, never the real
+     * anchor. When the ordering keys are unparseable the floor degrades to 0,
+     * i.e. the old behaviour.
+     */
+    private fun rawSearchFloor(
+        first: TextPosition,
+        documentRegistry: Map<TextShardId, String>,
+    ): Int {
+        val firstKey = shardOrderKey(first.shard.shardId) ?: return 0
+        val candidates = LinkedHashSet<TextShardId>()
+        candidates.addAll(documentRegistry.keys)
+        candidates.addAll(shards.keys)
+        var floor = 0
+        for (id in candidates) {
+            if (id == first.shard || id.messageId != first.shard.messageId) continue
+            val key = shardOrderKey(id.shardId) ?: continue
+            val cmp = compareShardOrder(key, firstKey) ?: continue
+            if (cmp >= 0) continue
+            val txt = shards[id]?.plainText ?: documentRegistry[id] ?: continue
+            floor += txt.length
+        }
+        return floor
     }
 
     /**
      * [T-android-copy-selection-not-whole-message] Heuristic: does this raw-
      * markdown slice contain a block that doesn't register as a MinisTextKit
-     * text shard (fenced code, table, or display math)? Used to decide whether
-     * the markdown slice carries content the per-shard walk would have dropped.
+     * text shard (fenced code or display math)? Used to decide whether the
+     * markdown slice carries content the per-shard walk would have dropped.
+     *
+     * [F-09 meta-audit-1028] Tables are deliberately NOT in this list any more.
+     * `RenderTable` registers one shard per cell, so the per-shard walk already
+     * carries the cell text; the old `|---|` delimiter test therefore only ever
+     * fired on a table-spanning selection, where it threw the exact walk away
+     * and pasted raw markdown full of pipes instead. Display math, on the other
+     * hand, renders as an image (`KatexBlockView` — no shard at all), which the
+     * old check missed because it only looked for `$$`.
      */
     private fun sliceCrossesNonShardBlock(slice: String): Boolean {
         if (slice.contains("```") || slice.contains("~~~")) return true
         if (slice.contains("$$")) return true
-        // A markdown table needs a header row plus a delimiter row of dashes
-        // and pipes (e.g. `|---|---|`). Look for that delimiter shape so a
-        // stray inline `|` in prose doesn't trigger a false positive.
-        val tableDelimiter = Regex("""(?m)^\s*\|?\s*:?-{3,}.*\|""")
-        return tableDelimiter.containsMatchIn(slice)
+        return slice.contains("\\[")
     }
 
     /**
@@ -986,10 +1070,21 @@ class SelectionController {
         return txt.substring(minOf(a, b), maxOf(a, b))
     }
 
-    /** Currently-composed shards in visual top-to-bottom order. */
+    /**
+     * Currently-composed shards in reading order (top-to-bottom, then
+     * left-to-right).
+     *
+     * [F-02 meta-audit-1028] The x tie-break is load-bearing: a table row's
+     * cells are laid out on ONE line, so sorting by y alone left their order
+     * up to the registry's iteration order and a multi-cell selection could
+     * copy the row's text out of order.
+     */
     private fun registeredShardsInOrder(): List<TextShardId> =
         shards.values
-            .sortedBy { it.positionInWindow().y }
+            .sortedWith(
+                compareBy<TextShard> { it.positionInWindow().y }
+                    .thenBy { it.positionInWindow().x },
+            )
             .map { it.id }
 }
 
@@ -1120,24 +1215,156 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
  * range).
  */
 /**
- * Best-effort document-order index for a shard, extracted from the
- * trailing integer in its shardId string. Returns null if the shardId
- * doesn't carry a parseable index. Use case: ordering shards even when
- * one of them isn't currently registered with the SelectionController
- * (e.g. it scrolled off-screen and got disposed by LazyColumn).
+ * [F-02 meta-audit-1028] Document order for one shard: (block ordinal, MdText
+ * slot index). Use case: ordering two endpoints even when one of them is not
+ * registered with the controller (it scrolled out of the viewport and
+ * LazyColumn recycled it), where a position comparison has nothing to read.
  *
- * Convention from ChatScreen.kt: shard ids look like
- *   "mdblock:<parentBlockId>:<blockIndex>"   ← splitMarkdownIntoBlockTexts
- *   "text:<blockId>"                          ← single AssistantText block
- *   "legacy"                                  ← whole-message legacy path
- * The mdblock case is the only one that needs ordering today; the others
- * are single-shard so the comparison never has to disambiguate.
+ * The previous key was the trailing integer of the WHOLE id
+ * (`substring(lastIndexOf(':') + 1).toIntOrNull()`), which is null for every
+ * shard the app actually produces:
+ *   - [MdText] appends its slot index with [SHARD_SUB_INDEX_SEPARATOR]
+ *     ("mdblock:12:3#2"), so the trailing segment is "3#2" → not an int;
+ *   - table cells are scoped to "tbl:<i>#<j>" and legacy text to
+ *     "legacy-text#<j>", which carry no block segment at all.
+ * So the key was null for 100% of production shards and both
+ * [SelectionController.orderedEndpoints] and [SelectionController.isShardBetween]
+ * fell through to a bare window-y comparison — which cannot order an endpoint
+ * that scrolled away (unregistered → null → the selection vanished) and cannot
+ * tell the columns of a table row apart (one y, so every cell looked
+ * "between").
+ *
+ * Two keys are comparable only inside ONE numbering space ([space] = the id
+ * minus its block ordinal): "mdblock:A:3" and "mdblock:B:3" are two different
+ * blocks (each streaming text block numbers its own fragments from 0), and a
+ * table cell's "tbl:<i>" counts tables inside one fragment, so two tables in
+ * different fragments both spell "tbl:0". Ordering across spaces is not
+ * merely unknown, it is WRONG, so [compareShardOrder] refuses.
+ *
+ * Table-scoped ids get no key at all for the same reason: their cells order by
+ * geometry (window y, then x), which is exactly what a row needs.
  */
-private fun shardOrderKey(id: TextShardId): Int? {
-    val s = id.shardId
-    val lastColon = s.lastIndexOf(':')
-    if (lastColon < 0) return null
-    return s.substring(lastColon + 1).toIntOrNull()
+internal data class ShardOrderKey(
+    /** Numbering space: the id without its trailing block ordinal. */
+    val space: String,
+    val block: Int?,
+    /** MdText slot index from the "base#<sub>" suffix; 0 when absent. */
+    val sub: Int,
+)
+
+/**
+ * Parse [shardId] into a [ShardOrderKey], or null when it carries no document
+ * position at all (no "#<sub>" suffix AND no numeric block segment — e.g. the
+ * bare "legacy" / "text:<uuid>" ids, which are single-shard by construction).
+ *
+ * Shapes (pinned by `MinisSelectionTableTest`):
+ *   "mdblock:12:3#2"  → space="mdblock:12", block=3,    sub=2
+ *   "mdblock:12:0#0"  → space="mdblock:12", block=0,    sub=0
+ *   "legacy-text#4"   → space="legacy-text", block=null, sub=4
+ *   "3#0"             → space="3",           block=null, sub=0
+ *   "tbl:0#1"         → null  (table cells order by geometry)
+ *   "text:b7f3c1"     → null  (neither a block ordinal nor a sub index)
+ *   "3" / "legacy"    → null
+ */
+internal fun shardOrderKey(shardId: String): ShardOrderKey? {
+    val hash = shardId.indexOf(SHARD_SUB_INDEX_SEPARATOR)
+    val core = if (hash >= 0) shardId.substring(0, hash) else shardId
+    if (core.startsWith(TABLE_SHARD_SCOPE_PREFIX)) return null
+    val sub = if (hash >= 0) {
+        shardId.substring(hash + SHARD_SUB_INDEX_SEPARATOR.length).toIntOrNull()
+    } else {
+        null
+    }
+    val lastColon = core.lastIndexOf(':')
+    val block = if (lastColon < 0) null else core.substring(lastColon + 1).toIntOrNull()
+    if (block == null && sub == null) return null
+    val space = if (block != null && lastColon >= 0) core.substring(0, lastColon) else core
+    return ShardOrderKey(space = space, block = block, sub = sub ?: 0)
+}
+
+/**
+ * Compare two document-order keys, or null when they live in different
+ * numbering spaces (a table cell vs a paragraph, say) and therefore have no
+ * document order between them. Callers must fall back to geometry in that
+ * case rather than inventing an order.
+ */
+internal fun compareShardOrder(a: ShardOrderKey, b: ShardOrderKey): Int? {
+    if (a.space != b.space) return null
+    val byBlock = if (a.block != null && b.block != null) a.block.compareTo(b.block) else 0
+    return if (byBlock != 0) byBlock else a.sub.compareTo(b.sub)
+}
+
+/**
+ * A shard's place on screen in READING order: window-y first, then window-x.
+ * The x tie-break is what keeps a table row honest — every cell of a row
+ * shares one y, so a y-only range test calls all of them "between", which is
+ * how unselected columns of a touched row ended up highlighted and copied.
+ */
+internal data class ShardOrderPosition(val y: Float, val x: Float) : Comparable<ShardOrderPosition> {
+    override fun compareTo(other: ShardOrderPosition): Int =
+        if (y != other.y) y.compareTo(other.y) else x.compareTo(other.x)
+}
+
+/** Does [middle] sit inside the [a]..[b] span in reading order? */
+internal fun isPositionBetween(
+    a: ShardOrderPosition,
+    b: ShardOrderPosition,
+    middle: ShardOrderPosition,
+): Boolean = middle >= minOf(a, b) && middle <= maxOf(a, b)
+
+/**
+ * Does [a] come first? Document order wins when both endpoints carry one —
+ * that is what survives an endpoint being recycled off-screen; geometry is the
+ * fallback. Null = undecidable (callers keep their own choice / drop to the
+ * per-shard walk).
+ */
+internal fun endpointComesFirst(
+    orderA: ShardOrderKey?,
+    orderB: ShardOrderKey?,
+    posA: ShardOrderPosition?,
+    posB: ShardOrderPosition?,
+): Boolean? {
+    if (orderA != null && orderB != null) {
+        val cmp = compareShardOrder(orderA, orderB)
+        if (cmp != null && cmp != 0) return cmp < 0
+    }
+    if (posA != null && posB != null) {
+        val cmp = posA.compareTo(posB)
+        if (cmp != 0) return cmp < 0
+    }
+    return null
+}
+
+/**
+ * Core of [SelectionController.isShardBetween], split out so the decision is
+ * unit-testable without a Compose layout: document order first, geometry
+ * second.
+ *
+ * The inversion that matters vs the pre-fix version: a MISSING endpoint
+ * position is not a "false" by itself — the caller passes the endpoint's last
+ * known on-screen position, so a selection whose endpoint scrolled away keeps
+ * painting (an endpoint being recycled does not mean the selection is gone).
+ */
+internal fun isBetweenEndpoints(
+    orderA: ShardOrderKey?,
+    orderB: ShardOrderKey?,
+    orderMiddle: ShardOrderKey?,
+    posA: ShardOrderPosition?,
+    posB: ShardOrderPosition?,
+    posMiddle: ShardOrderPosition?,
+): Boolean {
+    if (orderA != null && orderB != null && orderMiddle != null) {
+        val cmpAB = compareShardOrder(orderA, orderB)
+        val cmpAM = compareShardOrder(orderA, orderMiddle)
+        val cmpBM = compareShardOrder(orderB, orderMiddle)
+        // cmpAB == 0 means two distinct endpoints landed on the same slot of
+        // the same space — the key carries no ordering, so fall to geometry.
+        if (cmpAB != null && cmpAB != 0 && cmpAM != null && cmpBM != null) {
+            return if (cmpAB < 0) cmpAM <= 0 && cmpBM >= 0 else cmpAM >= 0 && cmpBM <= 0
+        }
+    }
+    if (posA == null || posB == null || posMiddle == null) return false
+    return isPositionBetween(posA, posB, posMiddle)
 }
 
 internal fun SelectionController.isShardBetween(
@@ -1145,36 +1372,18 @@ internal fun SelectionController.isShardBetween(
     b: TextShardId,
     middle: TextShardId,
 ): Boolean {
-    // First try the document-order index baked into the shardId string —
-    // mdblock:<parent>:<index> / text:<blockId>. The numeric index is a
-    // stable document position, immune to a/b having scrolled off-screen
-    // (which would leave their TextShard entries unregistered and the
-    // y-comparison below unable to position them). The "messageId" axis
-    // is compared first so cross-message selections still slot correctly:
-    // a shard from message M1 only lies "between" two endpoints if they
-    // straddle M1 in the registered-shards' visual order.
-    val orderA = shardOrderKey(a)
-    val orderB = shardOrderKey(b)
-    val orderM = shardOrderKey(middle)
-    if (orderA != null && orderB != null && orderM != null &&
-        a.messageId == b.messageId && middle.messageId == a.messageId
-    ) {
-        val lo = minOf(orderA, orderB)
-        val hi = maxOf(orderA, orderB)
-        return orderM in lo..hi
-    }
-    // Fall back to y-based comparison when index parsing fails or the
-    // selection spans multiple messages.
-    val shards = currentShards()
-    val sa = shards[a] ?: return false
-    val sb = shards[b] ?: return false
-    val sm = shards[middle] ?: return false
-    val ya = sa.positionInWindow().y
-    val yb = sb.positionInWindow().y
-    val ym = sm.positionInWindow().y
-    val lo = minOf(ya, yb)
-    val hi = maxOf(ya, yb)
-    return ym in lo..hi
+    // The document-order key is only meaningful inside ONE message: "block 3"
+    // of message A says nothing about block order in message B. Cross-message
+    // selections therefore fall through to geometry, exactly as before.
+    val sameMessage = a.messageId == b.messageId && middle.messageId == a.messageId
+    return isBetweenEndpoints(
+        orderA = if (sameMessage) shardOrderKey(a.shardId) else null,
+        orderB = if (sameMessage) shardOrderKey(b.shardId) else null,
+        orderMiddle = if (sameMessage) shardOrderKey(middle.shardId) else null,
+        posA = windowPositionOf(a),
+        posB = windowPositionOf(b),
+        posMiddle = windowPositionOf(middle),
+    )
 }
 
 /**
