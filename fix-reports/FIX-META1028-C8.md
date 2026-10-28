@@ -132,6 +132,7 @@ VERBATIM ChatContextWindow.kt    internal fun messageCharContribution( / partCha
 | R3 | F-11 的 `observeMessageCountsPerSession().first()` 是**一次性**快照，sheet 打开期间新建的消息不计 | sheet 常开 + 后台有消息写入（几乎不可达：sheet 是模态、且不跨重建） | 改 `collectAsState` 订阅 | 收益≈0，代价是新增长驻订阅；模态 sheet 生命周期短 |
 | R4 | F-12 只按 `attachmentNames` 检索，未覆盖图片的 `imageUris` 文件名 | 用户按图片文件名搜历史输入 | 在 `ChatMessage` 侧加一个统一 `attachmentDisplayNames`（图 + 文件），两处共用 | 需要改 `ChatMessage`/序列化（数据层），不在本支允许触碰的文件面内 |
 | R5 | F-07 的 `bottomReserve` 与 bar 是否渲染仍是两个独立谓词（`hasFloatingTools` vs 内部早退） | 未来任何让 bar 早退的改动 | 让 bar 把"我渲染了多少高度"回传给 `ChatScreen` | 本条修复后两者在所有已知输入上一致；为一个已消除的缺口加回传通道 = 装置超前于问题 |
+| R6 | **形状钉的工作目录依赖**（本支实测踩到）：任何新增的"读源码做形状断言"测试，若假定 cwd = 仓库根，Gradle 下必红 | 下次有人新增形状钉时 | 默认照抄既有 30+ 个 `readRepoFile` 向上遍历先例；或在本仓加一个共享测试助手，消除这份复制 | 已在 `5945d8fa` 修掉本支的四处；剩下的是**仓级重复**，属"登记不修"（复制粘贴的先例在仓里已经存在且被广泛使用，抽公共助手会碰大量文件，超出本支白名单） |
 
 ---
 
@@ -148,4 +149,22 @@ VERBATIM ChatContextWindow.kt    internal fun messageCharContribution( / partCha
 ## 9. 收口
 
 - 本地：43/43 绿 + 5 个负控臂（M0–M4）逐臂只红应红项；语法闸通过。
-- 云端：见下方 CI 附录（push 后补填 run id / head_sha / 日志读数）。
+- 云端：run `40682587113` success，head_sha `5945d8fa28f9410a6e12213cdad6c016c08dc0c3` 与本地 HEAD 逐字符一致。
+
+### 9.1 CI 附录
+
+| run | head_sha | 结论 | 读数 |
+|---|---|---|---|
+| `40679992792` | `d84361ca…` | **failure** | 27 步中唯一非 success = `Run unit tests (full suite)`；`7370 tests completed, 6 failed`，6 条全在本次新增的 4 个测试类里，**同一个根因**：形状断言用相对路径 `src/android/app/src/main/…` 读源码，而 Gradle 跑 `:app:testReleaseUnitTest` 时 `user.dir` = `src/android/app` ⇒ `FileNotFoundException`（6 条 `FileNotFoundException`，非断言失败） |
+| `40682587113` | `5945d8fa…` | **success** | head_sha 与本地 HEAD 逐字符一致；`git diff --name-only 5945d8fa HEAD -- . ':(exclude)fix-reports'` = **空** |
+
+**第一次红的教训（值得留给所有形状钉）**：本仓的形状钉**不能**假定工作目录 = 仓库根。既有 30+ 个同类测试（`ScreenshotCaptureShapeTest` / `ConfigBackupEnvvarsAndOverlayTest` / `ChatBottomFollowTest` …）都自带一个 `readRepoFile(relative)`：**从 `user.dir` 向上遍历**，直到相对路径存在为止——同一份代码因此在 module dir、repo root、repo 任意子目录三种 cwd 下都成立。我第一版照抄了"仓库根相对路径"这个隐含前提，探针从仓库根跑永远是绿的，CI 立刻把它打红（6 条红全在形状钉，价值断言一条没红 ⇒ 本地绿 ≠ CI 绿，这是本支唯一一次真机外的"绿是假的"）。
+
+修法（commit `5945d8fa`）：四个测试各加一个 `readRepoFile`（逐字照既有先例），形状断言全部改走它。修后本地**两种 cwd 各跑一遍**（repo root 与 `src/android/app`）都 43/43 绿，且基线臂 M0 在修复前源码树上仍红 5 条（形状钉依然有牙）。
+
+**这算不算"CI 才暴露的缺陷"？** 算装置缺陷，不是生产缺陷：四条生产修复在两次 run 之间**一行未改**（`git diff d84361ca 5945d8fa -- src/android/app/src/main` = 空），红→绿全部由测试侧路径解析造成。这条也是本支的一条新登记项（见 R6）。
+
+### 9.2 收口核对
+
+- 三项核查：①`git diff --name-only bfb5b0e6 HEAD --stat` = 4 生产文件 + 4 测试文件 + 1 报告，`scripts/scan/**` / `scan.sh` / `test_scan.py` **零触碰**；②CI head_sha 与本地 HEAD 逐字符一致（`5945d8fa28f9410a6e12213cdad6c016c08dc0c3`）；③独立于 CI 的证据 = 本地 43/43 + 5 个负控臂逐臂只红应红项 + 语法闸。
+- 停止节点达成：**分支 CI 绿**，停在 `fix/meta1028-c8-sheets-misc`，**不合 main**（合并起手权在用户）。
