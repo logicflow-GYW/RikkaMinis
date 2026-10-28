@@ -133,7 +133,7 @@ file:///var/minis/mounts/ro_vault/out.txt
 
 | 层 | 装置 | 读数 |
 |---|---|---|
-| L1 纯函数单测 | `ModelExecutionRetryTest`(14) / `ModelUseOutputFileUrlTest`(8) / `AccessibilityWaitTargetTest`(8) / 更新的 calendar 真值表 | 全部 PASS（本地 kotlinc + JUnit 实跑） |
+| L1 纯函数单测 | `ModelExecutionRetryTest`(14) / `ModelUseOutputFileUrlTest`(6) / `AccessibilityWaitTargetTest`(5) / 更新的 calendar 真值表 | 全部 PASS（本地 kotlinc + JUnit 实跑；CI 侧 14/6/5 亦全 PASSED，见 §8） |
 | L2 三态真值表探针 | `probe-d2/Truths.kt` + `slice.py` 逐字切片 | **SLICE-TRUTHS: PASS**（36 断言；每条都同时跑「新实现」与「pre-fix 逐字转录」，证明夹具有牙且不修过头） |
 | L3 变异 | 13 臂（M1–M5 策略 / S1–S8 谓词） | **13/13 各自变红、baseline 绿** |
 | L4 结构检查 | `struct_check.py`（10 文件括号配平 + 新符号声明 + 死短路已删 + 无孤儿 helper） | `STRUCTCHECK: PASS` |
@@ -154,10 +154,31 @@ file:///var/minis/mounts/ro_vault/out.txt
 
 | 项 | 值 |
 |---|---|
-| run id | `40695565862` |
-| head_sha | `e204558718dbf61420cc5289b4deb684f101ff82`（与本地 HEAD 逐字符一致） |
+| run id | `40697745032`（run_number 2838 / attempt 1） |
+| head_sha | `4dc9fe16a5940887682c492ba34cade2b99f2e26`（与本地 HEAD 逐字符一致） |
+| 结论 | **success**，27 步中唯一非 success = Publish（main 门控，分支上 skipped） |
+| 时长 | 13:34:57Z → 13:56:09Z（21m12s） |
 
-（CI 读数待 COMMIT 后回填。）
+**日志读数**（1,508,679 B / NUL 0）：
+
+- 门：`Summary: 113 passed, 0 failed`（分片 25/16/44/19/30/18 为并行池分段，**不是门数**）；`ALL 349 CASES PASS`；`^ e: ` **0**；含 `FAILED` 的行 **0**（连 PASSED 子串的都没有）。
+- 单测：`ModelExecutionRetryTest` 14 PASSED / `ModelUseOutputFileUrlTest` 6 PASSED / `AccessibilityWaitTargetTest` 5 PASSED / `CalendarFreebusyInstancesTest` 19 PASSED / `OffloadCliArgsTest` 57 PASSED，**FAILED 0**。
+- 相关门真树：`offload_relative_path_unify_check` / `a11y_handler_contract_check` / `calendar_events_nullable_predicate_check` / `modelsvc_single_read_check` / `modeluse_proto_single_source_check` / `offload_cli_args_check` / `offload_media_b64_wire_check` / `provider_boundary_guard` / `schedule_date_source_check` / `share_dir_prune_check` / `xproc_boundary_check` 全部 rc=0（含逐门 `--selftest`）。
+
+### 8.1 首轮 CI 失败（run `40695565862`，HEAD `e2045587`）—— 「门把缺陷钉成了期望值」
+
+首轮在 **Run unit tests (full suite)** 红灯，两条失败全在 `OffloadCliArgsTest`：
+
+| 失败用例 | 根因 |
+|---|---|
+| `model-use relative paths are wired through the shared join` | 探针**要求**的正是 F-02 的缺陷写法：`code.contains("if (raw.startsWith(\"file://\")) raw else resolveMaybeRelative(raw, request.cwd)")` |
+| `negative control - a re-inlined --output guard fails the probe` | 负控以该字面量为变异锚点，锚点不存在 ⇒ `mutated != original` 断言先炸 |
+
+即**既有门不是漏判，是把缺陷写成了契约**：它强制 `file://` 值跳过 shared join、跳过所有下游路径语义消费者（只读挂载守卫 / 会话域正则都按相对路径形态判定），于是归一化成相对的 `file:/var/minis/…`、绕过两道守卫、被写进 `<rootfs>/file:/…`，而响应回显的还是原始 URL —— 正是 F-02 的静默失败形态，只是 CI 在读它。
+
+**修法**（纯测试，零生产改动，commit `4dc9fe16`）：探针改成断言正解形态（`resolveMaybeRelative(stripFileUrlScheme(raw), request.cwd)` 恰好一次）+ **用自己的判据禁止 passthrough 回来** + 负控改为「把 strip 摘掉」（`resolveMaybeRelative(raw, …)`）必须让探针变红。齿不削，方向掰正。
+
+**可复用判据**：形状探针的价值不在于「钉住某行原文」，而在于「钉住行为契约」。一条断言如果把**缺陷**写成期望值，它就是缺陷的守卫；写新判据时必须问一句「这个字面量是实现细节，还是我在意的那个契约」。旁证：`codeOnlyStrings` 会剥注释，所以探针的 KDoc 里引用旧字面量不会自伤 —— 引用与断言是两回事。
 
 ---
 
