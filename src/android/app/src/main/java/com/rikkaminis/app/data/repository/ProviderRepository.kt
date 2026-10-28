@@ -11,6 +11,7 @@ import com.rikkaminis.app.data.db.ProviderDatabase
 import com.rikkaminis.app.data.db.ProviderThinkingRuleEntity
 import com.rikkaminis.app.data.db.compositeEntryKey
 import com.rikkaminis.app.data.db.toProviderConfig
+import com.rikkaminis.app.data.db.toProviderConfigWithDiagnostics
 import com.rikkaminis.app.data.db.toSnapshot
 import com.rikkaminis.app.data.model.ImageEndpointMode
 import com.rikkaminis.app.data.model.LLMModel
@@ -283,6 +284,23 @@ class ProviderRepository(private val context: Context) {
             Thread(r, "ProviderConfig-Persist").apply { isDaemon = true }
         }
 
+    /**
+     * [fix/p1028-provider-corrupt-row] `provider_model_entries.id` values the
+     * last DB load could not decode, and which the in-memory [ProviderConfig]
+     * therefore does not contain. Kept here so every save can hand them to
+     * [ProviderConfigDao.syncAllIncremental] as "known rows" — its delete set is
+     * `NOT IN (ids I was given)`, so without this an unrelated write (rename a
+     * provider, reorder models) physically deletes the unreadable row. The
+     * legacy JSON mirror never carried those models, so nothing else can bring
+     * the bytes back.
+     *
+     * Recomputed on every load (and only then): the row keeps failing to decode
+     * until a build that can read it arrives, so the protection has to stay in
+     * place for the whole process lifetime.
+     */
+    @Volatile
+    private var quarantinedEntryRowIds: Set<String> = emptySet()
+
     private fun loadConfig(): ProviderConfig = runBlocking { loadConfigSuspending() }
 
     /**
@@ -326,7 +344,24 @@ class ProviderRepository(private val context: Context) {
                 )
                 val dbMs = (System.nanoTime() - tDb) / 1_000_000
                 val tAssemble = System.nanoTime()
-                val cfg = snapshot.toProviderConfig(json)
+                // [fix/p1028-provider-corrupt-row] Load through the diagnostics
+                // overload: rows whose base_model_json won't decode are skipped
+                // from the in-memory config (unchanged display behaviour) but
+                // their ids are remembered so the sync path keeps them in the
+                // delete-set. Skipping without this bookkeeping = deletion on
+                // the next save, which is exactly what THIS function used to do.
+                val loaded = snapshot.toProviderConfigWithDiagnostics(json)
+                val cfg = loaded.config
+                quarantinedEntryRowIds = loaded.quarantinedEntryRowIds
+                if (loaded.quarantinedEntryRowIds.isNotEmpty()) {
+                    android.util.Log.w(
+                        "ProviderRepo",
+                        "[ProviderStore] ${loaded.quarantinedEntryRowIds.size} provider model " +
+                            "entries undecodable — rows preserved in provider.db (kept out of the " +
+                            "model list; NOT deleted by the next sync): " +
+                            loaded.quarantinedEntryRowIds.take(5).joinToString(","),
+                    )
+                }
                 val assembleMs = (System.nanoTime() - tAssemble) / 1_000_000
                 android.util.Log.i(
                     "ProviderPerf",
@@ -476,6 +511,12 @@ class ProviderRepository(private val context: Context) {
                 groups = snapshot.groups,
                 loopIds = snapshot.loopIds,
                 meta = snapshot.meta,
+                // [fix/p1028-provider-corrupt-row] The delete-set is derived from
+                // `entries`, and quarantined rows are absent from it by
+                // construction — hand them over explicitly so an unrelated save
+                // (rename / reorder / refresh) doesn't physically drop the row
+                // that the load path only meant to SKIP.
+                preserveEntryIds = quarantinedEntryRowIds,
             )
         }
         dbWrite.onFailure { e ->

@@ -209,7 +209,42 @@ fun ProviderConfig.toSnapshot(
  */
 private const val TAG = "ProviderConfigMapping"
 
-fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig {
+/**
+ * [fix/p1028-provider-corrupt-row] Result of [toProviderConfigWithDiagnostics]:
+ * the in-memory config PLUS the primary keys of rows that could not be decoded
+ * and were therefore left out of it.
+ *
+ * Why the ids have to travel with the result: `syncAllIncremental` computes its
+ * delete set as "every id I was given → delete everything else" (`NOT IN`).
+ * A decode failure means the row is missing from the list it feeds, so the very
+ * next save would physically delete it — turning "one row is temporarily
+ * unreadable" into "one row is permanently gone", with the legacy mirror
+ * (which never carried the row's model) unable to bring it back.
+ *
+ * The mapping layer is the only place that can tell "row is absent from the
+ * config" apart from "row could not be read" — hence the ids are produced HERE
+ * and handed to the DAO explicitly, never re-derived there.
+ */
+data class ProviderConfigLoad(
+    val config: ProviderConfig,
+    /**
+     * `provider_model_entries.id` values whose `base_model_json` failed to
+     * decode. They stay in the DB untouched (no upsert, no delete) until a
+     * build that CAN read them rotates them back into [config].
+     */
+    val quarantinedEntryRowIds: Set<String> = emptySet(),
+)
+
+fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig =
+    toProviderConfigWithDiagnostics(jsonForBlobs).config
+
+/**
+ * [fix/p1028-provider-corrupt-row] Same projection as [toProviderConfig], but
+ * also reports the rows it had to skip — see [ProviderConfigLoad]. Use this on
+ * the load path; the plain [toProviderConfig] overload stays for the
+ * canonicalization call sites that operate on an already-in-memory config.
+ */
+fun ProviderConfigSnapshot.toProviderConfigWithDiagnostics(jsonForBlobs: Json): ProviderConfigLoad {
     val instances = this.instances.map { row ->
         ProviderInstance(
             id = row.id,
@@ -260,6 +295,7 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         )
     }.toMutableList()
 
+    val quarantinedEntryRowIds = LinkedHashSet<String>()
     val entries = this.entries.mapNotNull { row ->
         // [audit-0917] Guard the two JSON blob decodes the same way the enum
         // parses above are guarded. A malformed baseModelJson/overridesJson
@@ -267,6 +303,11 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         // of the whole toProviderConfig, which failed the entire DB load — one
         // bad row wiped every provider and group from the UI. Skip the bad row
         // and keep the rest.
+        //
+        // [fix/p1028-provider-corrupt-row] …but "skip" must not become "delete".
+        // Remember the row id so the sync path can keep it in its delete-set
+        // (see ProviderConfigLoad / entryIdsToKeep). Skipping is a display
+        // decision; the bytes stay put for a build that can read them.
         val baseModel = runCatching {
             jsonForBlobs.decodeFromString(LLMModel.serializer(), row.baseModelJson)
         }.onFailure {
@@ -274,7 +315,11 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
                 TAG,
                 "skipping model entry ${row.id}: baseModelJson undecodable (${it.message})",
             )
-        }.getOrNull() ?: return@mapNotNull null
+        }.getOrNull()
+        if (baseModel == null) {
+            quarantinedEntryRowIds.add(row.id)
+            return@mapNotNull null
+        }
         val overrides = row.overridesJson?.let {
             runCatching { jsonForBlobs.decodeFromString(ModelOverrides.serializer(), it) }
                 .onFailure { e ->
@@ -342,18 +387,36 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         .toMutableList()
 
     val metaMap = this.meta.associate { it.key to it.value }
-    return ProviderConfig(
-        instances = instances,
-        modelEntries = entries,
-        modelGroups = groups,
-        defaultPrimaryGroupId = metaMap[ProviderConfigMetaKeys.DEFAULT_PRIMARY_GROUP_ID],
-        defaultSubGroupId = metaMap[ProviderConfigMetaKeys.DEFAULT_SUB_GROUP_ID],
-        voiceInputGroupId = metaMap[ProviderConfigMetaKeys.VOICE_INPUT_GROUP_ID],
-        voiceOutputGroupId = metaMap[ProviderConfigMetaKeys.VOICE_OUTPUT_GROUP_ID],
-        agentLoopModelEntryIds = entryLoopIds,
-        agentLoopGroupIds = groupLoopIds,
+    return ProviderConfigLoad(
+        config = ProviderConfig(
+            instances = instances,
+            modelEntries = entries,
+            modelGroups = groups,
+            defaultPrimaryGroupId = metaMap[ProviderConfigMetaKeys.DEFAULT_PRIMARY_GROUP_ID],
+            defaultSubGroupId = metaMap[ProviderConfigMetaKeys.DEFAULT_SUB_GROUP_ID],
+            voiceInputGroupId = metaMap[ProviderConfigMetaKeys.VOICE_INPUT_GROUP_ID],
+            voiceOutputGroupId = metaMap[ProviderConfigMetaKeys.VOICE_OUTPUT_GROUP_ID],
+            agentLoopModelEntryIds = entryLoopIds,
+            agentLoopGroupIds = groupLoopIds,
+        ),
+        quarantinedEntryRowIds = quarantinedEntryRowIds,
     )
 }
+
+/**
+ * [fix/p1028-provider-corrupt-row] Delete-set for
+ * [ProviderConfigDao.syncAllIncremental]'s entry table: every row we decoded
+ * **plus** every row we quarantined because it could not be decoded.
+ *
+ * Pulled out as a pure function so the "keep the unreadable" rule is testable
+ * without Room, and so the DAO has exactly one place where the set is built
+ * (`NOT IN` turns "what I know" into "what should exist" — the invert is where
+ * the bug lived).
+ */
+fun entryIdsToKeep(
+    decoded: List<ProviderModelEntryEntity>,
+    quarantinedEntryRowIds: Collection<String>,
+): List<String> = (decoded.map { it.id } + quarantinedEntryRowIds).distinct()
 
 /** Composite key shape used as ModelEntry id in DB and forward in JSON mirror. */
 fun compositeEntryKey(instanceId: String, modelId: String): String = "$instanceId/$modelId"
