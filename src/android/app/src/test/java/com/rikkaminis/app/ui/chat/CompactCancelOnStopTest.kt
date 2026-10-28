@@ -106,16 +106,22 @@ class CompactCancelOnStopTest {
         // (fix/clearchat-compact-ce-1002) legitimately precedes the marker
         // insert in the same file and broke the old pin (CI run 36980256369
         // caught it). Same shape as the raw-id verify pin below.
-        val markerRegion = lifecycle
-            .substringAfter("val markerSaved = try {")
-            .substringBefore("if (!markerSaved)")
-        val rethrow = markerRegion.indexOf("chatRepository.dao.insertCompactMarker(marker)")
-        assertTrue("marker insert call missing", rethrow >= 0)
+        // [fix/r3-b11-compact-F02] The insert no longer carries a
+        // `markerSaved` boolean (a failed insert now throws into compactAll's
+        // own catch instead of publishing in-memory state), so the region is
+        // bounded by the guarded call and the publish line it protects —
+        // identical region, same intent, no new anchors beyond those two.
+        val call = lifecycle.indexOf("chatRepository.dao.insertCompactMarker(marker)")
+        assertTrue("marker insert call missing", call >= 0)
+        val publish = lifecycle.indexOf("_compactSummary.value = summary", call)
+        assertTrue("publish line missing after the marker insert", publish > call)
+        val markerRegion = lifecycle.substring(call, publish)
         val rethrowCatch = markerRegion.indexOf("catch (e: CancellationException)")
         assertTrue("cancellation rethrow missing", rethrowCatch >= 0)
-        // Sequence: the guarded call first, its rethrowing catch after —
-        // i.e. the same try/catch region, not two unrelated constructs.
-        assertTrue(rethrow < rethrowCatch)
+        // Sequence: the guarded call first (region starts at it), its
+        // rethrowing catch after — i.e. the same try/catch region, not two
+        // unrelated constructs.
+        assertTrue(rethrowCatch > 0)
         // The CE arm must actually rethrow, not swallow.
         val ceArm = markerRegion.substring(
             rethrowCatch,

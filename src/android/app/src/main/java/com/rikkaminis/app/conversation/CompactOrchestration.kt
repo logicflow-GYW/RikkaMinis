@@ -411,19 +411,31 @@ internal fun ChatViewModel.compactAll(
             // [audit-0917] "compacted in memory, full history after reload"
             // inconsistency this guard exists to prevent). Rethrow
             // cancellation; other failures keep the best-effort semantics.
-            val markerSaved = try {
+            // [fix/r3-b11-compact-F02] The contract above was quoted but not
+            // enforced: a failed insert only logged a warning, then
+            // _compactSummary/_cachedLatestMarker were published anyway, the
+            // UI was greyed and a divider + "compacted N bubbles" card
+            // announced success, and compactSucceeded still kicked the queued
+            // drain. Reload then silently replayed the full history (no row),
+            // and the divider's Revert affordance failed with
+            // sysmsg_revert_failed_db (deleteCompactMarker → 0 rows). A
+            // non-persisted marker is now a COMPACT FAILURE: it throws into
+            // compactAll's own catch, so nothing in-memory is published, no
+            // greying/divider is painted, the queue is not kicked, and the
+            // caller falls back to the hard trim exactly like every other
+            // compact failure (the auto path detects `folded == false`).
+            // Manual /compact sees sysmsg_compact_failed with the underlying
+            // DB error; silent auto-compacts stay silent, same !silent policy
+            // as the sibling failure branches.
+            try {
                 chatRepository.dao.insertCompactMarker(marker)
-                true
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(ChatViewModel.TAG, "Failed to persist compact marker: ${e.message}")
-                false
-            }
-            if (!markerSaved) {
-                AppLogger.warning(
-                    ChatViewModel.TAG_STREAM,
-                    "compact marker not persisted; keeping the summary in memory only",
+                throw IllegalStateException(
+                    "compact marker not persisted: ${e.message ?: e.javaClass.simpleName}",
+                    e,
                 )
             }
             _compactSummary.value = summary
@@ -594,8 +606,9 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     // [feat/compact-pin-v0-1005] Pin v0: user verbatim text never passes
     // through a rewrite. Extraction + strip happen at the depth-0 entry
     // (BEFORE any LLM call); the re-append happens at the one exit below
-    // (AFTER the LLM). At depth > 0 previousSummary is always null and the
-    // recursion passes no pin — the split/merge prompts never see one.
+    // (AFTER the LLM). The split/merge prompts never see a pin block: the
+    // payload is stripped at the depth-0 entry and the recursion only ever
+    // receives the STRIPPED summary.
     // previousSummary comes from the previous round's summary and may carry
     // a `<pinned-user-messages>` block: strip it here, carry the payload,
     // and re-merge it with this fold's user text at the exit.
@@ -603,12 +616,7 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     val pinCarried = if (depth == 0) pinnedSectionInner(previousSummary) else null
     val prevSummaryStripped = if (depth == 0) stripPinnedSection(previousSummary) else previousSummary
     val transcript = buildConversationTextForSummary(messages)
-    val conversationText = if (prevSummaryStripped.isNullOrBlank()) {
-        transcript
-    } else {
-        "Previous context summary:\n$prevSummaryStripped\n\n" +
-            "New conversation to merge:\n$transcript"
-    }
+    val conversationText = ContextCompactor.compactInputText(prevSummaryStripped, transcript)
     val summary = try {
         generateCompactSummary(conversationText)
     } catch (e: CancellationException) {
@@ -617,6 +625,7 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
         if (!isContextTooLargeError(e) || messages.size < 2 || depth >= 3) {
             throw e
         }
+        // equivalent-mutant arm: comment only
         val mid = messages.size / 2
         val firstHalf = messages.subList(0, mid).toList()
         val secondHalf = messages.subList(mid, messages.size).toList()
@@ -624,7 +633,20 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
             ChatViewModel.TAG,
             "[Compact] Splitting ${messages.size} messages into ${firstHalf.size} + ${secondHalf.size} (depth=$depth)",
         )
-        val summary1 = generateCompactSummaryWithSplitting(firstHalf, null, depth + 1)
+        // [fix/r3-b11-compact-F01] The first half is the OLDER material, so it
+        // is exactly the half that must be summarized ON TOP OF the previous
+        // rounds' summary. Passing `null` here dropped prevSummaryStripped the
+        // moment the depth-0 pass hit ContextTooLarge: summary1 then covered
+        // only this fold's first half, the merge prompt merged those two
+        // halves, and the returned string replaced the previous summary in the
+        // marker (`compactAll` persists it) — erasing every earlier compact
+        // round, tool conclusion and decision, irreversibly. The second half
+        // keeps `null`: it has no older context to sit on (the previous
+        // summary was already incorporated by the first half, and feeding it
+        // to both halves would double-count it in the merge). At depth > 0
+        // prevSummaryStripped is the pushed-down summary, so a re-split inside
+        // the first half keeps the chain intact instead of cutting it again.
+        val summary1 = generateCompactSummaryWithSplitting(firstHalf, prevSummaryStripped, depth + 1)
         val summary2 = generateCompactSummaryWithSplitting(secondHalf, null, depth + 1)
         val mergeInput = buildString {
             append("Merge these partial summaries into a single cohesive context summary. ")
