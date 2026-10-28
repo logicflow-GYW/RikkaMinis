@@ -56,6 +56,15 @@ object MarkdownParser {
     /** Object Replacement Character (U+FFFC) — sentinel used by math placeholders. */
     private const val ORC = '￼'
 
+    /**
+     * [r3-c / B09 F-13] Glyphs a price never uses. Used by [isCurrencyShaped] to
+     * decide "digit-led content is still math". `=` (an equation), LaTeX
+     * structure (`\ ^ _ { }`) and the big operators are in it; `+ - < >` are NOT,
+     * because `$5 - $10` / `$10+$5` / `$5>$3` are exactly the money shapes the
+     * old operator scan mistook for formulas.
+     */
+    private val NON_CURRENCY_MATH_GLYPHS = charArrayOf('=', '\\', '^', '_', '{', '}', '∫', '∑', '∏', '√')
+
     // [dv22/B-06] The extension sets live in one place only
     // (`ui/chat/MarkdownBlockModel.kt`). This parser classifies through
     // `mediaKindOfUrl` so the block renderer, the inline split and the image
@@ -669,6 +678,22 @@ object MarkdownParser {
      */
     private fun looksLikeMath(content: String): Boolean {
         if (content.isEmpty()) return false
+        // [r3-c / B09 F-13, P1] A span that still contains a bare `$` is not a
+        // formula — it is the residue of a pairing that jumped over a dollar the
+        // closing rule rejected (a `$` preceded by a space is not a close
+        // delimiter), so the real close was a LATER `$`: `"$5 - $10 and $20"`
+        // pairs the first with the third and its content is `"5 - $10 and"`.
+        // Rendering that as KaTeX deletes three currency markers and feeds the
+        // engine a stray `$`. Reject, keep the sentence as text.
+        if (content.indexOf('$') >= 0) return false
+        // [r3-c / B09 F-13, P1] Currency is excluded BEFORE the operator scan.
+        // The old order scanned `-`/`+`/`=`/`<`/`>` first and only then rejected
+        // a leading digit, so the leading-digit guard was unreachable for exactly
+        // the shapes it was written for: `$5-$10` → content `"5-"` → hits `-` →
+        // "math", and both `$` vanished from the sentence (same for `$10+$5`,
+        // `$5>$3`, `US$5-US$10`). Price ranges with no space around the operator
+        // are the common case in LLM prose about money.
+        if (isCurrencyShaped(content)) return false
         // T208 Layer B: previous heuristic rejected single-letter math like
         // `$c$` or `$i$` — `length > 2` returned false and the literal
         // dollar-wrapped text leaked into the rendered output. Any of:
@@ -682,6 +707,10 @@ object MarkdownParser {
             if (c in mathChars) return true
         }
         // Currency heuristic: `$5`, `$5.99`, `$1,000` look numeric. Skip.
+        // [r3-c] Now a SECOND net, not the only one: `isCurrencyShaped` above
+        // already caught the digit-led forms that also carry an arithmetic mark
+        // (`5-`, `10+`). What still lands here is digit-led content built of
+        // glyphs that are not currency punctuation, e.g. `$5x2 rows$`.
         if (content[0].isDigit()) return false
         // Whitespace at either edge usually means a stray dollar, not math.
         if (content.first().isWhitespace() || content.last().isWhitespace()) return false
@@ -689,6 +718,31 @@ object MarkdownParser {
         // 30 chars is almost certainly a variable reference.
         if (content.length <= 30 && content.all { it.isLetterOrDigit() }) return true
         return content.length > 2
+    }
+
+    /**
+     * [r3-c / B09 F-13] "This `$ … $` span is money, not a formula": the content
+     * starts with a digit and carries nothing a price would not use — no letter,
+     * no `=`, and no LaTeX structure glyph (`\ ^ _ { }` and the big operators).
+     *
+     * The three exclusions are what keeps real math alive under a leading digit:
+     * `$1+1=2$` has an `=`, `$2^{10}$` has `^`/`{`/`}`, `$\frac{1}{2}$` starts
+     * with `\` — all still reach the glyph scan and render. Everything else that
+     * begins with a digit (`5-`, `10+`, `5>`, `5.99`, `1,000`, `5 - 3`) is a
+     * price or a price range, and the `$` markers are the text the user meant.
+     *
+     * Trade-off recorded on purpose: `$5 > 3$` as a bare numeric inequality reads
+     * as money and stays text. Text is the honest failure — a missed formula
+     * still shows its own `$…$`, a swallowed price range silently deletes the
+     * `$` the user was reading.
+     */
+    private fun isCurrencyShaped(content: String): Boolean {
+        if (!content.first().isDigit()) return false
+        for (c in content) {
+            if (c.isLetter()) return false
+            if (c in NON_CURRENCY_MATH_GLYPHS) return false
+        }
+        return true
     }
 
     /**

@@ -35,7 +35,7 @@ import java.io.File
  *    the page, breaking that illusion.
  */
 class WebViewHolder(
-    appContext: Context,
+    private val appContext: Context,
     initialUrl: String,
 ) {
 
@@ -100,7 +100,7 @@ class WebViewHolder(
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    val webView: WebView = WebView(appContext).apply {
+    private fun createWebView(): WebView = WebView(appContext).apply {
         settings.javaScriptEnabled = true       // sandbox HTML demos rely on JS
         settings.domStorageEnabled = true
         // [T-audit-p1-1] File access is DISABLED in the preview WebView.
@@ -152,25 +152,26 @@ class WebViewHolder(
         }
         webViewClient = object : SafeWebViewClient() {
             /**
-             * [GH#341] Renderer died. [assetLoader] is bound to this holder's
-             * initial URL, so recovery is not a matter of re-running a load —
-             * the holder has no construction path for a replacement instance.
-             * Flag it for the host and stop pretending the page is live.
+             * [GH#341] Renderer died. Re-running a load cannot fix this — the
+             * process that owns the document is gone — so the holder flags it
+             * and lets the host drive recovery through
+             * [rebuildAfterRendererGone], which is the one path that can build a
+             * replacement instance.
              */
             override fun onRendererGone(view: WebView?) {
                 rendererGone = true
                 isLoading = false
-                // Deliberately NOT destroying the instance: `webView` is a val
-                // on this holder and hosts keep calling into it (reload,
-                // desktop-mode toggle, detach). A destroyed WebView throws on
-                // every one of those, which is worse than an inert one — the
-                // holder's own [destroy] stays the single teardown path.
+                // [r3-c / B09 F-08] Deliberately NOT destroying the instance here:
+                // the host reads [rendererGone] and offers a retry that goes
+                // through [rebuildAfterRendererGone], which is the single place
+                // that tears the corpse down and swaps in a fresh WebView. (Pre
+                // -fix this flag had no reader at all, so the preview stayed
+                // blank forever and Reload did nothing visible.)
                 //
-                // ponytail: 只置标志，不重建 holder | 天花板: 该预览永久空白，
-                // 重新打开预览才会拿到新 holder（rememberWebViewHolder 以 url 为
-                // key）| 升级触发: 真机日志出现 renderer gone 且用户在预览里看到
-                // 空白却无法通过重开恢复，届时给 holder 加"重建 webView 实例"的
-                // 工厂（需要把 assetLoader 的构建抽成函数）。
+                // ponytail: 置标志，由宿主点「重新加载」才重建 | 天花板: 崩溃后
+                // 不自愈，用户必须点一次重试 | 升级触发: 真机日志出现 renderer
+                // gone 且用户不点重试就一直空白（说明要自动重建 + 失败次数上限，
+                // 防崩溃循环）。
             }
 
             override fun shouldInterceptRequest(
@@ -253,12 +254,18 @@ class WebViewHolder(
                 // does (T-webview-popup-d3c6e10f): post a synthetic
                 // `resize` after first commit so vh/innerHeight readers
                 // recompute against the stabilised height.
-                view.postDelayed({
+                // [r3-c / B09 F-07] Registered with the release latch and
+                // guarded: closing the sheet inside this 100 ms window used to
+                // fire `evaluateJavascript` into a destroyed renderer.
+                val resizeHop = Runnable {
+                    if (!releaseLatch.canRunDeferred() || destroyed.get()) return@Runnable
                     view.evaluateJavascript(
                         "window.dispatchEvent(new Event('resize'));",
                         null,
                     )
-                }, 100)
+                }
+                releaseLatch.track(resizeHop)
+                view.postDelayed(resizeHop, 100)
             }
         }
         webChromeClient = object : android.webkit.WebChromeClient() {
@@ -276,6 +283,9 @@ class WebViewHolder(
         // layouts stay anchored to the original height and end up offset
         // or clipped. Forward every container-height change to JS.
         addOnLayoutChangeListener { v, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            // [r3-c / B09 F-07] A layout pass can still be delivered while the
+            // holder is being torn down; talking to a destroyed WebView throws.
+            if (destroyed.get() || releaseLatch.isReleased) return@addOnLayoutChangeListener
             val oldH = oldBottom - oldTop
             val newH = bottom - top
             if (newH > 0 && newH != oldH) {
@@ -286,6 +296,48 @@ class WebViewHolder(
             }
         }
     }
+
+    /**
+     * [r3-c / B09 F-07] Deferred-work latch for THIS WebView instance — the same
+     * one `KaTeXView` / `FilePreviewScreen` use. `destroy()` used to call
+     * `webView.removeCallbacks(null)`, which AOSP defines as a no-op (`if (action
+     * != null) { … }`): the `onPageFinished` `postDelayed` resize hop and the
+     * post-attach/post-layout `loadUrl` hops all survived the teardown and ran
+     * against a destroyed renderer.
+     */
+    private var releaseLatch = WebViewReleaseLatch()
+
+    /**
+     * [r3-c / B09 F-07] Listeners registered on the live view while the first
+     * load waits for attach / layout. Held so teardown can unbind them instead of
+     * leaving a listener that fires into a destroyed WebView.
+     */
+    private var pendingAttachListener: android.view.View.OnAttachStateChangeListener? = null
+    private var pendingLayoutListener: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
+
+    /** [fix/audit0917-b8] Latches the first `destroy()` so later calls are
+     *  no-ops. Callers include a Compose `DisposableEffect(onDispose)` in
+     *  addition to the user-initiated dismiss callback, and BOTH fire on a
+     *  normal dismissal — without the latch the second pass would run
+     *  stopLoading/loadUrl/destroy on an already-destroyed WebView (undefined
+     *  behaviour, and `destroy()`'s `catch (Throwable)` would swallow the
+     *  symptom into a warning line).
+     *
+     *  [r3-c / B09 F-07] Declared here (before [webView]) because
+     *  [createWebView]'s deferred bodies read it, and because [destroy] and
+     *  [rebuildAfterRendererGone] are the two writers. */
+    private val destroyed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * [r3-c / B09 F-08, P1] The one WebView this holder renders.
+     *
+     * A `mutableStateOf` rather than a `val` because a WebView whose renderer
+     * process died can never be revived: [rebuildAfterRendererGone] swaps in a
+     * fresh instance, and the Compose hosts key their `AndroidView` on this value
+     * so the factory re-runs and attaches the replacement.
+     */
+    var webView: WebView by mutableStateOf(createWebView())
+        private set
 
     private var hasLoaded = false
 
@@ -302,37 +354,67 @@ class WebViewHolder(
         // For file:// URLs, load via the asset loader's secure origin
         // instead of granting direct file:// access.
         val loadUrl = toAssetLoaderUrl(currentUrl) ?: currentUrl
-        if (webView.isAttachedToWindow && webView.width > 0 && webView.height > 0) {
+        // [r3-c / B09 F-07] Bind every deferred hop to THIS WebView instance: a
+        // rebuild swaps `webView`, and a stale hop must not drive the new one.
+        val wv = webView
+        if (wv.isAttachedToWindow && wv.width > 0 && wv.height > 0) {
             AppLogger.info(TAG, "loadUrl (attached) ${loadUrl.take(160)}")
-            webView.loadUrl(loadUrl)
+            wv.loadUrl(loadUrl)
             return
         }
-        webView.addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
+        val attachListener = object : android.view.View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(v: android.view.View) {
                 v.removeOnAttachStateChangeListener(this)
-                v.post {
+                if (pendingAttachListener === this) pendingAttachListener = null
+                // [r3-c / B09 F-07] Named + latched: the sheet can be dismissed
+                // (and the WebView destroyed) between attach and this hop.
+                val loadAfterAttach = Runnable {
+                    if (!releaseLatch.canRunDeferred() || destroyed.get()) return@Runnable
                     if (v.width > 0 && v.height > 0) {
                         AppLogger.info(TAG, "loadUrl (post-attach) ${loadUrl.take(160)}")
-                        webView.loadUrl(loadUrl)
+                        wv.loadUrl(loadUrl)
                     } else {
-                        v.viewTreeObserver.addOnGlobalLayoutListener(object :
-                            android.view.ViewTreeObserver.OnGlobalLayoutListener {
-                            override fun onGlobalLayout() {
-                                if (v.width > 0 && v.height > 0) {
-                                    v.viewTreeObserver.removeOnGlobalLayoutListener(this)
-                                    AppLogger.info(TAG, "loadUrl (post-layout) ${loadUrl.take(160)}")
-                                    webView.loadUrl(loadUrl)
+                        val layoutListener =
+                            object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                                override fun onGlobalLayout() {
+                                    if (v.width > 0 && v.height > 0) {
+                                        v.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                                        pendingLayoutListener = null
+                                        if (!releaseLatch.canRunDeferred() || destroyed.get()) {
+                                            return
+                                        }
+                                        AppLogger.info(TAG, "loadUrl (post-layout) ${loadUrl.take(160)}")
+                                        wv.loadUrl(loadUrl)
+                                    }
                                 }
                             }
-                        })
+                        pendingLayoutListener = layoutListener
+                        v.viewTreeObserver.addOnGlobalLayoutListener(layoutListener)
                     }
                 }
+                releaseLatch.track(loadAfterAttach)
+                v.post(loadAfterAttach)
             }
             override fun onViewDetachedFromWindow(v: android.view.View) {}
-        })
+        }
+        pendingAttachListener = attachListener
+        wv.addOnAttachStateChangeListener(attachListener)
     }
 
+    /**
+     * [r3-c / B09 F-07] `reload()` / `stopLoading()` are reachable from a toolbar
+     * that outlives a teardown (and, for `reload`, from a host that has not yet
+     * noticed [rendererGone]): both used to call into a destroyed WebView.
+     */
     fun reload() {
+        if (destroyed.get() || releaseLatch.isReleased) {
+            AppLogger.warning(TAG, "reload dropped: WebView already destroyed")
+            return
+        }
+        if (rendererGone) {
+            AppLogger.warning(TAG, "reload dropped: renderer process is gone (host must rebuild)")
+            return
+        }
         AppLogger.info(TAG, "reload")
         webView.reload()
     }
@@ -352,6 +434,13 @@ class WebViewHolder(
         // reload() on a destroyed WebView.
         if (destroyed.get()) {
             AppLogger.warning(TAG, "toggleDesktopMode dropped: WebView already destroyed")
+            return
+        }
+        // [r3-c / B09 F-08] A dead renderer still answers settings writes, but
+        // the reload() at the end of this function cannot revive it — the host
+        // owns recovery, so drop the toggle instead of pretending it worked.
+        if (rendererGone) {
+            AppLogger.warning(TAG, "toggleDesktopMode dropped: renderer process is gone")
             return
         }
         desktopMode = !desktopMode
@@ -397,6 +486,10 @@ class WebViewHolder(
     }
 
     fun stopLoading() {
+        if (destroyed.get() || releaseLatch.isReleased) {
+            AppLogger.warning(TAG, "stopLoading dropped: WebView already destroyed")
+            return
+        }
         AppLogger.info(TAG, "stopLoading")
         webView.stopLoading()
         isLoading = false
@@ -413,41 +506,114 @@ class WebViewHolder(
     }
 
     /**
-     * [fix/audit0917-b8] Latches the first `destroy()` so later calls are
-     * no-ops. Callers now include a Compose `DisposableEffect(onDispose)` in
-     * addition to the user-initiated dismiss callback, and BOTH fire on a
-     * normal dismissal — without the latch the second pass would run
-     * stopLoading/loadUrl/destroy on an already-destroyed WebView (undefined
-     * behaviour, and the `catch (Throwable)` below would swallow the symptom
-     * into a warning line).
-     */
-    private val destroyed = java.util.concurrent.atomic.AtomicBoolean(false)
-
-    /**
      * Final teardown. Call when the preview path is fully closed (sheet
      * dismissed AND fullscreen popped) so the WebView's renderer process
      * doesn't linger. Safe to call multiple times.
      */
     fun destroy() {
         if (!destroyed.compareAndSet(false, true)) return
+        val wv = webView
         try {
-            detach()
-            webView.stopLoading()
-            // [deep-audit-1045 B-02] Same three-call teardown KaTeXView.kt
-            // (T10-M1) and FilePreviewScreen.kt (F-274) already use: stop →
-            // drop this view's queued callbacks → destroy. The queue that
-            // matters here is `onPageFinished`'s `view.postDelayed({ resize })`
-            // (:249): a late attach would flush it into a destroyed renderer.
-            // Safe by ordering — detach() above already cleared attachInfo, so
-            // this only drains THIS view's run queue, never the shared window
-            // handler's null-token messages.
-            webView.removeCallbacks(null)
-            webView.loadUrl("about:blank")
-            webView.destroy()
+            // [r3-c / B09 F-07] Teardown now goes through the repo's canonical
+            // `releasePlan` (same enum KaTeXView / FilePreviewScreen order by):
+            // detach → drop the runnables this view's latch still holds →
+            // stopLoading → destroy.
+            //
+            // The previous body called `webView.removeCallbacks(null)` with a
+            // comment claiming it "drains THIS view's run queue". It drains
+            // NOTHING: AOSP's `removeCallbacks` opens with `if (action != null)`
+            // and the null form is a documented no-op, so `onPageFinished`'s
+            // 100 ms resize hop and the post-attach/post-layout `loadUrl` hops
+            // all survived. Those hops are now latch-guarded AND removed by
+            // identity here.
+            val outstanding = releaseLatch.release()
+            for (step in releasePlan(attached = wv.parent != null)) {
+                when (step) {
+                    ReleaseStep.DETACH -> {
+                        detach()
+                        unbindPendingListeners(wv)
+                    }
+                    ReleaseStep.DROP_DEFERRED -> {
+                        // ISSUE-08 C4 contract (browser_destroy_wakeup_check):
+                        // the null-token clear stays AFTER detach so it can
+                        // only ever see this view's own run queue, never the
+                        // shared window handler's null-token messages. AOSP
+                        // treats the null action as a no-op — the identity
+                        // removal below is what actually reaps the tracked
+                        // hops; both are kept on purpose.
+                        webView.removeCallbacks(null)
+                        outstanding.forEach { wv.removeCallbacks(it) }
+                    }
+                    ReleaseStep.STOP_LOADING -> {
+                        wv.stopLoading()
+                        // Unchanged from the pre-fix sequence: drop the document
+                        // (and any audio/timers it owns) right before the
+                        // renderer goes away.
+                        wv.loadUrl("about:blank")
+                    }
+                    ReleaseStep.DESTROY -> webView.destroy()
+                }
+            }
             AppLogger.info(TAG, "destroyed")
         } catch (e: Throwable) {
             AppLogger.warning(TAG, "destroy failed: ${e.message}")
         }
+    }
+
+    /**
+     * [r3-c / B09 F-08, P1] Replace a WebView whose renderer process died.
+     *
+     * A dead renderer cannot be revived — `WebView.destroy()` on the corpse and a
+     * fresh instance is the only path, which is why the holder owns the factory
+     * ([createWebView]) instead of a `val`. Returns false when there is nothing to
+     * rebuild (no crash recorded, or the holder is already torn down), so a host
+     * retry button can call it unconditionally.
+     *
+     * The Compose hosts key their `AndroidView` on `(holder, holder.webView)`, so
+     * publishing the new instance re-runs the factory and attaches it.
+     */
+    fun rebuildAfterRendererGone(): Boolean {
+        if (!rendererGone || destroyed.get()) return false
+        val stale = webView
+        val outstanding = releaseLatch.release()
+        runCatching {
+            unbindPendingListeners(stale)
+            (stale.parent as? android.view.ViewGroup)?.removeView(stale)
+            outstanding.forEach { stale.removeCallbacks(it) }
+            stale.stopLoading()
+            stale.destroy()
+        }.onFailure { t ->
+            AppLogger.warning(TAG, "teardown of dead WebView failed: ${t.message}")
+        }
+        // A released latch is never handed to the next instance (same rule as
+        // KaTeXView's per-WebView latch).
+        releaseLatch = WebViewReleaseLatch()
+        hasLoaded = false
+        rendererGone = false
+        isLoading = true
+        pageFavicon = null
+        webView = createWebView()
+        AppLogger.info(TAG, "rebuilt after renderer gone")
+        startIfNeeded()
+        return true
+    }
+
+    /** [r3-c / B09 F-07] Drop the first-load listeners instead of leaving them
+     *  hooked to a view that is about to die. */
+    private fun unbindPendingListeners(view: WebView) {
+        // Ownership gate (same family as `pendingAttachListener === this` in
+        // the attach callback): a stale teardown — the rebuild path passes
+        // the previous instance — must not clear the listeners the live view
+        // just bound.
+        if (view !== webView) return
+        pendingAttachListener?.let { listener ->
+            runCatching { view.removeOnAttachStateChangeListener(listener) }
+        }
+        pendingAttachListener = null
+        pendingLayoutListener?.let { listener ->
+            runCatching { view.viewTreeObserver.removeOnGlobalLayoutListener(listener) }
+        }
+        pendingLayoutListener = null
     }
 
     companion object {

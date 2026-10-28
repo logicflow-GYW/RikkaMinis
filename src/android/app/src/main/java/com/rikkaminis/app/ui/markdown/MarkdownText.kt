@@ -966,7 +966,20 @@ private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
     val player = remember(resolvedMediaSourceKey(file)) {
         if (file == null) null else MediaPlayer()
     }
+    // [r3-c / B09 F-12, P2] One serial worker per player instance. Before this,
+    // `prepare()` ran on Dispatchers.IO while `release()` ran on the main thread
+    // the moment the block left composition — cancelling the coroutine cannot
+    // interrupt a thread already inside native `prepare()`, so the same native
+    // handle was prepared and released concurrently (JNI crash / undefined
+    // state). prepare + release now take turns on this single thread.
+    val serialOps = remember(player) { player?.let { SerialMediaOps() } }
     var prepared by remember(resolvedMediaSourceKey(file)) { mutableStateOf(false) }
+    // Whether the last prepare attempt FAILED (as opposed to not having finished
+    // yet). Needed because the click target below is disabled until
+    // `prepared` — which used to make its own "open in an external player"
+    // fallback unreachable for exactly the files that need it (a container
+    // MediaPlayer cannot decode).
+    var prepareFailed by remember(resolvedMediaSourceKey(file)) { mutableStateOf(false) }
     // T10-M5: setDataSource() opens and parses the container header — real
     // disk/codec work that used to run inside remember{}, i.e. on the main
     // thread during composition. Open the source together with prepare() on
@@ -974,16 +987,32 @@ private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
     LaunchedEffect(player, resolvedMediaSourceKey(file)) {
         val p = player ?: return@LaunchedEffect
         val f = file ?: return@LaunchedEffect
-        prepared = withContext(Dispatchers.IO) {
+        val ops = serialOps ?: return@LaunchedEffect
+        val ok = withContext(Dispatchers.IO) {
             runCatching {
-                p.setDataSource(f.absolutePath)
-                p.prepare()
-                true
+                ops.runPreparing {
+                    p.setDataSource(f.absolutePath)
+                    p.prepare()
+                    true
+                }
             }.getOrDefault(false)
         }
+        prepared = ok
+        prepareFailed = !ok
     }
     DisposableEffect(player) {
-        onDispose { try { player?.release() } catch (_: Throwable) {} }
+        onDispose {
+            val p = player
+            val ops = serialOps
+            if (p != null && ops != null) {
+                // Queued, not called inline: if `prepare()` is still running on
+                // the serial worker, `release()` runs after it returns. Release
+                // must not wait on the main thread, so it cannot take a lock
+                // here instead.
+                ops.enqueue { p.release() }
+                ops.shutdown()
+            }
+        }
     }
 
     var isPlaying by remember(resolvedMediaSourceKey(file)) { mutableStateOf(false) }
@@ -1028,7 +1057,12 @@ private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
             .clip(RoundedCornerShape(10.dp))
             .background(cardBg)
             .border(0.5.dp, borderColor, RoundedCornerShape(10.dp))
-            .clickable(enabled = file != null && (player == null || prepared)) {
+            // [r3-c / B09 F-12] `prepareFailed` is part of the enable gate on
+            // purpose. The gate used to be `prepared` only, while the tap
+            // handler below already had an `!prepared` branch that hands the file
+            // to an external player — so a container MediaPlayer cannot decode
+            // disabled its own fallback and the user was stuck with a dead card.
+            .clickable(enabled = file != null && (player == null || prepared || prepareFailed)) {
                 if (player == null || !prepared) {
                     file?.let { openMediaExternally(context, it, "audio/*") }
                 } else {
