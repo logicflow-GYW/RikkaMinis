@@ -178,10 +178,24 @@ RESULT ALL_RED
 
 | 项 | 值 |
 |---|---|
-| run | `#2845`（`build-apk.yml`，`workflow_dispatch`，ref `fix/meta1028-e5-settings-a`） |
-| 创建 | 2026-10-28T13:54:33Z |
-| head_sha | `<待回填>` |
-| 结论 | `<待回填>` |
+| run | `#2845`（id `40700782125`，`build-apk.yml`，`workflow_dispatch`，ref `fix/meta1028-e5-settings-a`） |
+| 创建 → 完成 | 2026-10-28T13:54:33Z → 14:15:38Z（**21m05s**） |
+| head_sha | `5b575253bdbc22ee8936e5ca3baf8e64eebac767`（与本地 `git rev-parse` **逐字符一致**） |
+| 结论 | **success**；27 步中唯一非 success = 2 skipped（`Move the rolling tag` + `Publish to Releases`，均 main 门控） |
+
+**日志判读**（zip 656,637 B → 解压 3,010,255 字符 / NUL 0）：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 113 passed, 0 failed` | 2 次（另有分片 16/18/19/25/30/44，failed 全 0） |
+| `ALL 349 CASES PASS` | 2 次 |
+| 门头 `[N/113]` | 226 处、编号互异 113 |
+| 编译错误 `^e: ` | **0** |
+| 含 `FAILED` 的行 | 12 条，其中非 `PASSED` 子串的 **0** |
+| 新测试 4 类 | 全部 PASSED（54 条 PASSED 行，0 FAILED） |
+| 门自测标记 | 164 处（`SELFTEST=PASS` / `ALL ARMS MATCH`） |
+| `BUILD SUCCESSFUL` | 8 次 |
+| `Function not implemented` | 0 |
 
 分支 push 不触发 CI（`build-apk.yml` 只认 main），故走 `gh-actions-dispatch`；
 本支改了 `src/**`，必须全量构建（廉价门不适用）。
