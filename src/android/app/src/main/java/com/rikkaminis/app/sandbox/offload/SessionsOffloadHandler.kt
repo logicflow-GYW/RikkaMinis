@@ -67,6 +67,22 @@ class SessionsOffloadHandler(
         }
 
         val sub = args.positional.firstOrNull() ?: "list"
+        // [meta1028-B05 F-12] Refuse an option this subcommand does not
+        // implement BEFORE dispatching — the rule the fastio CLI already
+        // enforces ([FastioOffloadHandler.unknownOption]): `list --kewords
+        // python` parsed as an unknown key, was ignored, and answered EVERY
+        // session at exit 0, which reads as "the filter matched everything".
+        // A value option spelled without its value (`list --start --end
+        // 2026-01-01`) is the same failure one spelling over: OffloadArgs files
+        // it as a BOOLEAN flag, the bound then reads as "no filter" and the
+        // whole history comes back.
+        sessionsOptionProblem(sub, args)?.let { problem ->
+            val err = errorEnvelope(sub, "INVALID_ARGS", problem)
+            return NativeOffloadResult(
+                EXIT_INVALID_ARGS,
+                OffloadOutput.formatBody(err.toString(2), args) + "\n" + HELP_TEXT,
+            )
+        }
         return try {
             when (sub) {
                 "list" -> cmdList(args)
@@ -570,6 +586,11 @@ OPTIONS:
   --compact             Minimize JSON output
   -q, --quiet           Output only data field
 
+OPTIONS ARE PER COMMAND: an option this command does not implement — including a
+value option spelled without its value — is a usage error (exit 2), never
+silently ignored. 'list --kewords x' answering every session is precisely the
+silent wrong answer this rule exists to prevent.
+
 OUTPUT (list):
   Each session includes: session_id, title, preview (first user message,
   60 chars), source, started_at, last_active, message_count.
@@ -701,3 +722,4 @@ internal fun sessionsDateBound(flag: String, raw: String?, parse: (String) -> Lo
     if (raw.isNullOrBlank()) return null
     return parse(raw) ?: throw InvalidDateArg(flag, raw)
 }
+
