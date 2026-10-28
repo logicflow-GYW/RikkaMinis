@@ -3363,6 +3363,25 @@ internal fun collectInlineMathLatex(text: String): List<String> {
                 i = span.next; continue
             }
         }
+        if (c == '`') {
+            // [F-07 meta-audit-1028] Consume an inline-code span whole, before
+            // the `$` scanner below can see the dollars inside it. `parseInline`
+            // has always had this branch (same `findInlineCodeClose` helper), so
+            // the two scanners disagreed on any line that mixes code holding a
+            // dollar sign with a real formula — a line like "`$USER_DIR` 是否满足
+            // $x + 1 > 0$" made parseInline emit the REAL formula's tag while this
+            // function paired the code's `$` with the formula's opening `$`,
+            // registered the phantom span "USER_DIR` 是否满足 " and jumped past the
+            // real opener. The real tag therefore had no inlineContent entry
+            // (Compose falls back to the alternate text = the formula rendered as
+            // literal text) and a KaTeX bitmap was burned on a formula that never
+            // appears on screen. Sharing the close-scanner keeps both boundaries
+            // identical; an unclosed backtick stays literal in parseInline (one
+            // char consumed, scanning continues), so it must fall through to
+            // `i++` here too.
+            val end = findInlineCodeClose(text, i + 1)
+            if (end != -1) { i = end + 1; continue }
+        }
         if (c == '$' && i + 1 < text.length && text[i + 1] != '$' && text[i + 1] != ' ') {
             val end = findInlineMathClose(text, i + 1)
             if (end != -1) {

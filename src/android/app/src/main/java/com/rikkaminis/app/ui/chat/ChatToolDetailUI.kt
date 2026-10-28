@@ -75,7 +75,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.outlined.Public
@@ -156,7 +155,11 @@ internal fun ToolDetailSheet(
                 //    clipboard.
                 val clipboardManager = LocalClipboardManager.current
                 val actionContext = LocalContext.current
-                var copyDone by remember { mutableStateOf(false) }
+                // [F-11 meta-audit-1028] Keyed on the block: this flag lives in
+                // the sheet header, which is shared by every paged tool block, so
+                // an unkeyed `remember` carried the 2-second "copied ✓" state onto
+                // the NEXT tool when the user paged within that window.
+                var copyDone by remember(block.id) { mutableStateOf(false) }
                 val isShellTool = block.toolName == "shell_execute"
                 val isBrowserTool = block.toolName == "browser_use"
                 val toolArgsForAction = remember(block.toolArgs) {
@@ -240,7 +243,17 @@ internal fun ToolDetailSheet(
             HorizontalDivider(thickness = 1.dp, color = ChatColors.sheetHeaderBorder)
 
             // ── Content Area (iOS: tool-specific rendering) ──
-            val outputScrollState = rememberScrollState()
+            // [F-11 meta-audit-1028] One ScrollState for the whole sheet, keyed on
+            // the block so paging with the `|<` / `>|` arrows starts the new tool
+            // at its top. Without the key the state survived the page flip: the
+            // arrows only change `currentIdx`, so a long output left the viewport
+            // thousands of pixels down and the next tool opened mid-document (with
+            // a long-but-shorter tool it silently clamped to that tool's bottom).
+            // `rememberScrollState()` has no key parameter, hence the explicit
+            // ScrollState — no other call site scrolls this state programmatically,
+            // which is also what makes `value != 0` a faithful "user scrolled"
+            // signal for the auto-reveal gate below.
+            val outputScrollState = remember(block.id) { androidx.compose.foundation.ScrollState(0) }
             val toolArgsObj = remember(block.toolArgs) {
                 try { org.json.JSONObject(block.toolArgs) } catch (_: Exception) { org.json.JSONObject() }
             }
@@ -1342,6 +1355,37 @@ private const val LAZY_TOOL_INITIAL_CHUNKS = 5            // ~200 lines
 private const val LAZY_TOOL_BATCH_CHUNKS = 5              // +200 lines per reveal
 private const val LAZY_TOOL_INITIAL_BYTE_CAP = 10 * 1024 // clamp first window to ~10KB
 
+/** [F-11 meta-audit-1028] Distance from the bottom (in px) that still counts as
+ *  "the user reached the end of what is currently revealed". Extracted from the
+ *  inline literal so the auto-reveal predicate below is unit-testable. */
+private const val LAZY_TOOL_NEAR_BOTTOM_PX = 600
+
+/**
+ * [F-11 meta-audit-1028] Pure predicate behind the lazy-reveal gate: may the
+ * next batch be revealed without the user asking for it?
+ *
+ * [scrollValue] == 0 means the viewport has NOT moved since this text was
+ * installed — nothing in this sheet scrolls the state programmatically — so it
+ * can never mean "reached the bottom". The old inline form checked only
+ * `value >= maxValue - 600`, which the very first frame satisfies whenever the
+ * content overflows the viewport by 1..600 px: the gate opened itself and each
+ * pending batch was revealed as soon as it was laid out, so a short-to-medium
+ * output bypassed the laziness entirely (the "Load more" counter flashed and
+ * vanished). Requiring a real offset keeps the documented behaviour — "only
+ * grows the window once the user has actually scrolled near the end" — and
+ * leaves the manual "Load more / Load all" buttons as the way through when the
+ * content fits (maxValue == 0) or Compose hasn't measured it yet (Int.MAX_VALUE).
+ */
+internal fun shouldAutoRevealMore(
+    scrollValue: Int,
+    maxValue: Int,
+    nearBottomPx: Int = LAZY_TOOL_NEAR_BOTTOM_PX,
+): Boolean {
+    if (maxValue <= 0 || maxValue == Int.MAX_VALUE) return false
+    if (scrollValue <= 0) return false
+    return scrollValue >= maxValue - nearBottomPx
+}
+
 /** Split [text] into ordered 40-line chunks. Each chunk keeps its trailing
  *  newline so concatenation round-trips. */
 private fun chunkToolOutput(text: String): List<String> {
@@ -1445,10 +1489,12 @@ private fun LazyRevealToolText(
     // Auto-grow the window when the user scrolls within ~600px of the bottom of
     // the currently-revealed content. derivedStateOf keeps the predicate from
     // recomposing on every scroll pixel; it only flips at the threshold.
-    val nearBottom by remember {
+    // [F-11 meta-audit-1028] `remember` is keyed on [scrollState]: the sheet now
+    // swaps in a fresh ScrollState per tool block, and an unkeyed remember would
+    // keep reading the previous block's instance (stale value + stale max).
+    val nearBottom by remember(scrollState) {
         derivedStateOf {
-            val max = scrollState.maxValue
-            max > 0 && max != Int.MAX_VALUE && scrollState.value >= max - 600
+            shouldAutoRevealMore(scrollState.value, scrollState.maxValue)
         }
     }
     LaunchedEffect(nearBottom, revealed, total) {

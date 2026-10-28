@@ -142,6 +142,40 @@ class InlineMathExtractionTest {
         assertEquals(listOf("\\|x\\|"), collectInlineMathLatex("\$\\|x\\|\$"))
     }
 
+    // ── [F-07 meta-audit-1028] inline code hides its dollars ────────────────
+    //
+    // parseInline has always consumed `` `…` `` as inline code before the `$`
+    // scanner can see the dollars inside it; this collector had no such branch,
+    // so on a line mixing code with a formula it paired the code's `$` with the
+    // formula's opening `$`. The real formula's tag then had no pre-registered
+    // inlineContent slot (it fell back to literal text) while a phantom KaTeX
+    // render was burned on a span that never appears on screen.
+
+    @Test fun `inline code dollars do not swallow the following formula`() {
+        assertEquals(
+            listOf("x + 1 > 0"),
+            collectInlineMathLatex("`\$USER_DIR` 是否满足 \$x + 1 > 0\$ ?"),
+        )
+    }
+
+    @Test fun `inline code after a formula leaves the formula intact`() {
+        assertEquals(listOf("a_{1}"), collectInlineMathLatex("\$a_{1}\$ 再 `\$PATH`"))
+    }
+
+    @Test fun `code only line with a dollar collects nothing`() {
+        assertEquals(emptyList<String>(), collectInlineMathLatex("run `echo \$PATH` now"))
+    }
+
+    @Test fun `unclosed backtick stays literal so the formula is still collected`() {
+        // findInlineCodeClose stops at the newline; parseInline then renders the
+        // lone backtick literally, and the `$…$` after it is still math.
+        assertEquals(listOf("x"), collectInlineMathLatex("a `\$x\$"))
+    }
+
+    @Test fun `two code spans around one formula`() {
+        assertEquals(listOf("y"), collectInlineMathLatex("`\$A` 与 `\$B` 对应 \$y\$"))
+    }
+
     // ── katexInlineTagFor ───────────────────────────────────────────────────
 
     @Test fun `katex tag prefixes latex`() {
