@@ -107,6 +107,29 @@ object OpenMinisBackupCompat {
      *  不设上限——真实输出由 [MAX_OUTPUT_CHARS]（RikkaMinis 导入上限）兜底。 */
     private const val SHARD_LIMIT = 256
 
+    /**
+     * [FIX-P1B / RT-S1] 连续多少个分片序号都读不到，才判定「分片序列到此结束」。
+     *
+     * 为什么必须「连续」而不是「第一个空洞就是终点」：分片序列中间缺一片
+     * （世界 W3，文件消失）**不是终点** —— 后面的片还在包里。原实现的
+     * `readMember(...) ?: break` 把第一个空洞当终点：`-0002` 缺席就丢掉了
+     * `-0003` 及其后的全部消息，4 条静默变 2 条，且不留任何标记。
+     *
+     * 为什么取 3（容忍最多 2 连缺）：
+     *  1. 必须 > 1 —— 取 1 等于把「缺一片」又当成终点，退回原缺陷；
+     *  2. 正常包的代价 = 每个流末尾多 2 次 `File.isFile`（共 3 个流 → 6 次
+     *     stat），可忽略；
+     *  3. 连续 3 片都缺已经不是「一片消失」而是包被截断，继续往后找只会让
+     *     一个损坏的包看起来更完整。
+     * 末尾那串连续读不到的序号是「序列正常结束」，不是缺片 —— 记录进
+     * [JsonlShardRead.missingShards] 的只有「后面还有片被读到」的空洞。
+     */
+    private const val SHARD_GAP_TOLERANCE = 3
+
+    /** 缺片报告里最多列出多少个成员名（`shardsMissing` 仍是真实总数）。
+     *  一个损坏的包可以缺几十片；报告是给人看的，不是转储。 */
+    private const val MISSING_SHARD_REPORT_CAP = 32
+
     private class Keys(val dataKey: ByteArray, val secretsKey: ByteArray)
 
     /**
@@ -226,22 +249,24 @@ object OpenMinisBackupCompat {
                 .put("version", 1)
                 .put("exportedAt", now())
 
+            // [FIX-P1B / RT-S1] 缺片清单：分片序号 → 成员名，喂给缺片报告段。
+            val missingShards = ArrayList<String>()
             if (pc != null) {
                 val (providers, typeToLabel) = convertProviders(pc, secrets, notes)
                 doc.put("providers", providers)
-                doc.put("thinkingRules", convertThinkingRules(
-                    readJsonlShards(work, keys, "data/thinking_rules"),
-                    typeToLabel,
-                ))
+                val rules = readJsonlShards(work, keys, "data/thinking_rules")
+                missingShards.addAll(recordMissingShards("data/thinking_rules", rules))
+                doc.put("thinkingRules", convertThinkingRules(rules.records, typeToLabel))
                 doc.put("groups", convertGroups(pc))
             }
             doc.put("envVars", convertEnvVars(work, keys, secrets, includeSecrets = true))
             doc.put("skills", convertSkills(work, keys, notes))
             doc.put("memoryFiles", convertMemory(work, keys, notes))
             doc.put("mcpServers", convertMcp(work, keys))
-            val (sessions, messages) = convertChats(work, keys, includeChats)
+            val (sessions, messages) = convertChats(work, keys, includeChats, missingShards)
             doc.put("chatSessions", sessions)
             doc.put("chatMessages", messages)
+            shardLossReport(missingShards)?.let { doc.put("chatTruncated", it) }
 
             val out = doc.toString()
             if (out.length > MAX_OUTPUT_CHARS) {
@@ -388,18 +413,45 @@ object OpenMinisBackupCompat {
     // 分片 JSONL 读取：base、base-0002、base-0003…（BackupJsonlWriter 规则）
     // ------------------------------------------------------------------
 
+    /**
+     * [FIX-P1B / RT-S1] 一次分片 JSONL 读取的结果：记录 + **真实缺片**。
+     *
+     * [missingShards] 只含「洞」（1 基序号，且后面还有片被读到）。序列末尾那串
+     * 读不到的序号是「正常结束」——若把末尾探测也记成缺片，每个正常包都会被
+     * 报成缺 [SHARD_GAP_TOLERANCE] - 1 片。
+     */
+    internal data class JsonlShardRead(
+        val records: List<JSONObject>,
+        val missingShards: List<Int>,
+    )
+
+    /** 分片成员名（第 1 片无序号后缀，第 2 片起 `-0002`…）。构造端与读取端
+     *  共用这一个函数，缺片报告里的名字才和真实成员名一致。 */
+    private fun shardMemberName(base: String, shard: Int): String =
+        if (shard == 1) "$base.jsonl"
+        else String.format(Locale.US, "%s-%04d.jsonl", base, shard)
+
     private fun readJsonlShards(
         work: File,
         keys: Keys?,
         base: String,
         limit: Int = SHARD_LIMIT,
-    ): List<JSONObject> {
+    ): JsonlShardRead {
         val records = ArrayList<JSONObject>()
+        val missing = ArrayList<Int>()
+        // 还没被「后面的命中」兑现的空洞：只有在读到后续片时才升级成缺片。
+        val pendingHoles = ArrayList<Int>()
         var shard = 1
         while (shard <= limit) {
-            val name = if (shard == 1) "$base.jsonl"
-            else String.format(Locale.US, "%s-%04d.jsonl", base, shard)
-            val bytes = readMember(work, keys, name) ?: break
+            val bytes = readMember(work, keys, shardMemberName(base, shard))
+            if (bytes == null) {
+                pendingHoles.add(shard)
+                if (pendingHoles.size >= SHARD_GAP_TOLERANCE) break
+                shard++
+                continue
+            }
+            missing.addAll(pendingHoles)
+            pendingHoles.clear()
             val text = String(bytes, Charsets.UTF_8)
             for (line in text.lineSequence()) {
                 val t = line.trim()
@@ -408,7 +460,38 @@ object OpenMinisBackupCompat {
             }
             shard++
         }
-        return records
+        return JsonlShardRead(records, missing)
+    }
+
+    /** [FIX-P1B / RT-S1] 缺片序号 → 成员名，追加进调用方的总清单。 */
+    private fun recordMissingShards(base: String, read: JsonlShardRead): List<String> =
+        read.missingShards.map { shardMemberName(base, it) }
+
+    /**
+     * [FIX-P1B / RT-S1] 缺片报告段。
+     *
+     * 通道选择：挂在既有 `chatTruncated` 段上 —— 它是导入链路里**唯一**被读的
+     * 「聊天内容不全」通道（`ConfigBackup.import` 读 `sessionsDropped` /
+     * `messagesDropped` 并写进 `ImportResult.skipped`）。本段新增的键对现存
+     * 读取方是无害的（`optInt(key, 0)` 默认 0 ⇒ 行为不变），而把「缺了几片、
+     * 缺的是哪几片」放在同一个段里，让「让用户看到 N 片缺失」只差一次
+     * `optInt` 读 —— 那个读在本支的禁区（`ConfigBackup.kt` 由 P1-A 同时施工），
+     * 已作为交接项写进 `fix-reports/FIX-P1B-BACKUP-WRITE-READ.md`。
+     *
+     * 为什么必须报告而不是只 Log：缺片 = 消息永久丢失（源设备那份还在，
+     * 但用户在本机看到的是一个「导入成功」的短历史）。沉默的部分恢复比
+     * 明确报错更危险。
+     *
+     * @return null 表示没有任何缺片（正常包 ⇒ 文档形状与升级前逐键一致）。
+     */
+    private fun shardLossReport(missing: List<String>): JSONObject? {
+        if (missing.isEmpty()) return null
+        return JSONObject()
+            .put("shardsMissing", missing.size)
+            .put("missingShards", JSONArray(missing.take(MISSING_SHARD_REPORT_CAP)))
+            .put("sessionsShardsMissing", missing.count { it.startsWith("data/sessions") })
+            .put("messagesShardsMissing", missing.count { it.startsWith("data/messages") })
+            .put("thinkingRulesShardsMissing", missing.count { it.startsWith("data/thinking_rules") })
     }
 
     // ------------------------------------------------------------------
@@ -832,12 +915,15 @@ object OpenMinisBackupCompat {
         work: File,
         keys: Keys?,
         includeChats: Boolean,
+        missingShards: MutableList<String>,
     ): Pair<JSONArray, JSONArray> {
         val sessionsOut = JSONArray()
         val messagesOut = JSONArray()
         if (!includeChats) return sessionsOut to messagesOut
 
-        for (rec in readJsonlShards(work, keys, "data/sessions")) {
+        val sessionShards = readJsonlShards(work, keys, "data/sessions")
+        missingShards.addAll(recordMissingShards("data/sessions", sessionShards))
+        for (rec in sessionShards.records) {
             if (rec.optString("t", "") != "SessionV2") continue
             val d = rec.optJSONObject("d") ?: continue
             // 新包是 {"session":{…}, …wrapper}；旧包字段平铺 —— 两种都读
@@ -869,7 +955,9 @@ object OpenMinisBackupCompat {
             if (o.optString("id").isNotEmpty()) sessionsOut.put(o)
         }
 
-        for (rec in readJsonlShards(work, keys, "data/messages")) {
+        val messageShards = readJsonlShards(work, keys, "data/messages")
+        missingShards.addAll(recordMissingShards("data/messages", messageShards))
+        for (rec in messageShards.records) {
             if (rec.optString("t", "") != "MessageV2") continue
             val d = rec.optJSONObject("d") ?: continue
             val o = JSONObject()

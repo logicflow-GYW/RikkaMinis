@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 import java.io.StringWriter
 
 /**
@@ -224,5 +225,174 @@ class BackupStreamWriterTest {
             emptyList<String>(),
             BackupStreamWriter.missingFrameKeys(frame, listOf("format", "providers")),
         )
+    }
+
+    // ── [FIX-P1A / RT-S3] pre-restore snapshot write ─────────────────────
+    //
+    // The snapshot is the ROLLBACK point for a restore. It used to be written
+    // straight to its final name, so an ENOSPC / a kill mid-stream left a
+    // truncated `.json` that `listSnapshots` offered as the newest rollback
+    // point, and the name was the clock at second precision, so two restores in
+    // one second wrote the same path (the second truncating the first, i.e. a
+    // failure there left ZERO usable rollback points). These arms run the real
+    // production functions against real temp directories — no Android types
+    // involved (kotlinx-coroutines' [runBlocking] supplies the suspend caller).
+
+    private fun tempSnapshotDir(tag: String): java.io.File {
+        val dir = java.io.File(
+            System.getProperty("java.io.tmpdir"),
+            "snapshot-$tag-${System.nanoTime()}",
+        )
+        dir.mkdirs()
+        return dir
+    }
+
+    @Test
+    fun `failed snapshot write leaves no snapshot and no temp behind`() = runBlocking {
+        val dir = tempSnapshotDir("fail")
+        try {
+            var threw = false
+            try {
+                ConfigBackup.writeSnapshotStreaming(dir) { w ->
+                    w.write("{\"format\":\"openminis.config.backup\",")
+                    w.flush()
+                    throw java.io.IOException("ENOSPC")
+                }
+            } catch (_: java.io.IOException) {
+                threw = true
+            }
+            assertTrue("the write failure must reach the caller", threw)
+            assertEquals(
+                "a half-written document must never become a rollback candidate",
+                emptyList<String>(),
+                ConfigBackup.listSnapshots(dir).map { it.name },
+            )
+            assertEquals(
+                "the .tmp sidecar must not be left behind either",
+                emptyList<String>(),
+                (dir.listFiles() ?: emptyArray()).map { it.name },
+            )
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `the final name only appears after the writer closed cleanly`() = runBlocking {
+        // Discriminator for the tmp+rename itself: writing straight to the
+        // final name (and cleaning up in a catch) survives an in-process
+        // IOException, but not a KILL — the process dies between the partial
+        // write and the catch, leaving a valid-looking `.json`. Inside the
+        // writer block the document must therefore exist ONLY under `.tmp`.
+        val dir = tempSnapshotDir("inflight")
+        try {
+            var sawFinalName = false
+            var tmpCount = -1
+            ConfigBackup.writeSnapshotStreaming(dir) { w ->
+                sawFinalName = ConfigBackup.listSnapshots(dir).isNotEmpty()
+                tmpCount = (dir.listFiles() ?: emptyArray()).count { it.name.endsWith(".json.tmp") }
+                w.write("{\"format\":\"openminis.config.backup\"}")
+            }
+            assertTrue(
+                "the final *.json name must not exist while the document is still streaming — " +
+                    "a kill here would leave a truncated file that the rollback list accepts",
+                !sawFinalName,
+            )
+            assertEquals("the in-flight document must live in exactly one .json.tmp", 1, tmpCount)
+            assertEquals(1, ConfigBackup.listSnapshots(dir).size)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a failed snapshot leaves the previous rollback point intact`() = runBlocking {
+        val dir = tempSnapshotDir("keep")
+        try {
+            val good = ConfigBackup.writeSnapshot(dir, "{\"good\":true}")
+            assertEquals("{\"good\":true}", good.readText())
+            try {
+                ConfigBackup.writeSnapshotStreaming(dir) { w ->
+                    w.write("{\"half\":")
+                    throw java.io.IOException("killed")
+                }
+            } catch (_: java.io.IOException) {
+            }
+            val left = ConfigBackup.listSnapshots(dir)
+            assertEquals("exactly the pre-existing snapshot survives", 1, left.size)
+            assertEquals(good.name, left[0].name)
+            assertEquals("{\"good\":true}", left[0].readText())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `two snapshots in the same second get distinct names`() {
+        val dir = tempSnapshotDir("same-second")
+        try {
+            val now = 1_700_000_000_000L
+            val first = ConfigBackup.allocateSnapshotFile(dir, now)
+            first.writeText("first")
+            val second = ConfigBackup.allocateSnapshotFile(dir, now)
+            assertEquals(
+                "the second name must be the first name plus a sequence suffix, never the " +
+                    "same path (same path = the second write truncates the first)",
+                first.name.removeSuffix(".json") + "-2.json",
+                second.name,
+            )
+            second.writeText("second")
+            assertEquals("first", first.readText())
+            assertEquals("second", second.readText())
+            // Third collision keeps counting instead of reusing "-2".
+            val third = ConfigBackup.allocateSnapshotFile(dir, now)
+            assertEquals(first.name.removeSuffix(".json") + "-3.json", third.name)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a clock rollback cannot prune the snapshot just written`() {
+        val dir = tempSnapshotDir("rollback")
+        try {
+            // The previous snapshot carries a FUTURE mtime: exactly what a
+            // restore looks like after the clock jumped backwards. Pruning by
+            // mtime alone deleted the file this run had just produced.
+            val older = ConfigBackup.writeSnapshot(dir, "{\"older\":true}")
+            older.setLastModified(System.currentTimeMillis() + 3_600_000L)
+            val fresh = ConfigBackup.writeSnapshot(dir, "{\"fresh\":true}")
+            assertTrue("the snapshot just written must survive pruning", fresh.exists())
+            assertEquals("{\"fresh\":true}", fresh.readText())
+            assertEquals(
+                listOf(fresh.name),
+                ConfigBackup.listSnapshots(dir).map { it.name },
+            )
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `temp sidecars are invisible to the listing and swept once stale`() {
+        val dir = tempSnapshotDir("sweep")
+        try {
+            val stale = java.io.File(dir, "rikkaminis-snapshot-20200101-000000.json.tmp")
+            stale.writeText("{half")
+            stale.setLastModified(System.currentTimeMillis() - ConfigBackup.SNAPSHOT_TMP_STALE_MS - 1000L)
+            val live = java.io.File(dir, "rikkaminis-snapshot-20200101-000001.json.tmp")
+            live.writeText("{half")
+            assertEquals(
+                "a .json.tmp must never be listed as a rollback point, even when empty of data",
+                emptyList<String>(),
+                ConfigBackup.listSnapshots(dir).map { it.name },
+            )
+            ConfigBackup.writeSnapshot(dir, "{}")
+            assertTrue("a killed write's stale temp is swept on the next write", !stale.exists())
+            assertTrue("a fresh temp is never swept (a concurrent write may own it)", live.exists())
+            assertEquals(1, ConfigBackup.listSnapshots(dir).size)
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }

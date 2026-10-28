@@ -110,10 +110,52 @@ class BackupFetchBusyGateTest {
             7,
             code.split("operationBusy = true").size - 1,
         )
+        // 10 = the pre-[FIX-P1A] baseline. The 11th site is the restore path's
+        // snapshot-failure abort (added by FIX-P1A / RT-S3: a failed snapshot
+        // used to leave the gate up forever while the import ran on; the abort
+        // branch lowers it before returning). It is NOT a free release — ⑦
+        // below pins that the branch really returns instead of falling through
+        // to the import, so the count cannot be bumped without the contract.
         assertEquals(
-            "exactly one new operationBusy = false site (the fetch path's finally)",
-            10,
+            "exactly one new operationBusy = false site (the fetch path's finally), " +
+                "plus the restore snapshot-abort branch (pinned by snapshotFailure_abortsBeforeImport)",
+            11,
             code.split("operationBusy = false").size - 1,
+        )
+    }
+
+    // -- ⑦ a failed pre-restore snapshot aborts the restore (FIX-P1A / RT-S3) --
+
+    @Test
+    fun snapshotFailure_abortsBeforeImport() {
+        val snapshotIdx = code.indexOf("writeSnapshotStreaming(")
+        val importIdx = code.indexOf("ConfigBackup.import(")
+        assertTrue("the pre-restore snapshot anchor disappeared", snapshotIdx >= 0)
+        assertTrue("the restore's import anchor disappeared", importIdx >= 0)
+        assertTrue(
+            "the safety snapshot must be taken BEFORE the import overwrites the config",
+            snapshotIdx < importIdx,
+        )
+        assertTrue(
+            "the snapshot coroutine must be labelled so its failure branch can return",
+            code.contains("launch snapshotBeforeRestore@{"),
+        )
+        val failedIdx = code.indexOf("backup_snapshot_failed")
+        assertTrue("the snapshot failure branch anchor disappeared", failedIdx >= 0)
+        val catchIdx = code.indexOf("catch (t: Throwable)", snapshotIdx)
+        assertTrue("the snapshot write must have its own catch", catchIdx in snapshotIdx until importIdx)
+        val branch = bracedRegion(code, catchIdx)
+        assertTrue(
+            "a failed snapshot must report through the existing error dialog",
+            branch.contains("errorMessage ="),
+        )
+        assertTrue(
+            "a failed snapshot must lower the shared busy gate before returning",
+            branch.contains("operationBusy = false"),
+        )
+        assertTrue(
+            "a failed snapshot must NOT fall through into the import",
+            branch.contains("return@snapshotBeforeRestore"),
         )
     }
 

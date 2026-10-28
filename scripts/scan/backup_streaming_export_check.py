@@ -558,6 +558,17 @@ READ_VERB = re.compile(
     r"toByteArray|bufferedReader|bufferedInputStream)\b")
 FILE_BIND = re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*=\s*(?:java\.io\.)?File\s*\(")
 
+# [FIX-P1B / FINDING-14] Second legal sink spelling: the nightly export now
+# streams into `AutoBackupLocalStore.writeAtomically(<file>) { writer -> … }`,
+# which writes the sibling `.json.tmp` and renames it onto `<file>`. The
+# `FileOutputStream` therefore lives one call away, in the helper — anchoring
+# only on `name.bufferedWriter()` / `FileOutputStream(name)` reported "no File
+# bound to the export writer" for a *correct* implementation. Anchor on the
+# ARGUMENT instead: the uploaded File still has to be the File the document
+# was streamed into, which is the criterion's whole point.
+ATOMIC_WRITE_SINK = re.compile(
+    r"\bAutoBackupLocalStore\s*\.\s*writeAtomically\s*\(\s*([A-Za-z_]\w*)\b")
+
 
 def _enclosing_block_open(code, pos):
     """Index of the `{` opening the innermost block that contains `pos`."""
@@ -619,16 +630,28 @@ def _writer_for_sink(code, sink_pos):
 
 
 def _file_sinks(code):
-    """Variables bound to a File that the export writer streams into."""
+    """Variables bound to a File that the export writer streams into.
+
+    Two spellings count (both require the name to be File-bound in the same
+    body, so a stray identifier cannot become a "sink"):
+      - `name.bufferedWriter()` / `FileOutputStream(name)` — the direct shape,
+        still legal;
+      - `AutoBackupLocalStore.writeAtomically(name) { … }` — [FIX-P1B] the
+        atomic writer's target; the stream itself is opened inside the helper,
+        so the argument is the anchor.
+    """
+    bound = {m.group(1) for m in FILE_BIND.finditer(code)}
     out = set()
-    for m in FILE_BIND.finditer(code):
-        name = m.group(1)
+    for name in bound:
         if re.search(
             r"\bFileOutputStream\s*\(\s*" + re.escape(name) + r"\b"
             r"|\b" + re.escape(name) + r"\s*\.\s*(?:bufferedWriter|outputStream|sink)\b",
             code,
         ):
             out.add(name)
+    for m in ATOMIC_WRITE_SINK.finditer(code):
+        if m.group(1) in bound:
+            out.add(m.group(1))
     return out
 
 
@@ -1127,6 +1150,39 @@ VIOLATION_AUTO_PUSH_OTHER = COMPLIANT_AUTO.replace(
     "WebDavSync.backupAuto(cfg, local)",
     'WebDavSync.backupAuto(cfg, File(app.cacheDir, "other.json"))')
 
+# [FIX-P1B / FINDING-14] The atomic write is a LEGAL spelling of the sink: the
+# FileOutputStream lives inside AutoBackupLocalStore, and the uploaded File is
+# still the one the document was streamed into.
+COMPLIANT_AUTO_ATOMIC = """package com.rikkaminis.app.backup
+
+object AutoBackupManager {
+    private suspend fun runLocked(app: MinisApp) {
+        val dir = File(app.filesDir, "backup-autos").apply { mkdirs() }
+        val local = File(dir, "rikkaminis-auto-20261028-120000.json")
+        AutoBackupLocalStore.deleteStaleTemps(dir, LOCAL_FILE_PREFIX)
+        val unreadable = AutoBackupLocalStore.writeAtomically(local) { writer ->
+            ConfigBackup.exportToWriter(
+                providerRepo = app.providerRepository,
+                includeSecrets = false,
+                writer = writer,
+            )
+        }
+        rotateLocalAutoBackups(app)
+        val cfg = WebDavConfigStore(app).load()
+        if (cfg != null) {
+            WebDavSync.backupAuto(cfg, local)
+            WebDavSync.pruneAutoBackups(cfg, keep = WebDavSync.AUTO_BACKUP_KEEP)
+        }
+    }
+}
+"""
+
+# …and the witness that re-anchoring did not blunt the arm: same atomic write,
+# but the push uploads a DIFFERENT file.
+VIOLATION_AUTO_PUSH_OTHER_ATOMIC = COMPLIANT_AUTO_ATOMIC.replace(
+    "WebDavSync.backupAuto(cfg, local)",
+    'WebDavSync.backupAuto(cfg, File(app.cacheDir, "other.json"))')
+
 # A legal spelling: the payload is read through a stream wrapper.
 COMPLIANT_UPLOAD_STREAMED = COMPLIANT_SCREEN.replace(
     "                payload = tempFile.readBytes(),\n",
@@ -1291,6 +1347,12 @@ def selftest():
                       contains="never calls WebDavSync.backupAuto")
     ok &= run_fixture("violation-auto-push-other-file", expect_ok=False,
                       auto=VIOLATION_AUTO_PUSH_OTHER, contains="uploads `")
+    # [FIX-P1B / FINDING-14] the atomic sink spelling: accepted when correct,
+    # still caught when the upload is a different File.
+    ok &= run_fixture("compliant-auto-atomic-sink", expect_ok=True,
+                      auto=COMPLIANT_AUTO_ATOMIC)
+    ok &= run_fixture("violation-auto-push-other-atomic", expect_ok=False,
+                      auto=VIOLATION_AUTO_PUSH_OTHER_ATOMIC, contains="uploads `")
     ok &= run_fixture("compliant-upload-streamed", expect_ok=True,
                       screen=COMPLIANT_UPLOAD_STREAMED)
     print("BACKUP_STREAMING_EXPORT_SELFTEST=" + ("PASS" if ok else "FAIL"))

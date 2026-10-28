@@ -472,6 +472,7 @@
     <string name="storage_clear_confirm_text">这将删除 %1$s 的文件。此操作无法撤销。</string>
     <string name="storage_section_orphans">可回收空间</string>
     <string name="storage_orphan_banner">来自已删除会话的 %1$d 个残留项 — 共 %2$s</string>
+    <string name="storage_orphan_banner_blocked">%1$d 个项（共 %2$s）看似残留，但数据库中当前没有任何会话记录。为避免删除应用已看不到的数据，清理已被阻止。</string>
     <string name="storage_reclaim_button">回收</string>
     <string name="storage_reclaim_confirm_title">回收残留文件？</string>
     <string name="storage_reclaim_confirm_text">这将永久删除已删除会话遗留的 %1$d 个残留项（%2$s）。其余对话不受影响。此操作无法撤销。</string>

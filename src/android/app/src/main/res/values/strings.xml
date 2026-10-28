@@ -743,6 +743,7 @@
     <string name="storage_clear_confirm_text">This will delete %1$s of files. This action cannot be undone.</string>
     <string name="storage_section_orphans">Reclaimable space</string>
     <string name="storage_orphan_banner">%1$d orphaned item(s) from deleted sessions — %2$s</string>
+    <string name="storage_orphan_banner_blocked">%1$d item(s) (%2$s) look like leftovers, but the database currently lists no conversations. Cleanup is blocked so data the app can no longer see is not deleted.</string>
     <string name="storage_reclaim_button">Reclaim</string>
     <string name="storage_reclaim_confirm_title">Reclaim orphaned files?</string>
     <string name="storage_reclaim_confirm_text">This will permanently delete %1$d orphaned item(s) (%2$s) left over from deleted sessions. The remaining conversations are not affected. This cannot be undone.</string>
