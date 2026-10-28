@@ -50,6 +50,23 @@ class WebDavException(
     val statusCode: Int,
 ) : IOException(message)
 
+/**
+ * [fix/p1-webdav-propf] The server answered a request with a 2xx status but
+ * the body is not a WebDAV document — a captive portal, a reverse-proxy error
+ * page or an SSO login page served in place of the DAV reply.
+ *
+ * Deliberately NOT a [WebDavException]: that type carries an HTTP status that
+ * callers translate ("404 → the folder does not exist yet", see
+ * [WebDavSync.listBackupFiles]), and a login page answered with 200 must
+ * never be flattenable into "the server has no backups". [statusCode] is kept
+ * for diagnostics only; the message is what the user sees (it reaches them
+ * through the IOException branch of the backup screens' error mapper).
+ */
+class WebDavNonDavResponse(
+    message: String,
+    val statusCode: Int,
+) : IOException(message)
+
 /** One entry returned by a PROPFIND. */
 data class WebDavResourceInfo(
     val href: String,
@@ -201,7 +218,27 @@ class WebDavClient(
                 throw WebDavException("PROPFIND failed (HTTP $code)", code)
             }
             val xml = response.body?.string().orEmpty()
-            return parsePropfind(xml, url)
+            // [fix/p1-webdav-propf] `isSuccessful` is NOT permission to read
+            // the body as DAV. A captive portal, a reverse-proxy error page
+            // and an SSO login page all answer PROPFIND with 200 + HTML; the
+            // old code accepted that, the parser found zero <response>
+            // elements, and the caller rendered an EMPTY BACKUP LIST — the
+            // user was told "the server has no backups" by a server we never
+            // actually talked to, while testConnection() (same path, depth 0)
+            // reported success. The body is the authority: a genuine answer is
+            // an XML multistatus document (RFC 4918 §13), so its absence is a
+            // failure even on 200/207. Content-Type is NOT the judge — plenty
+            // of DAV servers omit it or send it wrong.
+            return parsePropfind(xml, url) ?: throw WebDavNonDavResponse(
+                if (code == 207) {
+                    "Server returned an unreadable WebDAV response (HTTP 207): " +
+                        "the body is not a multistatus document."
+                } else {
+                    "Server returned a non-WebDAV response (HTTP $code) — " +
+                        "possibly a Wi-Fi login portal or a proxy page."
+                },
+                code,
+            )
         }
     }
 
@@ -303,7 +340,15 @@ class WebDavClient(
     }
 
     /** Verify the server answers: PROPFIND depth 0 on the backup directory.
-     *  Throws [WebDavException] on any failure. */
+     *  Throws [WebDavException] on any failure.
+     *
+     *  [fix/p1-webdav-propf] A 2xx answer that is not a WebDAV document
+     *  (captive portal / login page / proxy error page) propagates as
+     *  [WebDavNonDavResponse] instead of being swallowed here: the connection
+     *  test must fail exactly when the backup list fails, otherwise the user
+     *  gets "connection OK" and "no backups on the server" from the same
+     *  broken link. Only a genuine 404 is tolerated (it means "the folder
+     *  does not exist yet", which upload creates). */
     fun testConnection() {
         try {
             propfind(depth = 0)
@@ -318,7 +363,38 @@ class WebDavClient(
 
     // ── PROPFIND response parsing ──────────────────────────────────────────
 
-    private fun parsePropfind(xml: String, requestUrl: HttpUrl): List<WebDavResourceInfo> {
+    /**
+     * [fix/p1-webdav-propf] Parse a PROPFIND body, returning `null` when it is
+     * not a WebDAV multistatus document at all — HTML login page, an error
+     * page echoing the word "multistatus" back at us, truncated garbage,
+     * unparsable XML. An EMPTY LIST keeps its old meaning: a genuine
+     * multistatus with zero `<response>` elements, i.e. a legitimately empty
+     * folder.
+     *
+     * Two independent signals, both required, no Content-Type:
+     *  1. the body mentions `multistatus` (case-insensitive) — an HTML page
+     *     from a portal does not, so the XML machinery never starts;
+     *  2. the DOCUMENT ROOT, as actually parsed, is `multistatus` (namespace
+     *     prefix ignored) — a page that merely contains the word fails here.
+     */
+    private fun parsePropfind(xml: String, requestUrl: HttpUrl): List<WebDavResourceInfo>? {
+        if (!xml.contains("multistatus", ignoreCase = true)) return null
+        return try {
+            parseMultistatus(xml, requestUrl)
+        } catch (e: Exception) {
+            // XmlPullParserException / IOException / anything else: "we could
+            // not read the answer" is not "the folder is empty". Swallowed
+            // here so the caller gets one type (null) from the seam.
+            null
+        }
+    }
+
+    /** Strict multistatus parse: `null` when the root element is not
+     *  `multistatus`, the resource list otherwise (possibly empty). */
+    private fun parseMultistatus(
+        xml: String,
+        requestUrl: HttpUrl,
+    ): List<WebDavResourceInfo>? {
         val factory = XmlPullParserFactory.newInstance()
         factory.isNamespaceAware = true
         val parser = factory.newPullParser()
@@ -335,12 +411,27 @@ class WebDavClient(
         var lastModified: Instant? = null
         var isCollection = false
         var lastTag: String? = null
+        var rootSeen = false
+        // Signal 3: how many elements are still open. XmlPullParser (kxml2)
+        // is forgiving — a body that ends mid-element simply reports
+        // END_DOCUMENT instead of failing — so "the document was complete"
+        // has to be counted, not assumed. A truncated multistatus must not be
+        // read as "the folder happens to be empty".
+        var openElements = 0
 
         var event = parser.eventType
         while (event != XmlPullParser.END_DOCUMENT) {
             when (event) {
                 XmlPullParser.START_TAG -> {
                     val name = parser.name
+                    openElements++
+                    if (!rootSeen) {
+                        rootSeen = true
+                        // Signal 2: a body whose ROOT is <html> (or anything
+                        // else) is not a DAV answer, no matter what words it
+                        // contains further down.
+                        if (!"multistatus".equals(name, ignoreCase = true)) return null
+                    }
                     when (name) {
                         "response" -> {
                             inResponse = true
@@ -371,6 +462,7 @@ class WebDavClient(
                 }
                 XmlPullParser.END_TAG -> {
                     val name = parser.name
+                    openElements--
                     if (name == "response" && inResponse) {
                         inResponse = false
                         val h = href
@@ -391,6 +483,13 @@ class WebDavClient(
             }
             event = parser.next()
         }
+        // Unbalanced elements at end of document = truncated body. Reading it
+        // as "zero responses ⇒ empty folder" is exactly the class of lie this
+        // seam exists to prevent.
+        if (openElements != 0) return null
+        // No element at all (plain text that happened to contain the word):
+        // not a document either.
+        if (!rootSeen) return null
         return resources
     }
 
