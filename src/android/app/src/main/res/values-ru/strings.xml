@@ -1220,6 +1220,7 @@
     <string name="browser_viewport_width">Ширина</string>
     <string name="browser_viewport_height">Высота</string>
     <string name="common_loading">Загрузка…</string>
+    <string name="settings_secret_unreadable">Не удалось прочитать сохранённое значение — ничего не сохранено. Закройте и снова откройте эту форму.</string>
     <string name="rootfs_reset_button">Сбросить</string>
     <string name="session_title_label">Название</string>
     <string name="backup_import_too_large">Файл резервной копии слишком велик (%1$d МБ, максимум %2$d МБ) — ничего не импортировано. Сократите окно истории чата (или отключите его), экспортируйте заново и импортируйте новый файл.</string>

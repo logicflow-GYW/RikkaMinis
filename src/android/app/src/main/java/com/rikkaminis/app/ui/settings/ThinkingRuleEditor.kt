@@ -391,13 +391,21 @@ private fun firstCustomTier(fmt: ThinkingWireFormat?): ThinkingLevel =
  * Live preview: resolve the rule against a sample body and show the JSON it would
  * produce. Only one tier can be rendered at a time, so [firstCustomTier] picks the
  * tier the rule actually configures.
+ *
+ * [meta-audit-1028 D4 F-01] The draft is evaluated through
+ * [ThinkingRuleResolver.applyDraftRules] — a READ path. This function used to publish
+ * the draft into the process-wide rule cache under a throwaway instance id and then
+ * remove it again, which was two cache mutations (and two `customRulesRevision` bumps)
+ * per call. This call sits in the dialog's composition body, so every frame the dialog
+ * was open bumped the parent list's Room reload key: the provider screen re-queried all
+ * of the instance's custom rules per frame, and a throw between publish and cleanup left
+ * a rule in the cache that no screen could ever remove.
  */
 private fun previewJson(rule: ThinkingRule): String {
     return try {
         val body = JSONObject()
-        // Isolate: inject just this one rule as the sole custom rule under a throwaway id.
+        // Isolate: the draft is the SOLE custom rule for this evaluation.
         val previewInstance = "__preview__"
-        ThinkingRuleResolver.setCustomRules(previewInstance, listOf(rule))
         val ctx = ThinkingResolveContext(
             modelId = (rule.scope as? ThinkingRule.Scope.ModelPattern)?.pattern?.replace("*", "x") ?: "sample-model",
             instanceId = previewInstance,
@@ -414,8 +422,7 @@ private fun previewJson(rule: ThinkingRule): String {
             isOfficialDeepSeek = false,
             offEffort = null,
         )
-        ThinkingRuleResolver.apply(body, ctx)
-        ThinkingRuleResolver.setCustomRules(previewInstance, emptyList())
+        ThinkingRuleResolver.applyDraftRules(body, ctx, listOf(rule))
         if (body.length() == 0) "{ }  (no thinking key sent)" else body.toString(2)
     } catch (e: Exception) {
         "(preview unavailable)"

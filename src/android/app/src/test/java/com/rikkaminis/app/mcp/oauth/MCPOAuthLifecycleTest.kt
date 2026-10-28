@@ -245,7 +245,13 @@ class MCPOAuthLifecycleTest {
     @Test
     fun `the form fields stay keyed on the entry so a reopen re-seeds them`() {
         // [U2] 17 keyed field states — the orphan fix must not disturb them.
-        assertEquals(17, Regex("remember\\(editServer\\)").findAll(readEditSheet()).count())
+        // [meta-audit-1028 D4 F-04] adds three more, all keyed on purpose:
+        //   oauthSecretLoad (tri-state PENDING/LOADED/UNREADABLE),
+        //   oauthSecretEdited (the user-typed-intent bit), oauthAuthorizedSeed.
+        // A reopen MUST re-seed them: a stale PENDING or a stale intent bit
+        // carried across entries is exactly the failure the secret load gate
+        // exists to prevent (see SettingsSecretWiringTest).
+        assertEquals(20, Regex("remember\\(editServer\\)").findAll(readEditSheet()).count())
     }
 
     @Test

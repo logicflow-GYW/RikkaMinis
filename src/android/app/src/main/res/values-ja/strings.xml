@@ -1090,6 +1090,7 @@
     <string name="browser_viewport_width">幅</string>
     <string name="browser_viewport_height">高さ</string>
     <string name="common_loading">読み込み中…</string>
+    <string name="settings_secret_unreadable">保存済みの値を読み取れませんでした。何も保存していません。このフォームを閉じて開き直してください。</string>
     <string name="rootfs_reset_button">リセット</string>
     <string name="session_title_label">タイトル</string>
     <string name="backup_import_too_large">バックアップファイルが大きすぎます（%1$d MB、上限 %2$d MB）。何もインポートされませんでした。「チャット履歴の期間」を短くするかオフにして再エクスポートし、新しいファイルをインポートしてください。</string>

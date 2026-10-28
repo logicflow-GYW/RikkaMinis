@@ -105,9 +105,17 @@ class BackupFetchBusyGateTest {
 
     @Test
     fun onlyTheFetchPathGainedAGateSite() {
+        // [meta-audit-1028 D4 F-02] 7 → 8: the restore-payload claim helper
+        // (`val claimRestorePayload`) is the single `operationBusy = true` site shared by
+        // every restore that builds a payload before it can call restoreWithSnapshot
+        // (WebDAV manual + auto, local snapshot, SAF import). One site, four entries — the
+        // alternative (claiming inside each handler) is what the count is protecting
+        // against. The contract behind the bump is pinned by RestorePayloadBusyGateTest
+        // (claim-before-payload per entry, preClaimed handoff, release on failure).
         assertEquals(
-            "exactly one new operationBusy = true site (the fetch path)",
-            7,
+            "exactly one new operationBusy = true site (the fetch path + the shared " +
+                "restore-payload claim helper)",
+            8,
             code.split("operationBusy = true").size - 1,
         )
         // 10 = the pre-[FIX-P1A] baseline. The 11th site is the restore path's
@@ -116,6 +124,12 @@ class BackupFetchBusyGateTest {
         // branch lowers it before returning). It is NOT a free release — ⑦
         // below pins that the branch really returns instead of falling through
         // to the import, so the count cannot be bumped without the contract.
+        // [meta-audit-1028 D4 F-02] Still 11, and that is the interesting number: the
+        // release side did not grow. `releaseRestorePayload` is a single site (+1) and it
+        // is paid for by the `.minisbak` Plain handoff (-1), which no longer drops the
+        // gate before restoreWithSnapshot re-acquires it (see [preClaimed]). A new release
+        // site appearing here means someone lowered the gate by hand instead of through
+        // the helper.
         assertEquals(
             "exactly one new operationBusy = false site (the fetch path's finally), " +
                 "plus the restore snapshot-abort branch (pinned by snapshotFailure_abortsBeforeImport)",
