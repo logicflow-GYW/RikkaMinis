@@ -80,12 +80,15 @@ class MountGuardScriptExecTest {
     private fun run(name: String, vararg args: String): Run {
         val script = wrapper(name)
         val cmd = mutableListOf(shell.absolutePath, script.absolutePath).apply { addAll(args) }
+        // stdout goes to a file rather than being discarded: `ProcessBuilder
+        // .Redirect.DISCARD` is a Java 9 API and does not exist on the Android
+        // platform classes these unit tests compile against. stderr is drained
+        // because that is where the guard's verdict is printed.
+        val sink = File(root, "stdout-$name.txt")
         val p = ProcessBuilder(cmd)
             .directory(root)
-            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            .redirectOutput(sink)
             .start()
-        // Drained before waitFor(): the guard's messages are tiny, so this
-        // cannot deadlock on a full pipe.
         val err = p.errorStream.bufferedReader().use { it.readText() }
         val exit = p.waitFor()
         return Run(exit, err)
