@@ -388,6 +388,128 @@ class WebDavClientTest {
         assertEquals("/dav/RikkaMinis_backups/rikkaminis-backup-1.json", server.takeRequest().path)
     }
 
+    // ── Non-WebDAV responses (captive portal / proxy login pages) ─────────
+    //
+    // [fix/p1-webdav-propf] World W5: the link comes up on a Wi-Fi portal, a
+    // proxy error page or an SSO login page, and the PROPFIND is answered
+    // with 200 + HTML. Before the fix `isSuccessful` waved it through, the
+    // parser found zero <response> nodes, and the UI said "the server has no
+    // backups" — while testConnection() (same code path, depth 0) said the
+    // connection was fine. Both statements were wrong and both sounded
+    // certain.
+
+    private fun enqueuePage(code: Int, body: String) {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(code)
+                .setHeader("Content-Type", "text/html; charset=utf-8")
+                .setBody(body)
+        )
+    }
+
+    private val loginPage = """<!DOCTYPE html>
+        |<html><head><title>Sign in</title></head>
+        |<body><form action="/login"><h1>Wi-Fi sign-in required</h1></form></body></html>"""
+        .trimMargin()
+
+    private fun expectNonDav(block: () -> Unit): WebDavNonDavResponse =
+        try {
+            block()
+            throw AssertionError(
+                "expected WebDavNonDavResponse — the call reported success for a non-WebDAV body",
+            )
+        } catch (e: WebDavNonDavResponse) {
+            e
+        }
+
+    @Test
+    fun `list throws on 200 plus an html login page instead of an empty list`() {
+        enqueuePage(200, loginPage)
+        val e = expectNonDav { dav().list() }
+        assertEquals(200, e.statusCode)
+        assertTrue("message should name the cause: ${e.message}", e.message!!.contains("non-WebDAV response"))
+        assertTrue("message should keep the code: ${e.message}", e.message!!.contains("HTTP 200"))
+        assertTrue("message should point at the likely cause: ${e.message}", e.message!!.contains("portal"))
+    }
+
+    @Test
+    fun `testConnection fails when the server answers with an html page`() {
+        enqueuePage(200, loginPage)
+        val e = expectNonDav { dav().testConnection() }
+        assertEquals(200, e.statusCode)
+    }
+
+    @Test
+    fun `an html page that merely mentions multistatus is still refused`() {
+        // Guards the second signal: the body DOES contain the word, so only
+        // "the parsed document root is <multistatus>" can reject it.
+        enqueuePage(
+            200,
+            "<!DOCTYPE html><html><body><p>PROPFIND multistatus rejected by proxy</p></body></html>",
+        )
+        val e = expectNonDav { dav().list() }
+        assertEquals(200, e.statusCode)
+    }
+
+    @Test
+    fun `a 207 whose body is not a multistatus document is refused with its own wording`() {
+        enqueuePage(207, "<html><body>multistatus expected</body></html>")
+        val e = expectNonDav { dav().list() }
+        assertEquals(207, e.statusCode)
+        assertTrue("message should say unreadable/207: ${e.message}", e.message!!.contains("HTTP 207"))
+    }
+
+    @Test
+    fun `truncated multistatus xml is refused rather than read as an empty folder`() {
+        // Root parses as multistatus, then the document ends mid-element: the
+        // parser blows up, which must not degrade to "no backups".
+        enqueuePage(
+            207,
+            """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/x""",
+        )
+        expectNonDav { dav().list() }
+    }
+
+    @Test
+    fun `list returns an empty list for a genuine multistatus with zero responses`() {
+        // The legitimate "empty folder" case must keep working — and must NOT
+        // throw. This is the arm the fix is most likely to break.
+        enqueue207("""<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:"/>""")
+        assertEquals(0, dav().list().size)
+    }
+
+    @Test
+    fun `list still returns the single file of a one-entry multistatus`() {
+        enqueue207(
+            """<?xml version="1.0" encoding="utf-8"?>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response>
+                <d:href>/dav/RikkaMinis_backups/rikkaminis-backup-20260101-0101.json</d:href>
+                <d:propstat>
+                  <d:prop>
+                    <d:getcontentlength>5</d:getcontentlength>
+                    <d:getlastmodified>Thu, 01 Jan 2026 01:01:00 GMT</d:getlastmodified>
+                  </d:prop>
+                  <d:status>HTTP/1.1 200 OK</d:status>
+                </d:propstat>
+              </d:response>
+            </d:multistatus>""".trimIndent(),
+        )
+        val items = dav().list()
+        assertEquals(1, items.size)
+        assertEquals("rikkaminis-backup-20260101-0101.json", items.first().displayName)
+        assertEquals(Instant.parse("2026-01-01T01:01:00Z"), items.first().lastModified)
+    }
+
+    @Test
+    fun `listBackupFiles propagates the non-WebDAV failure instead of an empty list`() {
+        // The exact user-visible symptom: the remote-backup screen showed an
+        // empty list. Its 404 tolerance must not swallow a login page.
+        enqueuePage(200, loginPage)
+        val e = expectNonDav { WebDavSync.listBackupFiles(config, client) }
+        assertEquals(200, e.statusCode)
+    }
+
     // ── Transport security (plain-HTTP refusal) ───────────────────────────
 
     private fun clientFor(url: String): WebDavClient =
