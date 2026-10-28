@@ -590,9 +590,14 @@ class ChatRepository(
         val out = ArrayList<MessageEntity>(minOf(limit, total))
         var unreadable = 0
         // Newest first, matching messagesLast's contract on the fast path.
+        //
+        // The single-row reads go through [loadPageSlice] rather than calling
+        // `dao.loadMessagesPage` directly: parts_json_funnel_check [R1] pins that
+        // shape to ONE call site (loadPageSlice), and a second raw call would be
+        // a third way to reach the DAO with no byte cap on the way in.
         for (offset in (total - 1) downTo start) {
             try {
-                out.addAll(dao.loadMessagesPage(sessionId, offset, 1))
+                out.addAll(loadPageSlice(sessionId, offset, 1))
             } catch (e: Exception) {
                 if (!isCursorWindowFailure(e)) throw e
                 unreadable += 1
