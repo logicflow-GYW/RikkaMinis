@@ -2780,6 +2780,25 @@ class BrowserUseManager(
     /** [r3-B09 F-02] No live renderer: destroyed, or renderer killed. */
     private fun webViewInert(): Boolean = destroyed || rendererDead
 
+    /**
+     * [r3-B09 F-02] The result for an action aimed at a tab that has no live
+     * WebView.
+     *
+     * Two causes, two different fixes on the caller's side, so they get two
+     * different messages: a torn-down tab means "pick another tab", a killed
+     * renderer means "this tab is done, open a new one". Both used to surface as
+     * a network-flavoured timeout.
+     */
+    private fun webViewGoneResult(): BrowserActionResult = BrowserActionResult.error(
+        if (destroyed) {
+            "This tab's WebView was already destroyed (the tab was closed or evicted) — " +
+                "pick another tab or open a new one."
+        } else {
+            "This tab's WebView renderer was killed by the system; this tab can no longer " +
+                "load pages — open a new tab."
+        },
+    )
+
     // ── [feat/browser-console-network-upload] diagnostics + file upload ──────
 
     /**

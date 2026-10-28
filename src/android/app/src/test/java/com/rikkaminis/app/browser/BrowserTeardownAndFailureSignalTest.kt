@@ -117,6 +117,18 @@ class BrowserTeardownAndFailureSignalTest {
                 "and reading the live page then awaits a callback that cannot arrive:\n$body",
             body.contains("details = if (webViewInert())"),
         )
+        // The short-circuit names a helper; pin the definition too, so a rename or
+        // a dropped body cannot leave the call dangling (that is a compile error,
+        // and CI is the only compiler this wave has).
+        val gone = memberSlice(readRepoFile(ManagerPath), "private fun webViewGoneResult(")
+        assertTrue(
+            "webViewGoneResult must be defined", gone.isNotEmpty(),
+        )
+        assertTrue(
+            "the result must distinguish 'tab torn down' from 'renderer killed' — the " +
+                "caller's fix differs:\n$gone",
+            gone.contains("if (destroyed)") && gone.contains("renderer was killed"),
+        )
     }
 
     @Test

@@ -246,8 +246,9 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
          * Reads that only meant "don't hand this tab to another caller yet"
          * (acquireTab's fan-out, trim/evict victim filters) use [isHeld];
          * [inUse] stays the executing signal so the published busy flag means
-         * what its name says. Excluded from equals/hashCode/copy for the same
-         * reason as [inUseGraceJob]: transient scheduling state, not identity.
+         * what its name says. A constructor `var` like [inUse] — mutable state,
+         * not identity; being part of generated equality only means a hold
+         * arming/releasing publishes through the tab list, which is the point.
          */
         var graceHeld: Boolean = false,
     ) {
