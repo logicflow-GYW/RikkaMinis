@@ -507,7 +507,14 @@ object BrowserUseJS {
     // -- Fetch (async IIFE) --
 
     fun fetch(url: String): String {
-        val escaped = url.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+        // [r3-B09 F-11] `\r` is a line terminator inside a JS string literal
+        // just like `\n` — a URL carrying one made the whole async IIFE a
+        // SyntaxError, which `awaitPromiseJs` surfaced as "SyntaxError:
+        // Unexpected token" instead of fetching anything. Escaped here with the
+        // rest; the literal `\r\n` that ends some header-injected URLs is the
+        // realistic carrier.
+        val escaped = url.replace("\\", "\\\\").replace("\"", "\\\"")
+            .replace("\n", "\\n").replace("\r", "\\r")
         return """
             (async function() {
                 try {
