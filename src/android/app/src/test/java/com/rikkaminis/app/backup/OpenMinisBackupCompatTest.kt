@@ -1067,4 +1067,186 @@ class OpenMinisBackupCompatTest {
             ConfigBackup.conversionNotes(notes).single().startsWith("conversion: "),
         )
     }
+
+    // ------------------------------------------------------------------
+    // [FIX-1028B / W8 第三态] 「读到了但形状不对」必须留一条 note
+    //
+    // 这一族的共同缺陷形状：`optJSONArray(k) == null` 同时表示「对端没有这个
+    // section」（正常的旧包）与「对端有但类型换了」（上游换代），转换层一律按
+    // 前者静默处理 ⇒ 计数与界面都正常，用户只看到一个更短的恢复。下面每条
+    // 用例都钉住两件事：**第三态要留 note**，且**正常形态逐字节不变**（对照臂
+    // 见 `a whole package adds neither an unparsable count nor conversion notes`）。
+    // ------------------------------------------------------------------
+
+    private fun notesOf(doc: JSONObject): List<String> {
+        val arr = doc.optJSONArray("conversionNotes") ?: return emptyList()
+        return (0 until arr.length()).map { arr.optString(it) }
+    }
+
+    @Test
+    fun `parts serialized as a JSON string is recovered, not emptied`() {
+        // A-7：上游把 parts 写成一个 JSON **字符串**。修复前 optJSONArray 得 null
+        // ⇒ partsJson "[]"：会话在、消息条数对、每条点进去是空的，且无标记。
+        val parts = JSONArray().put(JSONObject().put("type", "text").put("value", "周报"))
+        val line = JSONObject()
+            .put("t", "MessageV2")
+            .put("v", 1)
+            .put(
+                "d",
+                JSONObject()
+                    .put("id", "msg-1")
+                    .put("sessionId", "sess-1")
+                    .put("role", "user")
+                    .put("parts", parts.toString())
+                    .put("createdAt", "2026-09-30T08:00:05Z")
+                    .put("sortOrder", 0),
+            )
+            .toString()
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/messages.jsonl" to textEntry(line + "\n")
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        val msg = doc.getJSONArray("chatMessages").getJSONObject(0)
+        // 内容按"同一份数据换了个编码"还原，而不是丢成空数组。
+        assertEquals(parts.toString(), msg.getString("partsJson"))
+        assertTrue(notesOf(doc).any { it.contains("parts") && it.contains("JSON 字符串") })
+    }
+
+    @Test
+    fun `parts of a wrong type is emptied but leaves a locatable note`() {
+        val line = JSONObject()
+            .put("t", "MessageV2")
+            .put("v", 1)
+            .put(
+                "d",
+                JSONObject()
+                    .put("id", "msg-1")
+                    .put("sessionId", "sess-1")
+                    .put("role", "user")
+                    .put("parts", JSONObject().put("type", "text"))
+                    .put("createdAt", "2026-09-30T08:00:05Z"),
+            )
+            .toString()
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/messages.jsonl" to textEntry(line + "\n")
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        assertEquals("[]", doc.getJSONArray("chatMessages").getJSONObject(0).getString("partsJson"))
+        val note = notesOf(doc).single { it.contains("parts") }
+        // 文案必须能定位：section + 键 + 期望类型 + 实际类型。
+        assertTrue(note.contains("parts"))
+        assertTrue(note.contains("期望 array"))
+        assertTrue(note.contains("实际 object"))
+    }
+
+    @Test
+    fun `missing sortOrder is omitted so the importer index fallback still applies`() {
+        // A-20：修复前无条件写 optInt("sortOrder", 0)，于是导入端的
+        // `optInt("sortOrder", i)` 下标兜底永远走不到 —— 整批消息/规则都是 0。
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/provider_config.json" to jsonEntry(providerConfig())
+        members += "data/thinking_rules.jsonl" to textEntry(
+            thinkingRulesLine().replace("\"sortOrder\":0,", "") + "\n",
+        )
+        members += "data/messages.jsonl" to textEntry(
+            messageLine("msg-1").replace("\"sortOrder\":0,", "") + "\n",
+        )
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        val msg = doc.getJSONArray("chatMessages").getJSONObject(0)
+        assertFalse("缺键不该被写成 0", msg.has("sortOrder"))
+        val rule = doc.getJSONArray("thinkingRules").getJSONObject(0)
+            .getJSONArray("rules").getJSONObject(0)
+        assertFalse(rule.has("sortOrder"))
+        assertEquals(2, notesOf(doc).count { it.contains("sortOrder") })
+    }
+
+    @Test
+    fun `a section whose container changed type is noted without killing the rest`() {
+        // A-1：instances 从数组变成对象 ⇒ 修复前 provider 全丢、零提示。
+        val pc = providerConfig()
+        val inst = pc.getJSONArray("instances").getJSONObject(0)
+        pc.put("instances", JSONObject().put("inst-1", inst))
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/provider_config.json" to jsonEntry(pc)
+        members += "data/env_vars.json" to textEntry(envVarsMeta().toString())
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        assertEquals(0, doc.getJSONArray("providers").length())
+        assertTrue(
+            notesOf(doc).any {
+                it.contains("instances") && it.contains("期望 array") && it.contains("实际 object")
+            },
+        )
+        // 第三态不许污染同一文件里的其它 section。
+        assertEquals(1, doc.getJSONArray("envVars").length())
+    }
+
+    @Test
+    fun `modelGroups of a wrong type is noted and providers survive`() {
+        // A-9：组容器换代 ⇒ 修复前组全丢、provider 却还在，界面上像"用户没建组"。
+        val pc = providerConfig()
+        val g = pc.getJSONArray("modelGroups").getJSONObject(0)
+        pc.put("modelGroups", JSONObject().put("g1", g))
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/provider_config.json" to jsonEntry(pc)
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        assertEquals(0, doc.getJSONArray("groups").length())
+        assertEquals(1, doc.getJSONArray("providers").length())
+        assertTrue(notesOf(doc).any { it.contains("modelGroups") && it.contains("期望 array") })
+    }
+
+    @Test
+    fun `env_vars wrapper entries of a wrong type is noted`() {
+        // A-11：{"entries": {...}} 与 {"entries": []} 在修复前是同一个结果（0 条）。
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/env_vars.json" to textEntry(
+            JSONObject().put("entries", JSONObject().put("ev-1", JSONObject())).toString(),
+        )
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        assertEquals(0, doc.getJSONArray("envVars").length())
+        assertTrue(notesOf(doc).any { it.contains("entries") && it.contains("期望 array") })
+    }
+
+    @Test
+    fun `sharded files index is read in full`() {
+        // A-13：files.index 也是 JSONL 流。修复前只 readMember 第一片，第 2 片起的
+        // 技能文件在重组时"不存在"（技能少一半，无声）。
+        val mdA = textEntry("---\nname: Skill A\n---\n")
+        val mdB = textEntry("---\nname: Skill B\n---\n")
+        val shaA = sha256Hex(mdA)
+        val shaB = sha256Hex(mdB)
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "files.index.jsonl" to textEntry(
+            JSONObject().put("path", "skills/skill-a/SKILL.md").put("sha256", shaA).toString() + "\n",
+        )
+        members += "files.index-0002.jsonl" to textEntry(
+            JSONObject().put("path", "skills/skill-b/SKILL.md").put("sha256", shaB).toString() + "\n",
+        )
+        members += "blobs/${shaA.take(2)}/$shaA" to mdA
+        members += "blobs/${shaB.take(2)}/$shaB" to mdB
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        val ids = (0 until doc.getJSONArray("skills").length())
+            .map { doc.getJSONArray("skills").getJSONObject(it).getString("id") }
+        assertEquals(listOf("skill-a", "skill-b"), ids)
+        assertFalse(doc.has("conversionNotes"))
+    }
+
+    @Test
+    fun `a record whose payload is not an object is noted`() {
+        // 第三条通道：记录存在、`d` 不是对象。修复前 `?: continue` 把它当成
+        // "没有这条记录"，消息直接消失。
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/messages.jsonl" to textEntry(
+            JSONObject().put("t", "MessageV2").put("v", 1).put("d", "not-an-object").toString() + "\n" +
+                messageLine("msg-2") + "\n",
+        )
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        assertEquals(1, doc.getJSONArray("chatMessages").length())
+        assertTrue(notesOf(doc).any { it.contains("MessageV2") && it.contains("期望 object") })
+    }
 }

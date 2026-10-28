@@ -5,6 +5,7 @@ import android.content.ContextWrapper
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -139,35 +140,84 @@ class SoulStoreOverwriteBackupTest {
         assertEquals(listOf("body-2", "body-3", "body-4"), bodies)
     }
 
-    // ── 5. unreadable target → save still succeeds, backup reports it ────
+    // ── 5. unreadable bytes → moved aside, never lost ────────────────────
 
     @Test
-    fun `an unreadable target never blocks the save`() {
+    fun `an unreadable target is moved aside verbatim instead of being overwritten blind`() {
         val target = File(tempDir, "SOUL.md")
-        target.writeText("---\nname: \"X\"\n---\n\nold body")
+        // A body that a foreign editor / chmod would leave behind. The bytes
+        // must survive: this is the world where the old code lost the persona.
+        val oldText = "---\nname: \"X\"\nstyle: \"\"\nlang: \"auto\"\n---\n\n我的正文 with CRLF\r\n"
+        target.writeText(oldText)
 
         // The runner is root, so chmod 000 would still read. A throwing reader
         // is the honest simulation of EACCES / EIO / a racing external editor.
         val throwingReader: (File) -> ByteArray? = { throw IOException("simulated EACCES") }
 
-        val outcome = SoulStore.backupBeforeOverwrite(target, "anything", { 1L }, throwingReader)
-        assertEquals(SoulStore.BackupOutcome.Unreadable, outcome)
+        val outcome = SoulStore.backupBeforeOverwrite(target, "anything", { 1_700_000_000_777L }, throwingReader)
+        assertEquals(SoulStore.BackupOutcome.Renamed, outcome)
 
-        // ... and the full write path proceeds: no exception, new content lands,
-        // nothing was "backed up" because nothing could be read.
-        SoulStore.saveTo(target, soulFile("new body"), { 2L }, throwingReader)
-        assertTrue(target.readText().contains("new body"))
-        assertEquals(0, backupsIn(tempDir).size)
+        // Rename, not copy: nothing was ever read, so the bytes landed bit for
+        // bit under the documented sibling name, and the path is free again.
+        assertFalse("the path must be free for the new write", target.exists())
+        val recovered = File(tempDir, "SOUL.md.recovered-1700000000777")
+        assertTrue("the old file must be moved to the documented name: ${recovered.name}", recovered.isFile)
+        assertEquals("the moved bytes must be untouched", oldText, recovered.readText())
     }
 
     @Test
-    fun `a target that is not a regular file reports unreadable instead of throwing`() {
+    fun `the save still lands after the unreadable file was moved aside`() {
+        val target = File(tempDir, "SOUL.md")
+        target.writeText("---\nname: \"X\"\n---\n\nold body")
+        val throwingReader: (File) -> ByteArray? = { throw IOException("simulated EIO") }
+
+        SoulStore.saveTo(target, soulFile("new body"), { 2L }, throwingReader)
+
+        assertTrue(target.readText().contains("new body"))
+        assertEquals("exactly one moved-aside copy", 1, backupsIn(tempDir).size)
+        assertEquals(
+            "and it is the pre-overwrite content, verbatim",
+            "---\nname: \"X\"\n---\n\nold body",
+            backupsIn(tempDir)[0].readText(),
+        )
+    }
+
+    @Test
+    fun `a rename that cannot happen is reported instead of swallowed`() {
+        val target = File(tempDir, "SOUL.md")
+        target.writeText("---\nname: \"X\"\n---\n\nold body")
+
+        // Make the rename itself impossible: the read fails *and* the parent
+        // directory is gone by the time we try to move the file into it. (A
+        // read-only directory would be the production shape, but the test
+        // runner is root, so chmod proves nothing here.)
+        val dir = tempDir
+        val readerThatRemovesTheDir: (File) -> ByteArray? = {
+            dir.deleteRecursively()
+            throw IOException("simulated EACCES")
+        }
+
+        val outcome = SoulStore.backupBeforeOverwrite(target, "anything", { 3L }, readerThatRemovesTheDir)
+
+        assertEquals(
+            "a failed rename-aside must be a distinct, loud outcome",
+            SoulStore.BackupOutcome.RenameFailed,
+            outcome,
+        )
+        assertFalse(dir.exists())
+    }
+
+    @Test
+    fun `a target that is not a regular file is reported and left alone`() {
         val target = File(tempDir, "SOUL.md")
         assertTrue(target.mkdirs())
 
         val outcome = SoulStore.backupBeforeOverwrite(target, "anything")
 
-        assertEquals(SoulStore.BackupOutcome.Unreadable, outcome)
+        // Deliberately NOT renamed aside: a directory is not persona bytes, and
+        // a non-file inside the recovered-* namespace would never be pruned.
+        assertEquals(SoulStore.BackupOutcome.NotARegularFile, outcome)
+        assertTrue("the directory itself must be untouched", target.isDirectory)
         assertEquals(0, backupsIn(tempDir).size)
     }
 
@@ -223,7 +273,22 @@ class SoulStoreOverwriteBackupTest {
     @Test
     fun `a concurrent reader never sees a truncated SOUL md`() {
         val target = File(tempDir, "SOUL.md")
-        val allowed = LinkedHashSet<String>()
+        // [1028B-2 / backlog L9195] CopyOnWriteArraySet, NOT LinkedHashSet.
+        //
+        // This set is written by the saving thread while the reader thread calls
+        // `contains` on it. A JDK HashSet / LinkedHashSet is not safe for that:
+        // a `contains` that races a resize can miss a key that is definitely in
+        // the set. In a local experiment 5 of 500 trials returned `false` for an
+        // already-present key, and that is the precise shape of the one CI
+        // failure this test produced — "reader saw 65598 bytes that are not any
+        // complete version (old=65598)": same length, present key, reported
+        // absent. The atomically-written file was fine; the container lied.
+        //
+        // Copy-on-write gives every read a stable snapshot (and keeps insertion
+        // order, so the diagnostic below still names the first version). The
+        // behaviour being asserted is untouched — a reader must never observe a
+        // file that is not one of the complete versions.
+        val allowed = CopyOnWriteArraySet<String>()
         val filler = "x".repeat(64 * 1024)
 
         val first = soulFile("${filler}\nversion-0")

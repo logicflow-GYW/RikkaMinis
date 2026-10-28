@@ -1753,30 +1753,28 @@ object ConfigBackup {
         }
 
         // -- Stage 6: memory files (GLOBAL.md + daily logs) --
+        // [FIX-1028B / L9033] `saveFile` is a whole-file overwrite and the
+        // memory dir is the one thing on this device that is appended to on
+        // every agent turn, so restoring an older backup used to truncate the
+        // daily logs / GLOBAL.md / rollup back to the export moment — no race
+        // required, and the dialog reported it as a clean restore. The per-file
+        // guard (newer local copy wins, undecidable ⇒ keep) lives in
+        // [restoreMemoryFiles] / [decideMemoryRestore] so it is pinned by
+        // MemoryRestoreGuardTest; `createdAt` was previously write-only.
         val memArr = root.optJSONArray("memoryFiles")
         if (memArr != null && memoryRepo != null) {
-            for (i in 0 until memArr.length()) {
-                val m = memArr.optJSONObject(i) ?: continue
-                val name = m.optString("name", "").trim()
-                if (name.isEmpty()) {
-                    skipped.add("memory file #${i + 1}: missing name")
-                    continue
-                }
-                // Defence in depth: these names become file names under the
-                // memory dir, so anything with a path separator is rejected
-                // outright rather than trusted from the payload.
-                if (name.contains('/') || name.contains('\\') || name.contains("..")) {
-                    skipped.add("memory file \"$name\": unsafe name, skipped")
-                    continue
-                }
-                val content = m.optString("content", "")
-                try {
-                    memoryRepo.saveFile(name, content)
-                    memoryFilesImported++
-                } catch (t: Throwable) {
-                    skipped.add("memory file \"$name\": ${t.message ?: "write failed"}")
-                }
-            }
+            // The memory dir comes from the repository itself rather than being
+            // re-derived here: one source of truth for "where memory lives", so
+            // this guard can never inspect a directory that saveFile does not
+            // write to.
+            val memoryDir = memoryRepo.memoryDirectory()
+            memoryFilesImported = restoreMemoryFiles(
+                section = memArr,
+                backupCreatedAt = root.optLong("createdAt", 0L),
+                localFile = { name -> File(memoryDir, name) },
+                saveFile = { name, content -> memoryRepo.saveFile(name, content) },
+                skipped = skipped,
+            )
         } else if (memArr != null && memArr.length() > 0 && memoryRepo == null) {
             skipped.add("${memArr.length()} memory file(s): not restorable here")
         }
