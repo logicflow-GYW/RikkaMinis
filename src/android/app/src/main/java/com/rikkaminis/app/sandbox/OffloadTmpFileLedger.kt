@@ -152,6 +152,14 @@ internal class OffloadTmpFileLedger(
 }
 
 /**
+ * The default [writeResponseFile] write: one `File.writeText` call in a named
+ * function, so the read-only-mount gate can see and attribute the site.
+ */
+internal fun writeFileText(file: File, text: String) {
+    file.writeText(text)
+}
+
+/**
  * [meta1028-B04 F-11] Write ONE offload response and account for it — the
  * whole reason this is a function and not two lines at the call site is that
  * the failure path has to delete the file it created.
@@ -164,7 +172,12 @@ internal class OffloadTmpFileLedger(
  * the ledger could not cover the gap because it never heard about a file
  * whose write failed.
  *
- * [writeFn] is injectable so a failing write is testable off-device.
+ * [writeFn] is injectable so a failing write is testable off-device. The
+ * default is `writeFileText` rather than an inline `{ f, s -> f.writeText(s) }`
+ * so the write call lives in a named function body: the read-only-mount gate's
+ * parser only audits writes it can attribute to a parsed declaration, and a
+ * write inside a parameter-list lambda is outside every body — it trips that
+ * gate's fail-closed "belongs to no parsed function" rule.
  *
  * Returns `Result.success(byte count)` or `Result.failure(cause)`; the caller
  * turns a failure into INTERNAL_DELIVERY + exit 1.
@@ -173,7 +186,7 @@ internal fun writeResponseFile(
     file: File,
     text: String,
     ledger: OffloadTmpFileLedger,
-    writeFn: (File, String) -> Unit = { f, s -> f.writeText(s) },
+    writeFn: (File, String) -> Unit = ::writeFileText,
 ): Result<Int> {
     ledger.register(file)
     return try {

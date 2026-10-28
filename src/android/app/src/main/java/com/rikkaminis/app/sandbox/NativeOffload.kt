@@ -467,7 +467,10 @@ internal fun deliverResponseFile(
     pid: Int,
     seq: Long,
     ledger: OffloadTmpFileLedger,
-    writeFn: (File, String) -> Unit = { f, s -> f.writeText(s) },
+    // Named, not an inline lambda: see `writeFileText` — a write inside a
+    // parameter-list default is outside every parsed function body and trips
+    // the read-only-mount gate's fail-closed rule.
+    writeFn: (File, String) -> Unit = ::writeFileText,
 ): Result<DeliveredResponse> {
     tmpDir.mkdirs()
     val host = File(tmpDir, "$OFFLOAD_TMP_PREFIX$pid-$seq")
