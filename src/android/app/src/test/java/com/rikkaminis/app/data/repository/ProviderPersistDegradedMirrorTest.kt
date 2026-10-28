@@ -24,6 +24,11 @@ import org.junit.Test
  *     while its NINE sibling functions all wrapped the DAO call
  *     (runCatching + loud log — see the [audit-0909 T4-H1] hunks).
  *
+ * [fix/meta1028-d1 F-01] The hash is now taken from what prefs actually holds
+ * after the commit ([decideSyncHash]) rather than from the string we hoped to
+ * write — see [ProviderMirrorHashTest] for the arbitration that serves. The
+ * persist arms below only reproduce the log branches the assertions read.
+ *
  * [ProviderRepository] itself needs an Android Context (not
  * JVM-constructible), so — same as [ProviderImportRoundTripTest] — this
  * test pins the contract by faithfully replicating the production write
@@ -84,34 +89,36 @@ class ProviderPersistDegradedMirrorTest {
     }
 
     // ------------------------------------------------------------------
-    // Faithful replica of persistToDbAndMirror's write sequence
-    // ([fix/dv22-a1 §1042-A-01] hunks included): DB write first, wrapped
-    // in runCatching; mirror write ALWAYS after it, unconditional.
+    // Replica of persistToDbAndMirror's write sequence. [fix/meta1028-d1 F-01]
+    // changes only ONE thing in it: the hash is now taken from what prefs holds
+    // AFTER the commit ([decideSyncHash]) instead of from the string we hoped to
+    // write. Only the LOG branches are reproduced below, because those are what
+    // the arms assert — see ProviderMirrorHashTest for the arbitration itself.
     // ------------------------------------------------------------------
     private fun persistReplica(dao: FakeDao, prefs: FakePrefs, mirrorStr: String): Boolean {
-        // [fix/dv22-a1 §1042-A-01] wrap: DB failure must not skip the mirror.
-        val dbWrite = runCatching {
-            dao.syncAllIncremental()
-        }
-        dbWrite.onFailure { e ->
-            ProbeLog.e(
-                "[ProviderStore] DB incremental sync failed (provider.db unavailable?); " +
-                    "writing JSON mirror only — DB stale until next successful save: ${e.message}",
-            )
-        }
-        // commit() not apply(): mirror must land with the write (see the
-        // production comment); the value returned is the "did it land" bit.
         val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
         if (!mirrorWritten) {
             ProbeLog.w(
-                "[ProviderStore] mirror commit() returned false — " +
-                    if (dbWrite.isSuccess) {
-                        "DB updated but JSON write rejected (disk full? prefs corruption?); " +
-                            "DB remains authoritative"
-                    } else {
-                        "DB sync FAILED as well (see the incremental-sync error above); " +
-                            "neither store took this write — in-memory state only"
-                    },
+                "[ProviderStore] prefs mirror commit() returned false — the DB rows will keep " +
+                    "the previous json_sync_hash so the two stores stay in step; this save is " +
+                    "lost in BOTH stores (disk full? prefs corruption?)",
+            )
+        }
+        val dbWrite = try {
+            dao.syncAllIncremental()
+            true
+        } catch (e: Exception) {
+            ProbeLog.e(
+                "[ProviderStore] DB incremental sync failed (provider.db unavailable?); " +
+                    "the JSON mirror already carries this write — DB stale until the next " +
+                    "launch re-imports it: ${e.message}",
+            )
+            false
+        }
+        if (!dbWrite && !mirrorWritten) {
+            ProbeLog.w(
+                "[ProviderStore] DB sync FAILED as well (see the incremental-sync error above) " +
+                    "— neither store took this write, in-memory state only",
             )
         }
         return mirrorWritten
@@ -215,7 +222,7 @@ class ProviderPersistDegradedMirrorTest {
         )
         assertTrue(
             "failure log must name the degraded mode",
-            ProbeLog.errors[0].contains("writing JSON mirror only"),
+            ProbeLog.errors[0].contains("the JSON mirror already carries this write"),
         )
     }
 
@@ -276,8 +283,8 @@ class ProviderPersistDegradedMirrorTest {
         assertFalse(mirrorWritten)
         assertEquals(1, ProbeLog.warnings.size)
         assertTrue(
-            "DB-ok + mirror-rejected must keep the original reassurance",
-            ProbeLog.warnings[0].contains("DB remains authoritative"),
+            "the DB rows keep the previous hash so the stores stay in step",
+            ProbeLog.warnings[0].contains("the two stores stay in step"),
         )
     }
 

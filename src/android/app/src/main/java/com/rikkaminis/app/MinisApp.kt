@@ -18,6 +18,7 @@ import com.rikkaminis.app.browser.BrowserTabPool
 import com.rikkaminis.app.data.db.AppDatabase
 import com.rikkaminis.app.data.db.DatabaseVersionGuard
 import com.rikkaminis.app.data.repository.BackgroundSettingsRepository
+import com.rikkaminis.app.data.repository.badgeReconcileInput
 import com.rikkaminis.app.data.repository.ChatRepository
 import com.rikkaminis.app.ui.chat.KatexWebViewPool
 import com.rikkaminis.app.ui.chat.clearMarkdownParseCachesForMemoryPressure
@@ -814,12 +815,25 @@ class MinisApp : Application(), ImageLoaderFactory {
             // the default handler, so an unguarded badge-store failure here
             // crashed the app at cold start.
             runCatching {
-                val interrupted = runCatching { chatRepository.interruptedSessionIds() }.getOrElse { emptySet() }
-                // Exclude any session that is already actively streaming (defensive;
-                // at cold start this is empty, but keeps the rule "active ⇒ never
-                // paused" uniform with the foreground reconcile path).
-                val active = SessionActivityTracker.activeSessions.value
-                com.rikkaminis.app.service.SessionBadgeStore.reconcileInterruptedSessions(interrupted - active)
+                // [fix/meta1028-d1 F-03] `null` = the tail query failed. Skip the
+                // reconcile and keep the persisted badges: reconciling to an
+                // empty set (the pre-fix behaviour of the two swallowing
+                // runCatching layers) dropped EVERY PAUSED badge and persisted
+                // the pruned map. badgeReconcileInput also applies the
+                // "active ⇒ never paused" rule to the streaming set (empty at
+                // cold start, but shared with the foreground path).
+                val interrupted = badgeReconcileInput(
+                    chatRepository.interruptedSessionIds(),
+                    SessionActivityTracker.activeSessions.value,
+                )
+                if (interrupted == null) {
+                    android.util.Log.w(
+                        "MinisApp",
+                        "cold-start badge reconcile skipped: interrupted-tail query failed",
+                    )
+                } else {
+                    com.rikkaminis.app.service.SessionBadgeStore.reconcileInterruptedSessions(interrupted)
+                }
             }.onFailure {
                 android.util.Log.w("MinisApp", "cold-start badge reconcile failed: ${it.message}")
             }
@@ -992,9 +1006,20 @@ class MinisApp : Application(), ImageLoaderFactory {
                         // foreground transition (badge store IO on a corrupt
                         // prefs file, etc.). A missed badge must never be fatal.
                         runCatching {
-                            val interrupted = runCatching { chatRepository.interruptedSessionIds() }.getOrElse { emptySet() }
-                            val active = SessionActivityTracker.activeSessions.value
-                            com.rikkaminis.app.service.SessionBadgeStore.reconcileInterruptedSessions(interrupted - active)
+                            // [fix/meta1028-d1 F-03] Same contract as the
+                            // cold-start path: null = unknown, keep the badges.
+                            val interrupted = badgeReconcileInput(
+                                chatRepository.interruptedSessionIds(),
+                                SessionActivityTracker.activeSessions.value,
+                            )
+                            if (interrupted == null) {
+                                android.util.Log.w(
+                                    "MinisApp",
+                                    "foreground badge reconcile skipped: interrupted-tail query failed",
+                                )
+                            } else {
+                                com.rikkaminis.app.service.SessionBadgeStore.reconcileInterruptedSessions(interrupted)
+                            }
                         }.onFailure {
                             android.util.Log.w("MinisApp", "foreground badge reconcile failed: ${it.message}")
                         }

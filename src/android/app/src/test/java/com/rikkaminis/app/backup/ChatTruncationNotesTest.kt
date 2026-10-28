@@ -134,4 +134,40 @@ class ChatTruncationNotesTest {
         assertEquals(emptyList<String>(), ConfigBackup.conversionNotes(null))
         assertEquals(emptyList<String>(), ConfigBackup.conversionNotes(JSONArray()))
     }
+
+    // ------------------------------------------------------------------
+    // [fix/meta1028-d1 F-04] 第四种不完整：行在，但本机读不出来
+    // ------------------------------------------------------------------
+
+    @Test
+    fun unreadableMessagesAreReportedAsAReadFailureNotATrim() {
+        val notes = ConfigBackup.chatTruncationNotes(tr("messagesUnreadable" to 5))
+
+        assertEquals(1, notes.size)
+        val note = notes.single()
+        assertTrue("must name the count", note.contains("5 message(s) could not be read"))
+        // 与「预算裁剪」必须分开：裁剪是导出方主动取舍（源设备有全量、可再导一次
+        // 更大的窗口），读失败是本机 DB 的行读不出来（同一份窗口再导也还是读不出）。
+        assertTrue("a read failure is not a budget trim", !note.contains("budget-trimmed"))
+        assertTrue(!note.contains("data shard(s) missing"))
+    }
+
+    @Test
+    fun zeroUnreadableStaysSilent() {
+        assertEquals(
+            emptyList<String>(),
+            ConfigBackup.chatTruncationNotes(tr("messagesUnreadable" to 0)),
+        )
+    }
+
+    @Test
+    fun aTrimAndAReadFailureAreBothReported() {
+        val notes = ConfigBackup.chatTruncationNotes(
+            tr("messagesDropped" to 4, "messagesUnreadable" to 2),
+        )
+
+        assertEquals(2, notes.size)
+        assertTrue(notes[0].contains("budget-trimmed at export"))
+        assertTrue(notes[1].contains("2 message(s) could not be read"))
+    }
 }

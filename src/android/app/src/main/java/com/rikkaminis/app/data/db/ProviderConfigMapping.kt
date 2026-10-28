@@ -233,6 +233,20 @@ data class ProviderConfigLoad(
      * build that CAN read them rotates them back into [config].
      */
     val quarantinedEntryRowIds: Set<String> = emptySet(),
+    /**
+     * [fix/meta1028-d1 F-02] Entry ids that ARE in [config] (the model stays
+     * visible and usable with DEFAULT overrides) but whose `overrides_json`
+     * column failed to decode. The persist path substitutes the stored blob —
+     * see [restoreFrozenBlobs].
+     */
+    val unreadableOverridesEntryIds: Set<String> = emptySet(),
+    /**
+     * [fix/meta1028-d1 F-02] Group ids whose `member_entry_ids_json` failed to
+     * decode; their in-memory member list is a placeholder (empty). Substituted
+     * at persist time, and excluded from [ProviderRepository.removeInstance]'s
+     * "became empty" group cascade so a decode failure can never delete a group.
+     */
+    val unreadableMemberGroupIds: Set<String> = emptySet(),
 )
 
 fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig =
@@ -296,6 +310,9 @@ fun ProviderConfigSnapshot.toProviderConfigWithDiagnostics(jsonForBlobs: Json): 
     }.toMutableList()
 
     val quarantinedEntryRowIds = LinkedHashSet<String>()
+    // [fix/meta1028-d1 F-02] Rows that STAY in the config but whose stored blob
+    // cannot be re-derived from what we decoded — see ProviderConfigLoad.
+    val unreadableOverridesEntryIds = LinkedHashSet<String>()
     val entries = this.entries.mapNotNull { row ->
         // [audit-0917] Guard the two JSON blob decodes the same way the enum
         // parses above are guarded. A malformed baseModelJson/overridesJson
@@ -320,12 +337,22 @@ fun ProviderConfigSnapshot.toProviderConfigWithDiagnostics(jsonForBlobs: Json): 
             quarantinedEntryRowIds.add(row.id)
             return@mapNotNull null
         }
-        val overrides = row.overridesJson?.let {
-            runCatching { jsonForBlobs.decodeFromString(ModelOverrides.serializer(), it) }
+        val overrides = row.overridesJson?.let { blob ->
+            runCatching { jsonForBlobs.decodeFromString(ModelOverrides.serializer(), blob) }
                 .onFailure { e ->
+                    // [fix/meta1028-d1 F-02] An UNDECODABLE blob is not the same
+                    // thing as a MISSING one (overridesJson == null, the common
+                    // and legitimate "model uses defaults" case). Falling back to
+                    // ModelOverrides() for display is fine; re-encoding that
+                    // default on the next save would write `null` over the column
+                    // and erase the user's real tuning permanently. Remember the
+                    // id so the persist path substitutes the STORED blob instead.
+                    unreadableOverridesEntryIds.add(row.id)
                     AppLogger.warning(
                         TAG,
-                        "model entry ${row.id}: overridesJson undecodable, using defaults (${e.message})",
+                        "model entry ${row.id}: overridesJson undecodable — showing defaults, " +
+                            "stored blob preserved (edits to this entry's overrides will not " +
+                            "persist until a build can read it) (${e.message})",
                     )
                 }
                 .getOrNull()
@@ -343,20 +370,32 @@ fun ProviderConfigSnapshot.toProviderConfigWithDiagnostics(jsonForBlobs: Json): 
     }.toMutableList()
 
     val stringListSerializer = ListSerializer(String.serializer())
+    val unreadableMemberGroupIds = LinkedHashSet<String>()
     val groups = this.groups.map { row ->
+        // [audit-0917] Same guard as the entry blobs above — a malformed member
+        // list must not abort the whole provider load.
+        // [fix/meta1028-d1 F-02] ...and "render empty" must not become "write
+        // empty": member_entry_ids_json is non-null by schema, so a decode
+        // failure is ALWAYS a damaged blob, never "the group really is empty".
+        // Re-encoding mutableListOf() on the next save would delete every
+        // member for good; remember the id so the persist path substitutes the
+        // stored blob (restoreFrozenBlobs) and removeInstance's "became empty"
+        // cascade skips it.
+        val decodedMembers = runCatching {
+            jsonForBlobs.decodeFromString(stringListSerializer, row.memberEntryIdsJson)
+        }.onFailure {
+            unreadableMemberGroupIds.add(row.id)
+            AppLogger.warning(
+                TAG,
+                "group ${row.id}: memberEntryIdsJson undecodable — rendering empty, stored blob " +
+                    "preserved (member edits will not persist until a build can read it) " +
+                    "(${it.message})",
+            )
+        }.getOrNull()
         ModelGroup(
             id = row.id,
             name = row.name,
-            // [audit-0917] Same guard as the entry blobs above — a malformed
-            // member list must not abort the whole provider load.
-            memberEntryIds = runCatching {
-                jsonForBlobs.decodeFromString(stringListSerializer, row.memberEntryIdsJson)
-            }.onFailure {
-                AppLogger.warning(
-                    TAG,
-                    "group ${row.id}: memberEntryIdsJson undecodable, treating as empty (${it.message})",
-                )
-            }.getOrNull()?.toMutableList() ?: mutableListOf(),
+            memberEntryIds = decodedMembers?.toMutableList() ?: mutableListOf(),
             // [T-android-enum-safe-parse] Safe parse — same rationale as the
             // ThinkingLevel.decoded() note below: an unknown strategy name
             // from a NEWER build must not throw and blow up the whole DB load.
@@ -400,6 +439,56 @@ fun ProviderConfigSnapshot.toProviderConfigWithDiagnostics(jsonForBlobs: Json): 
             agentLoopGroupIds = groupLoopIds,
         ),
         quarantinedEntryRowIds = quarantinedEntryRowIds,
+        unreadableOverridesEntryIds = unreadableOverridesEntryIds,
+        unreadableMemberGroupIds = unreadableMemberGroupIds,
+    )
+}
+
+/**
+ * [fix/meta1028-d1 F-02] Put the STORED blobs back into a snapshot whose
+ * source config carried decoded-default placeholders.
+ *
+ * Two columns can be unreadable while the rest of the row is fine
+ * (`overrides_json` on a model entry, `member_entry_ids_json` on a group). The
+ * load path keeps the row visible with a placeholder (defaults / empty list) so
+ * a single damaged blob does not hide a model or a whole group; writing that
+ * placeholder back would destroy the bytes it stands in for. This substitution
+ * happens at persist time, from rows re-read out of the DB, because `toSnapshot`
+ * has no other source for "what the column actually holds".
+ *
+ * Pure on purpose: [ProviderRepository] is not JVM-constructible, and the failure
+ * mode here (placeholder written back as truth) is exactly the kind of thing
+ * that must be pinned by a unit test rather than by a device.
+ *
+ * @param storedEntries / [storedGroups] the raw rows as they exist on disk NOW
+ *   (read after the config snapshot was built, so a concurrent write cannot
+ *   make us invent a blob that never existed — a missing row simply leaves the
+ *   placeholder in place).
+ */
+fun restoreFrozenBlobs(
+    snapshot: ProviderConfigSnapshot,
+    storedEntries: List<ProviderModelEntryEntity>,
+    storedGroups: List<ProviderModelGroupEntity>,
+    frozenEntryIds: Set<String>,
+    frozenGroupIds: Set<String>,
+): ProviderConfigSnapshot {
+    if (frozenEntryIds.isEmpty() && frozenGroupIds.isEmpty()) return snapshot
+    val entryBlobById = storedEntries
+        .filter { it.id in frozenEntryIds }
+        .associate { it.id to it.overridesJson }
+    val groupBlobById = storedGroups
+        .filter { it.id in frozenGroupIds }
+        .associate { it.id to it.memberEntryIdsJson }
+    return snapshot.copy(
+        entries = snapshot.entries.map { row ->
+            val blob = entryBlobById[row.id]
+            if (row.id !in frozenEntryIds || blob == null) row else row.copy(overridesJson = blob)
+        },
+        groups = snapshot.groups.map { row ->
+            val blob = groupBlobById[row.id]
+            if (row.id !in frozenGroupIds || blob == null) row
+            else row.copy(memberEntryIdsJson = blob)
+        },
     )
 }
 
