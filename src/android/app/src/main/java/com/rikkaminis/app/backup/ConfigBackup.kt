@@ -19,6 +19,7 @@ import com.rikkaminis.app.data.repository.MemoryRepository
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.data.repository.SkillRepository
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.scheduled.ScheduledTasksRestoreOutcome
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -1184,7 +1185,12 @@ object ConfigBackup {
         // [feat/scheduled-tasks-l0] Restores the scheduled-tasks document via
         // the store (caller supplies the suspension point — this class has no
         // Context). Absent/null section = pre-L0 backup, stage skipped.
-        onScheduledTasks: (suspend (JSONObject) -> Unit)? = null,
+        // [FIX-1028 / A-16] Returns what the store DID: the store refuses to
+        // overwrite a non-empty local task set with an empty/unknown-version
+        // section, and that refusal has to reach the user instead of being
+        // reported as `scheduledTasksImported = true`. Null = caller has no
+        // report (treated as applied, which is the pre-fix contract).
+        onScheduledTasks: (suspend (JSONObject) -> ScheduledTasksRestoreOutcome?)? = null,
         // [D-B fix/backup-bootstrap-size] The WebDAV server config this install
         // currently holds (caller reads it from WebDavConfigStore — this class
         // has no Context). Needed because a secrets-free backup carries no
@@ -1871,6 +1877,12 @@ object ConfigBackup {
             skipped.addAll(chatTruncationNotes(tr))
         }
 
+        // [FIX-1028 / A-6] What the `.minisbak` converter could not carry over
+        // (or carried over degraded). Absent section = document did not come
+        // from that converter, or it had nothing to report — same shape either
+        // way, so old payloads are unaffected.
+        skipped.addAll(conversionNotes(root.optJSONArray("conversionNotes")))
+
         // -- Stage 9: artifact files (shared/ + mcp data, from the embedded zip) --
         // The archive routes entries by first path segment into the matching
         // root ("shared/" → sharedRoot, "mcp/" → mcpRoot). Artifact files are
@@ -1979,8 +1991,11 @@ object ConfigBackup {
         if (scheduledObj != null) {
             if (onScheduledTasks != null) {
                 try {
-                    onScheduledTasks(scheduledObj)
-                    scheduledTasksImported = true
+                    val outcome = onScheduledTasks(scheduledObj)
+                    if (outcome == null || outcome.applied) {
+                        scheduledTasksImported = true
+                    }
+                    outcome?.notice?.let { skipped.add("scheduled tasks: $it") }
                 } catch (t: Throwable) {
                     skipped.add("scheduled tasks: restore failed (${t.message})")
                 }
@@ -2066,6 +2081,40 @@ object ConfigBackup {
                 "backup package was incomplete: $shards data shard(s) missing " +
                     "(chat/rule history restored partially; the source device still holds the full copy)"
             )
+        }
+        // [FIX-1028 / A-5] Third kind: the shard was there but a line inside it
+        // was not parseable JSON (transfer cut mid-line, half-written shard).
+        // The converter used to drop such a line silently, so a package that
+        // lost records to damage looked exactly like a complete one.
+        val unparsable = tr.optInt("unparsableLines", 0)
+        if (unparsable > 0) {
+            out.add(
+                "backup package held $unparsable unreadable record line(s) " +
+                    "(damaged/truncated JSONL in the source package: those entries are not in this restore)"
+            )
+        }
+        return out
+    }
+
+    /**
+     * [FIX-1028 / A-6] The user-facing lines for the `.minisbak` converter's own
+     * warnings (`conversionNotes` in the converted document).
+     *
+     * [OpenMinisBackupCompat] collects them while converting — a provider
+     * carried over with zero model entries, a skill whose archive failed to
+     * pack, a memory file over the size cap — and used to throw the list away:
+     * nothing in the tree read it, so a thinner-than-expected restore came with
+     * no explanation at all. `ImportResult.skipped` is the channel the backup
+     * screen already renders, so no new UI and no new key elsewhere.
+     *
+     * Pure on purpose (no repos, no I/O), like [chatTruncationNotes].
+     */
+    internal fun conversionNotes(notes: JSONArray?): List<String> {
+        if (notes == null) return emptyList()
+        val out = ArrayList<String>(notes.length())
+        for (i in 0 until notes.length()) {
+            val line = notes.optString(i, "").trim()
+            if (line.isNotEmpty()) out.add("conversion: $line")
         }
         return out
     }
@@ -2220,8 +2269,11 @@ object ConfigBackup {
      *  [allocateSnapshotFile], which resolves collisions against the directory
      *  instead of trusting the clock. */
     fun snapshotFileName(now: Long = System.currentTimeMillis()): String {
-        val fmt = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
-        return "$SNAPSHOT_PREFIX${fmt.format(java.util.Date(now))}$SNAPSHOT_SUFFIX"
+        // [FIX-1028 / B-12] The stamp shape lives in BackupRotation, because
+        // listSnapshots + pruneSnapshots now READ it back (a writer that
+        // re-spelled the format would silently make every snapshot unorderable,
+        // and an unorderable snapshot is never rotated away).
+        return "$SNAPSHOT_PREFIX${BackupRotation.stamp(now)}$SNAPSHOT_SUFFIX"
     }
 
     /**
@@ -2338,20 +2390,31 @@ object ConfigBackup {
     }
 
     /**
-     * [FIX-P1A / RT-S3] Keep [SNAPSHOT_KEEP] snapshots, and ALWAYS the one just
-     * written.
+     * [FIX-P1A / RT-S3 → FIX-1028 / B-12] Keep [SNAPSHOT_KEEP] snapshots, ALWAYS
+     * the one just written, and never one whose age cannot be read.
      *
-     * Pruning newest-first by mtime alone deleted the file a clock-rollback
-     * write had just produced (its mtime looks older than the previous
-     * snapshot's), i.e. the rollback point vanished exactly when the clock was
-     * untrustworthy. Excluding the just-written file makes the count
-     * explicit: 1 fresh + (KEEP-1) older ones by mtime.
+     * The two fixes address the same wound from two sides. P1A stopped counting
+     * the fresh file as a prunable candidate; B-12 stopped trusting mtime for
+     * the ORDER at all — a clock-rollback write still sorts last by mtime, so
+     * without name ordering the list offered the wrong rollback point and the
+     * "exclude the fresh file" rule was the only thing keeping it on disk, with
+     * KEEP=1 leaving no second chance. Order now comes from the name stamp;
+     * the fresh file and every unstamped file are additionally protected.
+     *
+     * Both exclusions follow one rule — rather keep a file than delete the
+     * wrong one: the fresh snapshot is never a victim, and neither is a file
+     * whose name carries no parseable stamp ([BackupRotation.rotationVictims]).
+     * The latter stays on disk for the user to inspect; nothing here can tell
+     * whether it is newer than what we kept.
      */
     private fun pruneSnapshots(dir: java.io.File, justWritten: java.io.File) {
-        listSnapshots(dir)
-            .filter { it.name != justWritten.name }
-            .drop((SNAPSHOT_KEEP - 1).coerceAtLeast(0))
-            .forEach { runCatching { it.delete() } }
+        BackupRotation.rotationVictims(
+            items = listSnapshots(dir),
+            name = { it.name },
+            key = { snapshotStampMillis(it) },
+            keep = SNAPSHOT_KEEP,
+            protect = { it.name == justWritten.name },
+        ).forEach { runCatching { it.delete() } }
     }
 
     /**
@@ -2379,11 +2442,31 @@ object ConfigBackup {
     /** Snapshots in [dir], newest first. Only `rikkaminis-snapshot-*.json` —
      *  the `.json.tmp` sidecars of an in-flight / killed write never match
      *  (see [SNAPSHOT_TMP_SUFFIX]), which is what keeps a half-written
-     *  document out of the rollback list. */
+     *  document out of the rollback list.
+     *
+     *  [FIX-1028 / B-12] "Newest" is the stamp in the NAME, not `lastModified`:
+     *  a restore performed after a clock rollback wrote a file whose mtime
+     *  looked older than its predecessor, so mtime ordering offered the WRONG
+     *  rollback point and pruning deleted the new one. */
     fun listSnapshots(dir: java.io.File): List<java.io.File> =
         dir.listFiles { f ->
             f.isFile && f.name.startsWith(SNAPSHOT_PREFIX) && f.name.endsWith(SNAPSHOT_SUFFIX)
-        }?.sortedByDescending { it.lastModified() } ?: emptyList()
+        }?.let { files ->
+            BackupRotation.newestFirst(files.toList(), name = { it.name }, key = { snapshotStampMillis(it) })
+        } ?: emptyList()
+
+    /** [FIX-1028 / B-12] A snapshot's ordering key, decoded from its file name.
+     *  Null = the name carries no stamp (came from elsewhere) ⇒ age unknown. */
+    internal fun snapshotStampMillis(file: java.io.File): Long? =
+        BackupRotation.stampMillis(file.name, SNAPSHOT_PREFIX, SNAPSHOT_SUFFIX)
+
+    /** [FIX-1028 / B-12] Timestamp a snapshot row should DISPLAY: the name
+     *  stamp when parseable — the same key [listSnapshots] orders by, so the
+     *  times shown can never contradict the order — else the file's mtime.
+     *  Showing mtime on a name-ordered list is how a rolled-back clock made the
+     *  newest rollback point look like the oldest. */
+    fun snapshotDisplayMillis(file: java.io.File): Long =
+        snapshotStampMillis(file) ?: file.lastModified()
 
     private val ATTACHED_FILES_REGEX =
         Regex("<user-attached-files>.*?</user-attached-files>", RegexOption.DOT_MATCHES_ALL)

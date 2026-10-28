@@ -250,12 +250,13 @@ object OpenMinisBackupCompat {
                 .put("exportedAt", now())
 
             // [FIX-P1B / RT-S1] 缺片清单：分片序号 → 成员名，喂给缺片报告段。
-            val missingShards = ArrayList<String>()
+            // [FIX-1028 / A-5] 同一累计器还收「读到但解析失败」的行数。
+            val loss = ShardLoss()
             if (pc != null) {
                 val (providers, typeToLabel) = convertProviders(pc, secrets, notes)
                 doc.put("providers", providers)
                 val rules = readJsonlShards(work, keys, "data/thinking_rules")
-                missingShards.addAll(recordMissingShards("data/thinking_rules", rules))
+                loss.record("data/thinking_rules", rules)
                 doc.put("thinkingRules", convertThinkingRules(rules.records, typeToLabel))
                 doc.put("groups", convertGroups(pc))
             }
@@ -263,10 +264,18 @@ object OpenMinisBackupCompat {
             doc.put("skills", convertSkills(work, keys, notes))
             doc.put("memoryFiles", convertMemory(work, keys, notes))
             doc.put("mcpServers", convertMcp(work, keys))
-            val (sessions, messages) = convertChats(work, keys, includeChats, missingShards)
+            val (sessions, messages) = convertChats(work, keys, includeChats, loss)
             doc.put("chatSessions", sessions)
             doc.put("chatMessages", messages)
-            shardLossReport(missingShards)?.let { doc.put("chatTruncated", it) }
+            shardLossReport(loss)?.let { doc.put("chatTruncated", it) }
+            // [FIX-1028 / A-6] The conversion's own warnings — providers carried
+            // over with no model entries, skills whose archive failed to pack,
+            // memory files over the cap. They were collected into `notes` and
+            // then dropped on the floor: no reader anywhere in the tree, so the
+            // user's only signal was a shorter restore. Same channel as the
+            // shard-loss report (`ImportResult.skipped` via ConfigBackup.import),
+            // no new UI.
+            if (notes.isNotEmpty()) doc.put("conversionNotes", JSONArray(notes))
 
             val out = doc.toString()
             if (out.length > MAX_OUTPUT_CHARS) {
@@ -423,6 +432,18 @@ object OpenMinisBackupCompat {
     internal data class JsonlShardRead(
         val records: List<JSONObject>,
         val missingShards: List<Int>,
+        /**
+         * [FIX-1028 / A-5] Non-blank lines that were present but did not parse
+         * as a JSON object (a truncated record, a transfer that cut mid-line,
+         * a half-written shard).
+         *
+         * Counted, not just dropped: before this the loop's `runCatching`
+         * discarded the line and said nothing, so the same "restored fine"
+         * screen covered both a complete package and one that lost messages to
+         * a damaged line. Reuses the existing [chatTruncated] channel (see
+         * [shardLossReport]) instead of inventing a second one.
+         */
+        val unparsableLines: Int = 0,
     )
 
     /** 分片成员名（第 1 片无序号后缀，第 2 片起 `-0002`…）。构造端与读取端
@@ -439,6 +460,7 @@ object OpenMinisBackupCompat {
     ): JsonlShardRead {
         val records = ArrayList<JSONObject>()
         val missing = ArrayList<Int>()
+        var unparsable = 0
         // 还没被「后面的命中」兑现的空洞：只有在读到后续片时才升级成缺片。
         val pendingHoles = ArrayList<Int>()
         var shard = 1
@@ -456,16 +478,33 @@ object OpenMinisBackupCompat {
             for (line in text.lineSequence()) {
                 val t = line.trim()
                 if (t.isEmpty()) continue
-                runCatching { JSONObject(t) }.getOrNull()?.let { records.add(it) }
+                // [FIX-1028 / A-5] A line that does not parse is a message (or a
+                // session, or a thinking rule) that will never appear — count it
+                // so the import can say so instead of reporting a clean restore.
+                val rec = runCatching { JSONObject(t) }.getOrNull()
+                if (rec == null) unparsable++ else records.add(rec)
             }
             shard++
         }
-        return JsonlShardRead(records, missing)
+        return JsonlShardRead(records, missing, unparsable)
     }
 
     /** [FIX-P1B / RT-S1] 缺片序号 → 成员名，追加进调用方的总清单。 */
     private fun recordMissingShards(base: String, read: JsonlShardRead): List<String> =
         read.missingShards.map { shardMemberName(base, it) }
+
+    /** [FIX-1028 / A-5] 一次转换里「包不完整」的两种证据的累计器：
+     *  [missing] 收缺片成员名，[unparsableLines] 收读到了但解析失败的行。
+     *  两者最后都进 [shardLossReport]，挂在同一条 `chatTruncated` 通道上。 */
+    private class ShardLoss {
+        val missing = ArrayList<String>()
+        var unparsableLines = 0
+
+        fun record(base: String, read: JsonlShardRead) {
+            missing.addAll(recordMissingShards(base, read))
+            unparsableLines += read.unparsableLines
+        }
+    }
 
     /**
      * [FIX-P1B / RT-S1] 缺片报告段。
@@ -484,14 +523,23 @@ object OpenMinisBackupCompat {
      *
      * @return null 表示没有任何缺片（正常包 ⇒ 文档形状与升级前逐键一致）。
      */
-    private fun shardLossReport(missing: List<String>): JSONObject? {
-        if (missing.isEmpty()) return null
-        return JSONObject()
-            .put("shardsMissing", missing.size)
-            .put("missingShards", JSONArray(missing.take(MISSING_SHARD_REPORT_CAP)))
-            .put("sessionsShardsMissing", missing.count { it.startsWith("data/sessions") })
-            .put("messagesShardsMissing", missing.count { it.startsWith("data/messages") })
-            .put("thinkingRulesShardsMissing", missing.count { it.startsWith("data/thinking_rules") })
+    private fun shardLossReport(loss: ShardLoss): JSONObject? {
+        if (loss.missing.isEmpty() && loss.unparsableLines == 0) return null
+        val missing = loss.missing
+        return JSONObject().apply {
+            if (missing.isNotEmpty()) {
+                put("shardsMissing", missing.size)
+                put("missingShards", JSONArray(missing.take(MISSING_SHARD_REPORT_CAP)))
+                put("sessionsShardsMissing", missing.count { it.startsWith("data/sessions") })
+                put("messagesShardsMissing", missing.count { it.startsWith("data/messages") })
+                put("thinkingRulesShardsMissing", missing.count { it.startsWith("data/thinking_rules") })
+            }
+            // [FIX-1028 / A-5] Separate key, separate meaning: a shard that was
+            // READ but held a line the parser rejected. Independent of missing
+            // shards (both can be 0/1 in any combination), so it gets its own
+            // count instead of being folded into shardsMissing.
+            if (loss.unparsableLines > 0) put("unparsableLines", loss.unparsableLines)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -915,14 +963,14 @@ object OpenMinisBackupCompat {
         work: File,
         keys: Keys?,
         includeChats: Boolean,
-        missingShards: MutableList<String>,
+        loss: ShardLoss,
     ): Pair<JSONArray, JSONArray> {
         val sessionsOut = JSONArray()
         val messagesOut = JSONArray()
         if (!includeChats) return sessionsOut to messagesOut
 
         val sessionShards = readJsonlShards(work, keys, "data/sessions")
-        missingShards.addAll(recordMissingShards("data/sessions", sessionShards))
+        loss.record("data/sessions", sessionShards)
         for (rec in sessionShards.records) {
             if (rec.optString("t", "") != "SessionV2") continue
             val d = rec.optJSONObject("d") ?: continue
@@ -956,7 +1004,7 @@ object OpenMinisBackupCompat {
         }
 
         val messageShards = readJsonlShards(work, keys, "data/messages")
-        missingShards.addAll(recordMissingShards("data/messages", messageShards))
+        loss.record("data/messages", messageShards)
         for (rec in messageShards.records) {
             if (rec.optString("t", "") != "MessageV2") continue
             val d = rec.optJSONObject("d") ?: continue

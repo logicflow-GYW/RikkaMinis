@@ -794,9 +794,19 @@ fun BackupSettingsScreen(
                         SettingsRow(
                             title = file.name.removePrefix(com.rikkaminis.app.backup.AutoBackupManager.LOCAL_FILE_PREFIX)
                                 .removeSuffix(".json"),
+                            // [FIX-1028 / B-12] Same key this list is ORDERED
+                            // by (the stamp in the local backup's name), so a
+                            // rolled-back clock cannot make the row's time
+                            // contradict its position. Falls back to mtime only
+                            // for a fetched copy that keeps a foreign stamp.
                             subtitle = java.text.SimpleDateFormat(
                                 "yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()
-                            ).format(java.util.Date(file.lastModified())),
+                            ).format(
+                                java.util.Date(
+                                    com.rikkaminis.app.backup.AutoBackupManager.localStampMillis(file)
+                                        ?: file.lastModified(),
+                                ),
+                            ),
                             icon = Icons.Filled.Restore,
                             onClick = { snapshotRestoreTarget = file },
                         )
@@ -855,9 +865,15 @@ fun BackupSettingsScreen(
                     snapshotFiles.forEachIndexed { index, file ->
                         SettingsRow(
                             title = file.name,
+                            // [FIX-1028 / B-12] Display the key this list is
+                            // ORDERED by (the stamp in the file name), else the
+                            // mtime. Showing mtime on a name-ordered list made a
+                            // rolled-back clock look like the newest rollback
+                            // point was the oldest — and the one-tap rollback on
+                            // the fatal-restore dialog takes the FIRST row.
                             subtitle = java.text.SimpleDateFormat(
                                 "yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()
-                            ).format(java.util.Date(file.lastModified())),
+                            ).format(java.util.Date(ConfigBackup.snapshotDisplayMillis(file))),
                             icon = Icons.Filled.Restore,
                             onClick = { snapshotRestoreTarget = file },
                             showDivider = index < snapshotFiles.size - 1,
