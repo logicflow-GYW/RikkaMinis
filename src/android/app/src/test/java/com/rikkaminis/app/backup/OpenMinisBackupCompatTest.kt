@@ -514,7 +514,13 @@ class OpenMinisBackupCompatTest {
         val sess = root.getJSONArray("chatSessions").getJSONObject(0)
         assertEquals("sess-1", sess.getString("id"))
         assertEquals(1, sess.getInt("memoryEnabled"))
-        assertEquals("group:g1", sess.getString("modelBinding"))
+        // [FIX-R3-D / F-09] OpenMinis' compact binding string is translated
+        // into the JSON shape this side persists (remapSessionBindingJson /
+        // restoreFromBinding both read `type`), instead of being passed through
+        // as a string no reader understands.
+        val binding = JSONObject(sess.getString("modelBinding"))
+        assertEquals("group", binding.getString("type"))
+        assertEquals("g1", binding.getString("groupId"))
         // 2026-09-30T08:00:00Z
         assertEquals(1790755200000L, sess.getLong("createdAt"))
 
@@ -1248,5 +1254,90 @@ class OpenMinisBackupCompatTest {
         val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
         assertEquals(1, doc.getJSONArray("chatMessages").length())
         assertTrue(notesOf(doc).any { it.contains("MessageV2") && it.contains("期望 object") })
+    }
+
+    // ── [FIX-R3-D / F-13] includesSecrets ────────────────────────────────
+
+    @Test
+    fun `converted document declares includesSecrets when credentials ride along`() {
+        // 修复前转换层从不写这个键 ⇒ ConfigBackup 的 hadSecrets 恒 false，
+        // 于是「该备份不含 API Key，恢复后请重新填写」这条提醒对每个 .minisbak
+        // 都会弹——包括刚刚把 secrets.json 原样搬过来的那些。
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "secrets.json" to jsonEntry(
+            JSONObject().put("inst-1", JSONObject().put("apiKey", "sk-live")),
+        )
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        assertTrue(doc.getBoolean("includesSecrets"))
+    }
+
+    @Test
+    fun `converted document does not claim secrets it does not carry`() {
+        // 反向：没有 secrets.json（或它是个空对象）时不得声称含密钥，
+        // 否则真实的「请重新填写」提醒被训练成噪音。
+        val withoutSecrets = JSONObject(
+            OpenMinisBackupCompat.convert(zipOf("manifest.json" to jsonEntry(plainManifest()))),
+        )
+        assertFalse(withoutSecrets.getBoolean("includesSecrets"))
+
+        val emptySecrets = JSONObject(
+            OpenMinisBackupCompat.convert(
+                zipOf(
+                    "manifest.json" to jsonEntry(plainManifest()),
+                    "secrets.json" to jsonEntry(JSONObject()),
+                )
+            ),
+        )
+        assertFalse(emptySecrets.getBoolean("includesSecrets"))
+    }
+
+    // ── [FIX-R3-D / F-09] modelBinding translation ───────────────────────
+
+    @Test
+    fun `compact model bindings are translated into the persisted json shape`() {
+        assertEquals(
+            JSONObject().put("type", "group").put("groupId", "g-42").toString(),
+            convertModelBinding("group:g-42"),
+        )
+        assertEquals(
+            JSONObject().put("type", "entry").put("entryId", "e-7").toString(),
+            convertModelBinding("entry:e-7"),
+        )
+        assertEquals(
+            JSONObject().put("type", "group").put("groupId", "g-42").toString(),
+            convertModelBinding("  group:g-42  "),
+        )
+    }
+
+    @Test
+    fun `already-json and unknown bindings pass through byte-identically`() {
+        // 这是翻译不是校验：不认识的形态原样返回，交给导入侧既有的
+        // remapSessionBindingJson 去判定（它自己会报 skipped）。
+        val alreadyJson = """{"type":"entry","entryId":"e-1"}"""
+        assertEquals(alreadyJson, convertModelBinding(alreadyJson))
+        assertEquals("", convertModelBinding(""))
+        assertEquals("custom:x", convertModelBinding("custom:x"))
+        assertEquals("group:", convertModelBinding("group:"))
+    }
+
+    @Test
+    fun `session binding falls back to the wrapper when the inner key is blank`() {
+        // d.modelBinding 存在但是空串时，optString 的三参重载不会回退到 s ——
+        // 原来那行把 s 上的绑定静默丢成 ""。
+        val d = JSONObject()
+            .put("session", JSONObject().put("id", "sess-blank").put("modelBinding", "entry:e-9"))
+            .put("modelBinding", "")
+        val members = mutableListOf<Pair<String, ByteArray>>()
+        members += "manifest.json" to jsonEntry(plainManifest())
+        members += "data/sessions.jsonl" to textEntry(
+            JSONObject().put("t", "SessionV2").put("v", 1).put("d", d).toString() + "\n",
+        )
+        val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
+        val sess = doc.getJSONArray("chatSessions").getJSONObject(0)
+        assertEquals(
+            JSONObject().put("type", "entry").put("entryId", "e-9").toString(),
+            sess.getString("modelBinding"),
+        )
     }
 }

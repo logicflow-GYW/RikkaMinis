@@ -267,6 +267,17 @@ object OpenMinisBackupCompat {
                 .put("format", "openminis.config.backup")
                 .put("version", 1)
                 .put("exportedAt", now())
+                // [FIX-R3-D / F-13] The converted document never declared this,
+                // so `ConfigBackup.import` read `hadSecrets = false` for EVERY
+                // .minisbak — including the ones whose credentials had just
+                // been carried over from secrets.json. The restore sheet then
+                // told the user "this backup contains no API keys, fill them in
+                // after restoring" over a package that had them, which is the
+                // one warning that trains a user to ignore warnings. The value
+                // mirrors what this converter actually carries: env values and
+                // provider credentials ride `secrets.json`, so a non-empty
+                // secrets object is exactly "credentials included".
+                .put("includesSecrets", secrets != null && secrets.length() > 0)
 
             // [FIX-P1B / RT-S1] 缺片清单：分片序号 → 成员名，喂给缺片报告段。
             // [FIX-1028 / A-5] 同一累计器还收「读到但解析失败」的行数。
@@ -1275,7 +1286,9 @@ object OpenMinisBackupCompat {
             o.put("updatedAt", isoToMillis(s.opt("updatedAt")) ?: 0L)
             o.put("category", s.optString("category", ""))
             o.put("lastMessage", s.optString("lastMessage", ""))
-            o.put("modelBinding", d.optString("modelBinding", s.optString("modelBinding", "")))
+            o.put("modelBinding", convertModelBinding(
+                d.optString("modelBinding", "").ifEmpty { s.optString("modelBinding", "") },
+            ))
             o.put("source", s.optString("source", ""))
             // org.json 的 optInt 不做 Boolean→Int 强转：显式转成 0/1
             val memEnabled = if (d.has("memoryEnabled")) d.optBoolean("memoryEnabled", true)
@@ -1318,4 +1331,39 @@ object OpenMinisBackupCompat {
         }
         return sessionsOut to messagesOut
     }
+}
+
+/**
+ * [FIX-R3-D / F-09] Translate a session's `modelBinding` into the JSON shape
+ * RikkaMinis persists, or return the input unchanged.
+ *
+ * OpenMinis stores the binding as a compact string — `"group:<group id>"` or
+ * `"entry:<model entry uuid>"` — while every reader on this side
+ * (`ChatViewModel.restoreFromBinding`, `remapSessionBindingJson`, the session
+ * sheet) expects `{"type":"group","groupId":…}` / `{"type":"entry","entryId":…}`.
+ * Passing the compact form through had two consequences, both invisible:
+ * `remapSessionBindingJson` did not recognise `optString("type")` and returned
+ * it verbatim (so the binding kept a FOREIGN id after a cross-device restore),
+ * and `restoreFromBinding` could not parse it, so the session degraded to the
+ * stored `modelId` — group routing and the fallback chain silently gone while
+ * the session rendered normally.
+ *
+ * Anything else (already-JSON payloads, an unknown prefix, blank) is returned
+ * byte-identically: this is a translation, not a validator. Top-level (not a
+ * member) so the real test class can pin it without a package.
+ */
+internal fun convertModelBinding(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return raw
+    if (trimmed.startsWith("group:")) {
+        val id = trimmed.removePrefix("group:").trim()
+        if (id.isEmpty()) return raw
+        return JSONObject().put("type", "group").put("groupId", id).toString()
+    }
+    if (trimmed.startsWith("entry:")) {
+        val id = trimmed.removePrefix("entry:").trim()
+        if (id.isEmpty()) return raw
+        return JSONObject().put("type", "entry").put("entryId", id).toString()
+    }
+    return raw
 }

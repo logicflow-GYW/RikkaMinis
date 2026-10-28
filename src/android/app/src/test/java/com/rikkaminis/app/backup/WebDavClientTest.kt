@@ -5,6 +5,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -162,6 +163,118 @@ class WebDavClientTest {
         val items = dav().list()
         assertEquals(1, items.size)
         assertEquals("rikkaminis-backup-20260802-0000.json", items.first().displayName)
+    }
+
+    @Test
+    fun `list keeps an entry whose 200 propstat is followed by a 404 propstat`() {
+        // [FIX-R3-D / F-10] RFC 4918 lets one <response> carry several
+        // <propstat> groups: the properties the server could answer, and those
+        // it could not (404). The parser kept ONE status for the whole
+        // response, so the trailing 404 group erased the 200 and the resource
+        // disappeared — a folder that every other client lists came back empty
+        // ("no remote backups").
+        enqueue207(
+            """<?xml version="1.0" encoding="utf-8"?>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response>
+                <d:href>/dav/RikkaMinis_backups/rikkaminis-backup-20260801-1200.json</d:href>
+                <d:propstat>
+                  <d:prop>
+                    <d:getcontentlength>99</d:getcontentlength>
+                    <d:getlastmodified>Sat, 01 Aug 2026 12:00:00 GMT</d:getlastmodified>
+                    <d:resourcetype/>
+                  </d:prop>
+                  <d:status>HTTP/1.1 200 OK</d:status>
+                </d:propstat>
+                <d:propstat>
+                  <d:prop>
+                    <d:displayname/>
+                    <d:getcontenttype/>
+                  </d:prop>
+                  <d:status>HTTP/1.1 404 Not Found</d:status>
+                </d:propstat>
+              </d:response>
+            </d:multistatus>""".trimIndent()
+        )
+        val items = dav().list()
+        assertEquals(1, items.size)
+        val item = items.first()
+        assertEquals("rikkaminis-backup-20260801-1200.json", item.displayName)
+        assertEquals(99L, item.contentLength)
+        assertEquals(Instant.parse("2026-08-01T12:00:00Z"), item.lastModified)
+        assertFalse(item.isCollection)
+    }
+
+    @Test
+    fun `a 404 propstat cannot erase a displayname the 200 propstat carried`() {
+        // Same shape, other direction: the 404 group also carries a
+        // <displayname> (some servers emit an empty one per missing property).
+        // It must not overwrite the answered group's value.
+        enqueue207(
+            """<?xml version="1.0" encoding="utf-8"?>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response>
+                <d:href>/dav/RikkaMinis_backups/2026-08.json</d:href>
+                <d:propstat>
+                  <d:prop>
+                    <d:displayname>2026-08.json</d:displayname>
+                    <d:getcontentlength>5</d:getcontentlength>
+                  </d:prop>
+                  <d:status>HTTP/1.1 200 OK</d:status>
+                </d:propstat>
+                <d:propstat>
+                  <d:prop><d:displayname>ignored</d:displayname></d:prop>
+                  <d:status>HTTP/1.1 404 Not Found</d:status>
+                </d:propstat>
+              </d:response>
+            </d:multistatus>""".trimIndent()
+        )
+        val items = dav().list()
+        assertEquals(1, items.size)
+        assertEquals("2026-08.json", items.first().displayName)
+        assertEquals(5L, items.first().contentLength)
+    }
+
+    @Test
+    fun `an entry whose every propstat group failed is still dropped`() {
+        enqueue207(
+            """<?xml version="1.0" encoding="utf-8"?>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response>
+                <d:href>/dav/RikkaMinis_backups/gone.json</d:href>
+                <d:propstat>
+                  <d:prop><d:getcontentlength>0</d:getcontentlength></d:prop>
+                  <d:status>HTTP/1.1 404 Not Found</d:status>
+                </d:propstat>
+                <d:propstat>
+                  <d:prop><d:getlastmodified/></d:prop>
+                  <d:status>HTTP/1.1 403 Forbidden</d:status>
+                </d:propstat>
+              </d:response>
+            </d:multistatus>""".trimIndent()
+        )
+        assertTrue(dav().list().isEmpty())
+    }
+
+    @Test
+    fun `a response-level status without propstat still decides`() {
+        // Some servers answer a failed PROPFIND with <href> + <status> and no
+        // propstat at all; that response must stay dropped.
+        enqueue207(
+            """<?xml version="1.0" encoding="utf-8"?>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response>
+                <d:href>/dav/RikkaMinis_backups/nope.json</d:href>
+                <d:status>HTTP/1.1 404 Not Found</d:status>
+              </d:response>
+              <d:response>
+                <d:href>/dav/RikkaMinis_backups/ok.json</d:href>
+                <d:status>HTTP/1.1 200 OK</d:status>
+              </d:response>
+            </d:multistatus>""".trimIndent()
+        )
+        val items = dav().list()
+        assertEquals(listOf("ok.json"), items.map { it.displayName })
     }
 
     @Test

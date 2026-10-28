@@ -60,10 +60,16 @@ class BackupIdRemapTest {
     }
 
     @Test
-    fun remapDefaultsIds_emptyMapsReturnInputUntouched() {
+    fun remapDefaultsIds_emptyMapsStillResolveThisInstallsOwnIds() {
         // Same-install restore (no maps minted) must not rewrite anything —
-        // assertSame proves the value object itself came back, byte-identical,
-        // and nothing is reported as unmapped (there was no map to miss it).
+        // but since [FIX-R3-D / F-02] it must also not PASS FOREIGN IDS
+        // THROUGH. The old shortcut ("no maps ⇒ untouched") was how an older
+        // backup with no `groups` section reached the field writers with the
+        // SOURCE install's ids: they were filtered away there and the setting
+        // was cleared. So the criterion is now "the id exists here": with this
+        // install's ids supplied the value comes back as the same object
+        // (nothing rewritten, nothing reported), and with a foreign id it is
+        // reported instead of written.
         for (path in listOf(
             "defaults.primaryGroup",
             "defaults.subGroup",
@@ -73,19 +79,38 @@ class BackupIdRemapTest {
             "defaults.agentLoopEntries",
             "runtime.compactModelEntryId",
         )) {
-            val str = ConfigValue.Str("11111111-1111-1111-1111-111111111111")
-            val strOut = remapDefaultsIds(path, str, emptyMap(), emptyMap())
+            val id = "11111111-1111-1111-1111-111111111111"
+            val isEntryField =
+                path == "defaults.agentLoopEntries" || path == "runtime.compactModelEntryId"
+            fun remap(value: ConfigValue, known: Boolean) = remapDefaultsIds(
+                path = path,
+                value = value,
+                groupIdMap = emptyMap(),
+                entryIdMap = emptyMap(),
+                localGroupIds = if (isEntryField || !known) emptySet() else setOf(id),
+                localEntryIds = if (isEntryField && known) setOf(id) else emptySet(),
+            )
+
+            val str = ConfigValue.Str(id)
+            val strOut = remap(str, known = true)
             assertSame(str, strOut.value)
             assertEquals(emptyList<String>(), strOut.unmapped)
-            val arr = ConfigValue.Arr(
-                listOf(
-                    ConfigValue.Str("11111111-1111-1111-1111-111111111111"),
-                    ConfigValue.Bool(true),
-                )
-            )
-            val arrOut = remapDefaultsIds(path, arr, emptyMap(), emptyMap())
+
+            val arr = ConfigValue.Arr(listOf(ConfigValue.Str(id), ConfigValue.Bool(true)))
+            val arrOut = remap(arr, known = true)
             assertSame(arr, arrOut.value)
             assertEquals(emptyList<String>(), arrOut.unmapped)
+
+            // …and the id NOT being here is reported, never written through.
+            val unknownStr = remap(ConfigValue.Str(id), known = false)
+            assertNull(unknownStr.value)
+            assertEquals(listOf(id), unknownStr.unmapped)
+            // For the array the non-id element survives (documented rule: drop
+            // the unresolvable id, keep what is not a reference) — the point is
+            // that the FOREIGN id is gone and reported.
+            val unknownArr = remap(arr, known = false)
+            assertEquals(ConfigValue.Arr(listOf(ConfigValue.Bool(true))), unknownArr.value)
+            assertEquals(listOf(id), unknownArr.unmapped)
         }
     }
 
@@ -148,19 +173,34 @@ class BackupIdRemapTest {
 
     @Test
     fun remapDefaultsIds_secondImportWithNoGroupsSectionKeepsLocalDefault() {
-        // RT-S5 end-to-end shape, on the pure function: import #1 minted the
-        // maps; import #2 is an older package with no `groups` section, so the
-        // group map is empty. The scalar must come back unrewritten (the write
-        // is skipped, the local default survives) and nothing claims to have
-        // been remapped.
+        // [FIX-R3-D / F-02] RT-S5 end-to-end shape, on the pure function: import
+        // #1 minted the maps; import #2 is an older package with no `groups`
+        // section, so the group map is empty. The id it carries is THIS
+        // install's own (same-device re-import), so the local id list resolves
+        // it verbatim — the field is written, the value is unchanged, and
+        // nothing is claimed as remapped. The pre-fix shortcut (empty map ⇒
+        // pass through) produced the same value here by NOT looking; the test
+        // below is the case where the two disagree.
         val second = remapDefaultsIds(
             path = "defaults.primaryGroup",
             value = ConfigValue.Str("g-src"),
             groupIdMap = emptyMap(),
             entryIdMap = emptyMap(),
+            localGroupIds = setOf("g-src"),
         )
         assertEquals(ConfigValue.Str("g-src"), second.value)
         assertEquals(emptyList<String>(), second.unmapped)
+        // …a FOREIGN id with no map and no local match is refused instead of
+        // written through (the writer would filter it and CLEAR the setting).
+        val foreign = remapDefaultsIds(
+            path = "defaults.primaryGroup",
+            value = ConfigValue.Str("g-other-device"),
+            groupIdMap = emptyMap(),
+            entryIdMap = emptyMap(),
+            localGroupIds = setOf("g-src"),
+        )
+        assertNull(foreign.value)
+        assertEquals(listOf("g-other-device"), foreign.unmapped)
         // …and with a map that simply does not know the id, the field is
         // refused instead of written dangling.
         val dangling = remapDefaultsIds(
@@ -171,6 +211,73 @@ class BackupIdRemapTest {
         )
         assertNull(dangling.value)
         assertEquals(listOf("g-src"), dangling.unmapped)
+    }
+
+    // ── [FIX-R3-D / F-02] the silent-wipe shape, end to end ──────────────
+
+    /**
+     * The exact world the report describes: an older package with no `groups`
+     * section, restored onto an install whose agent-loop list is populated.
+     * Before the fix the empty map meant "pass the source ids through", the
+     * writer's `filter { it in localIds }` emptied the list, and the restore
+     * reported success. The two halves are the production functions: the remap
+     * here, and `localEntryIds` standing in for the writer's valid set — the
+     * writer keeps only ids that exist, which is what "cleared" means.
+     */
+    @Test
+    fun remapDefaultsIds_emptyMapCannotClearTheLocalAgentLoopList() {
+        val localEntries = setOf("e-local-1", "e-local-2")
+
+        val remapped = remapDefaultsIds(
+            path = "defaults.agentLoopEntries",
+            value = ConfigValue.Arr(
+                listOf(ConfigValue.Str("e-src-1"), ConfigValue.Str("e-src-2")),
+            ),
+            groupIdMap = emptyMap(),
+            entryIdMap = emptyMap(),
+            localEntryIds = localEntries,
+        )
+
+        // Nothing survived ⇒ no write at all (and the ids are reported).
+        assertNull(remapped.value)
+        assertEquals(listOf("e-src-1", "e-src-2"), remapped.unmapped)
+
+        // The pre-fix path, spelled out so the regression is unmistakable: had
+        // the source ids been written, the writer's own filter would have kept
+        // nothing.
+        val whatTheWriterWouldKeep = listOf("e-src-1", "e-src-2").filter { it in localEntries }
+        assertEquals(emptyList<String>(), whatTheWriterWouldKeep)
+        // The local list therefore still holds both entries.
+        assertEquals(2, localEntries.size)
+    }
+
+    @Test
+    fun remapDefaultsIds_sameInstallIdsSurviveWhenTheDocumentHasNoSections() {
+        // The other half of the same shape: same-device re-import. Every id is
+        // already here, so the fields must be written unchanged rather than
+        // reported as unmapped (that would be a fake "partial restore").
+        val entries = remapDefaultsIds(
+            path = "defaults.agentLoopEntries",
+            value = ConfigValue.Arr(listOf(ConfigValue.Str("e-1"), ConfigValue.Str("e-2"))),
+            groupIdMap = emptyMap(),
+            entryIdMap = emptyMap(),
+            localEntryIds = setOf("e-1", "e-2"),
+        )
+        assertEquals(
+            ConfigValue.Arr(listOf(ConfigValue.Str("e-1"), ConfigValue.Str("e-2"))),
+            entries.value,
+        )
+        assertEquals(emptyList<String>(), entries.unmapped)
+
+        val pin = remapDefaultsIds(
+            path = "runtime.compactModelEntryId",
+            value = ConfigValue.Str("e-2"),
+            groupIdMap = emptyMap(),
+            entryIdMap = emptyMap(),
+            localEntryIds = setOf("e-1", "e-2"),
+        )
+        assertEquals(ConfigValue.Str("e-2"), pin.value)
+        assertEquals(emptyList<String>(), pin.unmapped)
     }
 
     @Test
@@ -225,8 +332,10 @@ class BackupIdRemapTest {
         // Discriminator: a group uuid that is a key in the ENTRY map must NOT
         // be rewritten through it. If someone moves the voice keys onto the
         // entryIdMap branch (or the bare `else` drops them entirely), this
-        // turns the silent misroute into a red test. The group map is empty, so
-        // the field is untouched — and the entry map must not be consulted.
+        // turns the silent misroute into a red test. With no group map and no
+        // local group of that id the field is REFUSED (null) — and the entry
+        // map must not be consulted (had it been, the value would come back as
+        // "e-new", which is the assertion this test would trip on).
         val v = ConfigValue.Str("eeeeeeee-1111-1111-1111-111111111111")
         val input = remapDefaultsIds(
             path = "defaults.voiceInputGroup",
@@ -234,16 +343,33 @@ class BackupIdRemapTest {
             groupIdMap = emptyMap(),
             entryIdMap = mapOf("eeeeeeee-1111-1111-1111-111111111111" to "e-new"),
         )
-        assertEquals(v, input.value)
-        assertEquals(emptyList<String>(), input.unmapped)
+        assertNull(input.value)
+        assertEquals(listOf("eeeeeeee-1111-1111-1111-111111111111"), input.unmapped)
         val output = remapDefaultsIds(
             path = "defaults.voiceOutputGroup",
             value = v,
             groupIdMap = emptyMap(),
             entryIdMap = mapOf("eeeeeeee-1111-1111-1111-111111111111" to "e-new"),
         )
-        assertEquals(v, output.value)
-        assertEquals(emptyList<String>(), output.unmapped)
+        assertNull(output.value)
+        assertEquals(listOf("eeeeeeee-1111-1111-1111-111111111111"), output.unmapped)
+        // …and the group map IS consulted (the positive half of the same
+        // branch), including an id that exists locally.
+        val mapped = remapDefaultsIds(
+            path = "defaults.voiceInputGroup",
+            value = v,
+            groupIdMap = mapOf("eeeeeeee-1111-1111-1111-111111111111" to "g-new"),
+            entryIdMap = emptyMap(),
+        )
+        assertEquals(ConfigValue.Str("g-new"), mapped.value)
+        val local = remapDefaultsIds(
+            path = "defaults.voiceInputGroup",
+            value = v,
+            groupIdMap = emptyMap(),
+            entryIdMap = emptyMap(),
+            localGroupIds = setOf("eeeeeeee-1111-1111-1111-111111111111"),
+        )
+        assertEquals(v, local.value)
     }
 
     // ── remapSessionBindingJson ────────────────────────────────────────────

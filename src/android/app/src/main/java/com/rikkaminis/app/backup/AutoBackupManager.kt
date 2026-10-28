@@ -111,8 +111,59 @@ object AutoBackupManager {
         // default (everything eligible) is the pure boundary this function has
         // always been, and its tests pin exactly that.
         victimEligible: (File) -> Boolean = { true },
+        // [FIX-R3-D / F-01] …and position is a separate question from
+        // OWNERSHIP: the copy this process just wrote is not history, it is the
+        // artifact the caller is about to upload / show. A rolled-back clock
+        // makes its name stamp the OLDEST in the directory, so `drop(keep)`
+        // puts it first in line for deletion — exactly the case
+        // [BackupRotation.rotationVictims]'s `protect` exists for. Null = no
+        // caller-supplied protection (pure-boundary default).
+        protectName: String? = null,
     ): List<File> =
-        (if (keep <= 0) files else files.drop(keep)).filter(victimEligible)
+        (if (keep <= 0) files else files.drop(keep))
+            .filter(victimEligible)
+            .filter { protectName == null || it.name != protectName }
+
+    /**
+     * [FIX-R3-D / F-01] The name of the copy the current thread just wrote into
+     * the auto-backup directory, or null.
+     *
+     * Why a scoped mark instead of a parameter on [rotateLocalAutoBackups]:
+     * that call is pinned by `backup_streaming_export_check` as the literal
+     * shape `rotateLocalAutoBackups(app)` / `rotateLocalAutoBackups(context)`
+     * (the gate exists because a dead-guarded rotation let
+     * `filesDir/backup-autos` grow without bound — see that gate's arm 1), and
+     * this branch may not touch the scan scripts. The rule itself lives where
+     * it is testable ([selectLocalRotationVictims]'s `protectName`); the scoped
+     * mark is only the plumbing that hands the rule its argument.
+     */
+    private val freshlyWritten: ThreadLocal<String?> = ThreadLocal()
+
+    /**
+     * [FIX-R3-D / F-01] Run [block] with [file] marked as "written by this
+     * run", so a rotation inside [block] can never delete it.
+     *
+     * Thread-scoped and restored on exit: an exception cannot leave a stale
+     * protection behind, and the nightly run and a settings-screen fetch (the
+     * two writers) never see each other's mark.
+     */
+    fun <T> withFreshlyWritten(file: File, block: () -> T): T {
+        val previous = freshlyWritten.get()
+        freshlyWritten.set(file.name)
+        try {
+            return block()
+        } finally {
+            freshlyWritten.set(previous)
+        }
+    }
+
+    /**
+     * [FIX-R3-D / F-01] The name the current thread marked as freshly written,
+     * or null. Exposed (internal) so the scoping contract — visible inside the
+     * block, gone after it, restored rather than cleared when nested — is
+     * pinned instead of assumed.
+     */
+    internal fun freshlyWrittenName(): String? = freshlyWritten.get()
 
     /**
      * [fix/da1023-backup-streaming-fetch] Enforce the local auto-backup cap:
@@ -121,6 +172,13 @@ object AutoBackupManager {
      * Shared between the nightly run and the settings screen's
      * fetch-to-local path, which previously wrote a fetched copy WITHOUT any
      * rotation — every fetch added an unbounded local copy.
+     *
+     * [FIX-R3-D / F-01] Never deletes the copy [withFreshlyWritten] marked:
+     * after a clock rollback (or a fetch of an old server-side copy) that copy
+     * sorts as the OLDEST, so rotation used to delete it in the same breath as
+     * writing it — and the WebDAV push that follows read a file that no longer
+     * existed (`FileNotFoundException`) while the settings page still claimed
+     * the day's backup was done.
      */
     fun rotateLocalAutoBackups(context: Context) {
         selectLocalRotationVictims(
@@ -129,6 +187,7 @@ object AutoBackupManager {
             // [FIX-1028 / B-12] Never delete a copy whose age we cannot read off
             // its name: "unknown" is not "oldest".
             victimEligible = { localStampMillis(it) != null },
+            protectName = freshlyWrittenName(),
         ).forEach { runCatching { it.delete() } }
     }
 
@@ -248,7 +307,12 @@ object AutoBackupManager {
         // Local rotation: keep the newest AUTO_BACKUP_KEEP auto files
         // (shared helper — the settings screen's fetch path rotates the same
         // way, so the cap has a single implementation).
-        rotateLocalAutoBackups(app)
+        //
+        // [FIX-R3-D / F-01] The copy just written is marked for the duration of
+        // this call: after a clock rollback its name stamp sorts OLDEST, so a
+        // plain rotation deleted it here and the push below read a missing
+        // file. See AutoBackupManager.withFreshlyWritten.
+        withFreshlyWritten(local) { rotateLocalAutoBackups(app) }
 
         // Remote push is best-effort: local copy already exists, so a failed
         // upload only means the offsite copy lags until tomorrow. The push
