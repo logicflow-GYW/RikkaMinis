@@ -90,16 +90,43 @@ object ArtifactBackupScope {
         // would otherwise recurse forever (File.isDirectory follows links)
         // and blow the stack. canonicalPath dedupes .. and absolute prefixes,
         // so the first visit wins and any revisit is skipped.
+        //
+        // [FIX-R3-D / F-06] …but "does not loop" is not "stays inside". The
+        // walk only looked at the LINK's own name, so `shared/bridge_bak ->
+        // ../../mcp-servers/oauth` was walked and archived as
+        // `shared/bridge_bak/<server>.json` — plaintext OAuth tokens riding a
+        // credentials-free (`includeSecrets=false`) backup all the way to the
+        // user's WebDAV server, past both DENIED_DIRS and the restore-side
+        // `mcp/oauth/` filter (neither matches that entry name). The resolved
+        // target now has to live under the shared root AND its resolved name
+        // has to survive DENIED_DIRS.
+        val rootCanon = try { sharedRoot.canonicalFile.path } catch (_: Exception) {
+            return Selection(files, 0, 0, 0)
+        }
+        val rootPrefix = if (rootCanon.endsWith(File.separator)) rootCanon else rootCanon + File.separator
+        fun resolveInside(child: File): File? = try {
+            val resolved = child.canonicalFile
+            val path = resolved.path
+            // Fail-closed: a link that escapes, an unreadable inode, and a
+            // canonicalisation error are all "not an artifact of this root".
+            if (path == rootCanon || path.startsWith(rootPrefix)) resolved else null
+        } catch (_: Exception) {
+            null
+        }
+
         val visited = HashSet<String>()
         fun walk(dir: File, prefix: String) {
             val canon = try { dir.canonicalPath } catch (_: Exception) { return }
             if (!visited.add(canon)) return
             val children = dir.listFiles() ?: return
             for (child in children.sortedBy { it.name }) {
+                // [FIX-R3-D / F-06] Resolve FIRST: `child.name` is the link's
+                // own token, `target.name` is what the bytes actually are.
+                val target = resolveInside(child) ?: continue
                 if (child.isDirectory) {
                     // [da1034-A1] Credential directories are dropped wherever
                     // they appear in the tree — see DENIED_DIRS.
-                    if (child.name in DENIED_DIRS) continue
+                    if (child.name in DENIED_DIRS || target.name in DENIED_DIRS) continue
                     // Only the shared root has environment payloads; nested
                     // directories are always walked.
                     if (prefix.isEmpty() && child.name in EXCLUDED_DIRS) continue
