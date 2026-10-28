@@ -350,4 +350,27 @@ object ContextCompactor {
 
         Do NOT translate or alter code snippets, file paths, identifiers, or error messages. Be concise but never lose information the agent needs.
     """.trimIndent()
+
+    /**
+     * Input text for ONE summarizer pass: the previous rounds' summary
+     * (already stripped of its pinned block) followed by this pass's
+     * transcript, or just the transcript when there is no previous summary.
+     *
+     * [fix/r3-b11-compact-F01] Single home for that framing so the depth-0
+     * pass and the halving recursion cannot drift apart — the F-01 defect was
+     * exactly such a drift: the split branch handed the first half `null`
+     * instead of the pushed-down summary, so every earlier compact round
+     * vanished from the new summary the moment a pass hit ContextTooLarge.
+     *
+     * Pure string assembly: no LLM, no Android. The literal framing is pinned
+     * by a JVM test because downstream tests and the summarizer prompt assume
+     * it.
+     */
+    fun compactInputText(previousSummaryStripped: String?, transcript: String): String =
+        if (previousSummaryStripped.isNullOrBlank()) {
+            transcript
+        } else {
+            "Previous context summary:\n$previousSummaryStripped\n\n" +
+                "New conversation to merge:\n$transcript"
+        }
 }
