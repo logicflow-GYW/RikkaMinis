@@ -269,6 +269,8 @@
     <string name="modeldetail_capabilities_footer">上下文視窗和最大輸出 Token 數（以 tokens 計）。留空使用供應商預設值。對支援擴展推理的模型啟用思考模式。</string>
     <string name="modeldetail_provider_default">供應商預設</string>
     <string name="modeldetail_max_tokens_exceeds_warning">超過供應商回報的上限（%1$d）。值已保存，但可能導致請求失敗。</string>
+    <string name="modeldetail_error_model_id_exists">"%1$s" 已被該供應商的另一個模型使用。請換一個模型 ID。</string>
+    <string name="add_custom_model_error_model_id_exists">"%1$s" 在該供應商下已存在。請換一個模型 ID。</string>
     <string name="modeldetail_section_input_modality">輸入模態</string>
     <string name="modeldetail_image_input">圖片輸入</string>
     <string name="modeldetail_pdf_input">PDF 輸入</string>

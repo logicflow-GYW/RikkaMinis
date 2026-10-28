@@ -305,8 +305,15 @@ private suspend fun importSkillFromCurrentUrl(
     skillRepository: SkillRepository,
     onStateChange: (HudState, String) -> Unit,
 ) {
+    // [meta-audit-1028 E5 / B06 F-11] Normalize ONCE, then use the normalized
+    // value everywhere: GitHub page URLs arrive with page anchors / query
+    // strings (`…/tree/main/exa-search#install`, `?tab=readme`), and
+    // toRawGitHubUrl splices "/SKILL.md" onto the path — an anchor left in
+    // place lands INSIDE that path, so the pre-fetch requested the directory
+    // and 404'd, aborting the import with "this folder has no SKILL.md".
+    val sourceUrl = stripUrlAnchor(url).trim()
     // Check if URL points to a specific skill directory (not repo root)
-    if (!isSkillDirectoryUrl(url)) {
+    if (!isSkillDirectoryUrl(sourceUrl)) {
         onStateChange(HudState.HINT, context.getString(R.string.skills_browser_error_not_folder))
         delay(3000)
         onStateChange(HudState.HIDDEN, "")
@@ -329,7 +336,7 @@ private suspend fun importSkillFromCurrentUrl(
         //     `if (skill != null)` was always true and the in-place refresh
         //     below was unreachable for every skill whose id equals its name
         //     slug (the screen always claimed "imported").
-        val rawUrl = toRawGitHubUrl(url)
+        val rawUrl = toRawGitHubUrl(sourceUrl)
         val content = withContext(Dispatchers.IO) {
             val conn = URL(rawUrl).openConnection() as HttpURLConnection
             conn.connectTimeout = 15_000
@@ -373,7 +380,7 @@ private suspend fun importSkillFromCurrentUrl(
         // file (scripts/, references/, sub-directories) into the skill's
         // local directory — on the update path too, which the pre-fix
         // fallback's update() alone never did.
-        val skill = skillRepository.importFromGitHub(url, preferredId = matchedId)
+        val skill = skillRepository.importFromGitHub(sourceUrl, preferredId = matchedId)
         if (skill != null) {
             val messageRes =
                 if (matchedId != null) R.string.skills_browser_success_updated
@@ -439,48 +446,10 @@ private suspend fun importSkillFromCurrentUrl(
     }
 }
 
-/**
- * Check if the URL points to a specific skill directory (not repo root or non-skill pages).
- * e.g. github.com/OpenMinis/MinisSkills/tree/main/exa-search → true
- *      github.com/OpenMinis/MinisSkills → false
- *      github.com/OpenMinis/MinisSkills/issues → false
- */
-private fun isSkillDirectoryUrl(url: String): Boolean {
-    if (!url.contains("github.com")) return true // Non-GitHub URL, let it try
-    if (url.endsWith("SKILL.md")) return true
-
-    // Must contain /tree/ or /blob/ with a path after the branch name
-    // e.g. /tree/main/skill-name or /blob/main/skill-name/SKILL.md
-    val treePattern = Regex("github\\.com/[^/]+/[^/]+/(tree|blob)/[^/]+/.+")
-    if (treePattern.containsMatchIn(url)) return true
-
-    // Reject known non-skill pages
-    val nonSkillPages = listOf("/issues", "/pulls", "/pull/", "/actions", "/settings", "/wiki")
-    if (nonSkillPages.any { url.contains(it) }) return false
-
-    return false
-}
-
-private fun toRawGitHubUrl(url: String): String {
-    // Handle github.com/user/repo/tree/branch/path → find SKILL.md
-    if (url.contains("github.com") && url.contains("/blob/")) {
-        return url.replace("github.com", "raw.githubusercontent.com")
-            .replace("/blob/", "/")
-    }
-    if (url.contains("github.com") && !url.contains("raw.githubusercontent.com")) {
-        val withFile = if (!url.endsWith("SKILL.md")) {
-            // Try tree → add SKILL.md
-            val cleaned = url.replace("/tree/", "/").trimEnd('/')
-            "$cleaned/SKILL.md"
-        } else {
-            url
-        }
-        return withFile.replace("github.com", "raw.githubusercontent.com")
-            .replace("/blob/", "/")
-            .replace("/tree/", "/")
-    }
-    return url
-}
+// [meta-audit-1028 E5 / B06 F-11] isSkillDirectoryUrl / toRawGitHubUrl moved
+// to SkillSourceUrl.kt (internal, JVM-tested): both must judge the URL AFTER
+// the anchor/query is stripped, and the decision belongs with the tests that
+// pin it rather than inside a Composable file the JVM cannot compile.
 
 /**
  * [FIX-R22 B32b] Resolve the id of the existing skill a browser refresh

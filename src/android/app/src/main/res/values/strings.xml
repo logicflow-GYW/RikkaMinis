@@ -890,6 +890,10 @@
     <string name="modeldetail_capabilities_footer">Context window and max output tokens (in tokens). Leave empty to use provider defaults. Enable Thinking for models that support extended reasoning.</string>
     <string name="modeldetail_provider_default">Provider default</string>
     <string name="modeldetail_max_tokens_exceeds_warning">Exceeds provider-reported limit (%1$d). The value is saved but may cause errors.</string>
+    <!-- [meta-audit-1028 E5 / B06 F-07] Shown when updateEntry refuses the save (the id is already used by another model of this provider). The screen stays open so the edit is not lost. -->
+    <string name="modeldetail_error_model_id_exists">"%1$s" is already used by another model of this provider. Choose a different Model ID.</string>
+    <!-- [meta-audit-1028 E5 / B06 F-07] Shown when addEntry refuses to add (same id already exists). -->
+    <string name="add_custom_model_error_model_id_exists">"%1$s" already exists for this provider. Choose a different Model ID.</string>
     <string name="modeldetail_section_input_modality">Input Modality</string>
     <string name="modeldetail_image_input">Image Input</string>
     <string name="modeldetail_pdf_input">PDF Input</string>

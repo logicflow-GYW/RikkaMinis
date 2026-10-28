@@ -18,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -55,6 +56,7 @@ fun ModelEntryDetailScreen(
     val config by providerRepository.config.collectAsState()
     val entry = config.modelEntries.find { it.id == entryId && it.providerInstanceId == instanceId }
     val instance = config.instances.find { it.id == instanceId }
+    val context = LocalContext.current
 
     if (entry == null) {
         // [S6-composition-back] onBack() during composition is a Compose
@@ -66,6 +68,14 @@ fun ModelEntryDetailScreen(
 
     val baseModel = entry.baseModel
     val overrides = entry.overrides
+
+    // [meta-audit-1028 E5 / B06 F-07] `updateEntry` answers "did the write
+    // land?" with String? — null means it REFUSED (a rename collided with
+    // another entry of the same instance, or the id is blank) and nothing was
+    // persisted. The old code called it and then `onBack()` unconditionally,
+    // so a refused rename looked exactly like a saved one: the screen popped
+    // and the user's edit was gone with no signal at all. Stay put and say so.
+    var saveError by remember(entry.id) { mutableStateOf<String?>(null) }
 
     // [da1026-C] Every editable field below is keyed on (entry identity, the
     // exact sources its initial value derives from). A keyless `remember`
@@ -189,8 +199,24 @@ fun ModelEntryDetailScreen(
                     } else {
                         entry.copy(overrides = newOverrides, isHidden = isHidden)
                     }
-                    providerRepository.updateEntry(updated)
-                    onBack()
+                    val persistedId = providerRepository.updateEntry(updated)
+                    // [meta-audit-1028 E5 / B06 F-07] `null` covers two
+                    // different refusals; they need different responses.
+                    val stillThere = providerRepository.config.value.modelEntries
+                        .any { it.id == entry.id && it.providerInstanceId == instanceId }
+                    when (classifyUpdateResult(persistedId, stillThere)) {
+                        EntrySaveOutcome.SAVED -> onBack()
+                        EntrySaveOutcome.ID_TAKEN -> {
+                            // Keep the editor open with the in-flight edits
+                            // intact and name the reason — popping here is
+                            // exactly what made the loss silent.
+                            saveError = context.getString(
+                                R.string.modeldetail_error_model_id_exists,
+                                modelId.trim(),
+                            )
+                        }
+                        EntrySaveOutcome.ENTRY_GONE -> onBack()
+                    }
                 },
                 // [da1022-E] fail-closed: block saving a blank/whitespace
                 // model id (same gate as AddCustomModelScreen's
@@ -210,7 +236,14 @@ fun ModelEntryDetailScreen(
                 RowLabel(text = stringResource(R.string.add_custom_model_model_id))
                 SectionTextField(
                     value = modelId,
-                    onValueChange = { if (entry.isCustom) modelId = it },
+                    // Typing is the user acting on the refusal, so clear it
+                    // here; the next Save re-evaluates against fresh state.
+                    onValueChange = {
+                        if (entry.isCustom) {
+                            modelId = it
+                            saveError = null
+                        }
+                    },
                     singleLine = true,
                     readOnly = !entry.isCustom,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
@@ -228,6 +261,19 @@ fun ModelEntryDetailScreen(
                 value = instance?.label ?: instanceId,
                 showDivider = false,
             )
+            // [meta-audit-1028 E5 / B06 F-07] Refusal is surfaced in the
+            // section that owns the field which caused it (the Model ID), not
+            // as a toast: the user must still be looking at what to change.
+            // (Local capture: a `by`-delegated property cannot smart-cast.)
+            saveError?.let { message ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 32.dp),
+                )
+            }
         }
 
         // ── Capabilities ────────────────────────────────────────────────
