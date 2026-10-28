@@ -1858,14 +1858,17 @@ object ConfigBackup {
         // fit MAX_PAYLOAD_BYTES, and the user should know how much was left
         // out (and that the exporting device's local DB still holds it all).
         root.optJSONObject("chatTruncated")?.let { tr ->
-            val s = tr.optInt("sessionsDropped", 0)
-            val m = tr.optInt("messagesDropped", 0)
-            if (s > 0 || m > 0) {
-                skipped.add(
-                    "chat history was budget-trimmed at export: " +
-                        "$m message(s) and $s session(s) not carried (full history stays on the source device)"
-                )
-            }
+            // [FIX-P1B / RT-S1] The converter (OpenMinisBackupCompat) records a
+            // missing JSONL shard as `shardsMissing` when the source package has
+            // a hole in its shard sequence. A hole is permanent message loss on
+            // this side, and the reader before P1-B simply stopped at it — so a
+            // package that was visibly incomplete imported as if it were whole.
+            // `ImportResult.skipped` is already the channel the backup screen
+            // shows, so no new UI. `optInt(k, 0)` keeps every package written
+            // before this key existed on the old path. Both kinds of
+            // incompleteness (exporter trim + package hole) are accounted in
+            // [chatTruncationNotes]; this call site only forwards its lines.
+            skipped.addAll(chatTruncationNotes(tr))
         }
 
         // -- Stage 9: artifact files (shared/ + mcp data, from the embedded zip) --
@@ -2027,6 +2030,44 @@ object ConfigBackup {
             )
             for (line in result.skipped) Log.w(TAG, "import skipped — $line")
         }
+    }
+
+    /**
+     * [FIX-P1B / RT-S1] The user-facing "this package was not whole" lines for
+     * an import, derived from the payload's `chatTruncated` object.
+     *
+     * Two independent kinds of incompleteness live in that one object and they
+     * must NOT be conflated:
+     *  - `sessionsDropped` / `messagesDropped` — the exporter deliberately
+     *    trimmed the history to fit its byte budget. The source device still
+     *    has everything (this is the pre-existing contract).
+     *  - `shardsMissing` — the source PACKAGE has a hole in its JSONL shard
+     *    sequence. Messages are gone here and the exporter never knew: before
+     *    P1-B the reader treated the hole as end-of-sequence, so the tail of
+     *    the transcript vanished silently and the import looked clean.
+     *
+     * Pure on purpose (no repos, no I/O): the call site in [import] only
+     * forwards these lines into `ImportResult.skipped`, which the backup screen
+     * already renders. Dead-literal tested in ChatTruncationNotesTest.
+     */
+    internal fun chatTruncationNotes(tr: JSONObject): List<String> {
+        val out = ArrayList<String>(2)
+        val s = tr.optInt("sessionsDropped", 0)
+        val m = tr.optInt("messagesDropped", 0)
+        if (s > 0 || m > 0) {
+            out.add(
+                "chat history was budget-trimmed at export: " +
+                    "$m message(s) and $s session(s) not carried (full history stays on the source device)"
+            )
+        }
+        val shards = tr.optInt("shardsMissing", 0)
+        if (shards > 0) {
+            out.add(
+                "backup package was incomplete: $shards data shard(s) missing " +
+                    "(chat/rule history restored partially; the source device still holds the full copy)"
+            )
+        }
+        return out
     }
 
     /** Hard cap on messages carried per session in a chat-history backup. */
