@@ -2,6 +2,7 @@ package com.rikkaminis.app.data.storage
 
 import android.content.Context
 import com.rikkaminis.app.data.ComposerDraftStore
+import com.rikkaminis.app.logging.AppLogger
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -18,6 +19,14 @@ import java.nio.file.attribute.BasicFileAttributes
  * "session-shaped" and deleted an active draft's files.
  */
 private const val DRAFT_ID_PREFIX = "__new__"
+
+/**
+ * [P1-D] Log tag for this owner. The delete half is the only place in the
+ * session-file lifecycle that refuses to act, so it is also the only one that
+ * needs to say so out loud (the Storage page shows the refusal in the UI; the
+ * log is what survives after the user closes the dialog).
+ */
+private const val TAG = "SessionFileStore"
 
 /**
  * Singular owner of the on-disk footprint attached to a chat session.
@@ -320,12 +329,43 @@ class SessionFileStore internal constructor(
      * B: orphan reclamation. Any dir under [sessionsRoot] or any media subdir
      * whose id is NOT in [liveSessionIds] is a leftover from a deleted (or
      * never-committed) session. Returns the reclaimable bytes and reclaims them.
+     *
+     * [P1-D FINDING-26] This is the ONE destructive sweep in the app, and
+     * "not in the live set" is only evidence of garbage when the live set has
+     * something to say. It is built entirely from the DB (`listSessions()`), so
+     * an EMPTY set means "we know nothing about any session", not "there are no
+     * sessions": a rebuilt / partially restored / cleared `sessions` table makes
+     * every surviving session dir, media leaf and tab-state file look like
+     * residue, and one tap on the Storage page ("reclaim N items") would delete
+     * every workspace, attachment and offload on the device. [withActiveComposerOwner]
+     * cannot cover this — a draft id tells us about ONE slot, never about the
+     * DB's overall trustworthiness, which is why the guard reads the caller's
+     * raw set and not the widened one.
+     *
+     * The floor is deliberately lopsided: no live sessions ⇒ refuse the whole
+     * sweep (all three kinds) and return a [ReclaimReport.blocked] report that
+     * still carries the candidate counts, so the caller can SAY why nothing
+     * happened instead of reporting a silent success. An empty live set with
+     * nothing to reclaim stays a plain zero report — a fresh install must not
+     * see an error for "there was nothing to do".
      */
     fun reclaimOrphans(liveSessionIds: Set<String>): ReclaimReport {
         // [da1040-A3] One widening per public entry point; the private helpers
         // below are reachable only from here, so they inherit [live].
         val live = withActiveComposerOwner(liveSessionIds)
-        val report = scanOrphans(live)
+        val report = withEmptyLiveFloor(scanOrphans(live), liveSessionIds)
+        if (report.blocked) {
+            // Not a silent skip: the refusal is logged AND returned, and the
+            // Storage page renders the blocked state instead of "reclaimed".
+            AppLogger.warning(
+                TAG,
+                "orphan reclaim BLOCKED (${report.blockReason}): the live session set is empty " +
+                    "but ${report.totalDirs} candidate(s) / ${report.totalBytes} B would have been " +
+                    "deleted — the DB says nothing about these sessions, so it cannot prove they " +
+                    "are orphans. Nothing was removed.",
+            )
+            return report
+        }
         with(report) {
             // Delete the scanned session dirs (ids in the report).
             if (sessionIds.isNotEmpty()) {
@@ -341,6 +381,31 @@ class SessionFileStore internal constructor(
         deleteOrphanBrowserTabFiles(live)
         return report
     }
+
+    /**
+     * [P1-D FINDING-26] The empty-live-set floor, in ONE place.
+     *
+     * [ReclaimReport.blocked] is a decision about a CANDIDATE SET, so the scan
+     * half needs it too: the Storage page assembles its own report by hand (one
+     * media walk, see `StorageManagementScreen.reload`), renders the banner from
+     * it and only then calls [reclaimOrphans]. Without this the banner would
+     * advertise "N items, X MB" as reclaimable in exactly the world where the
+     * delete half refuses to touch them.
+     *
+     * Both halves call this function, so "what the banner offers" and "what the
+     * sweep will do" cannot drift — the caller passes the SAME raw live set it
+     * would pass to [reclaimOrphans] (see that function's KDoc for why the
+     * draft-widened set is the wrong input).
+     */
+    fun withEmptyLiveFloor(report: ReclaimReport, liveSessionIds: Set<String>): ReclaimReport =
+        if (report.totalDirs > 0 && liveSessionIds.isEmpty()) {
+            report.copy(
+                blocked = true,
+                blockReason = ReclaimReport.BLOCK_NO_LIVE_SESSIONS,
+            )
+        } else {
+            report
+        }
 
     /**
      * True if [name] is a session-shaped id: a bare session UUID
@@ -550,6 +615,12 @@ class SessionFileStore internal constructor(
      *
      * Adding a fourth kind means adding it here AND to [scanOrphans], so the
      * number the user confirms is the number that gets deleted.
+     *
+     * [P1-D FINDING-26] [blocked] / [blockReason] are the fourth thing a caller
+     * must look at: they say the candidate set itself is untrustworthy (the live
+     * session set was empty), so the counts above are a WARNING, not an offer.
+     * They default to "not blocked" because every other report in the codebase
+     * (scans, per-kind sub-reports) is a measurement, not a decision.
      */
     data class ReclaimReport(
         val sessionIds: List<String> = emptyList(),
@@ -559,8 +630,21 @@ class SessionFileStore internal constructor(
         val mediaBytes: Long = 0L,
         val browserTabsDirs: Int = 0,
         val browserTabsBytes: Long = 0L,
+        /** True when the sweep refused to delete: see [SessionFileStore.reclaimOrphans]. */
+        val blocked: Boolean = false,
+        /** Stable, machine-readable reason code — null unless [blocked]. */
+        val blockReason: String? = null,
     ) {
         val totalBytes: Long get() = sessionBytes + mediaBytes + browserTabsBytes
         val totalDirs: Int get() = sessionDirs + mediaDirs + browserTabsDirs
+
+        companion object {
+            /**
+             * [P1-D] The live session set handed to the sweep was empty while
+             * orphan candidates existed. Reason code, not prose: the UI owns the
+             * wording (7 locales), the log and analytics own the identity.
+             */
+            const val BLOCK_NO_LIVE_SESSIONS = "no-live-sessions"
+        }
     }
 }

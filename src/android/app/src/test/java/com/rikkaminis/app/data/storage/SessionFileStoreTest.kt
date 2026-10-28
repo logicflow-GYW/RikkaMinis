@@ -2,6 +2,7 @@ package com.rikkaminis.app.data.storage
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -35,6 +36,19 @@ class SessionFileStoreTest {
     }
 
     private fun sid(): String = UUID.randomUUID().toString()
+
+    /**
+     * [P1-D FINDING-26] One live session id that owns NO files on disk.
+     *
+     * The delete-half tests below only care that "everything not live is
+     * residue", and `emptySet()` used to be shorthand for "nothing is live".
+     * That shorthand is now a different claim — "the DB knows nothing about any
+     * session", which the floor guard treats as a refusal (see the FINDING-26
+     * block at the bottom). Handing in one unrelated live id keeps those tests
+     * about the delete half; `emptySet()` is reserved for the floor arms, where
+     * the refusal IS the assertion.
+     */
+    private fun someLiveId(): Set<String> = setOf(sid())
 
     // ── Bug 3: sizeOf symlink / hardlink semantics ───────────────────────────
 
@@ -158,7 +172,7 @@ class SessionFileStoreTest {
         val mediaLeaf = File(File(File(s.mediaRootForTesting(), "2026"), "08"), dead)
         write(File(mediaLeaf, "m.bin"), 60)
 
-        val report = s.reclaimOrphans(emptySet())
+        val report = s.reclaimOrphans(someLiveId())
         assertEquals(1, report.sessionDirs)
         assertEquals(1, report.mediaDirs)
         assertFalse(s.sessionDir(dead).exists())
@@ -292,7 +306,7 @@ class SessionFileStoreTest {
         val draftStem = "__new__${UUID.randomUUID()}"
         val draftTabs = write(File(s.browserTabsRootForTesting(), "$draftStem.json"), 20)
 
-        s.reclaimOrphans(emptySet())
+        s.reclaimOrphans(someLiveId())
         assertFalse("orphaned draft tab file must be reclaimed", draftTabs.exists())
     }
 
@@ -301,7 +315,7 @@ class SessionFileStoreTest {
         val s = store()
         val stray = write(File(s.browserTabsRootForTesting(), "not-a-session.json"), 15)
 
-        s.reclaimOrphans(emptySet())
+        s.reclaimOrphans(someLiveId())
         assertTrue("fail-safe guard: unknown stems are never reclaimed", stray.exists())
     }
 
@@ -330,7 +344,7 @@ class SessionFileStoreTest {
         val deadMedia = write(File(File(File(s.mediaRootForTesting(), "2026-01-01"), other), "m.bin"), 30)
         val deadTabs = write(s.browserTabFile(other), 20)
 
-        s.reclaimOrphans(emptySet())
+        s.reclaimOrphans(someLiveId())
 
         assertTrue("active draft's session dir must survive", draftDir.exists())
         assertTrue("active draft's media must survive", draftMedia.exists())
@@ -363,11 +377,128 @@ class SessionFileStoreTest {
         val trailing = write(File(File(s.sessionsRoot, "__new__${UUID.randomUUID()}-extra"), "f.bin"), 10)
 
         val report = s.scanOrphans(emptySet())
-        s.reclaimOrphans(emptySet())
+        s.reclaimOrphans(someLiveId())
 
         assertTrue("fail-safe: only a full UUID behind the prefix qualifies", report.sessionIds.isEmpty())
         assertTrue("bare route placeholder", bare.exists())
         assertTrue("non-UUID suffix", notUuid.exists())
         assertTrue("trailing garbage after the UUID", trailing.exists())
+    }
+
+    // ── [P1-D FINDING-26] the empty live-set floor ───────────────────────────
+    // `liveSessionIds` is built from `dao.listSessions()` alone. An EMPTY set
+    // therefore means "the DB knows nothing about any session", not "there are
+    // no sessions" — and those are different claims. A rebuilt / partially
+    // restored / cleared `sessions` table with an intact filesDir is exactly
+    // the disaster this file guards: every surviving session dir, media leaf
+    // and tab-state file looks like residue, and the old sweep deleted all
+    // three kinds on one confirmation tap.
+
+    @Test
+    fun `reclaimOrphans refuses the whole sweep when the live set is empty`() {
+        val s = store()
+        val a = sid()
+        val b = sid()
+        val c = sid()
+        write(File(s.sessionDir(a), "workspace/download.bin"), 100)
+        write(File(s.sessionDir(b), "attachments/doc.pdf"), 200)
+        val mediaLeaf = File(File(File(s.mediaRootForTesting(), "2026"), "10"), c)
+        write(File(mediaLeaf, "photo.jpg"), 300)
+        val deadTabs = write(s.browserTabFile(c), 40)
+
+        val report = s.reclaimOrphans(emptySet())
+
+        assertTrue("the sweep must refuse instead of silently doing nothing", report.blocked)
+        assertEquals(
+            "the reason must be machine-readable (the UI owns the wording)",
+            SessionFileStore.ReclaimReport.BLOCK_NO_LIVE_SESSIONS,
+            report.blockReason,
+        )
+        // The candidates are still MEASURED: that is what lets the caller say
+        // "N items would have been deleted" instead of pretending success.
+        assertEquals(2, report.sessionDirs)
+        assertEquals(1, report.mediaDirs)
+        assertEquals(1, report.browserTabsDirs)
+        // ... and nothing may have moved, for ANY of the three kinds.
+        assertTrue("session dir a", s.sessionDir(a).exists())
+        assertTrue("session dir b", s.sessionDir(b).exists())
+        assertTrue("media leaf", File(File(File(s.mediaRootForTesting(), "2026"), "10"), c).exists())
+        assertTrue("tab state file", deadTabs.exists())
+    }
+
+    @Test
+    fun `reclaimOrphans with an empty live set and nothing to reclaim is not blocked`() {
+        // A brand-new install: no DB rows AND no leftovers. Nothing to refuse —
+        // the user must not see an error for "there was nothing to do".
+        val s = store()
+
+        val report = s.reclaimOrphans(emptySet())
+
+        assertFalse("an empty state is not a refusal", report.blocked)
+        assertNull(report.blockReason)
+        assertEquals(0, report.totalDirs)
+        assertEquals(0L, report.totalBytes)
+    }
+
+    @Test
+    fun `reclaimOrphans with a live session still deletes the other dirs`() {
+        // Zero-regression arm for the guard: one live id is enough for the
+        // sweep to trust its own predicate again.
+        val s = store()
+        val keep = sid()
+        val dead1 = sid()
+        val dead2 = sid()
+        write(File(s.sessionDir(keep), "workspace/a"), 10)
+        write(File(s.sessionDir(dead1), "workspace/a"), 10)
+        write(File(s.sessionDir(dead2), "workspace/a"), 10)
+
+        val report = s.reclaimOrphans(setOf(keep))
+
+        assertFalse(report.blocked)
+        assertTrue("live session must survive", s.sessionDir(keep).exists())
+        assertFalse("first orphan must be reclaimed", s.sessionDir(dead1).exists())
+        assertFalse("second orphan must be reclaimed", s.sessionDir(dead2).exists())
+        assertEquals(2, report.sessionDirs)
+    }
+
+    @Test
+    fun `an active draft does not unlock the empty-live-set floor`() {
+        // [da1040-A3]'s draft widening answers a different question ("does this
+        // ONE slot own files yet?"). It says nothing about the DB being
+        // trustworthy, so it must not re-arm the sweep while `sessions` is
+        // empty — otherwise an in-flight draft becomes a licence to delete
+        // every real session's files.
+        val draft = "__new__${UUID.randomUUID()}"
+        val s = storeWithDrafts(draft)
+        val real = sid()
+        val realDir = write(File(s.sessionDir(real), "workspace/a"), 10)
+
+        val report = s.reclaimOrphans(emptySet())
+
+        assertTrue(report.blocked)
+        assertTrue("an unrelated session dir must survive a blocked sweep", realDir.exists())
+    }
+
+    @Test
+    fun `the banner and the sweep share one floor predicate`() {
+        // The Storage page cannot call scanOrphans (one media walk), so it
+        // assembles its own ReclaimReport and applies this function to it. The
+        // sweep applies the same one — banner and delete cannot disagree.
+        val s = store()
+        val candidates = SessionFileStore.ReclaimReport(sessionDirs = 3, sessionBytes = 500)
+
+        val blocked = s.withEmptyLiveFloor(candidates, emptySet())
+        assertTrue("no live sessions ⇒ the offer is not an offer", blocked.blocked)
+        assertEquals(3, blocked.totalDirs)
+        assertEquals(500L, blocked.totalBytes)
+
+        assertFalse(
+            "one live session is enough to trust the predicate again",
+            s.withEmptyLiveFloor(candidates, setOf(sid())).blocked,
+        )
+        assertFalse(
+            "an empty candidate set is never a refusal",
+            s.withEmptyLiveFloor(SessionFileStore.ReclaimReport(), emptySet()).blocked,
+        )
     }
 }
