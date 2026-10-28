@@ -1236,29 +1236,46 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             ) + fadeOut(animationSpec = tween(durationMillis = 160)),
         ) {
             val scrollState = rememberScrollState()
-            // [T-thinking-render-perf-android] Render only the tail window so
-            // Compose lays out at most `thinkingWindowSize` chars. `remember`
-            // keyed on the length recomputes the substring on each token, but
-            // the cost is O(window) not O(total). Snap the cut to the next
-            // newline (within 200 chars) so we don't start mid-line.
-            val isTruncated = charCount > thinkingWindowSize
-            val displayContent = remember(charCount) {
-                if (isTruncated) {
-                    val full = block.content
-                    val start = charCount - thinkingWindowSize
-                    val nl = full.indexOf('\n', start)
-                    if (nl in start until start + 200) full.substring(nl + 1)
-                    else full.substring(start)
-                } else {
-                    block.content
-                }
-            }
             // [T-android-thinking-inner-scroll] Pause auto-follow once the user
             // scrolls away from the bottom; resume it when they return. iOS
             // pulls the user back unconditionally — but that fights every
             // touch on Compose's smaller pause-threshold scroller, so we
             // honor the user's drag the way the outer chat list does.
             var userScrolledAway by remember(block.id) { mutableStateOf(false) }
+            // [F-14 meta-audit-1028] Pausing the *scroll* wasn't enough: the
+            // window below is anchored to the tail, so on every token it
+            // dropped another slice from the head and re-based the whole
+            // string — the lines the reader was looking at slid up out of the
+            // viewport even though `scrollTo` was never called. Pin the head
+            // of the visible slice for as long as the pause lasts; release it
+            // (snap back to the live tail) the moment they return to the
+            // bottom, which the collector below already detects via gap <= 4.
+            var frozenWindowStart by remember(block.id) { mutableStateOf<Int?>(null) }
+            // [T-thinking-render-perf-android] Render only the tail window so
+            // Compose lays out at most `thinkingWindowSize` chars. Recompute
+            // cost is O(window), not O(total). The cut snaps to the next
+            // newline (within 200 chars) so we don't start mid-line.
+            val tailWindowStart = remember(block.content) {
+                thinkingTailWindowStart(block.content, thinkingWindowSize)
+            }
+            LaunchedEffect(userScrolledAway, tailWindowStart) {
+                if (userScrolledAway) {
+                    // Capture at pause time — without this the head would keep
+                    // advancing on the very next token.
+                    if (frozenWindowStart == null) frozenWindowStart = tailWindowStart
+                } else if (frozenWindowStart != null) {
+                    frozenWindowStart = null
+                }
+            }
+            val isTruncated = charCount > thinkingWindowSize
+            val displayContent = remember(block.content, tailWindowStart, frozenWindowStart) {
+                thinkingWindowSlice(
+                    content = block.content,
+                    start = frozenWindowStart ?: tailWindowStart,
+                    windowSize = thinkingWindowSize,
+                    frozen = frozenWindowStart != null,
+                )
+            }
             LaunchedEffect(scrollState, block.id) {
                 snapshotFlow {
                     Triple(
@@ -1440,4 +1457,50 @@ internal fun shouldSyncFullContentText(shown: CharSequence?, content: String): B
     if (shown == null) return true
     if (shown.length != content.length) return true
     return shown.toString() != content
+}
+
+// ─── [F-14 meta-audit-1028] thinking window slicing ─────────────────────────
+
+/** How far past the window start we'll look for a newline before giving up and
+ *  cutting mid-line. Matches the pre-F-14 inline behaviour (200 chars). */
+internal const val THINKING_WINDOW_NEWLINE_SLACK = 200
+
+/**
+ * Start offset of the tail-following window over [content]: the last
+ * [windowSize] characters, snapped forward to the next newline when one is
+ * close enough that the reader never sees a half line at the top.
+ *
+ * Returns 0 when the content already fits (nothing to trim).
+ */
+internal fun thinkingTailWindowStart(content: String, windowSize: Int): Int {
+    if (windowSize <= 0 || content.length <= windowSize) return 0
+    val start = content.length - windowSize
+    val nl = content.indexOf('\n', start)
+    return if (nl in start until start + THINKING_WINDOW_NEWLINE_SLACK) nl + 1 else start
+}
+
+/**
+ * Visible slice of [content] for a window anchored at [start].
+ *
+ * - `frozen == false` (following the tail): everything from [start] onward, so
+ *   the window keeps growing at the bottom as tokens arrive.
+ * - `frozen == true` (the reader scrolled away): exactly [windowSize] chars from
+ *   [start], so appended tokens can't re-base the string under them. Without
+ *   the upper bound the slice would still lengthen on every token, and the
+ *   head — which is what we're protecting — would stay pinned while the
+ *   content the reader is watching drifted upward.
+ *
+ * [start] is clamped, so a stale frozen offset (the block shrank) can't throw.
+ */
+internal fun thinkingWindowSlice(
+    content: String,
+    start: Int,
+    windowSize: Int,
+    frozen: Boolean = false,
+): String {
+    if (content.isEmpty()) return content
+    val from = start.coerceIn(0, content.length)
+    if (!frozen) return content.substring(from)
+    val size = if (windowSize > 0) windowSize else content.length
+    return content.substring(from, minOf(content.length, from + size))
 }
