@@ -3,6 +3,8 @@ package com.rikkaminis.app.browser
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.res.Configuration
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.util.Log
 import android.webkit.WebView
@@ -183,6 +185,15 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
          * set_viewport / reloadAndWait).
          */
         private const val TRIM_MAX_IDLE_TABS_TO_KEEP = 1
+
+        /**
+         * [r3-B09 F-09] Hand-rolled redirect budget for URL downloads. The
+         * connection's own auto-follow already covers same-protocol hops; this
+         * budget only bounds the explicit Location chase (cross-protocol, or a
+         * server that ignores the standard), so a redirect loop burns 5 hops —
+         * not the download coroutine's whole lifetime.
+         */
+        private const val MAX_DOWNLOAD_REDIRECT_HOPS = 5
     }
 
     /**
@@ -220,7 +231,29 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
          * since it's transient scheduling state, not tab identity.
          */
         var inUseGraceJob: Job? = null,
-    )
+        /**
+         * [r3-B09 F-04] The post-action reuse grace hold, held SEPARATELY from
+         * [inUse].
+         *
+         * Before this split one flag meant both "an agent action is executing
+         * on this tab" and "the tab is still reserved for a follow-up call
+         * 15s after the action ended". `agentBusy` derives from [inUse], so a
+         * plain tab-less `navigate` locked BrowserSheet's back/forward/reload
+         * and its "Minis is browsing | Takeover" bar for the whole grace
+         * window after the agent had already finished — and a Takeover during
+         * an action was re-locked by that action's own release path.
+         *
+         * Reads that only meant "don't hand this tab to another caller yet"
+         * (acquireTab's fan-out, trim/evict victim filters) use [isHeld];
+         * [inUse] stays the executing signal so the published busy flag means
+         * what its name says. Excluded from equals/hashCode/copy for the same
+         * reason as [inUseGraceJob]: transient scheduling state, not identity.
+         */
+        var graceHeld: Boolean = false,
+    ) {
+        /** [r3-B09 F-04] Reserved for the agent — executing or grace-held. */
+        val isHeld: Boolean get() = tabHeld(inUse = inUse, graceHeld = graceHeld)
+    }
 
     private val _tabs = MutableStateFlow<List<Tab>>(emptyList())
     val tabs: StateFlow<List<Tab>> = _tabs.asStateFlow()
@@ -249,6 +282,15 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
      * [da1040-B2] Single carrier of the busy predicate. Re-derives from the
      * live tab list, so every writer stays a statement of fact ("this tab is
      * in use") and the flag cannot drift from [Tab.inUse].
+     *
+     * [r3-B09 F-04] The predicate stays `any { it.inUse }` — and `inUse` now
+     * means "an agent action is executing on this tab" only: the post-action
+     * reuse grace hold moved to [Tab.graceHeld] (which the fan-out and the
+     * trim/evict victim filters read via [Tab.isHeld]). Before the split the
+     * 15s grace hold drove this flag too, so BrowserSheet stayed locked on
+     * its "Minis is browsing | Takeover" affordances long after the agent had
+     * finished, and a Takeover during an action was re-locked by that
+     * action's own release path.
      */
     private fun publishAgentBusy() {
         _agentBusy.value = _tabs.value.any { it.inUse }
@@ -711,16 +753,54 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         val id = registerDownload(dest, contentLength)
         val job = downloadScope.launch {
             try {
-                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-                conn.connectTimeout = 15_000
-                conn.readTimeout = 30_000
-                conn.instanceFollowRedirects = true
-                userAgent?.takeIf { it.isNotEmpty() }?.let { conn.setRequestProperty("User-Agent", it) }
-                // Reuse the WebView's cookies so authenticated downloads work.
-                android.webkit.CookieManager.getInstance().getCookie(url)?.let {
-                    conn.setRequestProperty("Cookie", it)
+                // [r3-B09 F-09] Resolve redirects BY HAND instead of trusting the
+                // connection: HttpURLConnection's auto-follow refuses
+                // cross-protocol hops (http→https), so the pre-fix code took the
+                // 3xx response itself (an empty or HTML stub body) as the payload
+                // and streamed it into the workspace as a COMPLETED download.
+                // Follow Location hops here (bounded), then gate on the final
+                // status so an error page can never become the payload.
+                var currentUrl = url
+                var opened: java.net.HttpURLConnection? = null
+                var hops = 0
+                while (opened == null) {
+                    val c = java.net.URL(currentUrl).openConnection() as java.net.HttpURLConnection
+                    c.connectTimeout = 15_000
+                    c.readTimeout = 30_000
+                    c.instanceFollowRedirects = true
+                    userAgent?.takeIf { it.isNotEmpty() }?.let { c.setRequestProperty("User-Agent", it) }
+                    // Reuse the WebView's cookies so authenticated downloads work
+                    // — re-read per hop, a redirect can cross hosts.
+                    android.webkit.CookieManager.getInstance().getCookie(currentUrl)?.let {
+                        c.setRequestProperty("Cookie", it)
+                    }
+                    val code = c.responseCode
+                    val location = if (code in 300..399) c.getHeaderField("Location") else null
+                    if (location != null) {
+                        c.disconnect()
+                        hops++
+                        if (hops > MAX_DOWNLOAD_REDIRECT_HOPS) {
+                            throw java.io.IOException("too many redirects (> $MAX_DOWNLOAD_REDIRECT_HOPS)")
+                        }
+                        currentUrl = java.net.URL(java.net.URL(currentUrl), location).toString()
+                        continue
+                    }
+                    // [r3-B09 F-09] 4xx/5xx bodies are error pages, not the
+                    // download. Fail loudly: the catch below settles the entry
+                    // FAILED (the partial file is deleted) and posts the chat
+                    // notice — instead of the old "downloaded 412 bytes of HTML,
+                    // success".
+                    if (code !in 200..299) {
+                        c.disconnect()
+                        throw java.io.IOException("HTTP $code")
+                    }
+                    opened = c
                 }
-                val total = if (contentLength > 0) contentLength else conn.contentLengthLong
+                val conn = opened ?: throw java.io.IOException("no connection established")
+                // [r3-B09 F-09] After a redirect the listener's contentLength
+                // describes the ORIGINAL URL, so the connection's own header
+                // (final hop) wins when it is known.
+                val total = conn.contentLengthLong.takeIf { it > 0 } ?: contentLength
                 conn.inputStream.use { input ->
                     dest.outputStream().use { out ->
                         val buf = ByteArray(64 * 1024)
@@ -812,6 +892,37 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
     private fun wireDownloadHandlers(manager: BrowserUseManager) {
         manager.onDownloadStart = { url, ua, cd, mime, len -> startUrlDownload(url, ua, cd, mime, len) }
         manager.onBlobDownloadData = { data, name, mime -> saveBlobDownload(data, name, mime) }
+        // [r3-B09 F-10] blob:/data: downloads are fetched by page-side JS, so
+        // every failure (bad bridge token, FileReader error, unsafe name,
+        // malformed data URL, decode error, tab gone) used to end as a Log.w
+        // inside the manager: the user tapped "download", nothing appeared in
+        // the panel and no notice was posted.
+        manager.onBlobDownloadFailed = { name, reason -> reportDownloadFailure(name, reason) }
+    }
+
+    /**
+     * [r3-B09 F-10] Surface a download that failed BEFORE any bytes reached the
+     * pool (blob:/data: paths fail inside the WebView bridge, so there is no
+     * registered entry and no partial file to settle).
+     *
+     * Posts a FAILED panel entry with no destination — the panel already treats
+     * a null destination as "nothing to open" — plus the same chat notice the
+     * streaming failure path posts, so both shapes look alike to the user.
+     */
+    internal fun reportDownloadFailure(name: String?, reason: String) {
+        val label = name?.let { sanitizeDownloadName(it) } ?: "download"
+        val entry = DownloadEntry(
+            id = nextDownloadId.getAndIncrement(),
+            filename = label,
+            destination = null,
+            bytesDone = 0L,
+            totalBytes = 0L,
+            state = DownloadState.FAILED,
+            failureReason = reason,
+            startedAt = System.currentTimeMillis(),
+        )
+        _downloads.update { listOf(entry) + it }
+        onDownloadEvent?.invoke("Download failed: ${middleTruncated(label)} — $reason")
     }
 
     // -- Agent Execution --
@@ -1014,6 +1125,12 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
             // the common cases (Cloudflare "Attention Required!" titles,
             // captcha "Security check" titles, etc.).
             val riskChallenge = BrowserRiskControl.detectChallenge(
+                // [r3-B09 F-14] Every call site omitted `statusCode`, so the
+                // 429/403 fast path was dead code: "rate_limited" /
+                // "access_denied" could only be reached through page TEXT (a
+                // bare 403 error page says neither). The manager records the
+                // main frame's last HTTP error status, reset per navigation.
+                statusCode = tab.manager.lastMainFrameHttpError,
                 title = tab.manager.pageTitle.value,
                 currentUrl = tab.manager.currentURL.value,
             )
@@ -1091,26 +1208,36 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
             }
         } finally {
             tab.lastActivityDate = Date()
+            // [r3-B09 F-04] Execution ends HERE for both paths: `inUse` is the
+            // "an agent action is running" signal, so it is released the moment
+            // the action returns. The reuse protection ("don't hand this tab to
+            // a near-simultaneous tab-less acquire yet") is the separate grace
+            // hold below, which no longer feeds the published busy flag — the
+            // old single-flag shape kept BrowserSheet locked for 15s after the
+            // agent had finished. Release first, then re-arm, so a concurrent
+            // acquireTab sees a consistent "not executing, grace-held" state.
+            setTabInUse(tab, false)
             if (implicitTab) {
                 // [T-browser-implicit-tab-inuse-until-load-android] Keep the tab
-                // marked inUse through a grace window instead of releasing it the
+                // reserved through a grace window instead of freeing it the
                 // instant the action returns. The action itself already ran to
                 // completion (navigate suspended until the page finished loading),
                 // so this grace exists purely to repel a near-simultaneous
                 // tab-less acquire — without it, three back-to-back navigates each
-                // clear inUse before the next acquireTab(null) runs and all land on
-                // tab 0. armImplicitGraceRelease re-arms on each action so a
-                // same-task follow-up chain holds the tab; it flips inUse=false
-                // after IMPLICIT_TAB_GRACE_MS of inactivity.
+                // clear the hold before the next acquireTab(null) runs and all
+                // land on tab 0. armImplicitGraceRelease re-arms on each action so
+                // a same-task follow-up chain holds the tab; it flips
+                // graceHeld=false after IMPLICIT_TAB_GRACE_MS of inactivity.
                 armImplicitGraceRelease(tab)
             } else {
                 // Explicit tab_id path keeps the original immediate release — its
                 // serialization is the per-tab Mutex (executeSerialized), so a
                 // grace hold here would only delay the model's own next deliberate
-                // op on that same tab. [T-browser-use-per-tab-serial-android]
+                // op on that same tab. It also retires a hold armed by an earlier
+                // tab-less action on this tab. [T-browser-use-per-tab-serial-android]
                 tab.inUseGraceJob?.cancel()
                 tab.inUseGraceJob = null
-                setTabInUse(tab, false)
+                tab.graceHeld = false
             }
             updateTabs()
             saveState()
@@ -1146,12 +1273,14 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
      * reads/writes inUse on Main).
      */
     private fun armImplicitGraceRelease(tab: Tab) {
-        setTabInUse(tab, true)
+        // [r3-B09 F-04] Reservation only — never an `inUse` write: the action
+        // this guards has already finished, and `inUse` now means "executing".
+        tab.graceHeld = true
         tab.inUseGraceJob?.cancel()
         tab.inUseGraceJob = evictionScope.launch {
             delay(IMPLICIT_TAB_GRACE_MS)
             withContext(Dispatchers.Main) {
-                setTabInUse(tab, false)
+                tab.graceHeld = false
                 tab.inUseGraceJob = null
                 tab.lastActivityDate = Date()
                 updateTabs()
@@ -1194,7 +1323,7 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
             // — that's the trampling this task forbids. Wait (bounded) for a tab
             // to free up; only fall back to reusing the least-recently-active tab
             // if nothing frees within the wait window.
-            var picked = currentTabs.firstOrNull { !it.inUse } ?: createTab(currentTabs)
+            var picked = currentTabs.firstOrNull { !it.isHeld } ?: createTab(currentTabs)
             if (picked == null) {
                 val waitDeadline = IMPLICIT_TAB_WAIT_MS
                 var waited = 0L
@@ -1202,7 +1331,7 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
                     delay(IMPLICIT_TAB_WAIT_POLL_MS)
                     waited += IMPLICIT_TAB_WAIT_POLL_MS
                     currentTabs = _tabs.value.toMutableList()
-                    picked = currentTabs.firstOrNull { !it.inUse } ?: createTab(currentTabs)
+                    picked = currentTabs.firstOrNull { !it.isHeld } ?: createTab(currentTabs)
                     if (picked != null) break
                 }
             }
@@ -1225,8 +1354,11 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         if (tab != null) {
             // Re-acquiring a tab that was sitting in its post-action grace window
             // cancels the pending release — it's actively in use again now.
+            // [r3-B09 F-04] The hold is [Tab.graceHeld], not `inUse`: cancel the
+            // timer and drop the reservation, then mark the tab as executing.
             tab.inUseGraceJob?.cancel()
             tab.inUseGraceJob = null
+            tab.graceHeld = false
             setTabInUse(tab, true)
             tab.lastActivityDate = Date()
             _selectedTabId.value = tab.id
@@ -1575,6 +1707,15 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         // for StateFlow to fire — but keep the live Tab instances.
         _tabs.value = _tabs.value.map { tab ->
             setTabInUse(tab, false)
+            // [r3-B09 F-04] A takeover releases the agent's RESERVATION too, not
+            // just the executing bit: the grace job exists to keep a same-task
+            // follow-up on the same tab, and the user now owns every tab. The
+            // hold moved to its own field, so it has to be retired here or the
+            // next tab-less acquire would fan out around a tab the user is
+            // driving.
+            tab.inUseGraceJob?.cancel()
+            tab.inUseGraceJob = null
+            tab.graceHeld = false
             tab
         }
         // [da1040-B2] The refill above is content-equal to the previous list, so
@@ -1589,9 +1730,22 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
     /**
      * [T-android-trim-memory] Central tab teardown. Removes the tab from the
      * supplied list and destroys its WebView so the renderer process actually
-     * frees memory (50-100 MB/tab). Must be called on the main thread (WebView
-     * APIs are main-thread only) — all call sites ([closeTab], [closeTabFromUI],
-     * [handleCloseWindow], [evictIdleTabs], trim callbacks) run on Main.
+     * frees memory (50-100 MB/tab).
+     *
+     * [r3-B09 F-01] The list bookkeeping here is caller-thread agnostic, but the
+     * WebView teardown is NOT: `BrowserUseManager.destroy()` drives
+     * `stopLoading()` / `loadUrl()` / `destroy()`, all of which throw
+     * "A WebView method was called on thread …" off Main — and the throw lands
+     * inside destroy()'s single `catch`, AFTER it has already latched
+     * `destroyed = true`, so no later call can retry and the renderer leaks for
+     * the life of the process (50-100 MB per tab).
+     *
+     * That is reachable: the memory hooks wired in `MinisApp` (memory-pressure
+     * reclaim, `OffloadRssProbe.governanceHook`, `AppMemoryGovernor`) all call
+     * [evictIdleTabs] from non-Main threads, and `dispose()` runs from
+     * `ViewModel.onCleared` on whatever thread the scope used. [closeTab] /
+     * [closeTabFromUI] / [handleCloseWindow] / the trim callbacks are already
+     * on Main; [destroyManagerOnMain] is the one place that makes the rest safe.
      */
     private fun destroyTab(tabs: MutableList<Tab>, tab: Tab) {
         tab.inUseGraceJob?.cancel()
@@ -1604,7 +1758,25 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         // removed at all. Both are "only-grow" tables on long soak.
         savedURLs.remove(tab.id)
         tabLocks.remove(tab.id)
-        tab.manager.destroy()
+        destroyManagerOnMain(tab.manager)
+    }
+
+    /**
+     * [r3-B09 F-01] Run [BrowserUseManager.destroy] on the main thread, always.
+     *
+     * Deliberately NOT a hop inside `BrowserUseManager.destroy()`: that body is
+     * pinned by `browser_destroy_wakeup_check` (both waiters woken, the latch
+     * gate, `removeCallbacks(null)` before `webView.destroy()`, detach before
+     * the callback drain), and splitting it behind a helper would move all of
+     * that out of `destroy()`'s own body. The pool is the single place that
+     * knows every teardown trigger, so the thread rule lives here instead.
+     */
+    private fun destroyManagerOnMain(manager: BrowserUseManager) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            manager.destroy()
+            return
+        }
+        Handler(Looper.getMainLooper()).post { manager.destroy() }
     }
 
     /**
@@ -1698,7 +1870,9 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         val policy = TrimPolicy.browserTabKillPolicy(level)
         val idleTimeoutMs = idleTimeoutMs
         val now = System.currentTimeMillis()
-        val isLongIdle = { tab: Tab -> !tab.inUse && (now - tab.lastActivityDate.time) >= idleTimeoutMs }
+        val isLongIdle = { tab: Tab ->
+            isIdleEvictionCandidate(tab.isHeld, now - tab.lastActivityDate.time, idleTimeoutMs)
+        }
         val victims = when (policy) {
             TrimPolicy.BrowserTabKillPolicy.DROP_ALL_BUT_SELECTED -> {
                 // Keep only the selected tab. [fix/audit-s4h2] Also keep tabs
@@ -1707,11 +1881,11 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
                 // corrupted mid-evaluation", but this branch previously only
                 // filtered on id != selected — destroying a busy tab's WebView
                 // under TRIM_MEMORY_RUNNING_CRITICAL, mid-evaluateJavascript.
-                _tabs.value.filter { it.id != _selectedTabId.value && !it.inUse }
+                _tabs.value.filter { it.id != _selectedTabId.value && !it.isHeld }
             }
             TrimPolicy.BrowserTabKillPolicy.DROP_ALL_IDLE -> {
                 // Drop all idle tabs (foreground low pressure / overall pressure).
-                _tabs.value.filter { !it.inUse }
+                _tabs.value.filter { !it.isHeld }
             }
             TrimPolicy.BrowserTabKillPolicy.DROP_LONG_IDLE_ONLY -> {
                 // Background / UI-hidden: drop only long-idle tabs, keep
@@ -1753,7 +1927,9 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         val now = System.currentTimeMillis()
         val currentTabs = _tabs.value.toMutableList()
         val timeoutMs = idleTimeoutMs
-        val toRemove = currentTabs.filter { !it.inUse && (now - it.lastActivityDate.time) >= timeoutMs }
+        val toRemove = currentTabs.filter {
+            isIdleEvictionCandidate(it.isHeld, now - it.lastActivityDate.time, timeoutMs)
+        }
         for (tab in toRemove) {
             val url = tab.manager.currentURL.value
             destroyTab(currentTabs, tab)
@@ -2221,3 +2397,26 @@ internal fun mergedTabUrls(
  * trim / idle-evict paths (stored AFTER destroyTab, see the call sites).
  */
 internal fun rememberEvictedUrl(url: String): String? = url.takeIf { it.isNotEmpty() }
+
+/**
+ * [r3-B09 F-04] "This tab is reserved for the agent" — executing *or* inside
+ * the post-action reuse grace window.
+ *
+ * Pure form of [BrowserTabPool.Tab.isHeld], so the split between "an action is
+ * running" and "the tab is still reserved" can be pinned with literals instead
+ * of a WebView. Every read that only needs "don't hand this tab to another
+ * caller yet" must use this; only the published busy flag reads
+ * [BrowserTabPool.Tab.inUse], because the grace hold is not the agent working.
+ */
+internal fun tabHeld(inUse: Boolean, graceHeld: Boolean): Boolean = inUse || graceHeld
+
+/**
+ * [r3-B09 F-01] Should this idle tab be destroyed now?
+ *
+ * Pure form of the trim / idle-evict victim filter: a reserved tab is never a
+ * victim, and a tab whose last activity is inside the timeout window is still
+ * warm. Literal-valued so a JVM test can pin the comparison's direction
+ * (`>=`, and "reserved outranks idle") without an Android runtime.
+ */
+internal fun isIdleEvictionCandidate(held: Boolean, idleMs: Long, timeoutMs: Long): Boolean =
+    !held && idleMs >= timeoutMs
