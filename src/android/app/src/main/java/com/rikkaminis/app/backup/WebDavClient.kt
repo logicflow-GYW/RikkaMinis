@@ -61,6 +61,10 @@ class WebDavException(
  * never be flattenable into "the server has no backups". [statusCode] is kept
  * for diagnostics only; the message is what the user sees (it reaches them
  * through the IOException branch of the backup screens' error mapper).
+ *
+ * [fix/webdav-method-judgement] The same 2xx-but-not-DAV shape is now judged
+ * on PUT/GET/DELETE too (a login page in place of the upload/download/delete
+ * answer), not just on PROPFIND — see [assertNotPortalBody].
  */
 class WebDavNonDavResponse(
     message: String,
@@ -201,6 +205,45 @@ class WebDavClient(
     private inline fun <T> Response.useSafe(block: (Response) -> T): T =
         use(block)
 
+    /**
+     * [fix/webdav-method-judgement] Shared body judge for PUT/GET/DELETE — the
+     * same seam [parsePropfind] guards for PROPFIND. A captive portal, a
+     * reverse-proxy error page or an SSO login page answers 2xx with an HTML
+     * page; judging only the status code made PUT report "backup uploaded"
+     * with nothing on the server, handed GET's login page to
+     * [ConfigBackup.import] (a misleading JSON parse error downstream), and
+     * reported DELETEs that never happened.
+     *
+     * Judge by the FIRST bytes only, deliberately conservative: a JSON backup
+     * payload starts with `{`/`[` (after an optional BOM/whitespace), never
+     * with `<`, so a body that OPENS with `<!DOCTYPE` or `<html` is certainly
+     * not what we asked for. A body that merely CONTAINS "<html" deeper in
+     * (user message content inside a real backup) passes untouched — that is
+     * why this is not a substring scan. `<?xml` is deliberately NOT judged:
+     * a legitimate DELETE may answer 207 with a multistatus document, and
+     * misclassifying a real DAV server as a portal would be the worse error.
+     * The client layer does not validate JSON (that is the importer's job) —
+     * this only refuses the one shape that is definitely not a DAV answer.
+     */
+    private fun assertNotPortalBody(code: Int, body: ByteArray, what: String) {
+        if (body.isEmpty()) return
+        var start = if (body.size >= 3 &&
+            body[0] == 0xEF.toByte() && body[1] == 0xBB.toByte() && body[2] == 0xBF.toByte()
+        ) 3 else 0
+        while (start < body.size) {
+            val b = body[start].toInt()
+            if (b == 0x20 || b == 0x0A || b == 0x0D || b == 0x09) start++ else break
+        }
+        val head = String(body, start, minOf(body.size - start, 256), Charsets.UTF_8).lowercase()
+        val isHtml = head.startsWith("<!doctype") || head.startsWith("<html")
+        if (!isHtml) return
+        throw WebDavNonDavResponse(
+            "$what returned HTTP $code but the body is an HTML page (a Wi-Fi " +
+                "login portal or a proxy page), not a WebDAV/backup response.",
+            code,
+        )
+    }
+
     // ── Operations ─────────────────────────────────────────────────────────
 
     /** PROPFIND [path] (default: the backup directory) at [depth]. */
@@ -265,8 +308,16 @@ class WebDavClient(
             .build()
 
         client.newCall(request).execute().useSafe { response ->
-            if (response.isSuccessful) return
             val code = response.code
+            if (response.isSuccessful) {
+                // [fix/webdav-method-judgement] 200 is NOT permission to claim
+                // the upload landed: a captive portal answers PUT with 200 + an
+                // HTML login page and nothing is stored. An empty body and a
+                // JSON body both pass — legitimate servers answer PUT with
+                // either.
+                assertNotPortalBody(code, response.body?.bytes() ?: ByteArray(0), "Upload")
+                return
+            }
             if (code != 409 && code != 404) {
                 throw WebDavException("Upload failed (HTTP $code)", code)
             }
@@ -285,32 +336,69 @@ class WebDavClient(
             ensureCollectionExists(*parentSegs.toTypedArray())
         }
         client.newCall(request).execute().useSafe { response ->
+            val code = response.code
             if (!response.isSuccessful) {
-                throw WebDavException("Upload failed (HTTP ${response.code})", response.code)
+                throw WebDavException("Upload failed (HTTP $code)", code)
             }
+            // Same body judge on the retry path: the portal answers both
+            // attempts identically, so only one of them getting the check
+            // would leave the hole open.
+            assertNotPortalBody(code, response.body?.bytes() ?: ByteArray(0), "Upload")
         }
     }
 
-    /** Download [path] as raw bytes. */
+    /**
+     * Download [path] as raw bytes. Callers feed this to
+     * [ConfigBackup.import], so the body is judged, not just the status:
+     * [fix/webdav-method-judgement] a captive portal answers GET with 200 +
+     * an HTML login page (redirects land there too), and the old code handed
+     * that page to the importer, which reported a misleading JSON parse
+     * error. An empty 200 body is refused as well — a real backup document
+     * is never zero bytes, so an empty answer means the server did not
+     * actually serve the file.
+     */
     fun get(path: String): ByteArray {
         val url = buildUrl(path)
         val request = Request.Builder().url(url).get().auth().build()
         client.newCall(request).execute().useSafe { response ->
+            val code = response.code
             if (!response.isSuccessful) {
-                throw WebDavException("Download failed (HTTP ${response.code})", response.code)
+                throw WebDavException("Download failed (HTTP $code)", code)
             }
-            return response.body?.bytes() ?: ByteArray(0)
+            val bytes = response.body?.bytes() ?: ByteArray(0)
+            if (bytes.isEmpty()) {
+                throw WebDavNonDavResponse(
+                    "Download returned HTTP $code with an empty body — the " +
+                        "server did not actually serve a backup file.",
+                    code,
+                )
+            }
+            assertNotPortalBody(code, bytes, "Download")
+            return bytes
         }
     }
 
-    /** Delete [path]. */
+    /**
+     * Delete [path]. 204 (or 200) with an empty body is the normal success; a
+     * portal answering 200 + HTML is refused like PUT/GET
+     * ([fix/webdav-method-judgement]) — the old code reported a deletion that
+     * never happened.
+     *
+     * Registered residual, not fixed here: a legitimate 207 multistatus
+     * listing failed entries still reads as success (a 207 is 2xx). Seeing
+     * inside it needs a status-level parse the current parser does not do;
+     * single-file DELETEs rarely answer 207, so this stays a registered
+     * residual rather than a second parser.
+     */
     fun delete(path: String) {
         val url = buildUrl(path)
         val request = Request.Builder().url(url).delete().auth().build()
         client.newCall(request).execute().useSafe { response ->
+            val code = response.code
             if (!response.isSuccessful) {
-                throw WebDavException("Delete failed (HTTP ${response.code})", response.code)
+                throw WebDavException("Delete failed (HTTP $code)", code)
             }
+            assertNotPortalBody(code, response.body?.bytes() ?: ByteArray(0), "Delete")
         }
     }
 
