@@ -328,6 +328,9 @@
     <string name="skill_import_error_no_url">URL を入力してください</string>
     <string name="skill_import_error_invalid">SKILL.md が無効、または skill が既に存在します</string>
     <string name="skill_import_error_format">SKILL.md が無効です。\'name:\' フィールドを含む YAML frontmatter を確認してください。</string>
+    <string name="skill_file_error_read">選択したファイルを読み込めませんでした</string>
+    <string name="skill_file_error_archive">skill アーカイブが無効です: SKILL.md が見つかりません</string>
+    <string name="skill_file_error_detail">インポートに失敗しました: %1$s</string>
     <string name="skill_import_in_progress">インポート中…</string>
     <string name="skill_import_submit">インポート</string>
     <string name="skill_detail_label_name">名前</string>

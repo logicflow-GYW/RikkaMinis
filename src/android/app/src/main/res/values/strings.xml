@@ -692,6 +692,9 @@
     <string name="skill_import_error_no_url">Enter a URL</string>
     <string name="skill_import_error_invalid">Invalid SKILL.md or skill already exists</string>
     <string name="skill_import_error_format">Invalid SKILL.md. Ensure YAML frontmatter with \'name:\' field.</string>
+    <string name="skill_file_error_read">Could not read the selected file</string>
+    <string name="skill_file_error_archive">Invalid skill archive: no SKILL.md found inside</string>
+    <string name="skill_file_error_detail">Import failed: %1$s</string>
     <string name="skill_import_in_progress">Importing...</string>
     <string name="skill_import_submit">Import</string>
     <string name="skill_detail_label_name">Name</string>

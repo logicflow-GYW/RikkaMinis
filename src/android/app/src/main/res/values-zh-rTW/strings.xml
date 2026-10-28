@@ -1224,6 +1224,9 @@
     <string name="skill_import_error_no_url">請輸入 URL</string>
     <string name="skill_import_error_invalid">SKILL.md 無效或 skill 已存在</string>
     <string name="skill_import_error_format">SKILL.md 無效。請確認包含 \'name:\' 欄位的 YAML frontmatter。</string>
+    <string name="skill_file_error_read">無法讀取所選檔案</string>
+    <string name="skill_file_error_archive">技能壓縮檔無效：其中未找到 SKILL.md</string>
+    <string name="skill_file_error_detail">匯入失敗：%1$s</string>
     <string name="skill_import_in_progress">匯入中…</string>
     <string name="skill_import_submit">匯入</string>
     <string name="skill_detail_label_name">名稱</string>
