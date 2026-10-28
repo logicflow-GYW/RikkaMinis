@@ -325,25 +325,40 @@ object ModelExecutionDispatcher {
      * fall back to the in-process path.
      */
     suspend fun dispatch(context: Context, requestJson: String): String? {
-        // [fix/audit-s3l2] Only retry on a CONFIRMED worker death. The previous
-        // code retried on ANY null result, but dispatchOnce also returns null
-        // on timeout — where the worker may STILL be executing the provider
-        // call (slow image/long-text generation). Re-dispatching then started
-        // a second provider call → duplicate billing / duplicate generation.
-        // A timeout must NOT be transparently retried; only the stale-key
-        // worker-death (worker beat then died before writing any output) is
-        // safe to re-run onto a fresh process.
-        val first = dispatchOnce(context, requestJson)
-        if (first.result != null) return first.result
-        return if (first.workerDied) {
-            Log.w(TAG, "dispatch got no result after confirmed worker death — one retry onto a fresh process (stale-key cache / crash)")
-            dispatchOnce(context, requestJson).result
-        } else {
-            // timeout / IO / service-unavailable: do NOT re-dispatch (worker
-            // may still be running the request); surface null to the caller
-            // for its in-process fallback.
-            null
-        }
+        // [fix/audit-s3l2] A TIMEOUT is never retried: dispatchOnce also returns
+        // null on timeout — where the worker may STILL be executing the
+        // provider call (slow image/long-text generation). Re-dispatching then
+        // starts a SECOND provider call → duplicate billing / duplicate
+        // generation. Only a CONFIRMED worker death (beat then silence, no
+        // output) is safe to re-run onto a fresh process.
+        //
+        // [meta1028-D2 F-01] Retrying now keys off the worker's TYPED rejection
+        // as well as the death evidence, and the whole decision table lives in
+        // [ModelExecutionRetryPolicy]. The old code short-circuited on
+        // `first.result != null`, which made its own retry branch unreachable
+        // for the case it was written for: since `feat/provider-exec-concurrency`
+        // the stale-key handoff writes `{"error":"stale_key_cache"}` into
+        // result.json (and the admission gate writes `worker_queue_full`)
+        // instead of killing the process silently — so a dispatch that should
+        // have re-run on a fresh worker returned the rejection verbatim. Both
+        // codes are written BEFORE any provider call, which is why they may be
+        // retried while a timeout may not (the invariant is documented on
+        // ModelExecutionRetryPolicy, not re-derived here).
+        val outcome = dispatchWithRetry(
+            attempt = {
+                val one = dispatchOnce(context, requestJson)
+                ModelDispatchAttempt(one.result, one.workerDied)
+            },
+            onRetry = { attemptsMade, errorCode, delayMs ->
+                Log.w(
+                    TAG,
+                    "dispatch attempt #$attemptsMade returned no usable result " +
+                        "(code=${errorCode ?: "workerDied"} / no result) — " +
+                        "re-dispatching in ${delayMs}ms",
+                )
+            },
+        )
+        return outcome.resultJson
     }
 
     private suspend fun dispatchOnce(context: Context, requestJson: String): DispatchOutcome {

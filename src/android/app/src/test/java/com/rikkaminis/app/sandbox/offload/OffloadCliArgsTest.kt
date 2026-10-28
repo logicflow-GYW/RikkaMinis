@@ -588,7 +588,20 @@ class OffloadCliArgsTest {
         val code = codeOnlyStrings(src)
         assertTrue(
             "--output must be normalised through the shared join before the fail-closed guard",
-            code.contains("if (raw.startsWith(\"file://\")) raw else resolveMaybeRelative(raw, request.cwd)"),
+            code.contains("resolveMaybeRelative(stripFileUrlScheme(raw), request.cwd)"),
+        )
+        // [meta1028-D2 F-02] This assertion used to pin the OPPOSITE literal —
+        // `if (raw.startsWith("file://")) raw else resolveMaybeRelative(...)` —
+        // i.e. the probe *demanded* the passthrough that was the defect: a
+        // `file://` value skipped the join AND every downstream path-semantics
+        // consumer, so it was normalized to the RELATIVE `file:/var/minis/...`,
+        // slipped past both the read-only-mount guard and the session-scope
+        // regex, and got written into `<rootfs>/file:/…` while the response
+        // echoed the original URL. The scheme must now be stripped first, and
+        // the passthrough must never come back.
+        assertFalse(
+            "--output must not pass a file:// value through to the path-semantics consumers",
+            code.contains("if (raw.startsWith(\"file://\")) raw"),
         )
         assertTrue(
             "readLinuxPath must delegate to the shared join, not keep an inline copy",
@@ -626,14 +639,15 @@ class OffloadCliArgsTest {
     @Test
     fun `negative control - a re-inlined --output guard fails the probe`() {
         val original = source(modelUseFile)
+        // [meta1028-D2 F-02] Regression shape = the strip silently dropped, so
+        // a `file://` value reaches the join (and the guards) as a URL again.
         val mutated = original.replace(
-            "if (raw.startsWith(\"file://\")) raw else resolveMaybeRelative(raw, request.cwd)",
-            "val normalizedOutput = resolveMaybeRelative(raw, request.cwd)",
+            "resolveMaybeRelative(stripFileUrlScheme(raw), request.cwd)",
+            "resolveMaybeRelative(raw, request.cwd)",
         )
         assertTrue("the --output normalisation line must exist to be mutated", mutated != original)
         assertProbeFails { assertModelUseRelativePathWiring(mutated) }
     }
-
     @Test
     fun `negative control - re-inlining readLinuxPath fails the probe`() {
         val original = source(modelUseFile)

@@ -164,12 +164,27 @@ class ModelUseOffloadHandler(
         // join implementation. A bare relative path only survives when the cwd
         // itself is missing/relative; then we still fail closed with a clear
         // "absolute path required" error instead of dropping it onto the rootfs
-        // root (which `read_image` would later reject). `file://` URLs are
-        // already absolute and are left untouched.
+        // root (which `read_image` would later reject).
+        //
+        // [meta1028-D2 F-02] `file://` used to be passed through UNSTRIPPED
+        // ("for downstream stripping" — no such stripping existed). Every later
+        // consumer of [outputPath] has PATH semantics: `isLinuxPathUnderReadOnlyMount`
+        // normalizes `file:///var/minis/x` to the RELATIVE `file:/var/minis/x`
+        // (never matches the `/var/minis/mounts/` prefix ⇒ the read-only guard
+        // silently passes), and `sessionAwareHostFile` matches its
+        // `/var/minis/(attachments|offloads|workspace|browser)` regex on the
+        // same relative form (⇒ session scoping lost) before falling back to
+        // `PRootKernel.resolveHostPath`'s rootfs branch — which really wrote
+        // `<rootfs>/file:/var/minis/workspace/out.png` while answering
+        // `output_file: file:///var/minis/workspace/out.png`. The user's file
+        // was nowhere and the bytes landed in the rootfs every session shares.
+        // Strip the scheme, then resolve. Percent-decoding is deliberately NOT
+        // added here — see FIX-FILEURL-CONTRACT §7-R2 (foreign input, no in-repo
+        // constructor; decoding would corrupt files literally named `%XX`).
         val outputPath = args.get("output")?.let { raw ->
-            if (raw.startsWith("file://")) raw else resolveMaybeRelative(raw, request.cwd)
+            resolveMaybeRelative(stripFileUrlScheme(raw), request.cwd)
         }
-        if (outputPath != null && !outputPath.startsWith("/") && !outputPath.startsWith("file://")) {
+        if (outputPath != null && !outputPath.startsWith("/")) {
             return NativeOffloadResult(
                 2,
                 JSONObject().put("error", "invalid_output_path")
@@ -1519,6 +1534,8 @@ Examples:
   minis-model-use run --model gpt-4o 'What is 2+2?'
   minis-model-use run --model gemini-2.5-flash --system 'You are a poet' \
                       --input msgs.json --output /var/minis/workspace/out.txt
+  minis-model-use run --model gpt-image-1 'a red panda' \
+                      --output file:///var/minis/workspace/panda.png   # file:// accepted, scheme stripped
 """
     }
 }
@@ -1581,3 +1598,30 @@ internal fun providerMatches(query: String, label: String, id: String, typeName:
         id.trim().lowercase() == q ||
         typeName.trim().lowercase() == q
 }
+
+/** `file://` scheme as it arrives on a `minis-model-use` path argument. */
+private const val FILE_URL_SCHEME = "file://"
+
+/**
+ * [meta1028-D2 F-02] Strip a leading `file://` scheme so `--output` reaches the
+ * path-semantics consumers (`isLinuxPathUnderReadOnlyMount`,
+ * `sessionAwareHostFile` → `PRootKernel.resolveHostPath`) as a real absolute
+ * Linux path.
+ *
+ * Why stripping alone is the whole fix: the guard, the session classifier and
+ * the rootfs fallback all call `normalizeLinuxPath`, which treats a string that
+ * does not START with `/` as RELATIVE — `file:///var/minis/x` became
+ * `file:/var/minis/x`, which matches neither the read-only-mount prefix nor the
+ * session-scope regex, so the write fell through to
+ * `<rootfs>/file:/var/minis/...` while the response claimed the original URL.
+ *
+ * Deliberately NOT percent-decoding: the path is foreign input with no in-repo
+ * `file://` constructor, and decoding would corrupt files literally named
+ * `%XX` (FIX-FILEURL-CONTRACT §7-R2 — same reasoning, same decision).
+ *
+ * Anything without the scheme is returned untouched (idempotent on plain
+ * paths), and `file://` is only recognized at the START: a path that merely
+ * CONTAINS it is a filenames problem, not a URL.
+ */
+internal fun stripFileUrlScheme(raw: String): String =
+    if (raw.startsWith(FILE_URL_SCHEME)) raw.removePrefix(FILE_URL_SCHEME) else raw

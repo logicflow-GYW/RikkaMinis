@@ -20,6 +20,37 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
+ * [meta1028-D2 F-03] `wait appear|disappear` needs at least ONE selector.
+ *
+ * Without one, the search matches nothing by construction and the two verbs
+ * answer opposite lies: `disappear` returns "disappeared" on the first poll
+ * (nothing was looked for) while `appear` burns the full timeout to answer
+ * found=false. Top-level and parameter-only so the truth table is JVM-testable
+ * without an Android node tree.
+ */
+internal fun waitSelectorProvided(
+    text: String?,
+    textContains: String?,
+    id: String?,
+    className: String?,
+): Boolean = text != null || textContains != null || id != null || className != null
+
+/** [meta1028-D2 F-03] Whole-screen verdict for a `wait appear|disappear` poll. */
+internal enum class WaitVerdict { SATISFIED, KEEP_WAITING }
+
+/**
+ * [meta1028-D2 F-03] `present = true` (appear) is satisfied when the screen
+ * holds a match; `present = false` (disappear) when it holds NONE.
+ *
+ * The predicate is trivial — that is the point. The defect it had to be
+ * separated from is not the comparison, it is WHERE it was applied: the caller
+ * evaluated it once per window root, so "no match in THIS window" was answered
+ * as "no match on the screen".
+ */
+internal fun waitVerdict(present: Boolean, screenMatch: Boolean): WaitVerdict =
+    if (screenMatch == present) WaitVerdict.SATISFIED else WaitVerdict.KEEP_WAITING
+
+/**
  * `android-a11y-cli` — UI-layer automation surface backed by
  * [MinisAccessibilityService]. Mirrors the design doc
  * `docs/.../android-accessibility-cli-design.md`.
@@ -592,13 +623,7 @@ First-run: enable "RikkaMinis" under Settings → Accessibility, then `service p
         maxDepth: Int, depth: Int, out: MutableList<AccessibilityNodeInfo>,
     ) {
         if (node == null || depth > maxDepth) return
-        val t = node.text?.toString()
-        val d = node.contentDescription?.toString()
-        val match = if (contains)
-            (t != null && t.contains(target)) || (d != null && d.contains(target))
-        else
-            t == target || d == target
-        if (match) out.add(node)
+        if (textOrDescMatches(node, target, contains)) out.add(node)
         for (i in 0 until node.childCount) findByTextOrDesc(node.getChild(i), target, contains, maxDepth, depth + 1, out)
     }
 
@@ -847,34 +872,91 @@ First-run: enable "RikkaMinis" under Settings → Accessibility, then `service p
 
     private fun waitAppear(args: OffloadArgs, present: Boolean): NativeOffloadResult {
         val svc = svcOrThrow()
+        // [meta1028-D2 F-03] A wait with NO selector used to answer off an empty
+        // match list: `wait disappear` reported "disappeared" instantly (nothing
+        // was ever searched for) and `wait appear` burned the whole timeout to
+        // answer found=false. Refuse instead — exit 2, like the missing/unknown
+        // subcommand paths above.
+        if (!waitSelectorProvided(
+                text = args.get("text"),
+                textContains = args.get("text-contains"),
+                id = args.get("id"),
+                className = args.get("class"),
+            )
+        ) {
+            return NativeOffloadResult(
+                2,
+                "$TOOL wait: at least one of --text/--text-contains/--id/--class is required\n$WAIT_HELP",
+            )
+        }
         val timeout = args.getLong("timeout") ?: 10_000L
         val deadline = System.currentTimeMillis() + timeout
-        val targetText = args.get("text") ?: args.get("text-contains")
-        val containsOnly = args.get("text-contains") != null
-        val targetId = args.get("id")
-        val targetClass = args.get("class")
         while (System.currentTimeMillis() < deadline) {
-            for (root in svc.rootNodes()) {
-                val matches = ArrayList<AccessibilityNodeInfo>()
-                if (targetText != null) findByTextOrDesc(root, targetText, contains = containsOnly, 30, 0, matches)
-                if (targetId != null) findByResourceId(root, targetId, 30, 0, matches)
-                if (targetClass != null) findByClassName(root, targetClass, 30, 0, matches)
-                val found = matches.isNotEmpty()
-                if (found == present) {
-                    return if (present) ok(args, JSONObject().put("found", true)
-                        .put("node", nodeToJson(svc.nodeRegistry, matches.first(), 0, compact = true)))
-                    else ok(args, JSONObject().put("disappeared", true))
+            // [meta1028-D2 F-03] The verdict is decided over the WHOLE SCREEN,
+            // never per window root. `rootNodes()` yields one root per window
+            // (status bar / IME / overlay included), and the old code returned
+            // `disappeared` from INSIDE the root loop as soon as the FIRST root
+            // lacked the target — a spinner still on screen in the app window
+            // was reported gone whenever another window came first in the list.
+            // [findWaitTarget] walks every root and applies the supplied
+            // selectors as an AND (matching `uiFind`/`matchesPredicate`) instead
+            // of unioning each selector's hits into one list (OR).
+            val match = findWaitTarget(svc, args)
+            if (waitVerdict(present, screenMatch = match != null) == WaitVerdict.SATISFIED) {
+                return if (match != null) {
+                    ok(args, JSONObject().put("found", true)
+                        .put("node", nodeToJson(svc.nodeRegistry, match, 0, compact = true)))
+                } else {
+                    ok(args, JSONObject().put("disappeared", true))
                 }
             }
             Thread.sleep(200)
         }
+        // Timeout keeps the family contract: `wait stable` / `wait activity`
+        // also answer exit 0 + timedOut=true, and callers read the flag.
         return ok(args, JSONObject().put("found", false).put("timedOut", true))
     }
 
-    private fun findByClassName(node: AccessibilityNodeInfo?, cls: String, maxDepth: Int, depth: Int, out: MutableList<AccessibilityNodeInfo>) {
-        if (node == null || depth > maxDepth) return
-        if (node.className?.toString() == cls) out.add(node)
-        for (i in 0 until node.childCount) findByClassName(node.getChild(i), cls, maxDepth, depth + 1, out)
+    /**
+     * [meta1028-D2 F-03] First node that matches EVERY supplied wait selector,
+     * searched across all window roots. Null = nothing on screen matches.
+     */
+    private fun findWaitTarget(svc: MinisAccessibilityService, args: OffloadArgs): AccessibilityNodeInfo? {
+        for (root in svc.rootNodes()) {
+            findWaitMatchIn(root, args, maxDepth = 30, depth = 0)?.let { return it }
+        }
+        return null
+    }
+
+    private fun findWaitMatchIn(
+        node: AccessibilityNodeInfo?, args: OffloadArgs,
+        maxDepth: Int, depth: Int,
+    ): AccessibilityNodeInfo? {
+        if (node == null || depth > maxDepth) return null
+        if (waitNodeMatches(node, args)) return node
+        for (i in 0 until node.childCount) {
+            findWaitMatchIn(node.getChild(i), args, maxDepth, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    /** AND semantics, one implementation of the text rule ([textOrDescMatches]). */
+    private fun waitNodeMatches(n: AccessibilityNodeInfo, args: OffloadArgs): Boolean {
+        args.get("text")?.let { if (!textOrDescMatches(n, it, contains = false)) return false }
+        args.get("text-contains")?.let { if (!textOrDescMatches(n, it, contains = true)) return false }
+        args.get("id")?.let { if (n.viewIdResourceName != it) return false }
+        args.get("class")?.let { if (n.className?.toString() != it) return false }
+        return true
+    }
+
+    private fun textOrDescMatches(n: AccessibilityNodeInfo, target: String, contains: Boolean): Boolean {
+        val t = n.text?.toString()
+        val d = n.contentDescription?.toString()
+        return if (contains) {
+            (t != null && t.contains(target)) || (d != null && d.contains(target))
+        } else {
+            t == target || d == target
+        }
     }
 
     private fun waitStable(args: OffloadArgs): NativeOffloadResult {
