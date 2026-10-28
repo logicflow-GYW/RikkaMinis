@@ -2273,6 +2273,269 @@ def check_ui_tree(root):
 
 
 
+# ── [meta-audit-1028 W-B00-09] C13: the empty-live floor's REFUSAL verdict ──
+# `SessionFileStore.withEmptyLiveFloor` marks a report `blocked` when the live
+# session set is empty (a DB reset / failed migration): the candidates on disk
+# are then not proven residue, and the sweep will refuse. The refusal is only
+# worth anything if the UI SAYS SO — and the storage banner computed the flag,
+# then hardcoded `val orphanBlocked = false`, so the block was swallowed and the
+# user got a clickable "N leftover dirs, tap to clean" banner whose confirm
+# dialog ends in a 0-file no-op that reads as success.
+#
+# C13 judges the CONSUMER of the verdict (derived: any ui/** file that calls the
+# floor), not the spelling of the flag:
+#   C13a  the `blocked` verdict of a report that came out of the floor call is
+#         actually READ (a binding or an inline `….blocked` expression that
+#         traces back to `withEmptyLiveFloor(…)`) — `= false` is not a read;
+#   C13b  the control that opens the reclaim confirmation is PROVABLY disabled
+#         while the flag is true: fold the `enabled = …` argument with every
+#         flag spelling bound to `true`; anything but `false` is a red (unknown
+#         counts as "not proven disabled" — fail closed);
+#   C13c  the blocked reason (`storage_orphan_banner_blocked`) is rendered, and
+#         it is not dead on the blocked path (`if (!blocked) blockedText`).
+# Fail-closed: an unlexable site, a floor consumer that no longer reads the
+# verdict, a confirmation that no state flag gates, or a missing banner = red.
+FLOOR_CALL = "withEmptyLiveFloor"
+BLOCKED_BANNER = "storage_orphan_banner_blocked"
+_OPENERS = (".clickable(", "Button(", "MinisTextButton(", "IconButton(", "TextButton(")
+_ASSIGN_RE = re.compile(
+    r"(?<![\w.`])(?:(?:val|var)\s+)?`?([A-Za-z_]\w*)`?\s*(?::[^=\n]+?)?=(?!=)")
+_BLOCKED_READ_RE = re.compile(r"([A-Za-z_]\w*)\s*(?:!!|\?)?\s*\.\s*blocked\b")
+_IDENT_RE = re.compile(r"(?<![\w.])`?([A-Za-z_]\w*)`?(?![\w(])")
+
+
+def _norm(expr):
+    return re.sub(r"\s+", "", expr or "")
+
+
+def _assignments(code):
+    """[(pos, name, rhs)] for `name = expr` and `val|var name = expr`."""
+    out = []
+    for m in _ASSIGN_RE.finditer(code):
+        rhs = code[m.end():expr_end(code, m.end())].strip()
+        out.append((m.start(), m.group(1), rhs))
+    return out
+
+
+def _reaches_floor(code, name, depth=3, seen=None):
+    """Does `name` ever hold a value that came out of the floor call?"""
+    if depth <= 0:
+        return False
+    seen = seen if seen is not None else set()
+    if name in seen:
+        return False
+    seen.add(name)
+    for _pos, nm, rhs in _assignments(code):
+        if nm != name:
+            continue
+        if FLOOR_CALL in rhs:
+            return True
+        for ident in _IDENT_RE.findall(rhs):
+            if ident in ("it", "this", "true", "false", "null", name):
+                continue
+            if _reaches_floor(code, ident, depth - 1, seen):
+                return True
+    return False
+
+
+def _blocked_reads(code):
+    """[(pos, receiver)] for every `X.blocked` / `X!!.blocked` read."""
+    return [(m.start(), m.group(1)) for m in _BLOCKED_READ_RE.finditer(code)]
+
+
+def _flag_spellings(code):
+    """Every identifier/expression that stands for "the report is blocked"."""
+    names, reads = set(), set()
+    for _pos, nm, rhs in _assignments(code):
+        if re.search(r"\.\s*blocked\b", rhs):
+            names.add(nm)
+    for pos, recv in _blocked_reads(code):
+        reads.add(_norm(code[pos:expr_end(code, pos)]))
+    return names, reads
+
+
+def _bind_flag(expr, names, reads):
+    """Substitute every flag spelling with `true` (the report IS blocked)."""
+    e = _norm(expr)
+    for nm in sorted(names, key=len, reverse=True):
+        e = re.sub(r"(?<![\w.])" + re.escape(nm) + r"(?![\w(])", "true", e)
+    for rd in sorted(reads, key=len, reverse=True):
+        e = e.replace(rd, "true")
+    return e
+
+
+def _disabled_when_blocked(expr, names, reads):
+    """True when `enabled = expr` is provably false while the report is blocked."""
+    if not expr.strip():
+        return False
+    return const_bool(_bind_flag(expr, names, reads)) is False
+
+
+def _reachable_with_flag(code, pos, names, reads, value):
+    """Is `pos` reachable when every flag spelling is `value`?"""
+    for _kind, cond in enclosing_conditions(code, pos):
+        folded = _bind_flag_for_value(cond, names, reads, value)
+        if const_bool(folded) is False:
+            return False
+    return True
+
+
+def _bind_flag_for_value(expr, names, reads, value):
+    e = _norm(expr)
+    for nm in sorted(names, key=len, reverse=True):
+        e = re.sub(r"(?<![\w.])" + re.escape(nm) + r"(?![\w(])",
+                   "true" if value else "false", e)
+    for rd in sorted(reads, key=len, reverse=True):
+        e = e.replace(rd, "true" if value else "false")
+    return e
+
+
+def _opener_var(code):
+    """The state flag that gates the reclaim confirmation (derived, not named)."""
+    confirm = code.find("reclaimOrphans(")
+    if confirm < 0:
+        return None, "the reclaim confirmation no longer exists — nothing consumes the "
+    cands = []
+    for _kind, cond in enclosing_conditions(code, confirm):
+        for ident in _IDENT_RE.findall(cond):
+            if ident in ("it", "this", "true", "false", "null"):
+                continue
+            if any(nm == ident and re.search(r"\btrue\b", rhs)
+                   for _p, nm, rhs in _assignments(code)):
+                cands.append(ident)
+    if not cands:
+        return None, "the reclaim confirmation is not gated by a state flag — the click"
+    return cands[0], ""
+
+
+def _enabled_arg(code, open_paren_pos):
+    """(enabled expression or None) of the call whose `(` sits at [open_paren_pos]."""
+    spans = call_args(code, open_paren_pos)
+    for a, b in spans:
+        arg = code[a:b]
+        m = re.match(r"\s*enabled\s*=(?!=)", arg)
+        if m:
+            return arg[m.end():].strip()
+    return None
+
+
+def _nearest_opener(code, pos):
+    best = None
+    for token in _OPENERS:
+        i = code.rfind(token, 0, pos)
+        if i >= 0 and (best is None or i > best[0]):
+            best = (i, token)
+    if best is None:
+        return None
+    return best[0] + len(best[1]) - 1          # index of the `(`
+
+
+def check_floor_verdict_source(src, label=""):
+    """C13 findings for one UI source file (empty list = clean / not a site)."""
+    tag = label or "ui source"
+    try:
+        code = code_view(src)
+    except KotlinLexError as exc:
+        return ["C13: %s is not lexable (%s) — fail closed" % (tag, exc)]
+    if FLOOR_CALL not in code:
+        return []
+    names, reads = _flag_spellings(code)
+    findings = []
+
+    # C13a — the verdict must be READ, and it must come from the floor's report.
+    traced = [r for _p, r in _blocked_reads(code) if _reaches_floor(code, r)]
+    if not traced:
+        findings.append(
+            "C13a: %s — no `blocked` verdict that traces back to `%s(` is read: the "
+            "refusal the store computed is dropped before it reaches the banner, so an "
+            "empty session table offers \"clean up N leftover dirs\" on top of real user "
+            "data (the sweep refuses and the click reads as success)"
+            % (tag, FLOOR_CALL))
+        return findings
+
+    # C13b — the affordance that opens the confirmation must be disabled.
+    opener, why = _opener_var(code)
+    if opener is None:
+        findings.append("C13b: %s — %s" % (tag, why))
+    else:
+        target = re.compile(r"(?<![\w.])" + re.escape(opener) + r"\s*=\s*true\b")
+        sites = [m.start() for m in target.finditer(code)]
+        if not sites:
+            findings.append(
+                "C13b: %s — `%s` is never set to true, so the confirmation cannot be "
+                "opened at all (the reclaim action became dead code)" % (tag, opener))
+        for pos in sites:
+            open_paren = _nearest_opener(code, pos)
+            line = code.count("\n", 0, pos) + 1
+            if open_paren is None:
+                findings.append(
+                    "C13b: %s:%d — `%s = true` has no clickable control in front of it, "
+                    "so the guard cannot be judged (fail closed)" % (tag, line, opener))
+                continue
+            enabled = _enabled_arg(code, open_paren)
+            if enabled is None:
+                findings.append(
+                    "C13b: %s:%d — the control that opens the reclaim confirmation has no "
+                    "`enabled = …` argument: it stays clickable while the report is BLOCKED, "
+                    "and the sweep it triggers refuses to delete anything (a no-op that "
+                    "reads as success)" % (tag, line))
+                continue
+            if not _disabled_when_blocked(enabled, names, reads):
+                findings.append(
+                    "C13b: %s:%d — `enabled = %s` is not provably false while the report is "
+                    "blocked: the banner offers a reclaim that the store will refuse"
+                    % (tag, line, " ".join(enabled.split())))
+
+    # C13c — the blocked reason must be rendered, and live on the blocked path.
+    raw = literal_view(src)
+    shown = [m.start() for m in re.finditer(re.escape(BLOCKED_BANNER), raw)]
+    if not shown:
+        findings.append(
+            "C13c: %s — `%s` is never rendered: a blocked report is shown as reclaimable "
+            "space with no reason why it cannot be freed"
+            % (tag, BLOCKED_BANNER))
+    else:
+        for pos in shown:
+            line = code.count("\n", 0, pos) + 1
+            if not names and not reads:
+                continue
+            if not _reachable_with_flag(code, pos, names, reads, True):
+                findings.append(
+                    "C13c: %s:%d — the blocked reason sits behind a condition that is FALSE "
+                    "when the report is blocked (inverted guard): the user only ever sees "
+                    "it for the reclaimable case" % (tag, line))
+    return findings
+
+
+def check_floor_verdict_tree(root):
+    """C13 across the whole UI tree (derived walk — no hardcoded file list)."""
+    base = os.path.join(root, UI_DIR)
+    if not os.path.isdir(base):
+        return ["C13: `%s` is missing — the floor's refusal consumer cannot be checked "
+                "(fail closed)" % UI_DIR]
+    findings, sites = [], 0
+    for dirpath, _dirs, files in os.walk(base):
+        for name in sorted(files):
+            if not name.endswith(".kt"):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    src = fh.read()
+            except OSError as exc:
+                findings.append("C13: cannot read %s (%s) — fail closed"
+                                % (os.path.relpath(path, root), exc))
+                continue
+            if FLOOR_CALL not in src:
+                continue
+            sites += 1
+            findings += check_floor_verdict_source(src, os.path.relpath(path, root))
+    if not sites:
+        return ["C13: no UI file calls `%s(` — the empty-live-set refusal has no consumer "
+                "left in the UI (fail closed)" % FLOOR_CALL]
+    return findings
+
+
 # ── C12 fixtures ([witness-1027 W-12]) ──────────────────────────────────────
 UI_OK = """package p
 
@@ -2337,6 +2600,95 @@ def _c12_arms():
          ["disagree on what an orphan is"], False),
         ("W-12d no delete half at all is red", UI_NO_DELETE,
          ["never calls `reclaimOrphans(`"], False),
+    ]
+
+
+
+# ── C13 fixtures ([meta-audit-1028 W-B00-09]) ───────────────────────────────
+BANNER_OK = """package p
+
+@Composable
+fun StorageManagementScreen(chatRepository: ChatRepository, sessionFiles: SessionFileStore) {
+    val scope = rememberCoroutineScope()
+    var orphanInfo by remember { mutableStateOf<SessionFileStore.ReclaimReport?>(null) }
+    var isScanningOrphans by remember { mutableStateOf(false) }
+    var isReclaiming by remember { mutableStateOf(false) }
+    var showReclaimDialog by remember { mutableStateOf(false) }
+
+    fun reload() {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                val allSessions = chatRepository.dao.listSessions()
+                val liveIds = allSessions.map { it.id }.toSet()
+                val orphanTabsPart = sessionFiles.scanOrphanBrowserTabFiles(liveIds)
+                val orphans = sessionFiles.withEmptyLiveFloor(
+                    sessionFiles.buildReport(liveIds, orphanTabsPart),
+                    liveIds,
+                )
+                orphanInfo = orphans
+            }
+        }
+    }
+
+    if (orphanInfo != null && orphanInfo!!.totalBytes > 0) {
+        val orphanBlocked = orphanInfo!!.blocked
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = !orphanBlocked && !isScanningOrphans && !isReclaiming) {
+                    showReclaimDialog = true
+                },
+        ) {
+            Text(
+                if (orphanBlocked) {
+                    stringResource(R.string.storage_orphan_banner_blocked, orphanInfo!!.totalDirs)
+                } else {
+                    stringResource(R.string.storage_orphan_banner, orphanInfo!!.totalDirs)
+                }
+            )
+        }
+    }
+
+    if (showReclaimDialog) {
+        Dialog(onConfirm = {
+            scope.launch { sessionFiles.reclaimOrphans(orphanInfo!!.sessionIds, liveIds) }
+        })
+    }
+}
+"""
+
+# W-B00-09's witness: the verdict is computed by the store and thrown away.
+BANNER_WITNESS = BANNER_OK.replace("val orphanBlocked = orphanInfo!!.blocked",
+                                   "val orphanBlocked = false")
+# The guard survives; the blocked flag is dropped out of it.
+BANNER_NO_GUARD = BANNER_OK.replace(
+    "enabled = !orphanBlocked && !isScanningOrphans && !isReclaiming",
+    "enabled = !isScanningOrphans && !isReclaiming")
+# The reason is replaced by the normal "tap to clean" copy.
+BANNER_NO_REASON = BANNER_OK.replace("R.string.storage_orphan_banner_blocked",
+                                     "R.string.storage_orphan_banner")
+# The reason is rendered on the WRONG side of the decision.
+BANNER_INVERTED = BANNER_OK.replace("if (orphanBlocked) {\n                    stringResource",
+                                    "if (!orphanBlocked) {\n                    stringResource")
+# legitimate: the flag is read inline, no binding at all
+BANNER_INLINE = BANNER_OK.replace("        val orphanBlocked = orphanInfo!!.blocked\n", "").replace(
+    "orphanBlocked", "orphanInfo!!.blocked").replace(
+    "orphanInfo!!.orphanInfo!!.blocked", "orphanInfo!!.blocked")
+
+
+def _c13_arms():
+    """(name, source, needles, clean) — a violating arm must be red on C13."""
+    return [
+        ("C13 shipped banner shape is green", BANNER_OK, [], True),
+        ("C13 inline flag read is green", BANNER_INLINE, [], True),
+        ("W-B00-09 `val orphanBlocked = false` is red", BANNER_WITNESS,
+         ["no `blocked` verdict"], False),
+        ("W-B00-09b the flag dropped out of `enabled` is red", BANNER_NO_GUARD,
+         ["not provably false while the report is blocked"], False),
+        ("W-B00-09c the blocked reason never rendered is red", BANNER_NO_REASON,
+         ["is never rendered"], False),
+        ("W-B00-09d the reason behind an inverted guard is red", BANNER_INVERTED,
+         ["inverted guard"], False),
     ]
 
 
@@ -2697,6 +3049,42 @@ class SessionFileStore internal constructor(
         else:
             print(f"  OK {name}: {errs}")
 
+    # --- [meta-audit-1028 W-B00-09] C13 arms: the floor's refusal verdict ---
+    for name, sample, expect, clean in _c13_arms():
+        errs = check_floor_verdict_source(sample, "Fixture.kt")
+        messages = "\n".join(errs)
+        if clean:
+            if errs:
+                print(f"  FAIL {name}: expected green, got {errs}")
+                failures += 1
+            else:
+                print(f"  OK {name}: green")
+        elif not errs:
+            print(f"  FAIL {name}: expected red, got green")
+            failures += 1
+        elif not all(e in messages for e in expect):
+            print(f"  FAIL {name}: expected {expect}, got {errs}")
+            failures += 1
+        else:
+            print(f"  OK {name}: {errs}")
+    # tree level: a UI tree with no floor consumer is a red, not a clean sweep.
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _tmp:
+        if not check_floor_verdict_tree(_tmp):
+            print("  FAIL C13 tree: a UI tree without any floor consumer was clean")
+            failures += 1
+        else:
+            print("  OK C13 tree: a UI tree without any floor consumer is red")
+        os.makedirs(os.path.join(_tmp, UI_DIR), exist_ok=True)
+        with open(os.path.join(_tmp, UI_DIR, "Screen.kt"), "w", encoding="utf-8") as fh:
+            fh.write(BANNER_OK)
+        if check_floor_verdict_tree(_tmp):
+            print(f"  FAIL C13 tree: the shipped banner fixture is red "
+                  f"({check_floor_verdict_tree(_tmp)})")
+            failures += 1
+        else:
+            print("  OK C13 tree: the shipped banner fixture is green")
+
     if failures:
         print(f"SELFTEST FAILED ({failures} arms)")
         return 1
@@ -2756,12 +3144,14 @@ def main() -> int:
         errs += check_context_only_persist(pool_src)
     # [witness-1027 W-12] C12 — the UI-side manual orphan assembly (derived walk).
     errs += check_ui_tree(root)
+    # [meta-audit-1028 W-B00-09] C13 — the empty-live floor's refusal verdict.
+    errs += check_floor_verdict_tree(root)
     if errs:
         print("browser_tabs_lifecycle_check RED:")
         for e in errs:
             print(f"  - {e}")
         return 1
-    print("browser_tabs_lifecycle_check OK (criteria: C1-C3 store lifecycle + C4/C4d pool teardown + window.open/close persistence + C4e disposal cancels every pool-owned scope + C4f the disposal latch guards saveState/restoreSavedTabs + C5 risk notice reaches the agent text + C6 setSession re-points downloads atomically + C7 the session-shape predicate alone carries the draft alias + C8 every orphan entry folds the composer's active draft in + C9 the pool's busy signal is funnelled and observable + C10 every destroyTab caller re-derives it after settling the list + C3b the orphan sweep deletes only non-live sessions (polarity) + C6b the remap callback writes the remapped path back + C6c loadSavedState actually dispatches the restore + C12 the UI-side manual orphan assembly uses the live ids and the SAME source as the delete half)")
+    print("browser_tabs_lifecycle_check OK (criteria: C1-C3 store lifecycle + C4/C4d pool teardown + window.open/close persistence + C4e disposal cancels every pool-owned scope + C4f the disposal latch guards saveState/restoreSavedTabs + C5 risk notice reaches the agent text + C6 setSession re-points downloads atomically + C7 the session-shape predicate alone carries the draft alias + C8 every orphan entry folds the composer's active draft in + C9 the pool's busy signal is funnelled and observable + C10 every destroyTab caller re-derives it after settling the list + C3b the orphan sweep deletes only non-live sessions (polarity) + C6b the remap callback writes the remapped path back + C6c loadSavedState actually dispatches the restore + C12 the UI-side manual orphan assembly uses the live ids and the SAME source as the delete half + C13 the empty-live floor's blocked verdict disables the reclaim control and surfaces its reason)")
     return 0
 
 
