@@ -766,6 +766,30 @@ object ExecutionCoordinator {
                 memoryRecycled = memoryRecycled,
                 commandDispatched = commandDispatched,
             )
+            // [SYMPTOM-A F-A2b] The verdict's two `outcomeKnown = false` exits live
+            // in the pure function above (`internalDecideShellRetryVerdict`), which
+            // is JVM-tested and Android-free — a log call there would break that and
+            // fire on every retry-policy evaluation. So the trace lands here, at the
+            // CONSUMPTION point, where the verdict becomes a CommandResult.
+            //
+            // Why it matters: without this line an untrustworthy shell result leaves
+            // no trace at all in the log. The only downstream evidence is the
+            // T7-D shadow reducer's "declined" warning (10-28: 11, 10-29: 12 — i.e.
+            // 17%/20% of runs), which reads like a failure and says nothing about
+            // WHICH command became untrustworthy. Metadata only — never the command
+            // text or any output (credentials leak through tool output; see the
+            // redaction rules in this package).
+            if (!verdict.outcomeKnown) {
+                Log.w(
+                    TAG,
+                    "[$sessionId] outcome unknown (reason=" +
+                        (if (memoryRecycled) "memory-recycled" else "outcome-unknown") +
+                        "): exit=${result.exitCode} alive=${shell.isAlive} " +
+                        "truncated=${result.truncated} attempt=$attempt/$MAX_AUTO_RETRIES " +
+                        "safety=${ToolRetrySafetyRegistry.lookup(SHELL_EXECUTE_TOOL_NAME)} " +
+                        "dispatched=$commandDispatched cmdLen=${command.length}",
+                )
+            }
             if (!verdict.retry) {
                 if (memoryRecycled) {
                     // [fix/audit3-cancel-retry-1015 F-06] Our own memory monitor

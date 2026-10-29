@@ -124,9 +124,24 @@ internal class ChatAgentTraceObserver(
                 if (r.changed) t7ReducerState = r.state
             }
             is AgentRunTransition.Rejected -> {
+                // [SYMPTOM-A F-A2a] Say what this actually is: a SHADOW reducer
+                // declining a verdict. `t7Reduce` never writes state on Rejected and
+                // never touches control flow — the run has already returned
+                // normally by the time this prints. The old wording ("reducer
+                // REJECTED <event>") read like "the turn failed to finish" and
+                // misled a triage pass on 10-29 (12 rejections that day, 20% of
+                // runs; the run itself was fine every time).
+                //
+                // Still on the `warn` channel: the injected logger is
+                // `warn: (String, String) -> Unit` (constructor above) and has no
+                // info slot. Adding one would touch every assembly point (and the
+                // constructor-arity assertions some tests rely on) for a log
+                // level — device-proportion says no. Downgrading to info is
+                // therefore REGISTERED, NOT FIXED; it needs a new injection slot.
                 warn(
                     "ChatVMStream",
-                    "T7-D reducer REJECTED ${event.traceName()}: ${r.rejection.message}",
+                    "T7-D shadow reducer declined ${event.traceName()} (non-controlling; " +
+                        "no state or control-flow change): ${r.rejection.message}",
                 )
             }
         }
