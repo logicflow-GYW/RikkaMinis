@@ -39,7 +39,6 @@ import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.ui.chat.ChatViewModelStore
 import com.rikkaminis.app.ui.NewerDatabaseGuidanceScreen
 import com.rikkaminis.app.ui.navigation.AppNavigation
-import com.rikkaminis.app.ui.navigation.coldStartRestoreAllowed
 import com.rikkaminis.app.ui.navigation.Routes
 import com.rikkaminis.app.ui.navigation.safeNavigate
 import com.rikkaminis.app.ui.settings.KEY_FONT_APP_BASE
@@ -575,7 +574,25 @@ class MainActivity : ComponentActivity() {
                 DisposableEffect(navController) {
                     val job = lifecycleScope.launch {
                         navController.currentBackStackEntryFlow.collect { entry ->
-                            val isChatRoute = entry.destination.route == Routes.CHAT
+                            // [R4-U F-09] A dialog destination is pushed ON TOP of
+                            // the chat — `Routes.FILE_PREVIEW` is the `dialog(...)`
+                            // entry in AppNavigation — and the chat screen keeps
+                            // rendering underneath. Treating the top-of-stack
+                            // emission as "the user left the chat" called
+                            // setAbsent() and cleared currentChatSessionId, so
+                            // opening an attachment dropped the keep-alive
+                            // presence (and the next turn's tool state) while the
+                            // user was still sitting in the chat. Resolve the
+                            // chat from the entry BELOW the dialog instead.
+                            val owner = if (ChatRoutePresence.isChatKeptAliveOverlay(
+                                    entry.destination.navigatorName,
+                                )
+                            ) {
+                                navController.previousBackStackEntry
+                            } else {
+                                entry
+                            }
+                            val isChatRoute = owner?.destination?.route == Routes.CHAT
                             // [da1032-D] The route arg can still be a draft key
                             // (`__new__<uuid>`) after the first send promoted the
                             // chat to a real row — the screen keeps its original
@@ -586,7 +603,7 @@ class MainActivity : ComponentActivity() {
                             // no row owns, and a crash restore lands the user back
                             // in a synthetic draft. Resolve once, here, through the
                             // same alias table the rest of the app uses.
-                            val sid = entry.arguments?.getString("sessionId")
+                            val sid = owner?.arguments?.getString("sessionId")
                                 ?.takeIf { isChatRoute }
                                 ?.let { ChatViewModelStore.resolveSessionId(it) }
                             val previous = currentChatSessionId
@@ -598,15 +615,17 @@ class MainActivity : ComponentActivity() {
                                     SessionActivityTracker.setPresent(sid)
                                 }
                                 currentChatSessionId = sid
-                                // [P3-crash-recovery] Persist the last-opened
-                                // session id at the process level so a native
-                                // crash (no saved-state bundle) can still land
-                                // the user back in this chat on next launch.
+                                // [R4-U F-01] Crash-recovery record. Two rules
+                                // live in [CrashRecoveryStore] / [ChatRoutePresence]
+                                // instead of here: a composer draft key
+                                // (`__new__<uuid>`) is never persisted — there is
+                                // no row behind it, so a native-crash restore would
+                                // open a synthetic draft instead of the chat the
+                                // user was actually in — and id + timestamp land in
+                                // ONE edit(), so the AUTO freshness window can never
+                                // read a stale id paired with a fresh timestamp.
                                 if (sid != null) {
-                                    getSharedPreferences(PREF_CRASH_RECOVERY, MODE_PRIVATE)
-                                        .edit()
-                                        .putString(KEY_LAST_CHAT_SESSION_ID, sid)
-                                        .apply()
+                                    CrashRecoveryStore.record(this@MainActivity, sid)
                                 }
                             }
                         }

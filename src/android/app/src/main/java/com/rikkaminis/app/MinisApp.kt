@@ -387,8 +387,18 @@ class MinisApp : Application(), ImageLoaderFactory {
                         com.rikkaminis.app.service.AppMemoryGovernor.tick(
                             anonMb = com.rikkaminis.app.service.MemoryPressureGate.anonMb(),
                             nowMs = android.os.SystemClock.elapsedRealtime(),
-                            toolRunning = com.rikkaminis.app.service.SessionActivityTracker
-                                .isToolRunning.value,
+                            // [R4-U F-07] The governor's guard is "is anything in
+                            // flight", not "is a tool running": a second session
+                            // streaming with no tool executing was reported as
+                            // idle, so the governor ran the synchronous GC it
+                            // exists to avoid. `toolRunning` below therefore
+                            // carries stream-OR-tool (see [TrimReclaimPolicy]).
+                            toolRunning = com.rikkaminis.app.service.TrimReclaimPolicy.hasActiveWork(
+                                activeSessionIds = com.rikkaminis.app.service.SessionActivityTracker
+                                    .activeSessions.value,
+                                toolRunning = com.rikkaminis.app.service.SessionActivityTracker
+                                    .isToolRunning.value,
+                            ),
                         )
                     }
                 }
@@ -546,6 +556,12 @@ class MinisApp : Application(), ImageLoaderFactory {
             onSessionDeleted = { sid ->
                 runCatching { skillRepository.clearSessionOverrides(sid) }
                 runCatching { mcpRepository.clearSessionOverrides(sid) }
+                // [R4-U F-02] Delete-side counterpart of the crash-recovery
+                // record: without it a deleted session stays the cold-start
+                // restore target (the read side cannot validate the id without
+                // a blocking DB read in onCreate) and the next launch synthesizes
+                // an OpenSession deep link to a row that no longer exists.
+                runCatching { com.rikkaminis.app.CrashRecoveryStore.clearIfMatches(this, sid) }
                 // [da1030-A ISSUE-01 裂缝B] Same one-hook-covers-all-entry-points
                 // contract for the session-list badge queue: without this, a
                 // deleted session's PAUSED badge stayed in SessionBadgeStore
@@ -1395,18 +1411,16 @@ class MinisApp : Application(), ImageLoaderFactory {
                 // pauses all threads and can stall/abort the very task that's
                 // driving the pressure — degrading the "peak-hour" experience the
                 // trim callback is supposed to protect.
-                val hasActiveWork =
-                    SessionActivityTracker.activeSessions.value.isNotEmpty() ||
-                        SessionActivityTracker.isToolRunning.value
+                val hasActiveWork = TrimReclaimPolicy.hasActiveWork(
+                    activeSessionIds = SessionActivityTracker.activeSessions.value,
+                    toolRunning = SessionActivityTracker.isToolRunning.value,
+                )
                 Log.w(
                     "MinisApp",
                     "onTrimMemory($level): reclaiming shells (foreground pressure, activeWork=$hasActiveWork)" +
                         (if (hasActiveWork) " — skipping sync gc" else " + gc"),
                 )
                 ExecutionCoordinator.recycleIdleShells()
-                if (!hasActiveWork) {
-                    System.gc()
-                }
             } else if (TrimPolicy.isBackground(level)) {
                 Log.i("MinisApp", "onTrimMemory($level): background/UI-hidden — skip aggressive reclaim (keep view state)")
             }
@@ -1430,6 +1444,25 @@ class MinisApp : Application(), ImageLoaderFactory {
                 // second look covered. Drop both; the next render re-renders.
                 runCatching { KatexWebViewPool.clearRenderCacheForMemoryPressure() }
                 runCatching { KaTeXRendererCache.clearForMemoryPressure() }
+            }
+            // [R4-U F-07] ONE synchronous collection per trim callback, and none
+            // while work is in flight. The two GC sites this replaces were in
+            // the two branches above: on a TRIM_MEMORY_RUNNING_CRITICAL emission
+            // that also satisfies `shouldReclaimShellsAndGc` (the foreground
+            // case) an IDLE process collected twice back-to-back, while a
+            // streaming one collected once regardless — the pause landing
+            // mid-generation, which is the stall the [P2-active-session-guard]
+            // comment above was written to prevent. The rule now lives in
+            // [TrimReclaimPolicy] so the governor tick has to obey it too.
+            if (TrimReclaimPolicy.shouldSyncGc(
+                    reclaimsShells = TrimPolicy.shouldReclaimShellsAndGc(level),
+                    engagesGate = TrimPolicy.shouldEngageMemoryGate(level),
+                    hasActiveWork = TrimReclaimPolicy.hasActiveWork(
+                        activeSessionIds = SessionActivityTracker.activeSessions.value,
+                        toolRunning = SessionActivityTracker.isToolRunning.value,
+                    ),
+                )
+            ) {
                 System.gc()
             }
         }.onFailure {
