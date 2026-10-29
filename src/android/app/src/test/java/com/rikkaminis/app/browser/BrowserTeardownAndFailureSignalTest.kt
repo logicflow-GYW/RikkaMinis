@@ -125,9 +125,18 @@ class BrowserTeardownAndFailureSignalTest {
             "webViewGoneResult must be defined", gone.isNotEmpty(),
         )
         assertTrue(
+            "webViewGoneResult must answer with the shared dead-tab message:\n$gone",
+            gone.contains("deadTabGoneMessage(destroyed)"),
+        )
+        // [r5-F F-F-01] The wording moved to a top-level pure helper
+        // (deadTabGoneMessage) so the async-JS reject shape executeJS/fetch
+        // answer with carries the SAME text — one dead tab, one story. The
+        // distinguish-the-two-causes criterion moves with it.
+        val wording = topLevelSlice(readRepoFile(ManagerPath), "internal fun deadTabGoneMessage(")
+        assertTrue(
             "the result must distinguish 'tab torn down' from 'renderer killed' — the " +
-                "caller's fix differs:\n$gone",
-            gone.contains("if (destroyed)") && gone.contains("renderer was killed"),
+                "caller's fix differs:\n$wording",
+            wording.contains("if (destroyed)") && wording.contains("renderer was killed"),
         )
     }
 
@@ -298,6 +307,20 @@ class BrowserTeardownAndFailureSignalTest {
         val at = src.indexOf(marker)
         assertTrue("marker not found: $marker", at >= 0)
         return src.substring(at, minOf(src.length, at + chars))
+    }
+
+    /**
+     * [r5-F F-F-01] A top-level declaration, sliced by ITS OWN domain — the
+     * marker line through the next blank line — rather than a character
+     * window: two earlier waves shipped criteria that went red on a correct
+     * edit because an inserted comment pushed the anchor out of the window.
+     */
+    private fun topLevelSlice(src: String, marker: String): String {
+        val at = src.indexOf(marker)
+        assertTrue("marker not found: $marker", at >= 0)
+        val lineStart = src.lastIndexOf('\n', at) + 1
+        val blank = src.indexOf("\n\n", at)
+        return src.substring(lineStart, if (blank < 0) src.length else blank)
     }
 
     private companion object {

@@ -742,13 +742,20 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         mimeType: String?,
         contentLength: Long,
     ) {
+        // [r5-F F-C-01b] The funnel needs a name, and guessFileName is the only
+        // source the URL path has for one — hoisted so the rejected branch
+        // below can report WHICH download was refused instead of only a log
+        // line (reportDownloadFailure re-sanitizes: an unusable guess degrades
+        // to the generic "download" label, it never reaches the panel raw).
+        val guessedName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
         val dir = sessionWorkspaceDir() ?: run {
-            Log.w(TAG, "download rejected: no session bound to pool")
+            // [r5-F F-C-01b] Same funnel as the blob path (r3-B09 F-10): an
+            // unbound pool used to drop the download with a log line only — no
+            // panel entry, no chat notice, nothing the user could act on.
+            reportDownloadFailure(guessedName, "no session is bound to this browser pool")
             return
         }
-        val name = sanitizeDownloadName(
-            android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
-        ) ?: "download-${System.currentTimeMillis()}"
+        val name = sanitizeDownloadName(guessedName) ?: "download-${System.currentTimeMillis()}"
         val dest = uniqueFile(dir, name)
         onDownloadEvent?.invoke("Downloading ${middleTruncated(dest.name)}…")
         val id = registerDownload(dest, contentLength)
@@ -849,6 +856,12 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         // component or is otherwise unusable — never let it escape the download dir.
         val safe = sanitizeDownloadName(filename) ?: run {
             Log.w(TAG, "blob download rejected: unsafe filename '${filename.take(80)}'")
+            // [r5-F F-C-01b] Log-only drops are invisible to the user: the page
+            // tapped "download", the panel stayed empty. Report through the
+            // same funnel as every other failure — the raw (unsafe) name only
+            // ever lands in logcat above; the panel label degrades to the
+            // generic "download" because reportDownloadFailure re-sanitizes.
+            reportDownloadFailure(filename, "unsafe download filename")
             return
         }
         // guessFileName on a blob: URL yields "downloadfile.bin" — refine the

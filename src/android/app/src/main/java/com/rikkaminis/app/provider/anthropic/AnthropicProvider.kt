@@ -93,8 +93,17 @@ class AnthropicProvider(
             if (enhancedCache) put("ttl", "1h")
         }
 
-    /** Use Bearer auth for custom (non-Anthropic) base URLs or OAuth. */
-    private val isCustomEndpoint: Boolean = basePath != "https://api.anthropic.com"
+    /**
+     * Use Bearer auth for custom (non-Anthropic) base URLs or OAuth.
+     *
+     * [R5-E F-07] Host-based, not string-equality: `effectiveBaseURL` appends
+     * `/v1`, so a user who pastes the public endpoint into the custom-base
+     * field arrives here as `https://api.anthropic.com/v1` — the old
+     * `basePath != "https://api.anthropic.com"` test called that a relay and
+     * sent `Authorization: Bearer`, which the official endpoint rejects
+     * (401) in favour of `x-api-key`.
+     */
+    private val isCustomEndpoint: Boolean = !isOfficialAnthropicHost(basePath)
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -803,6 +812,15 @@ class AnthropicProvider(
 
             if (msg.contentParts.isNotEmpty()) {
                 val contentArray = JSONArray()
+                // [R5-E F-06] Did this turn already put an image on the wire (as an
+                // image block, or as the [§27a] text placeholder for a non-vision
+                // model)? Both carriers — the request-level [imageParts] list and the
+                // message's own [msg.imageParts] — hold the SAME bytes the
+                // contentParts ImageData part holds, so the answer gates whether the
+                // leftover carriers may be appended below: appending them when the
+                // contentParts branch already emitted the image would send every
+                // attached screenshot twice.
+                var emittedImage = false
                 // [T-android-anthropic-thinking-echo] (issue #70) Prepend the
                 // synthesized thinking block FIRST so it precedes text/tool_use
                 // (Anthropic requires the thinking block to lead the assistant
@@ -847,10 +865,23 @@ class AnthropicProvider(
                         }
                         is AgentContentPart.ToolResult -> {
                             val resultContent = JSONArray()
-                            resultContent.put(JSONObject().apply {
-                                put("type", "text")
-                                put("text", part.content)
-                            })
+                            // [R5-E C-07①] An empty text block is a hard 400 inside
+                            // tool_result too ("text content blocks must be non-empty"
+                            // — same block type the [r3-b08 F-09] guard below already
+                            // refuses for plain text). Reachable producers: restored /
+                            // imported history rows whose persisted tool output is ""
+                            // (ChatStreamToolHelpers hands parts_json straight through)
+                            // and `minis-model-use` wire tool_result parts with no
+                            // `content` key (ModelExecutionService parses absent as "").
+                            // The live executor path is guarded by per-tool "never
+                            // empty" conventions (shell emits "(no output)", file_read
+                            // emits a header, …) — conventions, not invariants.
+                            if (part.content.isNotEmpty()) {
+                                resultContent.put(JSONObject().apply {
+                                    put("type", "text")
+                                    put("text", part.content)
+                                })
+                            }
                             if (part.imageData != null && part.imageMimeType != null) {
                                 val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
                                 if (visionText != null) {
@@ -879,6 +910,20 @@ class AnthropicProvider(
                                     })
                                 }
                             }
+                            // [R5-E C-07①] A tool_result whose content array ends up
+                            // EMPTY (no text, no image) is the same 400 one level out.
+                            // Single-space carrier, matching GeminiProvider's
+                            // `part.content.ifEmpty { " " }`: it is the minimal
+                            // non-empty text block, keeps `content` PRESENT on every
+                            // tool_result (uniform wire shape — omitting the key is
+                            // legal but some relays reject it), and makes a
+                            // cross-provider replay of one history byte-comparable.
+                            if (resultContent.length() == 0) {
+                                resultContent.put(JSONObject().apply {
+                                    put("type", "text")
+                                    put("text", " ")
+                                })
+                            }
                             contentArray.put(JSONObject().apply {
                                 put("type", "tool_result")
                                 put("tool_use_id", sanitizeToolId(part.id))
@@ -887,6 +932,10 @@ class AnthropicProvider(
                             })
                         }
                         is AgentContentPart.ImageData -> {
+                            // [R5-E F-06] Both sub-arms represent the image (block,
+                            // or placeholder for a non-vision model) — either way the
+                            // message's own carriers are already on the wire.
+                            emittedImage = true
                             val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
                             if (visionText != null) {
                                 // [§27a] Non-vision model — placeholder instead of
@@ -913,6 +962,67 @@ class AnthropicProvider(
                             }
                         }
                     }
+                }
+                // [R5-E F-06 / C-07③] The two image carriers that live OUTSIDE
+                // contentParts were read only in the `else` branch, so any turn whose
+                // contentParts was non-empty dropped them. Two shapes that mattered:
+                //  · `minis-model-use` turns, where the wire carries the bytes in
+                //    `image_parts` and the messages as plain text parts — the model
+                //    answered a question about a screenshot it never received;
+                //  · a turn whose contentParts held nothing serializable (every part
+                //    Text("") — the terminal-error bubble shape), which produced
+                //    `content: []` — a hard 400 — while `msg.imageParts` passed
+                //    `hasWirePayload` on the brand-new turn.
+                // Same carrier set and same assembly as the else branch below, gated
+                // on "this turn emitted no image of its own" (see [emittedImage]).
+                if (!emittedImage) {
+                    val isLastUser = msg.role == LLMMessage.Role.USER &&
+                        index == messages.indexOfLast { it.role == LLMMessage.Role.USER }
+                    // ONE carrier, not the concatenation. Every producer populates
+                    // both lists from the same `prepared.imageParts` (ChatViewModel
+                    // passes the request-level list and stores the same parts on the
+                    // message), so adding them the way the else branch does would put
+                    // every attached screenshot on the wire twice — the very cost this
+                    // gate exists to avoid. The request-level list is authoritative
+                    // for the turn it belongs to (last user turn); otherwise the
+                    // message's own carrier wins.
+                    val legacyImages = if (isLastUser && imageParts.isNotEmpty()) {
+                        imageParts
+                    } else {
+                        msg.imageParts
+                    }
+                    for (part in legacyImages) {
+                        val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
+                        if (visionText != null) {
+                            contentArray.put(JSONObject().apply {
+                                put("type", "text")
+                                put("text", visionText)
+                            })
+                        } else {
+                            val safeBytes = ImageBudget.compressUnderBudget(part.data)
+                            val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
+                            contentArray.put(JSONObject().apply {
+                                put("type", "image")
+                                put("source", JSONObject().apply {
+                                    put("type", "base64")
+                                    put("media_type", safeMime)
+                                    put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                                })
+                            })
+                        }
+                    }
+                }
+                // [R5-E C-07③] Last line of defence: whatever combination of parts
+                // and carriers arrived, an EMPTY content array is a hard 400 ("at
+                // least one content block required") — the same failure as an empty
+                // text block, one level out. Placed after every arm so it observes
+                // all of them; a single space is the minimal legal block (same
+                // literal as the tool_result carrier above and GeminiProvider's).
+                if (contentArray.length() == 0) {
+                    contentArray.put(JSONObject().apply {
+                        put("type", "text")
+                        put("text", " ")
+                    })
                 }
                 obj.put("content", contentArray)
             } else {
@@ -989,7 +1099,11 @@ class AnthropicProvider(
                     }
                     obj.put("content", contentArray)
                 } else {
-                    obj.put("content", msg.content)
+                    // [R5-E C-07③] `content: ""` is the STRING form of the same
+                    // "text must be non-empty" rule the array arms guard: the turn
+                    // survived the payload filter (last-user + request images, or a
+                    // restored row) so it must reach the wire with something legal.
+                    obj.put("content", msg.content.ifEmpty { " " })
                 }
             }
 
@@ -1038,6 +1152,17 @@ class AnthropicProvider(
                     contentBlocks.addAll(other)
                     contentBlocks.addAll(toolUse)
                 }
+                // [R5-E C-07②] Two same-role messages that each carried nothing
+                // serializable used to merge into `content: []` (a hard 400) — the
+                // merge itself is mandatory (Anthropic alternates roles), so keep the
+                // turn and give it the minimal legal block instead. Same literal as
+                // the empty-text carriers in buildMessages.
+                if (contentBlocks.isEmpty()) {
+                    contentBlocks.add(JSONObject().apply {
+                        put("type", "text")
+                        put("text", " ")
+                    })
+                }
                 val merged = JSONObject().apply {
                     put("role", role)
                     put("content", JSONArray(contentBlocks.map { it }))
@@ -1061,10 +1186,16 @@ class AnthropicProvider(
                 }
             }
             is String -> {
-                out.add(JSONObject().apply {
-                    put("type", "text")
-                    put("text", content)
-                })
+                // [R5-E C-07②] A merged turn re-materialises the string form into a
+                // text block, so an empty string became {"type":"text","text":""} —
+                // the same hard 400 the array arms already guard against. Dropped
+                // here (the caller refills an all-empty merge, see below).
+                if (content.isNotEmpty()) {
+                    out.add(JSONObject().apply {
+                        put("type", "text")
+                        put("text", content)
+                    })
+                }
             }
         }
     }

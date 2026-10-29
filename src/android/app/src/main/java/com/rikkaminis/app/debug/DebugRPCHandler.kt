@@ -435,10 +435,21 @@ class DebugRPCHandler(private val context: Context) {
         val isText = !forceBase64 && looksLikeUtf8Text(textCandidate)
         val bytes = if (isText) textCandidate else raw
 
+        // [R5-F F-F-08] The other half of the same boundary problem: R4-R F-10
+        // trims the page TAIL, but a caller that hand-picks an unaligned
+        // `offset` opens the window in the MIDDLE of a character, and
+        // `String(bytes, UTF_8)` then answered U+FFFD for those orphan
+        // continuation bytes — one per page, and with a `limit` that only covers
+        // a fragment the whole page was U+FFFD. [decodeUtf8Page] skips them,
+        // from the same index [looksLikeUtf8Text] validated, and drops them from
+        // `content` (never from `bytesRead`: the caller still advances past the
+        // fragment, so it cannot loop on the same offset). An aligned caller —
+        // one that advances by `bytesRead` — never trips this, because the
+        // previous page's tail trim already left it on a lead byte.
         return JSONObject().apply {
             put("size", fileSize)
             if (isText) {
-                put("content", String(bytes, Charsets.UTF_8))
+                put("content", decodeUtf8Page(bytes))
                 put("encoding", "utf8")
             } else {
                 put("content", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
@@ -1391,19 +1402,66 @@ internal fun utf8CompletePrefixLength(bytes: ByteArray): Int {
  * only guarantees the page does not END mid-character, while a caller-supplied
  * `offset` can land inside one — a leading continuation byte is a fragment of
  * a character the caller asked to skip past, not evidence of binary content.
- * The content still decodes it to the replacement character (baseline
- * behaviour); only the classification looks past it.
+ * [decodeUtf8Page] drops that same fragment from `content` (never from
+ * `bytesRead`), so the bytes this check approved are exactly the bytes the
+ * caller sees.
  */
 internal fun looksLikeUtf8Text(bytes: ByteArray): Boolean {
     if (bytes.any { it == 0.toByte() }) return false
-    var head = 0
-    while (head < bytes.size && head < 3 && (bytes[head].toInt() and 0xC0) == 0x80) head++
+    // [R5-F F-F-08] Skip leading continuation bytes (up to 3 — the tail of a
+    // 4-byte sequence): the window may open mid-character, and the decoder
+    // must not even see the orphan tail. ONE rule shared with [decodeUtf8Page].
+    val head = utf8SkipLeadingContinuation(bytes)
     val decoder = Charsets.UTF_8.newDecoder()
         .onMalformedInput(CodingErrorAction.REPORT)
         .onUnmappableCharacter(CodingErrorAction.REPORT)
     return runCatching {
         decoder.decode(ByteBuffer.wrap(bytes, head, bytes.size - head))
     }.isSuccess
+}
+
+/**
+ * [R5-F F-F-08] Decode one `debug.readFile` page: skip the orphan tail of a
+ * character the window opened inside, then decode. ONE definition for both the
+ * content field and (via [looksLikeUtf8Text]) the validity check, so the bytes
+ * the check approved are exactly the bytes that get decoded.
+ *
+ * Guarantees, in the terms the RPC contract speaks:
+ *  * the result never contains U+FFFD for a window that starts mid-character;
+ *  * a caller that walks the file page by page, advancing by `bytesRead`,
+ *    reconstructs the file exactly (its previous page already trimmed the tail,
+ *    so `skip == 0` on every aligned call);
+ *  * an unaligned `offset` costs only the ≤3 bytes of the fragment it opened
+ *    inside — they are dropped, never rendered as replacement characters.
+ */
+internal fun decodeUtf8Page(bytes: ByteArray): String {
+    val skip = utf8SkipLeadingContinuation(bytes)
+    return String(bytes, skip, bytes.size - skip, Charsets.UTF_8)
+}
+
+/**
+ * [R5-F F-F-08] How many bytes at the front of [bytes] are continuation bytes
+ * (`0x80..0xBF`, at most 3 — the tail of one 4-byte sequence).
+ *
+ * One rule, two consumers: [looksLikeUtf8Text] needs it so the validity check
+ * does not reject a page that merely starts mid-character, and `debug.readFile`
+ * needs it so `String(bytes, UTF_8)` does not answer U+FFFD for that same
+ * orphan tail. They used to be one inline loop in the first and nothing in the
+ * second — the decoder was told "starts at 0" after the check had looked at
+ * `head`, so a page cut inside a Chinese/emoji character decoded its tail into
+ * `content` as one replacement character per page boundary.
+ *
+ * Caller contract: an aligned caller (one that advances by the returned
+ * `bytesRead`) never trips this — the tail trim of the previous page already
+ * left it on a lead byte. Only a hand-picked unaligned `offset` pays, and what
+ * it pays is the fragment it asked for: the `<= 3` bytes are DROPPED from
+ * `content` (bytesRead still counts them, so the client cannot loop on the
+ * same offset), never decoded into U+FFFD.
+ */
+internal fun utf8SkipLeadingContinuation(bytes: ByteArray): Int {
+    var head = 0
+    while (head < bytes.size && head < 3 && (bytes[head].toInt() and 0xC0) == 0x80) head++
+    return head
 }
 
 

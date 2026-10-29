@@ -15,6 +15,7 @@ import com.rikkaminis.app.data.model.ImageEndpointMode
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ModelGroup
+import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.model.ProviderCredential
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.config.collections.canonicalModelProviderName
@@ -61,10 +62,10 @@ internal object ProviderMutationMethods {
         }
         // [R4-R F-11] Trim, then refuse empty: `.ifEmpty` alone only caught
         // `""`, so a whitespace-only label persisted and the Settings list
-        // rendered a nameless instance card.
-        val label = params.optString("label", "").trim().ifEmpty {
-            throw RPCException(-32602, "Missing 'label' param")
-        }
+        // rendered a nameless instance card. [R5-F F-F-08] The rule itself now
+        // lives in [requireNonBlankParam] so the group faces share it instead
+        // of carrying a trim-less copy.
+        val label = requireNonBlankParam(params, "label", "Missing 'label' param")
         val credTypeStr = params.optString("credentialType", "apiKey").ifEmpty { "apiKey" }
         val credentialType = try { ProviderCredential.valueOf(credTypeStr) } catch (_: Exception) {
             throw RPCException(-32602, "Unknown credentialType: $credTypeStr")
@@ -223,9 +224,8 @@ internal object ProviderMutationMethods {
         // list rendered a card with no name. Same contract as the create face:
         // trim, then refuse empty.
         val label = if (params.has("label")) {
-            params.optString("label", "").trim().ifEmpty {
-                throw RPCException(-32602, "Instance label must be non-empty")
-            }
+            // [R5-F F-F-08] Same shared trim-then-refuse rule as the create face.
+            requireNonBlankParam(params, "label", "Instance label must be non-empty")
         } else current.label
 
         val updated = current.copy(
@@ -445,7 +445,16 @@ internal object ProviderMutationMethods {
             inputModalities = inputModalities.takeIf { it.isNotEmpty() },
             outputModalities = outputModalities.takeIf { it.isNotEmpty() },
         )
-        val entry = ModelEntry(providerInstanceId = instanceId, baseModel = model, isCustom = true)
+        // [R5-E F-04] Same construction as ModelsCollection.add ([r3-b08
+        // F-04]): the explicit capability values ALSO go into `overrides`.
+        // See [addedModelEntry] for why that is the correct precedence.
+        val entry = addedModelEntry(
+            instanceId = instanceId,
+            model = model,
+            contextWindow = contextWindow,
+            maxOutputTokens = maxOut,
+            supportsReasoning = supportsReasoning,
+        )
         // [da1023-C] Fail-closed on duplicates at the RPC surface: a repeated
         // (instance, modelId) add used to mint a second config entry whose
         // composite primary key collided (LazyColumn "Key was already used"
@@ -671,11 +680,26 @@ internal object ProviderMutationMethods {
         return out
     }
 
+    /**
+     * [R5-F F-F-08] ONE trim-then-refuse reader for the string identity params
+     * on the mutation faces (`label`, group `name`).
+     *
+     * The two shapes this replaces had the same defect on different halves of
+     * the file: the instance faces spelled `.trim().ifEmpty { throw }` inline
+     * twice ([R4-R F-11]) — two copies that can drift — and the group faces
+     * spelled `.ifEmpty { throw }` with NO trim, so `provider.groups.create`
+     * with `"   "` persisted a blank group name (the Settings list renders a
+     * nameless row and `groups.update` can never select it by name again).
+     *
+     * Behaviour after this helper: whitespace-only is refused with the face's
+     * own `-32602` message, and a padded value persists TRIMMED.
+     */
+    private fun requireNonBlankParam(params: JSONObject, key: String, message: String): String =
+        params.optString(key, "").trim().ifEmpty { throw RPCException(-32602, message) }
+
     fun groupsCreate(context: Context, params: JSONObject): JSONObject {
         val repo = repo(context)
-        val name = params.optString("name", "").ifEmpty {
-            throw RPCException(-32602, "Missing 'name' param")
-        }
+        val name = requireNonBlankParam(params, "name", "Missing 'name' param")
         // [dv20-a1 A-02] Known = persisted entries + the virtual System voice
         // sentinels; the predicate is the ONE shared implementation.
         val knownEntryIds = repo.config.value.modelEntries.map { it.id }.toSet()
@@ -735,9 +759,11 @@ internal object ProviderMutationMethods {
 
         var updated = current
         if (params.has("name")) {
-            val n = params.optString("name", "")
-            if (n.isEmpty()) throw RPCException(-32602, "Group name must be non-empty")
-            updated = updated.copy(name = n)
+            // [R5-F F-F-08] Shared trim-then-refuse: `"   "` used to pass the
+            // bare `isEmpty()` check and rename the group to a blank string.
+            updated = updated.copy(
+                name = requireNonBlankParam(params, "name", "Group name must be non-empty"),
+            )
         }
         if (params.has("memberEntryIds")) {
             // [dv20-a1 A-02] Same shared predicate as the create face.
@@ -1030,3 +1056,38 @@ internal fun probePayloadIsModelsList(body: String): Boolean {
     val arr = runCatching { JSONArray(trimmed) }.getOrNull() ?: return false
     return (0 until arr.length()).all { arr.opt(it) is JSONObject }
 }
+
+/**
+ * [R5-E F-04] The entry construction shared by the two custom-model add faces —
+ * `provider.models.add` ([ProviderMutationMethods.modelsAdd]) and
+ * `minis-config models.add` ([ModelsCollection.add], which already spelled
+ * this shape at [r3-b08 F-04]).
+ *
+ * WHY the explicit capability values also go into `overrides`: they used to
+ * live only on `baseModel`, and the enrichment pass prefers the registry —
+ * `ModelsDevApi.applyDevData` copies `devModel.contextWindow ?:
+ * model.contextWindow` (same for maxOutputTokens / supportsReasoning). For any
+ * id models.dev knows, the caller's hand-typed value was silently replaced by
+ * the catalog default on the very next read while the add call answered
+ * ok:true. `overrides` are applied AFTER enrichment
+ * (`effectiveEntryModel` = enrich(baseModel).withOverrides(...)), which is the
+ * precedence a hand-typed value deserves. ONE shared constructor: the parity
+ * discipline the two faces already follow for ids ([normalizeCustomModelId])
+ * and names ([canonicalModelProviderName]), extended to the override block.
+ */
+internal fun addedModelEntry(
+    instanceId: String,
+    model: LLMModel,
+    contextWindow: Int?,
+    maxOutputTokens: Int?,
+    supportsReasoning: Boolean?,
+): ModelEntry = ModelEntry(
+    providerInstanceId = instanceId,
+    baseModel = model,
+    overrides = ModelOverrides(
+        contextWindow = contextWindow,
+        maxOutputTokens = maxOutputTokens,
+        supportsReasoning = supportsReasoning,
+    ),
+    isCustom = true,
+)

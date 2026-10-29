@@ -55,6 +55,7 @@ class ModelsCollection(
             modalitiesOverrideField(forId),
             contextWindowField(forId),
             contextWindowOverrideField(forId),
+            supportsReasoningField(forId),
             supportsToolsField(forId),
             supportsVisionField(forId),
         )
@@ -418,6 +419,44 @@ class ModelsCollection(
             },
         )
 
+    /**
+     * [R5-E F-04] `models.<id>.supportsReasoning` — the reasoning capability
+     * flag, writable as an override.
+     *
+     * Before this field the collection exposed `supportsTools` / `supportsVision`
+     * but not the flag that actually drives the thinking-level ceiling, while
+     * `add()` already persisted `overrides.supportsReasoning` ([r3-b08 F-04]).
+     * Two consequences: `minis-config get models.<id>.supportsReasoning`
+     * answered unknown_path, and the `.remove` snapshot (built by walking
+     * `fields()`) dropped the property, so the removed row's `old` value lied.
+     *
+     * The read is EFFECTIVE, not raw: `overrides.supportsReasoning` alone is
+     * null for every model the user never pinned, while the registry value is
+     * what the caller actually needs — the same trap [contextWindowField]
+     * documents at [dv22-A4], where the raw `overrides ?: baseModel` chain
+     * answered 0 for 33 of the 39 built-ins. Writing PINS the flag (overrides
+     * win over the registry, see `LLMModel.withOverrides`); there is no clear
+     * sentinel — a bool has no third value to distinguish "false" from
+     * "unset", so a written value stays pinned.
+     */
+    private fun supportsReasoningField(id: String): ConfigField =
+        ClosureField(
+            path = "models.$id.supportsReasoning",
+            displayName = "Supports reasoning",
+            description = "Effective reasoning flag (override applied if set, otherwise from models.dev / the provider). Writing pins it for this entry.",
+            valueSchema = ConfigSchema.Bool,
+            risk = ConfigRisk.SENSITIVE,
+            revertable = true,
+            reader = {
+                val e = entry(id) ?: return@ClosureField ConfigValue.Null
+                ConfigValue.Bool(effectiveModel(e).supportsReasoning == true)
+            },
+            writer = { v ->
+                val b = (v as? ConfigValue.Bool)?.value ?: throw ConfigError.TypeMismatch("bool")
+                mutate(id) { e -> e.withSupportsReasoningOverride(b) }
+            },
+        )
+
     private fun supportsToolsField(id: String): ConfigField =
         ReadOnlyField(
             path = "models.$id.supportsTools",
@@ -442,3 +481,14 @@ class ModelsCollection(
             },
         )
 }
+
+/**
+ * [R5-E F-04] The write transformation behind
+ * `models.<id>.supportsReasoning` — extracted as a pure function so the
+ * override semantics are testable without a repository: the value lands in
+ * `overrides` (which win over the enriched registry value in
+ * `ModelEntry.model`), it never touches `baseModel`, and writing `false` is a
+ * PIN, not a clear (a bool has no third value).
+ */
+internal fun ModelEntry.withSupportsReasoningOverride(value: Boolean): ModelEntry =
+    copy(overrides = overrides.copy(supportsReasoning = value))
