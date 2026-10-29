@@ -250,6 +250,16 @@ object AutoBackupManager {
         // way, so the cap has a single implementation).
         rotateLocalAutoBackups(app)
 
+        // [feat/auto-backup-external-mirror] Second copy outside filesDir.
+        // The 2026-10-29 incident rebuilt filesDir and took the working copy
+        // and this directory's only backup with it. The external folder is
+        // owned by MediaStore, so it survives that, an uninstall, and
+        // "clear app data". Best-effort by the same contract as the WebDAV push
+        // below: the local copy already exists, so a failure only means the
+        // external layer lags a day.
+        runCatching { MirrorStore.mirrorAutoSnapshot(app, local) }
+            .onFailure { Log.w(TAG, "external auto mirror failed: ${it.message}") }
+
         // Remote push is best-effort: local copy already exists, so a failed
         // upload only means the offsite copy lags until tomorrow. The push
         // uploads the file we just wrote (bytes read off disk), never a
