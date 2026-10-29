@@ -938,9 +938,21 @@ object CrashFrequencyDetector {
                 }
                 val target = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                     ?: throw IllegalStateException("MediaStore insert returned null")
-                resolver.openOutputStream(target).use { out ->
-                    requireNotNull(out) { "MediaStore openOutputStream returned null" }
-                    FileInputStream(zip).use { input -> input.copyTo(out) }
+                // [fix/r4-s F-06] insert() publishes the row immediately, so a
+                // failure below (null stream, ENOSPC mid-copy, cancellation
+                // between open and close) used to leave a 0-byte / truncated
+                // .zip visible in Downloads while the toast reported failure —
+                // and the next save of the same name would collide with it.
+                // Roll the row back before rethrowing.
+                try {
+                    resolver.openOutputStream(target).use { out ->
+                        requireNotNull(out) { "MediaStore openOutputStream returned null" }
+                        FileInputStream(zip).use { input -> input.copyTo(out) }
+                    }
+                } catch (t: Throwable) {
+                    runCatching { resolver.delete(target, null, null) }
+                        .onFailure { android.util.Log.w(TAG, "save rollback failed: ${it.message}") }
+                    throw t
                 }
                 "Downloads/${zip.name}"
             } else {
@@ -950,8 +962,16 @@ object CrashFrequencyDetector {
                 )
                 downloads.mkdirs()
                 val dest = File(downloads, zip.name)
-                FileInputStream(zip).use { input ->
-                    FileOutputStream(dest).use { out -> input.copyTo(out) }
+                // [fix/r4-s F-06] Same rollback on the legacy path: a partial
+                // file that carries the real archive's name is worse than no
+                // file at all.
+                try {
+                    FileInputStream(zip).use { input ->
+                        FileOutputStream(dest).use { out -> input.copyTo(out) }
+                    }
+                } catch (t: Throwable) {
+                    runCatching { dest.delete() }
+                    throw t
                 }
                 dest.absolutePath
             }
