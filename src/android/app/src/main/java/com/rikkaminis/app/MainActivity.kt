@@ -102,6 +102,28 @@ class MainActivity : ComponentActivity() {
     private var pendingLaunchSessionRoute: String? = null
 
     /**
+     * [r5-d2 D-F-06] Set right after THIS activity successfully launches some
+     * other activity (camera, file picker, SAF document picker, a system
+     * settings page, …). The next ON_START is then the *return leg of an
+     * in-app sub-flow*, not "the app came back from the background" — and the
+     * launch-session reroute must not treat it as one. Consumed (cleared) by
+     * [onStart]; it deliberately stays set if the user wanders off elsewhere
+     * from the launched app, costing one suppressed reroute — a much smaller
+     * defect than wiping the back stack on every picker return.
+     */
+    private var selfLaunchedExternalUi = false
+
+    /**
+     * [r5-d2 D-F-06] Set by [onNewIntent] when a wake-up intent carries its
+     * own destination (a resolvable deep link, or a share). The ON_START that
+     * follows such an intent is part of the *same* wake-up, and a route queued
+     * there would replace the destination the intent just navigated to with a
+     * blank draft. Same shape as `AppNavigation`'s cold-start
+     * `if (hasDeepLink) return` guard, which the warm path never had.
+     */
+    private var incomingWakeIntent = false
+
+    /**
      * Used by the "go to settings" gate to open e.g. the app-details or
      * Notification Access settings page. We don't rely on the result —
      * [OffloadPermissionManager.requestSettingsGate] polls until the
@@ -169,6 +191,12 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (t: Throwable) {
                 android.util.Log.w("MainActivity", "crash zip save failed: ${t.message}")
+                rollbackCreatedDocument(targetUri)
+                android.widget.Toast.makeText(
+                    this@MainActivity,
+                    getString(com.rikkaminis.app.R.string.crash_freq_save_failed, t.message ?: ""),
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
             } finally {
                 pendingCrashSaveOnClosed?.invoke()
                 pendingCrashSaveOnClosed = null
@@ -693,14 +721,52 @@ class MainActivity : ComponentActivity() {
      * only mode whose semantics genuinely demand a fresh chat on every
      * activation (cold or warm) — that's exactly the user expectation
      * the issue is reporting on.
+     *
+     * [r5-d2 D-F-06] "Activation" means the app coming back from the
+     * background, NOT every ON_START: the return leg of an in-app sub-flow
+     * (camera / picker / SAF / a settings page we opened) and a wake-up
+     * intent that already navigated somewhere are both excluded below, so the
+     * back-stack wipe only ever happens on a real recents→app transition.
+     * See [selfLaunchedExternalUi] / [incomingWakeIntent].
      */
     override fun onStart() {
         super.onStart()
         if (!hasResumedFromBackground) {
             hasResumedFromBackground = true
+            // Cold start: the decision belongs to AppNavigation's dispatcher.
+            // Drop any stale one-shot flags so they cannot eat the first real
+            // background → foreground transition.
+            selfLaunchedExternalUi = false
+            incomingWakeIntent = false
             return
         }
         val mode = getAppearancePrefs(this).getInt(KEY_LAUNCH_SESSION, 0)
+        // [r5-d2 D-F-06] Not every ON_START after the first one is "the app
+        // came back from the background":
+        //
+        //  1. the return leg of an in-app sub-flow — camera / file picker / SAF
+        //     / a settings page we launched (`selfLaunchedExternalUi`). The
+        //     reroute below cleared the whole back stack, so the user came back
+        //     from the camera and found a blank new chat: the chat they were
+        //     in was gone and the draft they were typing into was orphaned;
+        //  2. a wake-up intent that already navigated to its own destination —
+        //     `minis://session/<id>` from a completion notification or a share
+        //     (`incomingWakeIntent`, set in [onNewIntent]). The reroute landed
+        //     on top of that navigation and replaced it with a draft.
+        //
+        // A pending route from an earlier ON_START is dropped too: onResume
+        // would otherwise execute it on top of the decision made here.
+        if (selfLaunchedExternalUi || incomingWakeIntent) {
+            val reason = if (selfLaunchedExternalUi) "in-app sub-flow return" else "wake-up intent"
+            selfLaunchedExternalUi = false
+            incomingWakeIntent = false
+            pendingLaunchSessionRoute = null
+            AppLogger.info(
+                "LaunchSession",
+                "onStart: launch-session reroute suppressed ($reason, mode=$mode)",
+            )
+            return
+        }
         if (mode != 2) return
         val nav = navController ?: return
         // [da1029-A] Route through the single source (ComposerDraftStore)
@@ -759,6 +825,32 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * [r5-d2 D-C-09①] Undo the empty document `ACTION_CREATE_DOCUMENT` leaves
+     * behind when the copy into it fails.
+     *
+     * The picker creates the target document the moment the user confirms a
+     * name, long before a single byte is written. A failed
+     * `openOutputStream` / ENOSPC / a provider that revokes the permission
+     * mid-copy therefore left a 0-byte `.zip` with the real archive's name in
+     * the user's folder — indistinguishable from a successful save when they
+     * browse to it later, and the reason a "save failed" report came back as
+     * "there is no error, just an empty file". `DocumentsContract` is the
+     * documented deletes for a `content://` document; `resolver.delete` covers
+     * providers that only implement `delete()` (plain file / downloads
+     * providers). Both are best-effort: a provider that refuses the delete is
+     * not worth failing the flow over (nothing else can be done from here).
+     */
+    private fun rollbackCreatedDocument(targetUri: Uri) {
+        val deleted = runCatching {
+            android.provider.DocumentsContract.deleteDocument(contentResolver, targetUri)
+        }.getOrElse { false }
+        if (!deleted) {
+            runCatching { contentResolver.delete(targetUri, null, null) }
+                .onFailure { android.util.Log.w("MainActivity", "crash zip rollback failed: ${it.message}") }
+        }
+    }
+
+    /**
      * Apply (or release) the activity window's `FLAG_KEEP_SCREEN_ON` based on
      * the user's "Keep Screen Awake" toggle and whether any session has an
      * active task right now. Idempotent — flipping with the same desired
@@ -794,10 +886,45 @@ class MainActivity : ComponentActivity() {
         // FLAG_ACTIVITY_CLEAR_TOP, which delivers the new intent here when
         // MainActivity is already alive. Process the buffered share before
         // touching the deep-link path so the share coordinator sees it.
-        if (intent.getBooleanExtra("shared_content", false)) {
+        val sharedContent = intent.getBooleanExtra("shared_content", false)
+        if (sharedContent) {
             com.rikkaminis.app.share.ShareCoordinator.processPendingShare(this)
         }
+        // [r5-d2 D-F-06] A warm-start intent that carries its own destination
+        // owns the back stack: the branch below navigates to it, and the
+        // ON_START that follows a wake-up would otherwise queue a New-Chat
+        // reroute on top and replace it with a blank draft (report D-F-06).
+        // The flag is armed only while this activity is NOT resumed — a
+        // foreground `onNewIntent` (already-resumed activity) has no following
+        // ON_START, so arming it there would just sit until the next genuine
+        // background return and swallow that reroute instead.
+        val action = DeepLinkHandler.parse(intent.data)
+        if ((sharedContent || action !is DeepLinkAction.Unknown) &&
+            !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+        ) {
+            incomingWakeIntent = true
+            pendingLaunchSessionRoute = null
+        }
         handleDeepLink(intent.data)
+    }
+
+    /**
+     * [r5-d2 D-F-06] Every `ActivityResultLauncher` launch funnels through
+     * here: `ActivityResultRegistry` submits its `StartActivityForResult`
+     * contract via `ActivityCompat.startActivityForResult`, and both
+     * `startActivity(…)` overloads end in this three-argument method. One
+     * override therefore covers the camera, the photo picker, SAF document
+     * pickers, and any settings page we open — the whole set of "we left on
+     * purpose" transitions the New-Chat reroute must ignore.
+     *
+     * Set AFTER `super` on purpose: a launch that throws
+     * (`ActivityNotFoundException` on a device without a picker) never left
+     * the app, so it must not arm the suppressor.
+     */
+    @Deprecated("Deprecated in Java")
+    override fun startActivityForResult(intent: Intent, requestCode: Int, options: Bundle?) {
+        super.startActivityForResult(intent, requestCode, options)
+        selfLaunchedExternalUi = true
     }
 
     private fun handleDeepLink(uri: Uri?) {
