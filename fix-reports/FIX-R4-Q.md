@@ -68,11 +68,32 @@
 - **本地相关门（10 道，全绿）**：`turn_tail_finalize_order` / `loop_persist_slice_check` / `chat_session_id_binding_check` / `loop_tool_status_transition_check` / `compact_pin_truth_check` / `truncated_call_guard_check` / `budget_stop_break_guard` / `loop_counter_reset_guard` / `models_provider_field_check`（6 arms） / `router_lock_check` / `subagent_handback_check` / `trace_step_tag_check` / `prefs_listener_holder_guard` / `skill_frontmatter_roundtrip_check`（14 道含重复计数，0 红）。
 - **语法自查**：AgentLoopEngine.kt / ChatPromptAndTools.kt / OpenCatchUpGuardTest.kt / SubagentBudgetGateTest.kt / AgentLoopContinuationChainTest.kt 过 kotlinc 语法类错误过滤（`expecting|unexpected|syntax|unclosed` = 0）。
 - **JVM 探针未成**：Sandbox S28（子进程 `Function not implemented`，与本日共享目录清空事故叠加）+ /tmp 收割 + jvm-libs 丢失，三重环境事件后放弃本地全环路灯，改用「语法自查 + CI 真编译真运行 + 表驱动/形状测试进 CI」。**诚实标注：AgentLoopContinuationChainTest 的 4 个环路灯行为例 + 折叠判定表 7 例在提交时本地未运行过，绿红以 CI 为准。**
-- **CI**：#2877（`0b9cc5ee`）failure @ `compileReleaseUnitTestKotlin`（我的新测试少传 `LLMMessage.content` 必填参数，唯一失败步骤）→ 修后重派。#2878（`<见 git log>`）结论见 CI 判读（下节）。
+- **CI（四轮链，终绿）**：
+  | run | head | 结果 | 唯一失败点 |
+  |---|---|---|---|
+  | #2877 `40798494675` | `0b9cc5ee` | failure | `compileReleaseUnitTestKotlin`：我的新测试少传 `LLMMessage.content` 必填参数 |
+  | #2878 `40800785974` | `fcee2cb0` | failure | 8 例 / 4 族（见 §4.1） |
+  | #2879 `40805245655` | `e40a3e74` | failure | 1 例：`SessionActivityStreamErrorTest` 变异臂不红（见 §4.2） |
+  | #2880 `40807177021` | **`b5431ba9`** | **success** 21.5 min | — |
 
-## §4 CI 判读（#2878 起）
+## §4.1 #2878 四族红的逐族判定（「真行为变了」vs「探针口径」）
 
-（run id / head_sha 逐字符一致 / 27 步非 success 计数 / `Summary: 113 passed, 0 failed` ×1 / `ALL 349 CASES PASS` ×1 / `^ e: ` 0 / FAILED 行全为 PASSED 子串 —— 见会话收口读数）
+| 族 | 判据 | 判定 | 处置 |
+|---|---|---|---|
+| `OpenCatchUpGuardTest.fabUpTapAndFocusJump…` | 标记必须出现在 `tracedScrollToItem("FOCUS-MESSAGE"` 前 1200 字符内 | **我的实现错**：标记写在滚动之后；且上一轮的搬移脚本是**静默 no-op**（`replace` 的连续串跨了 `highlightedMessageId` 一行，assert 只查了两个串各自存在 ⇒ 假报成功） | 生产代码：标记搬到滚动调用之前 |
+| `ShellBudgetStopSymmetryTest`（2 例） | `collectBudgetGates` 扫 ChatPromptAndTools 全部 `t7ConsumeAndTrace(DIMENSION_…)` 门，要求集合恰为 {tool_calls, shell_commands} 且每门终态 | **两类问题**：①F-14 的门是**派发级**（拒绝一次子代理派发，不能给父 run 设 `t7BudgetStopReason`——那会杀掉父 run），不属于该探针宇宙；②我的 consume 写成多行 lambda，门的括号配平在 `}) {` 收掉 body，看不到拒绝分支 ⇒ 被误读成「非终态门」 | 生产代码改回主循环同形单行；探针按 `SubagentBudgetExhaustedException` 排除派发级门（KDoc 写明两条线的分工），run 级两门的终态判据一字未动 |
+| `SessionActivityStreamErrorTest` 漏斗计数 + `TerminalErrorPlacementTest` banner 站点计数 | `inline >= 5` / `spans >= 4`（均按基线调用图校准） | **口径随设计移动，不变量未动**：F-01 把 turn-tail persist 挪到续写 `continue` 之后 ⇒ 两处 fall-through banner（空回复提示、EOF 放弃）只能走 deferred 槽（inline 会打到上一轮的行，正是 placement 测试负控判红的形状）。站点总数不变：direct 5 + queue 5 → direct 3 + queue 7 | 下限改 3 / 3（两处判定各一条），注释给出证据与「为何不能靠加 inline 站点回到 5」 |
+| `AgentLoopContinuationChainTest`（2 例，我的测试） | — | **我的测试 bug**：①`foldDecisionTable` 的 size/content 期望值按「caller 会 append」写，而纯函数不 append；②`fallbackSwitch` 例的 `ModelEntry` 未设 `uuid` ⇒ `entryId` 对不上 ⇒ `newEntry == null` ⇒ 根本没发布（`ModelEntry.id` 派生自 `uuid`） | 表期望值按真实契约重写 + 补 `uuid`；本地用 kotlinc shim 提取生产对象原文跑 **ALL 7 CASES PASS**（期望值死字面量） |
+
+## §4.2 #2879 剩余一例（变异臂不红 = 下限没跟着实况走）
+
+`normalize()` 把**所有空白折叠成单空格**，所以我新增的**多行** `loopState.pendingInlineError =\n host.string(...)` 也被计入 `deferred`——实况 6 而非 5。下限停在 5 ⇒ 「删一个 deferred 站点」的变异臂仍绿（5 ≥ 5）＝ 漏斗可静默丢站点。抬到 6 后 Python 复现三条变异臂全部转红（删 deferred → 5<6；删 direct → 2<3；删 tail drain → 标记检查）。
+
+**教训（可复用）**：改被「计数下限」钉住的形状测试时，下限必须按**探针的真实口径**（含 normalize 后的匹配形态）重算，并且**逐条变异臂回放**——只验「live 绿」不验「坏树红」，下限就是空门。
+
+## §4.3 #2880 收口读数（绿 sha `b5431ba9`）
+
+`head_sha` `b5431ba928026a4b98d52a9b46614fb3881c7667` 与本地 HEAD **逐字符一致**；27 步非 success **0**（2 skipped = 滚动 tag + Publish，`if: main` 门控 = 分支不发布，预期）；日志 1,576,841 B / **NUL 0** / `Summary: 113 passed, 0 failed` ×1 / `ALL 349 CASES PASS` ×1 / `^ e: ` 0 / 含 FAILED 的 6 行全是 PASSED 用例名子串 / `:app:testReleaseUnitTest` 真跑。逐类：`AgentLoopContinuationChainTest` 6 PASSED · `SubagentBudgetGateTest` 2 · `OpenCatchUpGuardTest` 10 · `SessionActivityStreamErrorTest` 18 · `TerminalErrorPlacementTest` 11 · `ShellBudgetStopSymmetryTest` 5，FAILED 0。
 
 ## §5 纪律事故自报
 
