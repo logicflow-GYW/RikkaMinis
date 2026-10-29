@@ -350,14 +350,24 @@ object ExecutionCoordinator {
         // 多少内存」。与准入逻辑完全无关，任何失败静默。
         val spikeCmdClass = classifyCommand(command)
         MemorySpikeRecorder.onCommandStart(sessionId, spikeCmdClass.name, command)
+        // [LOOP-1030 R1-g] 影子水线挂在这里：准入读数就是决策读数（复用这一次
+        // 读，零额外 IO）。1s 周期采样看不到亚秒突发，别把它挪回 tick。
+        MemoryPressureGate.observeShadowAtAdmission(
+            anonBeforeMB, metricsBefore.rssMb, src = "shell-admission",
+        )
         if (MemoryPressureGate.levelFor(anonBeforeMB) == MemoryPressureLevel.CRITICAL) {
             MemoryPressureGate.reclaimAndWait(waitMs = 2_000L)
-            val anonAfterMB = MemoryPressureGate.anonMb()
+            val metricsAfter = MemoryPressureGate.metricsReader()
+            val anonAfterMB = metricsAfter.anonMb
+            // 回收完仍然越线 = 假设水线下的"拒绝准入"，单独一个 src 便于计数。
+            MemoryPressureGate.observeShadowAtAdmission(
+                anonAfterMB, metricsAfter.rssMb, src = "shell-post-reclaim",
+            )
             if (MemoryPressureGate.shouldRejectAfterReclaim(anonAfterMB)) {
-                Log.w(TAG, "[$sessionId] Process anon ${anonAfterMB}MB still critical after reclaim — rejecting command (anonBefore=${anonBeforeMB}MB, rss=${MemoryPressureGate.rssMb()}MB)")
+                Log.w(TAG, "[$sessionId] Process anon ${anonAfterMB}MB still critical after reclaim — rejecting command (anonBefore=${anonBeforeMB}MB, rss=${metricsAfter.rssMb}MB)")
                 MemorySpikeRecorder.onEvent(
                     "reject-anon",
-                    "session=$sessionId anonAfter=${anonAfterMB}MB anonBefore=${anonBeforeMB}MB rss=${MemoryPressureGate.rssMb()}MB :: ${MemorySpikeRecorder.previewOf(command, 60)}"
+                    "session=$sessionId anonAfter=${anonAfterMB}MB anonBefore=${anonBeforeMB}MB rss=${metricsAfter.rssMb}MB :: ${MemorySpikeRecorder.previewOf(command, 60)}"
                 )
                 return CommandResult(
                     "[System busy: process memory is critically high (anon ${anonAfterMB}MB). " +

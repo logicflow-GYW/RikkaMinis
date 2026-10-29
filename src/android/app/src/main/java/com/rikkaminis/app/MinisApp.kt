@@ -776,11 +776,11 @@ class MinisApp : Application(), ImageLoaderFactory {
         // 依据：三天 anon 峰值 1032/585/552MB，而 1200 的硬分支三天 0 次触发 ——
         // "把硬门槛降到 800 会不会天天触发"只能靠这台影子机回答，不能靠猜。
         // 它走自己的工作线程纪律（1s tick）与独立状态机，不动回收/准入。
-        com.rikkaminis.app.service.shadowTierListener = { from, to, anonMB, rssMB ->
+        com.rikkaminis.app.service.shadowTierListener = { src, from, to, anonMB, rssMB ->
             runCatching {
                 AppLogger.info(
                     "MemGateShadow",
-                    "from=$from to=$to anon=${anonMB}MB rss=${rssMB}MB — observe-only, no reclaim/admission change",
+                    "src=$src from=$from to=$to anon=${anonMB}MB rss=${rssMB}MB — observe-only, no reclaim/admission change",
                 )
             }
             Unit
