@@ -355,4 +355,273 @@ class MirrorPlanTest {
         // consume a previous/ slot.
         assertEquals(listOf("20261029-100000", "20261029-090000", "20261029-080000"), m.previousPoints)
     }
+
+    // ── [R5-A / F-03] clock rollback must not blind the verdict ─────────────
+
+    @Test
+    fun health_clockRollbackWithPendingIsStale() {
+        // The report's own verdict input: last write 5_000_000, clock now at
+        // 1_000_000, five files waiting. Before the fix `idle` was negative, the
+        // staleness test could never fire, and this returned Healthy(5) — a dead
+        // trigger chain reading as healthy for as long as the clock stays behind.
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = 5_000_000L,
+            pending = 5,
+            lastOutcome = "ok 1w/0d/0a of 10",
+            nowMs = 1_000_000L,
+        )
+        assertEquals(MirrorPlan.Health.Stale(5, 0L), h)
+    }
+
+    @Test
+    fun health_clockRollbackWithNothingPendingStaysHealthy() {
+        // Nothing waiting = nothing the mirror is failing to do, rollback or not
+        // (same rule as health_staleNeedsPendingFiles).
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = 5_000_000L,
+            pending = 0,
+            lastOutcome = "no-changes",
+            nowMs = 1_000_000L,
+        )
+        assertEquals(MirrorPlan.Health.Healthy(0), h)
+    }
+
+    @Test
+    fun health_clockRollbackWithUnreadablePendingStaysHealthy() {
+        // pending == null means the count could not be read; that is not a
+        // positive claim that files are waiting.
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = 5_000_000L,
+            pending = null,
+            lastOutcome = "ok 1w/0d/0a of 10",
+            nowMs = 1_000_000L,
+        )
+        assertEquals(MirrorPlan.Health.Healthy(null), h)
+    }
+
+    // ── [R5-A / F-03] duplicate point names must not shorten the kept list ──
+
+    @Test
+    fun rotatePoints_duplicateNameDoesNotShortenTheKeptList() {
+        // The report's verdict input: a rolled-back clock re-mints the name the
+        // OLDEST existing point already has. `filterNot { it in victims }` purged
+        // every equal element, so a keep of 3 produced 2 survivors.
+        val existing = listOf("20261029-120000", "20261029-110000", "20261029-100000")
+        val r = MirrorPlan.rotatePoints(existing, newPoint = "20261029-100000", keep = 3)
+        assertEquals(
+            listOf("20261029-120000", "20261029-110000", "20261029-100000"),
+            r.kept,
+        )
+        assertEquals(3, r.kept.size)
+        assertTrue(
+            "the point the run just archived must not be deleted in the same pass",
+            "20261029-100000" !in r.victims,
+        )
+    }
+
+    @Test
+    fun rotatePoints_deletesExactlyThePointsBeyondKeep() {
+        val existing = listOf("20261029-110000", "20261029-100000", "20261029-090000")
+        val r = MirrorPlan.rotatePoints(existing, newPoint = "20261029-120000", keep = 3)
+        assertEquals(
+            listOf("20261029-120000", "20261029-110000", "20261029-100000"),
+            r.kept,
+        )
+        assertEquals(listOf("20261029-090000"), r.victims)
+    }
+
+    @Test
+    fun rotatePoints_noNewPointStillRotates() {
+        val existing = listOf(
+            "20261029-100000", "20261029-090000", "20261029-080000", "20261029-070000",
+        )
+        val r = MirrorPlan.rotatePoints(existing, newPoint = null, keep = 3)
+        assertEquals(listOf("20261029-100000", "20261029-090000", "20261029-080000"), r.kept)
+        assertEquals(listOf("20261029-070000"), r.victims)
+    }
+
+    @Test
+    fun rotatePoints_keepZeroListsNothingAndDeletesOnlyStampedNames() {
+        // `keep = 0` is "no point history": nothing stays listed, and a directory
+        // whose name carries no stamp is still never a victim (that rule lives in
+        // previousVictims and must not be re-derived here).
+        val r = MirrorPlan.rotatePoints(
+            listOf("20261029-100000", "20261029-090000", "handmade-copy"),
+            newPoint = "20261029-110000",
+            keep = 0,
+        )
+        assertEquals(emptyList<String>(), r.kept)
+        assertEquals(
+            listOf("20261029-110000", "20261029-100000", "20261029-090000"),
+            r.victims,
+        )
+    }
+
+    @Test
+    fun nextManifest_duplicatePointNameKeepsTheFullKeep() {
+        // Exactly the F-03 verdict shape, through the manifest entry point.
+        val m = MirrorPlan.nextManifest(
+            nowMs = 1L,
+            entries = emptyList(),
+            existingPoints = listOf("20261029-120000", "20261029-110000", "20261029-100000"),
+            newPointName = "20261029-100000",
+            keep = 3,
+        )
+        assertEquals(3, m.previousPoints.size)
+        assertEquals(
+            listOf("20261029-120000", "20261029-110000", "20261029-100000"),
+            m.previousPoints,
+        )
+    }
+
+    // ── [R5-A / F-05] the daily copy just written owns a slot ───────────────
+
+    @Test
+    fun autoSnapshotVictims_rolledBackNameIsNotAVictim() {
+        // Seven newer snapshots already in `auto/`; the copy written "now" sorts
+        // OLDEST because the clock rolled back. `drop(7)` picked it first and the
+        // run still logged "mirrored" — the file it had just written was gone.
+        val fresh = "rikkaminis-auto-20261026-120000.json" to 0L
+        val others = listOf(
+            "rikkaminis-auto-20261029-120000.json" to 7L,
+            "rikkaminis-auto-20261028-120000.json" to 6L,
+            "rikkaminis-auto-20261027-120000.json" to 5L,
+            "rikkaminis-auto-20261020-120000.json" to 4L,
+            "rikkaminis-auto-20261019-120000.json" to 3L,
+            "rikkaminis-auto-20261018-120000.json" to 2L,
+            "rikkaminis-auto-20261017-120000.json" to 1L,
+        )
+        val victims = MirrorPlan.autoSnapshotVictims(others + fresh, fresh.first, keep = 7)
+        assertFalse(victims.contains(fresh.first))
+        // Quota stays exact: the fresh copy displaces the oldest OTHER snapshot
+        // instead of adding an eighth file.
+        assertEquals(1, victims.size)
+        assertEquals(listOf("rikkaminis-auto-20261017-120000.json"), victims)
+    }
+
+    @Test
+    fun autoSnapshotVictims_freshNewestAlsoKeepsSeven() {
+        val fresh = "rikkaminis-auto-20261029-130000.json" to 9L
+        val others = (1..7).map { i -> "rikkaminis-auto-2026101$i-120000.json" to i.toLong() }
+        val victims = MirrorPlan.autoSnapshotVictims(others + fresh, fresh.first, keep = 7)
+        assertEquals(1, victims.size)
+        assertEquals(listOf("rikkaminis-auto-20261011-120000.json"), victims)
+        assertFalse(victims.contains(fresh.first))
+    }
+
+    @Test
+    fun autoSnapshotVictims_underQuotaDeletesNothing() {
+        val fresh = "rikkaminis-auto-20261026-120000.json" to 0L
+        val others = listOf("rikkaminis-auto-20261025-120000.json" to 1L)
+        assertEquals(
+            emptyList<String>(),
+            MirrorPlan.autoSnapshotVictims(others + fresh, fresh.first, keep = 7),
+        )
+    }
+
+    @Test
+    fun autoSnapshotVictims_keepOneKeepsOnlyTheFreshCopy() {
+        val fresh = "rikkaminis-auto-20261026-120000.json" to 0L
+        val others = listOf("rikkaminis-auto-20261025-120000.json" to 2L, "rikkaminis-auto-20261024-120000.json" to 1L)
+        val victims = MirrorPlan.autoSnapshotVictims(others + fresh, fresh.first, keep = 1)
+        assertEquals(
+            listOf("rikkaminis-auto-20261025-120000.json", "rikkaminis-auto-20261024-120000.json"),
+            victims,
+        )
+    }
+
+    @Test
+    fun autoSnapshotVictims_ordersIndependentOfCaller() {
+        // The caller's list order must not decide what is deleted: the rule sorts
+        // by stamp itself.
+        val fresh = "rikkaminis-auto-20261026-120000.json" to 0L
+        val a = "rikkaminis-auto-20261027-120000.json" to 5L
+        val b = "rikkaminis-auto-20261025-120000.json" to 1L
+        assertEquals(
+            MirrorPlan.autoSnapshotVictims(listOf(fresh, a, b), fresh.first, keep = 2),
+            MirrorPlan.autoSnapshotVictims(listOf(b, a, fresh), fresh.first, keep = 2),
+        )
+        assertEquals(
+            listOf("rikkaminis-auto-20261025-120000.json"),
+            MirrorPlan.autoSnapshotVictims(listOf(fresh, a, b), fresh.first, keep = 2),
+        )
+    }
+
+    // ── [R5-A / F-02] a file we could not read is not "synced" ──────────────
+
+    @Test
+    fun manifestEntries_skippedFileKeepsTheOldRecord() {
+        val previous = listOf(MirrorPlan.Entry("memory/a.md", 10, 100))
+        val current = listOf(MirrorPlan.Entry("memory/a.md", 99, 900))
+        val entries = MirrorPlan.manifestEntries(current, previous, setOf("memory/a.md"))
+        // Old (size, mtime) → the next diff calls it changed and retries.
+        assertEquals(listOf(MirrorPlan.Entry("memory/a.md", 10, 100)), entries)
+    }
+
+    @Test
+    fun manifestEntries_skippedNewFileIsDroppedSoItComesBackAsAdded() {
+        val current = listOf(MirrorPlan.Entry("shared/new.md", 5, 50))
+        assertEquals(
+            emptyList<MirrorPlan.Entry>(),
+            MirrorPlan.manifestEntries(current, emptyList(), setOf("shared/new.md")),
+        )
+    }
+
+    @Test
+    fun manifestEntries_noSkipsIsTheCurrentSelection() {
+        val current = listOf(MirrorPlan.Entry("memory/a.md", 10, 100), MirrorPlan.Entry("memory/b.md", 20, 200))
+        assertEquals(current, MirrorPlan.manifestEntries(current, emptyList(), emptySet()))
+    }
+
+    @Test
+    fun manifestEntries_unskippedFilesKeepTheirNewRecord() {
+        val previous = listOf(MirrorPlan.Entry("memory/a.md", 10, 100), MirrorPlan.Entry("memory/b.md", 20, 200))
+        val current = listOf(MirrorPlan.Entry("memory/a.md", 11, 101), MirrorPlan.Entry("memory/b.md", 21, 201))
+        val entries = MirrorPlan.manifestEntries(current, previous, setOf("memory/b.md"))
+        assertEquals(
+            listOf(MirrorPlan.Entry("memory/a.md", 11, 101), MirrorPlan.Entry("memory/b.md", 20, 200)),
+            entries,
+        )
+    }
+
+    // ── [R5-A / C-01④ + C-03②] a failure survives an attempt-free outcome ──
+
+    @Test
+    fun nextRecordedOutcome_throttledAndBusyDoNotClearAFailure() {
+        val failed = "failed: write failed: memory/GLOBAL.md"
+        assertEquals(failed, MirrorPlan.nextRecordedOutcome(failed, "throttled"))
+        assertEquals(failed, MirrorPlan.nextRecordedOutcome(failed, "busy"))
+        // `unavailable` is the other failure spelling (Health.Failed(null)).
+        assertEquals("unavailable", MirrorPlan.nextRecordedOutcome("unavailable", "throttled"))
+        assertEquals("unavailable", MirrorPlan.nextRecordedOutcome("unavailable", "busy"))
+    }
+
+    @Test
+    fun nextRecordedOutcome_completedPassClearsTheFailure() {
+        val failed = "failed: disk full"
+        assertEquals("ok 3w/0d/0a of 1810", MirrorPlan.nextRecordedOutcome(failed, "ok 3w/0d/0a of 1810"))
+        // A finished read+diff against a readable target proves the pipeline
+        // works; keeping the warning would need a natural `ok` that a quiet
+        // install never produces.
+        assertEquals("no-changes", MirrorPlan.nextRecordedOutcome(failed, "no-changes"))
+    }
+
+    @Test
+    fun nextRecordedOutcome_healthyHistoryIsReplacedNormally() {
+        assertEquals("throttled", MirrorPlan.nextRecordedOutcome("ok 1w/0d/0a of 10", "throttled"))
+        assertEquals("no-changes", MirrorPlan.nextRecordedOutcome(null, "no-changes"))
+        assertEquals("busy", MirrorPlan.nextRecordedOutcome("no-changes", "busy"))
+    }
+
+    @Test
+    fun nextRecordedOutcome_newFailureAlwaysWins() {
+        assertEquals(
+            "failed: no space left on device",
+            MirrorPlan.nextRecordedOutcome("failed: write failed: a.md", "failed: no space left on device"),
+        )
+        assertEquals("unavailable", MirrorPlan.nextRecordedOutcome("failed: x", "unavailable"))
+    }
 }

@@ -32,6 +32,24 @@ object ScheduledTasksStore {
     private const val FILE_NAME = "scheduled-tasks.json"
     private const val TAG = "scheduled-run"
 
+    /**
+     * [R5-B2 C-02②] Suffix of the verbatim copy [preserveUnreadableLocked]
+     * keeps when a whole-document restore is about to replace bytes we could
+     * not read. Deliberately NOT a `.json` name: nothing may pick the copy up
+     * as a tasks document, and nothing globs this directory.
+     */
+    private const val UNREADABLE_COPY_SUFFIX = ".unreadable"
+
+    /** How many unreadable copies to keep (newest first, older ones pruned). */
+    private const val UNREADABLE_COPY_KEEP = 3
+
+    /**
+     * [R5-B2 C-02③] Marker for a `version` value that is present but not a
+     * positive integer (`0`, a negative number, a string). Never a real
+     * version: real versions count up from 1.
+     */
+    private const val INVALID_DECLARED_VERSION = -1
+
     private val lock = Mutex()
 
     /**
@@ -161,6 +179,14 @@ object ScheduledTasksStore {
                 // `scheduledTasksImported = true` and the restore UI shows no
                 // skip line, so a full disk used to report a clean restore of
                 // tasks that are still the old ones.
+                //
+                // [R5-B2 C-02②] This is the one write allowed to run while
+                // [unreadable] is set, and the bytes it replaces are the ONLY
+                // copy of whatever we could not read (a newer build's document,
+                // or corrupt bytes). The pre-restore snapshot cannot stand in
+                // for them: it recorded the tasks THIS build could parse, i.e.
+                // none. Keep a verbatim copy first.
+                if (unreadable) preserveUnreadableLocked(context)
                 if (writeLocked(context, parsed.copy(running = null))) {
                     // The bytes on disk are now a document we just produced, so
                     // an earlier unreadable verdict no longer applies. (A
@@ -262,6 +288,24 @@ object ScheduledTasksStore {
                 file.copy(tasks = file.tasks.filterNot { it.id == taskId })
             }
         }
+        // [R5-B2 F-04 = C-02①] A REFUSED delete must not release anything.
+        // `mutate` hands back the PRE-write document when the write did not
+        // land (disk full, or the `unreadable` guard — see
+        // [ScheduledTaskStorePolicy.visibleAfterWrite]), so "the task is still
+        // in the returned document" is exactly "nothing was deleted". The
+        // sibling restore path has the same guard (`if (!outcome.applied)
+        // return outcome`, above); without it here, a failed delete cleared the
+        // runner's in-memory lock while the persisted `running` marker stayed
+        // on disk — the next minute beat then reads
+        // `marker.taskId != runningTaskId` and books a `process-restart`
+        // crash failure against a task that is running perfectly well.
+        if (next.tasks.any { it.id == taskId }) {
+            AppLogger.warning(
+                TAG,
+                "delete of task=$taskId not persisted; runner state left alone",
+            )
+            return next
+        }
         // [da1016 B-7c] Deleting the task that is running right now only cleared
         // the persisted marker; the runner's in-memory lock (runningTaskId +
         // dispatched) kept pointing at the deleted task, so every other task
@@ -269,7 +313,9 @@ object ScheduledTasksStore {
         // (30 min by default). Release it here — after the store lock, see the
         // LOCK ORDER note on ScheduledTaskRunner.onTasksRemoved. Unconditional
         // (not guarded on the deleted id matching a run) on purpose: the plan
-        // decides, and a delete that hits a live run can never be forgotten.
+        // decides, and a delete that LANDS can never be forgotten. The guard
+        // above is about a delete that never happened, not about the run: a
+        // real deletion always releases, whether or not a run is in flight.
         ScheduledTaskRunner.onTasksRemoved(removedTaskIds = setOf(taskId))
         return next
     }
@@ -364,6 +410,75 @@ object ScheduledTasksStore {
 
     // ------------------------------------------------------------------
 
+    /**
+     * [R5-B2 C-02②] Keep the bytes of an unreadable `scheduled-tasks.json`
+     * before a whole-document restore replaces them.
+     *
+     * The defect: while [unreadable] is set, `load` produces an EMPTY document,
+     * so `exportDocument` gave the pre-restore snapshot an empty tasks section —
+     * and `importDocument` then overwrote the original file (a newer build's
+     * document, or corrupt-but-maybe-salvageable bytes). The user was left with
+     * neither the old file nor a snapshot holding its tasks. The snapshot
+     * cannot be fixed from here (it is ConfigBackup's payload), so the recovery
+     * net this store CAN lay down is a verbatim copy of the file it is about to
+     * destroy: `scheduled-tasks.json.unreadable-<stamp>` next to it, pruned to
+     * the newest [UNREADABLE_COPY_KEEP].
+     *
+     * Failure to copy must not block the restore — the restore is the user's
+     * requested action and the copy is a safety net; it is logged instead.
+     */
+    private fun preserveUnreadableLocked(context: Context) {
+        val file = fileFor(context)
+        if (!file.exists()) return
+        val dir = file.parentFile ?: return
+        val copy = File(dir, file.name + UNREADABLE_COPY_SUFFIX + "-" + System.currentTimeMillis())
+        try {
+            file.copyTo(copy, overwrite = false)
+            val pruned = (dir.listFiles { f -> f.name.startsWith(file.name + UNREADABLE_COPY_SUFFIX) }
+                ?: emptyArray())
+                .sortedByDescending { it.name }
+                .drop(UNREADABLE_COPY_KEEP)
+            var removed = 0
+            for (old in pruned) if (old.delete()) removed++
+            AppLogger.warning(
+                TAG,
+                "kept the unreadable scheduled-tasks.json as ${copy.name} before replacing it" +
+                    if (removed > 0) " (pruned $removed older copy/copies)" else "",
+            )
+        } catch (t: Throwable) {
+            AppLogger.warning(
+                TAG,
+                "could not keep a copy of the unreadable scheduled-tasks.json " +
+                    "(${t.javaClass.simpleName}) — a restore is about to replace it",
+            )
+        }
+    }
+
+    /**
+     * [R5-B2 C-02③] The declared `version`, read strictly.
+     *
+     * `optInt("version", ScheduledTasksCodec.VERSION)` mapped `0`, a negative
+     * number, `"v2"`, `null` and a missing key all onto "this build's version".
+     * The first two and the string are NOT a version this build reads: they
+     * were parsed leniently and then re-written as v1 by the next mutation,
+     * silently stripping whatever the writer had added —
+     * [ScheduledTasksRestorePlan.decide] already refuses a declared version it
+     * does not read, and the live file is the copy that gets overwritten blind,
+     * so it must be at least as strict.
+     *
+     * @return `null` when the key is absent (a pre-versioning document, which is
+     *   exactly this build's own shape: accepted as v1), the declared number
+     *   when it is a positive integer, or [INVALID_DECLARED_VERSION] when the
+     *   value exists but is not one.
+     */
+    private fun declaredVersionOf(root: JSONObject): Int? {
+        if (!root.has("version")) return null
+        val number = root.opt("version") as? Number ?: return INVALID_DECLARED_VERSION
+        val value = number.toInt()
+        if (number.toDouble() != value.toDouble() || value <= 0) return INVALID_DECLARED_VERSION
+        return value
+    }
+
     private fun loadLocked(context: Context): ScheduledTasksFile {
         val file = fileFor(context)
         if (!file.exists()) {
@@ -391,13 +506,22 @@ object ScheduledTasksStore {
             // ([ScheduledTasksRestorePlan.decide]); the live file gets the
             // same gate here, because it is the one that gets overwritten
             // blind. Counts as [unreadable], like any other read failure.
-            val declared = JSONObject(raw).optInt("version", ScheduledTasksCodec.VERSION)
-            if (declared > ScheduledTasksCodec.VERSION) {
+            //
+            // [R5-B2 C-02③] The gate reads `version` STRICTLY
+            // ([declaredVersionOf]): the old `optInt("version", VERSION)` mapped
+            // `0`, a negative number and a non-numeric value onto "this build's
+            // version", so a document that declared something else entirely was
+            // accepted as v1 and then re-written as v1 by the next mutation.
+            val declared = declaredVersionOf(JSONObject(raw))
+            if (declared != null &&
+                (declared == INVALID_DECLARED_VERSION || declared > ScheduledTasksCodec.VERSION)
+            ) {
                 unreadable = true
                 AppLogger.warning(
                     TAG,
-                    "tasks.json is format v$declared, this build reads v${ScheduledTasksCodec.VERSION} — " +
-                        "refusing writes until it is replaced",
+                    "tasks.json declares " +
+                        (if (declared == INVALID_DECLARED_VERSION) "an unusable version value" else "format v$declared") +
+                        ", this build reads v${ScheduledTasksCodec.VERSION} — refusing writes until it is replaced",
                 )
                 return ScheduledTasksFile()
             }

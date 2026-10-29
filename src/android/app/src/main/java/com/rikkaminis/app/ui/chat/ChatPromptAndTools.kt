@@ -466,11 +466,6 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
 
     // 2. Parse subagent config
     val config = SubagentSkill.parseSubagentConfig(skill)
-    // [FIX-R4-Q F-14] Dispatching a sub-agent IS a skill use: the main path
-    // records SKILL.md reads (executeTool's FileReadTool arm), so the "最近
-    // 使用" ordering never saw sub-agent usage at all — a skill dispatched
-    // 50 times a day sorted as if it had been read once.
-    runCatching { skillRepository?.recordSkillUse(skill.id) }
     if (!config.isSubagent) {
         // Answer with the skills that ARE sub-agents instead of a bare
         // rejection — same "give the model a way back" rule as
@@ -491,6 +486,14 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     }
 
     // 3. Build filtered tool set
+    // [R5-C C-C-07①] recordSkillUse sits AFTER the isSubagent gate (moved from
+    // step 2): the [FIX-R4-Q F-14] rationale is unchanged — dispatching a
+    // sub-agent IS a skill use and the "最近使用" ordering never saw sub-agent
+    // usage — but a dispatch that was then REJECTED (a non-subagent skill, the
+    // answer above IS the way back) was counted as a use all the same. Usage is
+    // something the model DID, not something it tried and was refused.
+    runCatching { skillRepository?.recordSkillUse(skill.id) }
+
     val subagentTools = SubagentSkill.buildFilteredTools(agentTools, config.allowedTools)
     if (subagentTools.isEmpty()) {
         return ToolExecutionResult(
@@ -534,6 +537,7 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
             false, toolTitle = title,
         )
     }
+
     return com.rikkaminis.app.ui.chat.runSubagentLoop(
         skillName = skillName,
         query = query,
@@ -592,6 +596,36 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         // [audit-0916] The sub-agent's own filtered list is passed in so a
         // rejected name is answered with the names this level may use.
         executeSubTool = { name, subArgs ->
+            // [R5-C C-C-07①] A tool executed INSIDE the sub-agent was invisible
+            // to the parent run's tool budget: the main dispatch consumes one
+            // TOOL_CALLS unit per call (executeTool), and the sub-agent's own
+            // REQUESTS consume PROVIDER_ATTEMPTS (streamProvider below —
+            // [FIX-R4-Q F-14]), but every in-tool execution here was free — a
+            // runaway sub-agent (a skill looping over files) could make
+            // thousands of tool calls the budget never counted and the deadline
+            // never capped. The SPAWN call itself is already charged by the main
+            // dispatch (that is what executeTool's gate pays for), so the unit
+            // belongs here, on each inner execution.
+            //
+            // Refusal shape = the file's own convention for a sub-agent gate:
+            // throw SubagentBudgetExhaustedException, which runSubagentLoop's
+            // catch turns into a VISIBLE failed result for the dispatching agent
+            // ("encountered an error after N turn(s) … Error: <reason>") instead
+            // of a refuse-and-retry loop on a run that is out of budget. The
+            // same marker keeps ShellBudgetStopSymmetryTest's contract intact:
+            // a dispatch-level gate is excluded from the RUN-level terminal
+            // gates (its KDoc), so the run-terminating gates stay exactly
+            // tool_calls + shell_commands.
+            if (traceObserver.activeRunBudget?.isExpired() == true) {
+                throw SubagentBudgetExhaustedException(
+                    "run deadline reached — sub-agent tool call refused",
+                )
+            }
+            if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS) { it.consumeToolCall() }) {
+                throw SubagentBudgetExhaustedException(
+                    "tool-call budget exhausted — sub-agent tool call refused",
+                )
+            }
             executeSubagentTool(name, subArgs, subagentTools.map { it.name })
         },
         // [fix/same-class-cleanup] The residue policy resolves a drifted
@@ -608,6 +642,11 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
  * assistantId, etc.) — the sub-agent produces file/memory results only.
  * Tools that are FORBIDDEN for sub-agents never reach this method
  * because [SubagentSkill.buildFilteredTools] excludes them.
+ *
+ * [R5-C C-C-07①] The parent run's deadline + TOOL_CALLS budget are gated by
+ * this method's ONLY caller (the spawn dispatch's `executeSubTool` lambda).
+ * A second call site must gate too, or inner executions escape the parent
+ * budget again.
  */
 internal suspend fun ChatViewModel.executeSubagentTool(
     name: String,
@@ -1974,6 +2013,22 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
         AppLogger.info("TitleGen", "skip guard=title-already-set title='${_sessionTitle.value.take(200)}'")
         return
     }
+    // [R5-C C-C-07②] The failure-shape predicate moved ABOVE the provider
+    // resolution: the `provider == null` branch below also consults it, and a
+    // local `fun` can only capture what appears before it lexically. The
+    // [FIX-R4-Q F-11] rationale is unchanged — one predicate for "this failure
+    // ends the title attempt" so a MANUAL regeneration cannot fail silently.
+    // With force=true the attempt counter is 1 after the first try, so the old
+    // `attempts >= TITLE_MAX_ATTEMPTS` gate made the click invisible for the
+    // two retries the user never sees. A manual attempt on a session that
+    // still has no real title falls back to the first-message title
+    // immediately; a manual attempt on an already-titled session keeps that
+    // title (needs-generation is false — the fallback must not overwrite a
+    // good title with a truncated first message).
+    fun titleFailureIsFinal(): Boolean =
+        titleGenerationAttempts >= TITLE_MAX_ATTEMPTS ||
+            (force && sessionTitleNeedsGenerationOf(_sessionTitle.value))
+
     // Prefer a dedicated sub-model (cheap, non-OAuth) — mirrors iOS resolveSubEntry.
     // Falls back to the primary provider if no sub-group is configured.
     // [T-title-gen-fallback-first-message-android] If no provider can be
@@ -1986,27 +2041,29 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
     val provider = subProvider ?: currentProvider
     if (provider == null) {
         AppLogger.warning("TitleGen", "no provider available (sub + current both null) — fallback-to-first-message path")
-        viewModelScope.launch(Dispatchers.IO) {
-            applyFallbackTitleFromFirstMessage("no provider available")
+        // [R5-C C-C-07②] The fallback UNCONDITIONALLY overwrites the session
+        // title (updateSessionTitle + _sessionTitle), so it was the one
+        // failure path that could clobber a good title: a manual regen
+        // (force) on an already-titled session with no provider resolved took
+        // the branch, needs-generation never got its say, and the user's
+        // chosen title became a truncated first message. Same criterion as
+        // every in-loop fallback below: when the failure is final for this
+        // shape (already-titled + manual), keep the current title.
+        if (!titleFailureIsFinal()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                applyFallbackTitleFromFirstMessage("no provider available")
+            }
+        } else {
+            AppLogger.info(
+                "TitleGen",
+                "no provider + already-titled manual regen — fallback skipped, title kept ('${_sessionTitle.value.take(120)}')",
+            )
         }
         return
     }
 
     titleGenerationInFlight = true
     titleGenerationAttempts++
-
-    // [FIX-R4-Q F-11] One predicate for "this failure ends the title attempt"
-    // so a MANUAL regeneration cannot fail silently. With force=true the
-    // attempt counter is 1 after the first try, so the old
-    // `attempts >= TITLE_MAX_ATTEMPTS` gate made the click invisible for the
-    // two retries the user never sees. A manual attempt on a session that
-    // still has no real title falls back to the first-message title
-    // immediately; a manual attempt on an already-titled session keeps that
-    // title (needs-generation is false — the fallback must not overwrite a
-    // good title with a truncated first message).
-    fun titleFailureIsFinal(): Boolean =
-        titleGenerationAttempts >= TITLE_MAX_ATTEMPTS ||
-            (force && sessionTitleNeedsGenerationOf(_sessionTitle.value))
 
     // [T-titlegen-context-first-last-pair] Build the summary from the first
     // user + first assistant message, and — when the session has more than

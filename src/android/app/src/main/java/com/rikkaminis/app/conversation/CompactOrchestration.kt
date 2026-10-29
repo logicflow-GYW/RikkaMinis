@@ -282,7 +282,17 @@ internal fun ChatViewModel.compactAll(
                 previousSummary = existing,
                 depth = 0,
             ).trim()
-            if (summary.isEmpty()) {
+            // [fix/r5-c1-compact-F01] Judge the BODY, not the assembled string.
+            // The pinned block is appended INSIDE the call above
+            // (generateCompactSummaryWithSplitting → appendPinnedSection), so a
+            // plain `summary.isEmpty()` could never fire whenever the fold
+            // region held one user message: the block turned a filtered/empty
+            // provider answer into a non-empty summary, the marker was persisted
+            // with no body at all, and effectiveAgentHistory then replaced the
+            // whole folded range with verbatim quotes of the user's own words.
+            // Empty body = nothing was summarised = nothing may be folded.
+            val bodyEmpty = !summaryHasBody(summary)
+            if (bodyEmpty) {
                 // [fix/compact-silent-abort-cards-1016] Gated with !silent like
                 // every other abort branch above: a silent auto-compact must
                 // leave the transcript untouched, and this branch can be
@@ -293,7 +303,8 @@ internal fun ChatViewModel.compactAll(
                 // empty". Manual /compact still shows it.
                 AppLogger.warning(
                     ChatViewModel.TAG,
-                    "[Compact] summary came back empty (silent=$silent) — nothing folded",
+                    "[Compact] summary came back with no body (chars=${summary.length}, " +
+                        "silent=$silent) — nothing folded",
                 )
                 if (!silent) {
                     withContext(Dispatchers.Main) {

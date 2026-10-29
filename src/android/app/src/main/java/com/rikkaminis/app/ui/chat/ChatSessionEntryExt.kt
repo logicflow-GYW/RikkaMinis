@@ -287,6 +287,20 @@ internal suspend fun ChatViewModel.ensureSession(): String {
         thinkingLevel = _thinkingLevel.value.name,
     )
     realSessionId = session.id
+    // [r5-d2 B-F-02②] The SECOND write site of the crash-recovery record.
+    // The nav listener already ran for this chat while the route argument was
+    // still the draft key (`__new__<uuid>`) — and at that point it CLEARS the
+    // slot instead of persisting (see `CrashRecoveryStore.slotWriteFor`), so
+    // without this line the whole conversation that follows has no restore
+    // target at all: a native crash / LMK restart lands on whatever session was
+    // recorded before it, or on nothing. Promotion is the first moment a real
+    // id exists, and it is also the last chance — `ChatViewModelStore.rename`
+    // changes only the alias table, so `currentBackStackEntryFlow` never emits
+    // again for this screen (its nav arg stays on the draft key for life).
+    com.rikkaminis.app.CrashRecoveryStore.record(
+        context.applicationContext,
+        session.id,
+    )
     // [feat/hermes-tier1] Draft materialised a NEW session id: re-key the
     // frozen system prompt cache so the prompt built for the draft (if any)
     // is not silently reused under the real id. Session-scoped anchors are

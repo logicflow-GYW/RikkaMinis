@@ -702,7 +702,17 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
     // text Stop — are testable without the ViewModel.
     val historyEndsWithAssistant =
         agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT
-    val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant)
+    // [R5-C C-C-06] Distinguish "history genuinely ends with a user/tool_result
+    // turn" from "history ends with resume()'s continuation reminder". The
+    // reminder IS a USER row, so without this probe the placeholder window
+    // (stop after the reminder but before the first packet) read
+    // historyEndsWithAssistant=false for the WRONG reason and the plan kept a
+    // dead reminder row while killing _canResume. Pure predicate in
+    // StopCleanupPlan.kt, single-sourced with the writer via
+    // CONTINUATION_REMINDER_TEXT.
+    val reminderTail = agentHistory.lastOrNull()
+        ?.let { isContinuationReminderTail(it.role, it.content) } == true
+    val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant, reminderTail)
 
     // Case 0 (T-ios-stop-clear-thinking-and-partial — Android port):
     // Stop fired while still in the pre-first-chunk thinking gap (no
@@ -716,6 +726,17 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
     // The predicate itself lives in `planStopCleanup` (all three cells:
     // text / tool_use / committed-history).
     if (stopPlan.dropPlaceholder) {
+        // [R5-C C-C-06] The placeholder window can fire while the transcript's
+        // tail is resume()'s continuation reminder (Stop after the reminder
+        // write, before the first packet). Pre-fix that row stayed in the DB
+        // and in agentHistory — a USER turn with no answer behind it, which
+        // every future transcript read as "the user asked for a continuation
+        // that never came" — and `_canResume` stayed false, killing the Resume
+        // banner. The plan now says when the tail IS the reminder: remove the
+        // row, restore resumability (with the reminder gone the transcript is
+        // exactly the pre-resume shape), then drop the placeholder.
+        if (stopPlan.dropContinuationReminder) dropContinuationReminderTail()
+        if (stopPlan.canResume) _canResume.value = true
         msgs.removeAt(lastIdx)
         _messages.value = msgs
         return
@@ -751,6 +772,50 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
     // USER(tool_result) as a valid anchor ("no reminder needed"), so nothing
     // else is required to make that shape resumable.
     if (stopPlan.canResume) _canResume.value = true
+}
+
+/**
+ * [R5-C C-C-06] Remove the orphaned continuation reminder from the tail of
+ * `agentHistory` and from the DB.
+ *
+ * Only called from the stop-cleanup placeholder arm, and only when
+ * [planStopCleanup] matched the tail against [isContinuationReminderTail] — so
+ * the row being removed is always the one `resume()` itself wrote for the turn
+ * that just produced nothing (never a real user message: real user text can
+ * never equal [CONTINUATION_REMINDER_TEXT]).
+ *
+ * The DB delete is guarded on "this row is still the last row": if anything
+ * landed after the reminder the run was not in the pre-first-packet window
+ * after all, and a partial delete (`deleteMessagesAfter(sortOrder)`) would take
+ * the newer rows with it. In that case the row is left in place and logged —
+ * divergence between memory and disk is worse than a logged orphan.
+ */
+internal fun ChatViewModel.dropContinuationReminderTail() {
+    val tail = agentHistory.lastOrNull() ?: return
+    if (!isContinuationReminderTail(tail.role, tail.content)) return
+    val dbId = tail.dbMessageId
+    agentHistory.removeAt(agentHistory.lastIndex)
+    if (dbId.isNullOrEmpty()) return
+    val sid = activeSessionId
+    viewModelScope.launch(Dispatchers.IO) {
+        runCatching {
+            val rows = chatRepository.loadMessages(sid)
+            if (rows.lastOrNull()?.id == dbId) {
+                chatRepository.deleteMessagesAfter(sid, rows.last().sortOrder)
+                AppLogger.info(
+                    ChatViewModel.TAG,
+                    "stop-cleanup: removed orphan continuation reminder row ${dbId.take(8)}",
+                )
+            } else {
+                AppLogger.warning(
+                    ChatViewModel.TAG,
+                    "stop-cleanup: continuation reminder ${dbId.take(8)} is not the DB tail — kept (no partial delete)",
+                )
+            }
+        }.onFailure {
+            Log.w(ChatViewModel.TAG, "stop-cleanup: reminder delete failed: ${it.message}")
+        }
+    }
 }
 
 

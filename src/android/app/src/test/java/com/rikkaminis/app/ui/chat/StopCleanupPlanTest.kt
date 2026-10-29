@@ -1,5 +1,6 @@
 package com.rikkaminis.app.ui.chat
 
+import com.rikkaminis.app.data.model.LLMMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -186,7 +187,11 @@ class StopCleanupPlanTest {
         val src = readRepoFile(sourcePath)
         assertTrue(
             "the decision must come from the pure planner",
-            src.contains("val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant)"),
+            // [R5-C C-C-06] The call gained a third input — the reminder-tail
+            // probe — the planner is still the single decision source.
+            src.contains(
+                "val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant, reminderTail)",
+            ),
         )
         assertTrue(
             "the placeholder drop must be the planner's arm",
@@ -215,7 +220,9 @@ class StopCleanupPlanTest {
     fun `an in-flight tool cancel still short-circuits before the planner`() {
         val src = readRepoFile(sourcePath)
         val case1 = src.indexOf("if (hadInflightTools) {")
-        val planner = src.indexOf("val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant)")
+        val planner = src.indexOf(
+            "val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant, reminderTail)",
+        )
         assertTrue("Case 1 block not found", case1 > 0)
         assertTrue("planner call not found", planner > 0)
         assertTrue("Case 1 (tool cancel) must return before the text tail", case1 < planner)
@@ -234,5 +241,36 @@ class StopCleanupPlanTest {
             dir = dir.parentFile
         }
         throw java.io.FileNotFoundException("$relative not found from user.dir=${System.getProperty("user.dir")}")
+    }
+
+    // ── [R5-C C-C-06] continuation-reminder tail ────────────────────────────
+
+    @Test
+    fun `empty bubble stopped over the reminder drops both rows and stays resumable`() {
+        val plan = planStopCleanup(
+            emptyList(),
+            historyEndsWithAssistant = false,
+            historyEndsWithContinuationReminder = true,
+        )
+        assertTrue(plan.dropPlaceholder)
+        assertNull(plan.persistText)
+        assertTrue(plan.canResume)
+        assertTrue(plan.dropContinuationReminder)
+    }
+
+    @Test
+    fun `empty bubble over a real user tail keeps the pre-existing non-resumable drop`() {
+        val plan = planStopCleanup(emptyList(), historyEndsWithAssistant = false)
+        assertTrue(plan.dropPlaceholder)
+        assertFalse(plan.canResume)
+        assertFalse(plan.dropContinuationReminder)
+    }
+
+    @Test
+    fun `reminder tail matcher accepts only the verbatim reminder written as a user turn`() {
+        assertTrue(isContinuationReminderTail(LLMMessage.Role.USER, CONTINUATION_REMINDER_TEXT))
+        assertFalse(isContinuationReminderTail(LLMMessage.Role.USER, "continue please"))
+        assertFalse(isContinuationReminderTail(LLMMessage.Role.ASSISTANT, CONTINUATION_REMINDER_TEXT))
+        assertFalse(isContinuationReminderTail(LLMMessage.Role.USER, null))
     }
 }

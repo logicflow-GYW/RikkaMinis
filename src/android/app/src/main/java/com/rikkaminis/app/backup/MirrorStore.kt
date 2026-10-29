@@ -240,8 +240,7 @@ object MirrorStore {
         override fun write(relPath: String, bytes: ByteArray): Boolean = runCatching {
             val existing = findUri(relPath)
             if (existing != null) {
-                resolver.openOutputStream(existing, "wt")?.use { it.write(bytes) } ?: return false
-                return true
+                return overwrite(existing, relPath, bytes)
             }
             val (dir, name) = split(relPath)
             val mime = mimeFor(name)
@@ -265,6 +264,49 @@ object MirrorStore {
                 false
             }
         }.getOrDefault(false)
+
+        /**
+         * [R5-A / F-01] Replace the bytes of an existing row.
+         *
+         * `"wt"` truncates at OPEN, so a failed write used to leave a 0-byte or
+         * half-written document under a visible name in the user's Downloads —
+         * and inside the `previous/` point-spacing window there is no archived
+         * copy to fall back to (accepted trade, see runLocked). "Non-atomic
+         * overwrite that fails" therefore has no recovery: the ROW is what is
+         * wrong, so the row is dropped. The next sync takes the IS_PENDING
+         * insert path (which cannot expose a partial file) and rebuilds it from
+         * the source tree.
+         *
+         * Deliberately NOT delete-then-insert up front: a same-name insert makes
+         * MediaStore rename the new row to `foo (1).md` (measured behaviour, see
+         * the class doc), forking the mirror on every single overwrite.
+         *
+         * The re-diff hazard — dropping the row while the manifest still
+         * describes the old bytes — cannot swallow the retry: a file that
+         * reaches this call is in `diff.toWrite`, i.e. the manifest does NOT
+         * match the source, so the next run classifies it as changed again.
+         */
+        private fun overwrite(existing: Uri, relPath: String, bytes: ByteArray): Boolean {
+            val failure: Throwable? = try {
+                val stream = resolver.openOutputStream(existing, "wt")
+                    ?: return dropHalfWritten(existing, relPath, "no output stream")
+                stream.use { it.write(bytes) }
+                null
+            } catch (t: Throwable) {
+                t
+            }
+            return if (failure == null) true else dropHalfWritten(existing, relPath, failure.message)
+        }
+
+        private fun dropHalfWritten(existing: Uri, relPath: String, reason: String?): Boolean {
+            Log.w(
+                TAG,
+                "overwrite of $relPath failed ($reason) — dropping the truncated row so the " +
+                    "next sync rebuilds it through IS_PENDING",
+            )
+            runCatching { resolver.delete(existing, null, null) }
+            return false
+        }
 
         override fun delete(relPath: String): Boolean = runCatching {
             val uri = findUri(relPath) ?: return true
@@ -430,13 +472,28 @@ object MirrorStore {
         //    mtime).
         val byRel = selection.associateBy { it.relPath }
         var written = 0
+        // [R5-A / F-02] Files we could not read this round. They are NOT synced,
+        // so step 5 must not record their new (size, mtime) — see
+        // MirrorPlan.manifestEntries for why that turns a transient read error
+        // into a permanent, invisible hole in the mirror.
+        val skipped = LinkedHashSet<String>()
         for (e in diff.toWrite) {
-            val src = byRel[e.relPath]?.file ?: continue
-            val bytes = runCatching { src.readBytes() }.getOrNull() ?: continue
+            // No `continue` inside an inline lambda (`?: run { … }`): the project
+            // compiles with a language version below 2.2, where that is a hard
+            // error (`break continue in inline lambdas`).
+            val src = byRel[e.relPath]?.file
+            val bytes = src?.let { runCatching { it.readBytes() }.getOrNull() }
+            if (src == null || bytes == null) {
+                skipped += e.relPath
+                continue
+            }
             if (!target.write(currentPath(e.relPath), bytes)) {
                 throw IOException("write failed: ${e.relPath}")
             }
             written++
+        }
+        if (skipped.isNotEmpty()) {
+            Log.w(TAG, "mirror skipped ${skipped.size} unreadable source file(s): ${skipped.take(3)}")
         }
 
         // 3. Source deletions propagate to `current` (the old bytes already
@@ -447,19 +504,24 @@ object MirrorStore {
             deleted++
         }
 
-        // 4. Rotate `previous/`: keep the newest PREVIOUS_KEEP points.
-        val existingPoints = manifest?.previousPoints ?: emptyList()
-        val allPoints = if (point != null) existingPoints + point else existingPoints
-        val victims = MirrorPlan.previousVictims(allPoints, MirrorPlan.PREVIOUS_KEEP)
-        for (v in victims) {
+        // 4. Rotate `previous/`: keep the newest PREVIOUS_KEEP points. The rule
+        //    (dedupe included) lives in MirrorPlan.rotatePoints — the same call
+        //    nextManifest makes, so the listed points and the deleted ones can
+        //    never come from two different arithmetics.
+        val rotation = MirrorPlan.rotatePoints(manifest?.previousPoints ?: emptyList(), point)
+        for (v in rotation.victims) {
             target.deleteTree("$PREVIOUS_REL/$v/")
         }
-        val kept = allPoints.filterNot { it in victims }.sortedDescending()
 
         // 5. Manifest last: a crash before this line leaves the old manifest,
         //    so the next run re-diffs and re-writes the same bytes. The reverse
         //    order would let a crash claim "synced" for bytes that never landed.
-        val next = MirrorPlan.Manifest(now, currentEntries, kept)
+        val nextEntries = MirrorPlan.manifestEntries(
+            current = currentEntries,
+            previous = manifest?.entries ?: emptyList(),
+            skipped = skipped,
+        )
+        val next = MirrorPlan.Manifest(now, nextEntries, rotation.kept)
         if (!target.write(manifestRel, MirrorPlan.encodeManifest(next).toByteArray(Charsets.UTF_8))) {
             throw IOException("manifest write failed")
         }
@@ -468,7 +530,7 @@ object MirrorStore {
             written = written,
             deleted = deleted,
             archived = archived,
-            previousPoints = kept.size,
+            previousPoints = rotation.kept.size,
             totalFiles = currentEntries.size,
         )
     }
@@ -478,10 +540,17 @@ object MirrorStore {
     private fun previousPath(point: String, relPath: String) = "$PREVIOUS_REL/$point/$relPath"
 
     private fun record(app: Context, text: String) {
+        val p = prefs(app)
         val ok = text.startsWith("ok ") || text == "no-changes"
-        prefs(app).edit()
-            .putLong(KEY_LAST_MS, if (ok) System.currentTimeMillis() else prefs(app).getLong(KEY_LAST_MS, 0L))
-            .putString(KEY_RESULT, text)
+        // [R5-A / C-01④ + C-03②] A run that never attempted anything
+        // (`throttled`, `busy`) must not overwrite a recorded failure: the
+        // settings row's only failure channel is this string, so overwriting it
+        // made the alert and its retry button disappear with the mirror still
+        // broken. See MirrorPlan.nextRecordedOutcome for the exact rule.
+        val stored = MirrorPlan.nextRecordedOutcome(p.getString(KEY_RESULT, null), text)
+        p.edit()
+            .putLong(KEY_LAST_MS, if (ok) System.currentTimeMillis() else p.getLong(KEY_LAST_MS, 0L))
+            .putString(KEY_RESULT, stored)
             .apply()
     }
 
@@ -518,13 +587,18 @@ object MirrorStore {
             // Rotate by NAME stamp (never mtime): a clock-rolled-back run would
             // otherwise look like the oldest copy and be deleted right after it
             // was written — the same defect B-12 fixed for the local rotation.
+            //
+            // [R5-A / F-05] The rotation rule itself is in
+            // MirrorPlan.autoSnapshotVictims, which reserves this copy's slot:
+            // `drop(KEEP_AUTO)` here made the freshly written `name` the FIRST
+            // victim whenever a rolled-back clock gave it an old-looking name,
+            // while the log line below still reported success.
             val all = target.list("$AUTO_REL/")
                 .mapNotNull { rel ->
                     val n = rel.substringAfterLast('/')
                     BackupRotation.stampMillis(n, AutoBackupManager.LOCAL_FILE_PREFIX)?.let { n to it }
                 }
-                .sortedByDescending { it.second }
-            val victims = all.drop(KEEP_AUTO).map { it.first }
+            val victims = MirrorPlan.autoSnapshotVictims(all, name, KEEP_AUTO)
             for (v in victims) target.delete("$AUTO_REL/$v")
             Log.i(TAG, "auto snapshot mirrored: $name (keep $KEEP_AUTO, removed ${victims.size})")
             true

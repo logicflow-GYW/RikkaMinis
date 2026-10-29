@@ -34,6 +34,15 @@ internal object CompletionLinger {
     const val LINGER_MS = 30_000L
 
     /**
+     * Deadline that cancels an armed window (R5-D F-04②). `0` already means
+     * "no linger" to [remainingMs] / [shouldStopNow]; the constant gives the
+     * explicit-dismissal paths (capsule closed, app back in foreground) one
+     * name instead of a bare literal, and is what the "cleared ⇒ stop now"
+     * test pins.
+     */
+    const val CLEARED = 0L
+
+    /**
      * Deadline for the idle stop, or 0 when no linger applies.
      *
      * Linger requires all four: this call actually ENDED a run ([wasActive]),

@@ -355,4 +355,121 @@ class MemoryRestoreGuardTest {
         assertTrue(skipped.isEmpty())
         assertEquals("backup-global", File(dir, "GLOBAL.md").readText())
     }
+
+    // -- [FIX-R5-B1 / F-06] the mirror of the blank-payload rule --
+
+    @Test
+    fun blankLocalCopyIsRefilledEvenThoughItsMtimeIsNewer() {
+        // A device whose GLOBAL.md exists but holds nothing: the file is the
+        // newer one, and before this fix the timestamp rule refused the
+        // backup's real content on behalf of an empty file.
+        val d = decideMemoryRestore(
+            name = "GLOBAL.md",
+            localExists = true,
+            localLastModified = backupStamp + 60_000L,
+            backupCreatedAt = backupStamp,
+            backupContentBlank = false,
+            localHasContent = false,
+        )
+        assertEquals(MemoryRestoreDecision.Restore, d)
+    }
+
+    @Test
+    fun whitespaceOnlyLocalCopyCountsAsNoContent() {
+        // Both sides of the comparison now measure "content" the same way:
+        // `isBlank()` on the payload, `isNotBlank()` on the local file.
+        val dir = tempDir()
+        val blank = File(dir, "GLOBAL.md").apply { writeText("\n\n  \n") }
+        assertFalse(localHasContent(blank, localExists = true))
+    }
+
+    @Test
+    fun omittedLocalHasContentDefaultsToFailClosed() {
+        // The default must not license an overwrite for a caller that forgot
+        // the argument (it is the "unknown" answer, and unknown fails closed).
+        val d = decideMemoryRestore(
+            name = "GLOBAL.md",
+            localExists = true,
+            localLastModified = backupStamp - 1L,
+            backupCreatedAt = backupStamp,
+            backupContentBlank = true,
+        )
+        assertEquals(
+            MemoryRestoreDecision.KeepLocal(
+                "memory file \"GLOBAL.md\": the backup's copy is empty, local copy kept"
+            ),
+            d,
+        )
+    }
+
+    @Test
+    fun blankLocalFileIsRefilledThroughTheStage6Body() {
+        val dir = tempDir()
+        fileAt(dir, "GLOBAL.md", "", backupStamp + 60_000L)
+
+        val (written, skipped) = apply(dir, section("GLOBAL.md" to "backup-global"))
+
+        assertEquals(1, written)
+        assertTrue(skipped.isEmpty())
+        assertEquals("backup-global", File(dir, "GLOBAL.md").readText())
+    }
+
+    // -- [FIX-R5-B1 / F-01] the payload timestamp Stage 6 orders against --
+
+    @Test
+    fun createdAtWinsOverExportedAt() {
+        val root = JSONObject().put("createdAt", backupStamp)
+            .put("exportedAt", backupStamp + 5_000L)
+        assertEquals(backupStamp, documentCreatedAt(root))
+    }
+
+    @Test
+    fun exportedAtIsTheFallbackForAConvertedPackage() {
+        val root = JSONObject().put("exportedAt", backupStamp)
+        assertEquals(backupStamp, documentCreatedAt(root))
+    }
+
+    @Test
+    fun unusableStampsResolveToZeroSoTheGuardStaysClosed() {
+        assertEquals(0L, documentCreatedAt(JSONObject()))
+        assertEquals(0L, documentCreatedAt(JSONObject().put("createdAt", 0L)))
+        assertEquals(
+            0L,
+            documentCreatedAt(JSONObject().put("createdAt", -1L).put("exportedAt", 0L)),
+        )
+        // A hand-written payload may carry the field as a string.
+        assertEquals(
+            1_700_000_000_000L,
+            documentCreatedAt(JSONObject().put("createdAt", "1700000000000")),
+        )
+    }
+
+    @Test
+    fun aConvertedDocumentRestoresMemoryFilesTheOldSingleKeyReadRefused() {
+        // The exact shape `OpenMinisBackupCompat.convert` emitted before this
+        // fix: `exportedAt` only. Both arms run the REAL Stage 6 body over the
+        // REAL file — only the timestamp handed to it differs.
+        val dir = tempDir()
+        fileAt(dir, "SOUL.md", "# 旧人格\n", backupStamp - 5_000L)
+        val root = JSONObject()
+            .put("exportedAt", backupStamp)
+            .put("memoryFiles", section("SOUL.md" to "# 新人格\n"))
+        val entries = root.getJSONArray("memoryFiles")
+
+        // Control arm: what `root.optLong("createdAt", 0L)` handed Stage 6.
+        val (oldWritten, oldSkipped) = apply(dir, entries, createdAt = root.optLong("createdAt", 0L))
+
+        assertEquals(0, oldWritten)
+        assertEquals(
+            listOf("memory file \"SOUL.md\": backup carries no timestamp to order against, kept"),
+            oldSkipped,
+        )
+
+        // The read this fix installs.
+        val (newWritten, newSkipped) = apply(dir, entries, createdAt = documentCreatedAt(root))
+
+        assertEquals(1, newWritten)
+        assertTrue(newSkipped.isEmpty())
+        assertEquals("# 新人格\n", File(dir, "SOUL.md").readText())
+    }
 }

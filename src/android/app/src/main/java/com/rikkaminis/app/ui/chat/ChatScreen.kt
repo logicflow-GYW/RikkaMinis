@@ -3435,6 +3435,19 @@ fun ChatScreen(
                     // jump the user just asked for. Same marking the
                     // InputHistorySheet jump already does.
                     openCatchUpUserEngaged = true
+                    // [R5-C4] The jump must move the FOLLOW state too, not just
+                    // the catch-up gate: scrollToItem fires no
+                    // DragInteraction.Stop, so the drag-stop handler that owns
+                    // the FOLLOWING → DETACHED flip never runs. Dispatch BEFORE
+                    // the scroll so the streaming follow collector already reads
+                    // DETACHED on the emission the jump itself causes.
+                    followEventForProgrammaticJump(
+                        targetIsNewestRow = idx >= flatItems.lastIndex,
+                    )?.let { jumpEvent ->
+                        followState = dispatchFollow(
+                            sessionId, followState, jumpEvent, listState, isUserDragging, isStreaming,
+                        )
+                    }
                     tracedScrollToItem("FOCUS-MESSAGE", idx, 0)
                     highlightedMessageId = originalMessageId(target)
                     // Clearing pendingFocusId cancels THIS coroutine (it is a
@@ -4401,6 +4414,20 @@ fun ChatScreen(
                                 // viewport back down and the "scroll to top"
                                 // tap appears to do nothing.
                                 openCatchUpUserEngaged = true
+                                // [R5-C4] Same follow-state gap as the
+                                // FOCUS-MESSAGE jump: a programmatic jump fires
+                                // no DragInteraction.Stop, so without this the
+                                // streaming collector drags the viewport back
+                                // down and the return-to-bottom FAB stays hidden.
+                                // Target is row 0; only a one-row list is
+                                // "already the newest row".
+                                followEventForProgrammaticJump(
+                                    targetIsNewestRow = flatItems.lastIndex <= 0,
+                                )?.let { jumpEvent ->
+                                    followState = dispatchFollow(
+                                        sessionId, followState, jumpEvent, listState, isUserDragging, isStreaming,
+                                    )
+                                }
                                 // [forward-stable] Forward list: oldest message
                                 // is index 0 (was totalItemsCount-1 under
                                 // reverseLayout).
@@ -5242,6 +5269,40 @@ internal fun isListAtBottom(
     val distance = viewportEndOffsetPx - bottomEdge
     return distance >= 0 && distance <= thresholdPx
 }
+
+/**
+ * [R5-C4] Which follow verdict a PROGRAMMATIC jump must publish (null = leave
+ * the state machine untouched).
+ *
+ * `tracedScrollToItem` goes through `LazyListState.scrollToItem`, which — unlike
+ * a finger — emits NO `DragInteraction.Stop`. The drag-stop handler (the
+ * interactionSource collector) is the ONLY place that flips FOLLOWING →
+ * DETACHED via `FollowEvent.UserDragEnd(atBottom = false)`, so the two jump
+ * entry points (the session/search focus jump and the "scroll to first message"
+ * FAB) left `followState` at FOLLOWING after moving the viewport away from the
+ * tail. Two user-visible consequences:
+ *
+ *  1. streaming: the SIMPLE_FOLLOW collector's `!followState.isFollowing` gate
+ *     still read "following", so the very `visibleItemsInfo` emission the jump
+ *     produces re-requested the bottom and yanked the reader back within a frame;
+ *  2. idle: the return-to-bottom FAB renders only when `!isFollowing`, so the
+ *     escape hatch stayed hidden after a jump into history.
+ *
+ * [targetIsNewestRow] keeps the verdict honest at the tail: jumping to the newest
+ * row is already where follow wants to be, so the state machine is left alone
+ * (null) — in particular a DETACHED reader who jumps to the newest row is NOT
+ * silently re-engaged; only the FOLLOWING-after-a-jump-away case is repaired.
+ * Returning the event (rather than dispatching from here) keeps the rule pure
+ * and JVM-testable against the real reducer.
+ *
+ * ponytail: 用「目标是否为最新一行」代替「跳转后哨兵是否可见」的真值——后者要等
+ * 一次布局才读得到，而 scrollToItem 返回时 layoutInfo 可能尚未 apply | 天花板:
+ * 跳到最新一行、但该行高于一屏时视口停在行首仍留在 FOLLOWING（流式期会被拉回
+ * 底部——与修复前完全一致，不构成回归）| 升级触发: 真机出现「跳最新行后被拉走」
+ * 或「跳最新行后回底按钮不出现」的反馈。
+ */
+internal fun followEventForProgrammaticJump(targetIsNewestRow: Boolean): FollowEvent? =
+    if (targetIsNewestRow) null else FollowEvent.UserDragEnd(atBottom = false)
 
 /**
  * [diag/render-attribution] T3-Q2: the single funnel every `followReducer`

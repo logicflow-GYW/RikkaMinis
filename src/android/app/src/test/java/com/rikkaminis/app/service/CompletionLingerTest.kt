@@ -78,6 +78,21 @@ class CompletionLingerTest {
         assertTrue("no window stops", CompletionLinger.shouldStopNow(0L, 1_000L))
     }
 
+    /**
+     * [R5-D F-04②] Explicit dismissal (capsule X / tap-to-open, or the app
+     * coming back to the foreground) cancels the window by writing
+     * [CompletionLinger.CLEARED]. The cleared deadline must behave exactly like
+     * "never armed": zero remaining, stop now — otherwise a dismissed capsule
+     * would keep the foreground service (and its ongoing row) pinned for the
+     * rest of the original 30 s.
+     */
+    @Test
+    fun clearedDeadlineMeansStopNow() {
+        assertEquals(0L, CompletionLinger.CLEARED)
+        assertEquals(0L, CompletionLinger.remainingMs(CompletionLinger.CLEARED, nowMs = 1_000L))
+        assertTrue(CompletionLinger.shouldStopNow(CompletionLinger.CLEARED, nowMs = 1_000L))
+    }
+
     @Test
     fun insaneClockDoesNotArm() {
         assertEquals(0L, CompletionLinger.deadlineOnTurnEnd(nowMs = 0L, wasActive = true, appForeground = false, eligible = true))

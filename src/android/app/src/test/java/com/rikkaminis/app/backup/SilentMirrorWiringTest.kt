@@ -1,6 +1,7 @@
 package com.rikkaminis.app.backup
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -195,6 +196,71 @@ class SilentMirrorWiringTest {
             "force must NOT bypass the previous/ point spacing: history density is a " +
                 "property of time, not of who asked",
             code.contains("MirrorPlan.shouldMintPoint(manifest?.previousPoints"),
+        )
+    }
+
+    // ------------------------------------- [R5-A] the I/O shell's own contracts
+    //
+    // MediaStoreTarget needs a ContentResolver and runLocked needs a Context, so
+    // the JVM cannot instantiate them. What the pure layer cannot prove is that
+    // the shell USES the decisions, which is what these three assertions pin.
+
+    @Test
+    fun aFailedOverwriteDropsTheTruncatedRow() {
+        val code = withoutComments(readRepoFile(storeRel))
+        assertTrue(
+            "the existing-row branch must go through overwrite(): `wt` truncates at OPEN, so " +
+                "an inline write leaves a 0-byte or half-written document under a visible name",
+            code.contains("return overwrite(existing, relPath, bytes)"),
+        )
+        val overwrite = braced(code, code.indexOf("private fun overwrite("))
+        assertEquals(
+            "both failure shapes — a thrown write and a null stream — must reach " +
+                "dropHalfWritten(), or one of them still leaves the corpse",
+            2,
+            count(overwrite, "dropHalfWritten("),
+        )
+        val drop = braced(code, code.indexOf("private fun dropHalfWritten("))
+        assertTrue(
+            "the failure path must DELETE the row, so the next sync rebuilds it through the " +
+                "IS_PENDING insert path",
+            drop.contains("resolver.delete(existing, null, null)"),
+        )
+        assertTrue("dropping the row is still a failed write", drop.contains("return false"))
+    }
+
+    @Test
+    fun unreadableSourceFilesAreNotRecordedAsSynced() {
+        val code = withoutComments(readRepoFile(storeRel))
+        val runLocked = braced(code, code.indexOf("private suspend fun runLocked("))
+        assertTrue(
+            "the write loop must collect what it could not read",
+            runLocked.contains("skipped += e.relPath"),
+        )
+        assertTrue(
+            "the manifest must be built through manifestEntries(…, skipped)",
+            runLocked.contains("MirrorPlan.manifestEntries(") &&
+                runLocked.contains("MirrorPlan.Manifest(now, nextEntries,"),
+        )
+        assertFalse(
+            "recording the raw walk selection is the defect itself: a transient read failure " +
+                "then reads as 'synced' forever, with pending 0 and a healthy row",
+            runLocked.contains("MirrorPlan.Manifest(now, currentEntries,"),
+        )
+    }
+
+    @Test
+    fun aRecordedFailureSurvivesAnAttemptFreeOutcome() {
+        val code = withoutComments(readRepoFile(storeRel))
+        val record = braced(code, code.indexOf("private fun record("))
+        assertTrue(
+            "record() must route the stored text through MirrorPlan.nextRecordedOutcome, or " +
+                "`throttled`/`busy` overwrite the row's only failure channel",
+            record.contains("MirrorPlan.nextRecordedOutcome(p.getString(KEY_RESULT, null), text)"),
+        )
+        assertFalse(
+            "writing the raw text back is exactly the C-01④ / C-03② defect",
+            record.contains("putString(KEY_RESULT, text)"),
         )
     }
 }

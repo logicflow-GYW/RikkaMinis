@@ -354,4 +354,41 @@ class ToolLoopDetectorTest {
         assertTrue("message must name the loop", blocked.message!!.contains("unknown_tool_repeat") ||
             blocked.message!!.contains("'foobar'"))
     }
+
+    /**
+     * [R5-C C-C-09] The engine's blocked-call arm feeds `check()`'s message
+     * back into `record()` as `errorMessage` (AgentLoopEngine passes
+     * `precheck.message`). That round trip is a parser contract, not prose: the
+     * pre-fix wording ("attempted unavailable tool 'x' …") matched neither
+     * regex, so the blocked attempt entered history with
+     * `unknownToolName = null`, `countUnknownStreakFromTail` broke on its own
+     * tail entry, and every block restarted the streak — of every
+     * threshold+1 hallucinated calls exactly one was ever refused. The test
+     * goes through the REAL message and the REAL check() output, so rewording
+     * the block message without keeping an "unknown tool '<name>'" phrase that
+     * UNKNOWN_TOOL_RE_1 captures fails here.
+     */
+    @Test
+    fun `unknown_tool_repeat survives its own blocked message recorded back`() {
+        val detector = ToolLoopDetector()
+        val refusal = UnknownToolMessage.message("foobar", listOf("file_read"))
+        repeat(10) { i ->
+            detector.record("foobar", mapOf("x" to i), result = null, errorMessage = refusal)
+        }
+        val blocked = detector.check("foobar", mapOf("x" to 100))
+        assertEquals("10 hallucinated calls → blocked", Level.CRITICAL, blocked.level)
+
+        detector.record("foobar", mapOf("x" to 100), result = null, errorMessage = blocked.message)
+        assertEquals(
+            "a blocked attempt must not reset the unknown streak",
+            Level.CRITICAL,
+            detector.check("foobar", mapOf("x" to 101)).level,
+        )
+        detector.record("foobar", mapOf("x" to 101), result = null, errorMessage = blocked.message)
+        assertEquals(
+            "every later hallucinated call stays refused",
+            Level.CRITICAL,
+            detector.check("foobar", mapOf("x" to 102)).level,
+        )
+    }
 }

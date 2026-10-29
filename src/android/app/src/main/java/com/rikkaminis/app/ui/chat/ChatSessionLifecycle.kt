@@ -238,8 +238,10 @@ internal fun ChatViewModel.effectiveAgentHistory(): List<LLMMessage> {
         // dangling tool message. This is the same repair that runs on
         // the full agentHistory each loop iteration — the slice is the
         // gap that previously escaped it.
-        sanitizeAgentHistoryMessages(result)
-        normalizeSliceRoleAlternation(result)
+        // [fix/r5-c1-compact-C03①] One call, not a hand-written pair: sanitize
+        // and normalize feed each other (see repairSliceShape), so the two
+        // entry points must never be invoked in a fixed order again.
+        repairSliceShape(result)
         return result
     }
 
@@ -257,8 +259,7 @@ internal fun ChatViewModel.effectiveAgentHistory(): List<LLMMessage> {
             val result1 = mutableListOf<LLMMessage>()
             result1.add(summaryHead)
             result1.addAll(agentHistory.subList(keepStart, agentHistory.size))
-            sanitizeAgentHistoryMessages(result1)
-            normalizeSliceRoleAlternation(result1)
+            repairSliceShape(result1)
             return result1
         }
         // Fall through to safety net.
@@ -273,8 +274,7 @@ internal fun ChatViewModel.effectiveAgentHistory(): List<LLMMessage> {
         if (postCompactStart < agentHistory.size) {
             result2.addAll(agentHistory.subList(postCompactStart, agentHistory.size))
         }
-        sanitizeAgentHistoryMessages(result2)
-        normalizeSliceRoleAlternation(result2)
+        repairSliceShape(result2)
         return result2
     }
 
@@ -329,6 +329,68 @@ internal fun normalizeSliceRoleAlternation(messages: MutableList<LLMMessage>) {
 }
 
 /**
+ * [fix/r5-c1-compact-C03①] Repair a compacted slice to a FIXPOINT: strip
+ * orphan tool blocks → normalize roles → strip again, until a whole pass
+ * changes nothing.
+ *
+ * The two repairs are not independent. [sanitizeAgentHistoryMessages] drops a
+ * tool_result whose tool_use fell outside the slice, which can expose an
+ * ASSISTANT at the head; [normalizeSliceRoleAlternation] then peels that
+ * ASSISTANT, which orphans the tool_result right after it — a NEW illegal
+ * shape produced by the repair that just ran. Running each exactly once in a
+ * fixed order therefore still left the slice head as an orphan tool_result,
+ * and strict gateways answer that with a 400 on the next request.
+ *
+ * Termination: a pass only removes messages, removes parts, or merges two
+ * messages into one. The one additive step (placeholder injection for an
+ * unmatched tool_use) is idempotent and removes itself from the equation the
+ * moment its tool_use is peeled, so message and part counts are monotonically
+ * non-increasing from the second pass on. [MAX_SLICE_REPAIR_PASSES] is a
+ * safety net for a future edit that breaks that; hitting it is logged rather
+ * than silently accepted.
+ */
+internal fun repairSliceShape(messages: MutableList<LLMMessage>) {
+    var pass = 0
+    while (pass < MAX_SLICE_REPAIR_PASSES) {
+        val before = sliceShapeSignature(messages)
+        sanitizeAgentHistoryMessages(messages)
+        normalizeSliceRoleAlternation(messages)
+        pass++
+        if (sliceShapeSignature(messages) == before) return
+    }
+    Log.w(
+        ChatViewModel.TAG,
+        "[Compact] slice repair did not stabilise after $MAX_SLICE_REPAIR_PASSES passes " +
+            "(size=${messages.size})",
+    )
+}
+
+private const val MAX_SLICE_REPAIR_PASSES = 4
+
+/**
+ * Shape fingerprint for [repairSliceShape]: exactly what the two repairs can
+ * change (roles, tool block ids, message count). Content text is deliberately
+ * out — a merge concatenates text, which shows up as a part/message count
+ * change anyway, and hashing megabytes of transcript every pass is wasteful.
+ */
+private fun sliceShapeSignature(messages: List<LLMMessage>): String {
+    val sb = StringBuilder(messages.size * 8)
+    for (m in messages) {
+        sb.append(if (m.role == LLMMessage.Role.USER) 'u' else 'a')
+        for (p in m.contentParts) {
+            when (p) {
+                is AgentContentPart.ToolUse -> sb.append("<u:").append(p.id).append('>')
+                is AgentContentPart.ToolResult -> sb.append("<r:").append(p.id).append('>')
+                else -> sb.append('.')
+            }
+        }
+        if (m.content.isEmpty()) sb.append('_')
+        sb.append('|')
+    }
+    return sb.toString()
+}
+
+/**
  * Serialization reads [LLMMessage.contentParts] when present and ignores
  * [LLMMessage.content] — lift a content-only message into a Text part, or a
  * merge would silently swallow its text.
@@ -345,9 +407,19 @@ private fun slicePartsOf(m: LLMMessage): List<AgentContentPart> =
 private fun mergeSameRoleNeighbors(a: LLMMessage, b: LLMMessage): LLMMessage {
     val parts = slicePartsOf(a) + slicePartsOf(b)
     val content = listOf(a.content, b.content).filter { it.isNotEmpty() }.joinToString("\n")
+    // [fix/r5-c1-compact-C03②] The two multimodal carriers live in their OWN
+    // fields (LLMMessage.imageParts / audioParts) — they are not contentParts,
+    // so `a.copy()` silently inherited a's and dropped b's. When the injected
+    // summary head merges with a first kept message that still carried an
+    // attachment (or two same-role turns are merged by the peel), the user's
+    // image/audio vanished from the request with no error and no trace. Both
+    // sides are concatenated in chronological order: a merge must never lose
+    // an attachment.
     return a.copy(
         content = content,
         contentParts = parts,
+        imageParts = a.imageParts + b.imageParts,
+        audioParts = a.audioParts + b.audioParts,
         reasoningContent = a.reasoningContent ?: b.reasoningContent,
     )
 }
@@ -398,6 +470,20 @@ internal suspend fun ChatViewModel.dropCompactMarkerIfRewound(sid: String) {
         .isSuccess
     _cachedLatestMarker = null
     _compactSummary.value = null
+    // [fix/r5-c1-compact-C04③] Clearing the marker is the whole statement
+    // "this fold is gone" — the transcript must stop LOOKING folded. What this
+    // list still carries are the marker's two visible fragments: half-opacity
+    // bubbles (`isCompactedHistory`, ChatScreen's grayedMap) and the divider
+    // card, whose detail sheet offers "Revert Compact" — an affordance that now
+    // answers sysmsg_revert_nothing, because the marker it would revert from is
+    // the null written directly above. Reuse the silent-compact neutraliser
+    // (drops divider rows, clears every fade flag) for the same reason it
+    // exists there: no marker describes the current transcript any more.
+    // Unconditional, mirroring the cache writes: the in-memory truth is what
+    // the next revert/lookup reads, so the screen must not disagree with it.
+    withContext(Dispatchers.Main) {
+        _messages.value = neutralizeCompactArtifacts(_messages.value)
+    }
     Log.w(
         ChatViewModel.TAG,
         "[Compact] history rewound past marker anchor (anchors=$anchors, live=${liveIds.size}, deleted=$deleted) — " +
@@ -1032,7 +1118,7 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
             insertIdx = lcmIdx + 1
         } else {
             // lcmId missing or orphaned. Try createdAt self-heal.
-            val heal = anchorByCreatedAt(rawMessages, marker.createdAt, historyDbIds)
+            val heal = healAnchorByCreatedAt(rawMessages, marker.createdAt, historyDbIds, marker.compactedCount)
             val healUiIdx = heal?.let { uiIdxForDbId(it.id) } ?: -1
             if (heal != null && healUiIdx >= 0) {
                 insertIdx = healUiIdx + 1
@@ -1072,7 +1158,7 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
             // same path as compactAll, then divider AFTER the healed
             // anchor (treating this as an upgrade to v2 compactAll
             // semantics).
-            val heal = anchorByCreatedAt(rawMessages, marker.createdAt, historyDbIds)
+            val heal = healAnchorByCreatedAt(rawMessages, marker.createdAt, historyDbIds, marker.compactedCount)
             val healUiIdx = heal?.let { uiIdxForDbId(it.id) } ?: -1
             if (heal != null && healUiIdx >= 0) {
                 insertIdx = healUiIdx + 1
@@ -1133,23 +1219,54 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
 }
 
 /**
- * createdAt self-heal: return the LAST raw message whose
- * `createdAt < markerCreatedAt` AND whose id is still represented in
- * agentHistory (filtered via [historyDbIds]). When [historyDbIds] is
- * empty (no dbIds collected — unusual), the filter degrades to "just
- * the createdAt predicate" so we still recover SOMETHING.
+ * createdAt self-heal, BOUNDED — [fix/r5-c1-compact-F02].
  *
- * Mirrors iOS AIChatViewModel+Compaction.swift:125.
+ * The marker's `createdAt` is the compact EXECUTION instant, not the anchor's:
+ * every kept-tail message that already existed when the compact ran also has
+ * `createdAt < marker.createdAt`. The old "last raw before marker.createdAt"
+ * answer therefore walked straight past the folded block into that kept tail
+ * and folded turns the summary never covered — unbounded, the self-heal could
+ * only ever DESTROY (it always over-extended, not occasionally: any compact
+ * that leaves a pre-existing tail sets the trap).
+ *
+ * The one boundary signal a marker still carries is `compactedCount` (the
+ * folded block's length). The healed anchor is taken at `compactedCount - 1`
+ * among the pre-marker candidates, which can only land AT or BEFORE the true
+ * anchor — a later-round block starts after the previous anchor, and
+ * [rawMessages] may hold rows the LLM history filters out (system/divider
+ * rows), both of which push the index earlier. The heal can only NARROW the
+ * folded range, never widen it: the worst case re-sends already-summarised
+ * text verbatim, which costs tokens, never data. [historyDbIds] keeps
+ * filtering to ids the loaded history still represents.
+ *
+ * Refusals (the caller falls back to "divider at top, no graying"):
+ *  - `compactedCount <= 0` — no block length to bound with;
+ *  - fewer pre-marker candidates than `compactedCount` while rows arrived
+ *    after the marker — the survivors are no longer provably a prefix of the
+ *    folded block, so "the last survivor is inside it" cannot be asserted;
+ *  - no candidates at all.
+ *
+ * Mirrors iOS AIChatViewModel+Compaction.swift:125, which keeps the unbounded
+ * form; this port deliberately does not — the unbounded form was falsified by
+ * meta-audit-1029 R5-C F-02.
  */
-internal fun ChatViewModel.anchorByCreatedAt(
-    rawMessages: List<com.rikkaminis.app.data.db.MessageEntity>,
+internal fun healAnchorByCreatedAt(
+    rawMessages: List<MessageEntity>,
     markerCreatedAt: Long,
     historyDbIds: Set<String>,
-    ): com.rikkaminis.app.data.db.MessageEntity? {
-    return rawMessages.lastOrNull { raw ->
+    compactedCount: Int,
+): MessageEntity? {
+    if (compactedCount <= 0) return null
+    val candidates = rawMessages.filter { raw ->
         raw.createdAt < markerCreatedAt &&
             (historyDbIds.isEmpty() || raw.id in historyDbIds)
     }
+    if (candidates.isEmpty()) return null
+    if (candidates.size >= compactedCount) return candidates[compactedCount - 1]
+    // Fewer survivors than were folded: the transcript was truncated INTO the
+    // folded block. The last survivor is inside it only when nothing arrived
+    // after the marker (no kept tail exists to be reached past).
+    return if (candidates.size == rawMessages.size) candidates.last() else null
 }
 
 /**

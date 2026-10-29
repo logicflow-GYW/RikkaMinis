@@ -67,6 +67,71 @@ internal class StagedBytesLedger(initial: Long = 0L) {
     }
 }
 
+/**
+ * [R5-A3 F-07] Process-lifetime registry of staged files that exist on disk
+ * but are not (yet) referenced by the pending share.
+ *
+ * The keep set in [SharedShareStore.cleanSharedFiles] is "what the pending
+ * share references", and the pending share is only written at hand-off
+ * (`savePendingShare`, which happens after every attachment has been copied and
+ * after the provider-import dialog is answered). Everything a producer writes
+ * before that instant therefore looked exactly like an orphan of an earlier
+ * share, so a `cleanSharedFiles` triggered by the *previous* share being
+ * consumed could delete the *current* share's freshly staged bytes — the user
+ * then got ghost attachments pointing at nothing.
+ *
+ * The producer claims a name BEFORE creating the file ([begin]) and releases it
+ * when it is either persisted in the pending share ([endAll] from the hand-off)
+ * or deleted ([end] from the discard path). Registered names are protected from
+ * cleanup; nothing else changes.
+ *
+ * Deliberately process-lifetime (like the byte ledger): producers and the
+ * consumer run in the same process, and a process death takes the staged files'
+ * only reference with it anyway — the survivors are then genuine orphans and
+ * must be collectable, which is exactly what an empty registry gives.
+ */
+internal object StagedInFlightFiles {
+
+    private val names: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Claim [name] before the file is created. Empty names are ignored. */
+    fun begin(name: String) {
+        if (name.isNotEmpty()) names.add(name)
+    }
+
+    /** Release [name] (its file is gone, or nothing will reference it again). */
+    fun end(name: String) {
+        names.remove(name)
+    }
+
+    /** Release every name in [released] (the hand-off persisted them elsewhere). */
+    fun endAll(released: Collection<String>) {
+        for (name in released) names.remove(name)
+    }
+
+    /** Consistent copy for a cleanup pass — see [shouldKeepStagedFile]. */
+    fun snapshot(): Set<String> = names.toSet()
+}
+
+/**
+ * [R5-A3 F-07] Keep rule for [SharedShareStore.cleanSharedFiles]: a staged file
+ * survives iff the pending share references it as an attachment (the
+ * pre-existing rule) OR a producer still has it in flight. Extracted as a pure
+ * function so the two-set decision is pinned by JVM tests instead of living
+ * only inside an Android-only file walk.
+ *
+ * Callers must snapshot [inFlight] AFTER listing the directory: a producer
+ * claims its name before creating the file, so any entry that shows up in the
+ * listing is already visible to a snapshot taken afterwards. (The other order
+ * leaves a window where a file created between the snapshot and `listFiles()`
+ * is deleted while its producer is still copying into it.)
+ */
+internal fun shouldKeepStagedFile(
+    fileName: String,
+    referenced: Set<String>,
+    inFlight: Set<String>,
+): Boolean = fileName in referenced || fileName in inFlight
+
 /** [§1042-A-07] UTF-8 byte length of a text attachment — the budget counts bytes, not chars. */
 internal fun attachTextByteCount(text: String): Long =
     text.toByteArray(Charsets.UTF_8).size.toLong()

@@ -356,6 +356,16 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
                 agentHistory.clear()
                 toolLoopDetector.reset()
                 for (entity in remaining) agentHistory.add(entity.toLLMMessage())
+                // [R5-C C-C-04②] The re-sync rewound the transcript back to the
+                // last committed user message — same rewind rules as
+                // rerunFromToolBlock ([FIX-R4-P F-05/F-02]): a compaction marker
+                // anchored in the deleted range must not survive (its summary
+                // describes turns the switch just deleted, and the stale reading
+                // would be re-injected into the new provider's first request),
+                // and the context-pressure reading belongs to the PRE-switch
+                // transcript. Mirrors rerunFromToolBlock / retryLast.
+                dropCompactMarkerIfRewound(sid)
+                resetContextPressureState()
                 // Drop stream-flush side-channel state for messages the rollback
                 // removed, so no stale delta can resurrect on a kept bubble
                 // (mirrors rerunFromToolBlock).
