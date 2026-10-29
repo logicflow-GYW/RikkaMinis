@@ -107,7 +107,7 @@
 | 括号 / 花括号配平 | 13 个改动文件全部 `{}()[]` 归零 | python 粗扫（剥注释与字符串字面量） |
 | 定向门禁 | 5/5 PASS | 见 §4 |
 | 依赖/引用自查 | `TrimReclaimPolicy` 补 import；`MainActivity` 删掉已无引用的 `coldStartRestoreAllowed` import；`PREF_CRASH_RECOVERY` / `KEY_LAST_CHAT_SESSION_ID` 全树 0 引用 | `rg` 复核 |
-| JVM 表驱动断言 | **本地未跑**（`kotlinc` 的 `KOTLIN_HOME` + jar 集随 shared 被删） | 断言写进仓库，由 CI `testReleaseUnitTest` 执行；CI 读数见本节末 |
+| JVM 表驱动断言 | **CI 绿**：4 类 / 16 用例全部 `PASSED` | 本地无 `kotlinc`（jar 集随 shared 被删）；断言以仓库测试形式由 CI `testReleaseUnitTest` 执行，读数见 §4 末「CI 判读」 |
 | 变异臂 | **未做**（装置重建被告警明令禁止） | 因此本支的「测试真的会红」证据只有 CI 一轮 PASS + 判据本身是字面量期望 |
 
 新增测试（4 类 / 16 个用例，全部纯 JVM、无 Android 依赖）：
@@ -136,6 +136,25 @@
 | `process_logging_gate.py` | PASS |
 
 **未跑全量** `scan.sh` / `test_scan.py`（告警要求「不跑全量」）；`scripts/scan/**` 零改动（本支未新增/修改任何门或夹具）。
+
+### CI 判读（run #2874 / `40797486769` success @ `6540eb6e630a0bd5e59cc72493fe39ebafd32b1b`）
+
+| 判据 | 读数 |
+|---|---|
+| run 结论 / 耗时 | `success`，27 步 **0 个非 success**（2 skipped = 滚动 tag + Publish 的 `if: main` 门控） |
+| `head_sha` vs 本地/远端 | `6540eb6e630a…` 三处**逐字符一致**（`git ls-remote` 与 `git rev-parse HEAD` 同值） |
+| 门集 | `Summary: 113 passed, 0 failed`（基线 113，本支未加门） |
+| 夹具 | `ALL 349 CASES PASS` ×1 |
+| 单测 | 7 段 `Summary: N passed, 0 failed`（25 / 16 / 44 / 19 / 30 / 18 + 门集 113），`e: file:///` = **0** |
+| 新增 4 类 | `ChatRoutePresenceTest` 6 / `ToolSlotRegistryTest` 5 / `CompletionLingerTest` 5 / `TrimReclaimPolicyTest` 2 全部 `PASSED` |
+| 判读陷阱 | `FAILED` 字样 6 处，逐条确认**全是 `PASSED` 用例名子串**（如 `slot denied produces FAILED …`）；`^.{0,40}e: ` 的 20 处命中全是日志前缀（`Build Date:` / `Image:` 等），`e: file:///` 为 0 |
+
+**两轮红旗都是编译级，都不是逻辑错**（记录以便后续会话识别同款）：
+1. **#2868** `pendingIdleStop` 里 `mainHandler.postDelayed(this, remaining)` —— SAM lambda 内 `this` 是外部 `SessionActivityTracker` 而非 `Runnable`。
+2. **#2871** 改成 `postDelayed(pendingIdleStop, …)` 后仍红：`Type checking has run into a recursive problem` —— 属性在自己初始化器里自引用，需**显式声明 `: Runnable`**。
+
+（本地无编译器时这两类错误只能靠 CI 发现；已把「沙箱无 Android 编译 ⇒ 自引用属性必须显式声明类型」记进残留 R6 的触发条件。）
+
 
 ---
 
@@ -173,6 +192,11 @@
 - 触发条件：后续有人只读 `AppMemoryGovernor.tick(..., toolRunning = …)` 的签名就判断「忙碌」的语义。
 - 触发后方案：把形参改名为 `busy` / `activeWork`，同时改 `AppMemoryGovernorTest` 的 12 处具名调用。
 - 搁置理由：改名扩半径到测试文件（可能被并行支同时改），先用注释在调用点固定语义。
+
+**R6 — 本地无编译器时的自检缺口（compile-only 缺陷只能靠 CI）**
+- 触发条件：沙箱里 `kotlinc` 的 `kotlin-home` / `jvm-libs` 缺失（本次基础设施清空后即是），而改动涉及自引用属性或 SAM lambda 内的 `this`。
+- 触发后方案：①自引用（在自身初始化器里引用自己）的属性**显式写类型** `: Runnable` 等；②SAM lambda 内不要用 `this`，改用属性名或显式标签；③`/tmp/libs` 恢复后先跑一次 `kotlinc` 语法检查（只筛 `expecting|unexpected|Unclosed|recursive`）再 push。
+- 搁置理由：本轮装置重建被告警明令禁止；CI 一轮 ~13 min 足以兜住编译级错误，代价是可接受的一轮往返（本轮两轮红即为此）。
 
 ---
 
