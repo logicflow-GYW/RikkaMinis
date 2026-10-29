@@ -1093,12 +1093,39 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     // ─── Resolve insertIdx ────────────────────────────────────────
     //
     // [fix/silent-auto-compact] This resolution no longer drives any
-    // rendering — graying and the divider row are both gone. What it still
-    // does is decide whether the marker RESOLVED against the loaded rows, and
-    // the branch that fails is the one that runs the createdAt self-heal
-    // (rewriting an orphaned marker as v2 and persisting it). That heal is
-    // what keeps effectiveAgentHistory() working after messages are deleted
-    // or restored from a backup, so the walk stays.
+    // rendering — graying and the divider row are both gone. `insertIdx` is
+    // the field the restore log line below prints, plus the trigger for the
+    // createdAt self-heal.
+    //
+    // [SYMPTOM-A F-A3] The self-heal branch is NOT the load-bearing mechanism
+    // this comment used to describe. Measured reality (2026-10-29 full log,
+    // corroborated in source):
+    //
+    //  - `lastCompactedMessageId` usually anchors on a role=user row that
+    //    carries only tool carriers (toolUse / toolResult parts; no visible
+    //    text, no image, no attachment). `buildChatMessagesTranscript` drops
+    //    exactly those rows — ChatTranscriptRebuild.kt:224 returns
+    //    `@mapNotNull null` through the shared predicate
+    //    `userRowHasVisibleContent` (:36-44) — so `uiIdxForDbId` below answers
+    //    -1 for an anchor that is perfectly valid in agentHistory.
+    //  - the heal candidate must then pass the SAME UI gate (:1123 requires
+    //    `healUiIdx >= 0`) ⇒ `healedMarker` stays null ⇒ nothing is persisted
+    //    ⇒ the next session open repeats the identical attempt (10-29: 12
+    //    marker restores, 9 unresolved, one marker repeated 6x).
+    //  - user-visible consequence: NONE. The summary is injected through
+    //    `effectiveAgentHistory()`, which parses the marker against
+    //    agentHistory independently (3 days: 1726 slices, 0 degradations).
+    //    The price is one WARN per open plus one bounded, wasted heal scan.
+    //
+    // Deliberately NOT relaxing the :1123 acceptance gate: accepting an anchor
+    // that is not in the UI list would turn "one WARN per open" into "one DB
+    // write per open" while the anchor stays invisible — write amplification,
+    // zero user benefit.
+    //
+    // UPGRADE TRIGGER: if any UI artefact starts depending on `insertIdx`
+    // again (divider, graying, an "already folded" marker), fix the :1123 gate
+    // FIRST — accept "present in historyDbIds" instead of "present in the UI
+    // list" — or 9 of 12 tool-heavy sessions will silently misplace it.
     //
     // Special value -1 → "unresolved": no heal candidate either.
     var insertIdx = -1
@@ -1204,10 +1231,15 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     // during the live session) would be a worse surprise than one shown
     // consistently, so the reload path drops it too.
     //
-    // `insertIdx` is still resolved above on purpose: the self-heal branch
-    // repairs an orphaned marker (rewriting it as v2 + persisting), which
-    // keeps effectiveAgentHistory() — the thing that actually matters —
-    // working after messages are deleted or restored from a backup.
+    // `insertIdx` is still resolved above, but not for the reason this comment
+    // used to give. [SYMPTOM-A F-A3] The self-heal does NOT keep
+    // effectiveAgentHistory() working — that path parses the marker against
+    // agentHistory on its own and never reads `insertIdx` (3 days: 1726
+    // slices, 0 degradations). For tool-heavy sessions the anchor row is
+    // invisible in the UI transcript, so the heal cannot resolve and nothing
+    // gets persisted; see the block above ("Resolve insertIdx") for the full
+    // chain and for the upgrade trigger that would make this gate load-bearing
+    // again.
     // "Revert Compact" now lives in the message long-press menu, so it no
     // longer depends on the divider row existing.
     AppLogger.info(
