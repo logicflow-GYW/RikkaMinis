@@ -8,7 +8,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -42,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -388,6 +392,19 @@ fun ImageGalleryViewer(
 }
 
 /**
+ * [R4-V F-08] Does the gallery page own the current drag?
+ *
+ * While the picture sits at 1× the pager must be the one that moves. A
+ * magnified picture, or a second finger down (pinch), is the only case where
+ * the page owns the gesture — everything else is the pager's swipe. This is
+ * the decision the pointer loop below consults *before* consuming, kept as a
+ * named pure function so the boundary is pinned by a JVM test instead of by a
+ * gesture recogniser that cannot run off-device.
+ */
+internal fun galleryPageOwnsDrag(scale: Float, pressedPointers: Int): Boolean =
+    scale > 1f || pressedPointers > 1
+
+/**
  * One page inside [ImageGalleryViewer]. Owns its own zoom/pan state so the
  * pager remembers per-page transform independently — flipping to the next
  * page resets the previous page's zoom when its composition leaves.
@@ -433,15 +450,40 @@ private fun GalleryPage(
                 // so the parent pager doesn't change pages while the user
                 // is panning around inside a magnified image. Mirrors iOS
                 // UIScrollView naturally blocking the parent TabView swipe.
+                //
+                // [R4-V F-08] This used to be a bare `detectTransformGestures`,
+                // which consumes EVERY position change past touch slop — even
+                // at scale == 1f, where it also discards the pan (it only
+                // applies pan while zoomed). A single-finger swipe inside the
+                // picture therefore never reached `HorizontalPager` and paging
+                // was dead. The page now owns the drag only while it is
+                // magnified or a second finger is down (pinch), and only then
+                // consumes: at 1× the event stream is left to the pager,
+                // untouched.
                 .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        scale = (scale * zoom).coerceIn(1f, 8f)
-                        if (scale > 1f) {
-                            offsetX += pan.x
-                            offsetY += pan.y
-                        } else {
-                            offsetX = 0f
-                            offsetY = 0f
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        // `while` (not `do/while`) so the loop variable lives in
+                        // the loop's own scope — the same reading, no reliance on
+                        // do-body declarations being visible to the condition.
+                        var pointerDown = true
+                        while (pointerDown) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.count { it.pressed }
+                            if (galleryPageOwnsDrag(scale, pressed)) {
+                                val zoom = event.calculateZoom()
+                                val pan = event.calculatePan()
+                                scale = (scale * zoom).coerceIn(1f, 8f)
+                                if (scale > 1f) {
+                                    offsetX += pan.x
+                                    offsetY += pan.y
+                                } else {
+                                    offsetX = 0f
+                                    offsetY = 0f
+                                }
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
+                            pointerDown = event.changes.any { it.pressed }
                         }
                     }
                 }
