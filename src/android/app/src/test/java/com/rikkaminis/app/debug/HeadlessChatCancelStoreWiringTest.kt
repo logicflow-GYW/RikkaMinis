@@ -184,7 +184,8 @@ class HeadlessChatCancelStoreWiringTest {
     fun `negative control - cancel back to reading only the private cache is caught`() {
         val original = source(runnerFile)
         val mutated = original.replace(
-            "        val vm = viewModelForCancel(context, sessionId) ?: return@withContext false\n",
+            "        val vm = viewModelForCancel(context, sessionId, persisted) " +
+                "?: return@withContext false\n",
             "        val cached = providers[sessionId] ?: return@withContext false\n" +
                 "        val vm = cached[ChatViewModel::class.java]\n",
         )
@@ -271,6 +272,43 @@ class HeadlessChatCancelStoreWiringTest {
             runCatching {
                 assertCacheStillFastPath(cancelBody(mutated), resolverBody(mutated))
             }.isFailure,
+        )
+    }
+
+    // ── [R4-R F-01] the row gate ───────────────────────────────────────────
+    // A cancel/compact for an id with no `chat_sessions` row must not BUILD a
+    // ChatViewModel: `ChatViewModelStore.ownerFor` allocates the process-wide
+    // store entry and the ViewModelProvider lookup constructs the VM, and
+    // `requireSendableSession` accepts a resident VM as "the user is looking at
+    // it" for every later send. Returns a Boolean so the negative control can
+    // assert the same check fails on a mutated copy.
+    private fun holdsRowGate(cancel: String, resolver: String): Boolean =
+        cancel.contains("dao.getSession(") &&
+            cancel.contains("persisted") &&
+            resolver.contains("ChatViewModelStore.peekViewModel(") &&
+            resolver.contains("if (!persistedSession) return null")
+
+    @Test
+    fun `cancel reads the session row before building a view model`() {
+        val runner = source(runnerFile)
+        assertTrue(
+            "the row read must happen in cancel and gate the resolver — a row-less " +
+                "id must answer false, not materialise a resident VM",
+            holdsRowGate(cancelBody(runner), resolverBody(runner)),
+        )
+    }
+
+    @Test
+    fun `negative control - building a view model for a row-less id is caught`() {
+        val original = source(runnerFile)
+        val mutated = original.replace(
+            "        ChatViewModelStore.peekViewModel(sessionId)?.let { return it }\n",
+            "",
+        )
+        assertTrue("the store peek must exist to be mutated", mutated != original)
+        assertTrue(
+            "a resolver that skips the non-destructive store read must fail the row-gate probe",
+            !holdsRowGate(cancelBody(mutated), resolverBody(mutated)),
         )
     }
 
