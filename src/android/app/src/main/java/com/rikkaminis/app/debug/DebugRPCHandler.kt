@@ -421,7 +421,12 @@ class DebugRPCHandler(private val context: Context) {
         // page back to the last complete character and report the trimmed size
         // in `bytesRead`: a client advances by that, so the next page starts on
         // the character's lead byte and nothing is lost.
-        val textEnd = if (forceBase64) raw.size else utf8CompletePrefixLength(raw)
+        // `bytesRead` is the caller's advance, so the trim must never empty the
+        // page: a `limit` shorter than the single character it starts with would
+        // otherwise answer 0 and loop forever. Fail open — keep the page and
+        // accept one replacement character.
+        val trimmedEnd = if (forceBase64) raw.size else utf8CompletePrefixLength(raw)
+        val textEnd = if (trimmedEnd == 0 && raw.isNotEmpty()) raw.size else trimmedEnd
         val textCandidate = if (textEnd == raw.size) raw else raw.copyOf(textEnd)
         // Binary detection is a real UTF-8 validity check rather than the old
         // "any byte above 0x7F counts as text" whitelist, which decoded binary
