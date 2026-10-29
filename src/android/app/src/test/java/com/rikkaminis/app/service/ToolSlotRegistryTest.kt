@@ -144,7 +144,7 @@ class ToolSlotRegistryTest {
     @Test
     fun nonRunningUpdateDoesNotRaiseDepth() {
         val reg = ToolSlotRegistry()
-        reg.start("a", null, "Idle", isRunning = false)
+        reg.start(sessionId = "a", toolName = null, toolTitle = null, status = "Idle", isRunning = false)
         // A text-only refresh then one "finish": if the text-only update had
         // raised the depth, this finish would leave a phantom running entry.
         assertNull(reg.finish("a"))
@@ -154,8 +154,8 @@ class ToolSlotRegistryTest {
     @Test
     fun blankStatusKeepsPreviousText() {
         val reg = ToolSlotRegistry()
-        reg.start("a", "shell_execute", "Running cmd", true)
-        val after = reg.start("a", "shell_execute", "", true)
+        reg.start(sessionId = "a", toolName = "shell_execute", toolTitle = null, status = "Running cmd", isRunning = true)
+        val after = reg.start(sessionId = "a", toolName = "shell_execute", toolTitle = null, status = "", isRunning = true)
         assertEquals("Running cmd", after.status)
         assertEquals("shell_execute", after.toolName)
     }
@@ -165,15 +165,15 @@ class ToolSlotRegistryTest {
         // Session ids are uuids; the shared bucket must never collide with one.
         assertTrue(ToolSlotRegistry.UNATTRIBUTED.isEmpty())
         val reg = ToolSlotRegistry()
-        reg.start(ToolSlotRegistry.UNATTRIBUTED, "shell_execute", "Running cmd", true)
+        reg.start(sessionId = ToolSlotRegistry.UNATTRIBUTED, toolName = "shell_execute", toolTitle = null, status = "Running cmd", isRunning = true)
         assertNull(reg.slot("session-a"))
     }
 
     @Test
     fun clearResetsEverything() {
         val reg = ToolSlotRegistry()
-        reg.start("a", "shell_execute", "Running cmd", true)
-        reg.start("b", "browser_use", "Opening page", true)
+        reg.start(sessionId = "a", toolName = "shell_execute", toolTitle = null, status = "Running cmd", isRunning = true)
+        reg.start(sessionId = "b", toolName = "browser_use", toolTitle = null, status = "Opening page", isRunning = true)
         reg.clear()
         assertNull(reg.representative(setOf("a", "b")))
         assertNull(reg.slot("a"))

@@ -19,20 +19,28 @@ import org.junit.Test
  */
 class TrimReclaimPolicyTest {
 
+    private data class BusyRow(
+        val label: String,
+        val sessions: Set<String>,
+        val toolRunning: Boolean,
+        val expectBusy: Boolean,
+    )
+
+    private data class GcRow(
+        val reclaimsShells: Boolean,
+        val engagesGate: Boolean,
+        val activeWork: Boolean,
+        val expectGc: Boolean,
+    )
+
     @Test
     fun hasActiveWorkTable() {
-        data class Row(
-            val label: String,
-            val sessions: Set<String>,
-            val toolRunning: Boolean,
-            val expectBusy: Boolean,
-        )
         val rows = listOf(
-            Row("idle process", emptySet(), false, expectBusy = false),
-            Row("streaming session only", setOf("s1"), false, expectBusy = true),
-            Row("second session streaming, no tool", setOf("s1", "s2"), false, expectBusy = true),
-            Row("tool running, no stream", emptySet(), true, expectBusy = true),
-            Row("both in flight", setOf("s1"), true, expectBusy = true),
+            BusyRow("idle process", emptySet(), false, expectBusy = false),
+            BusyRow("streaming session only", setOf("s1"), false, expectBusy = true),
+            BusyRow("second session streaming, no tool", setOf("s1", "s2"), false, expectBusy = true),
+            BusyRow("tool running, no stream", emptySet(), true, expectBusy = true),
+            BusyRow("both in flight", setOf("s1"), true, expectBusy = true),
         )
         rows.forEach { row ->
             val actual = TrimReclaimPolicy.hasActiveWork(row.sessions, row.toolRunning)
@@ -46,27 +54,21 @@ class TrimReclaimPolicyTest {
 
     @Test
     fun shouldSyncGcTable() {
-        data class Row(
-            val reclaimsShells: Boolean,
-            val engagesGate: Boolean,
-            val activeWork: Boolean,
-            val expectGc: Boolean,
-        )
         val rows = listOf(
             // Foreground pressure only, idle → collect (legacy behaviour kept).
-            Row(reclaimsShells = true, engagesGate = false, activeWork = false, expectGc = true),
+            GcRow(reclaimsShells = true, engagesGate = false, activeWork = false, expectGc = true),
             // Memory gate only, idle → collect.
-            Row(reclaimsShells = false, engagesGate = true, activeWork = false, expectGc = true),
+            GcRow(reclaimsShells = false, engagesGate = true, activeWork = false, expectGc = true),
             // BOTH (the TRIM_MEMORY_RUNNING_CRITICAL foreground case): ONE
             // collection, not two.
-            Row(reclaimsShells = true, engagesGate = true, activeWork = false, expectGc = true),
+            GcRow(reclaimsShells = true, engagesGate = true, activeWork = false, expectGc = true),
             // Neither branch fired → no GC.
-            Row(reclaimsShells = false, engagesGate = false, activeWork = false, expectGc = false),
+            GcRow(reclaimsShells = false, engagesGate = false, activeWork = false, expectGc = false),
             // Work in flight always wins, whichever branch fired.
-            Row(reclaimsShells = true, engagesGate = false, activeWork = true, expectGc = false),
-            Row(reclaimsShells = false, engagesGate = true, activeWork = true, expectGc = false),
-            Row(reclaimsShells = true, engagesGate = true, activeWork = true, expectGc = false),
-            Row(reclaimsShells = false, engagesGate = false, activeWork = true, expectGc = false),
+            GcRow(reclaimsShells = true, engagesGate = false, activeWork = true, expectGc = false),
+            GcRow(reclaimsShells = false, engagesGate = true, activeWork = true, expectGc = false),
+            GcRow(reclaimsShells = true, engagesGate = true, activeWork = true, expectGc = false),
+            GcRow(reclaimsShells = false, engagesGate = false, activeWork = true, expectGc = false),
         )
         rows.forEach { row ->
             val label = "shells=${row.reclaimsShells} gate=${row.engagesGate} busy=${row.activeWork}"
