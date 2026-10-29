@@ -321,6 +321,26 @@ internal object ContinuationHistoryMerge {
     }
 
     /**
+     * [R5-C2] The OTHER half of the stacking guard for the error-shaped
+     * continuation branch: that branch can equally follow a length-wall
+     * segment, and [EofStubReminderStackGuard] deliberately does not
+     * cross-match its family (a "cut off mid-sentence" reminder is not an
+     * "cut off by a network error" one — `EofStubStackingGuardTest` pins that
+     * separation). The injection site therefore ORs the two family predicates:
+     * one source per family, no composed predicate that would become a third
+     * copy to drift.
+     *
+     * The length-wall reminder's shape: a USER turn with one Text part carrying
+     * [LENGTH_WALL_REMINDER_MARKER]. Shape-only, mirroring the EOF predicate.
+     */
+    fun isLengthWallReminder(message: LLMMessage?): Boolean {
+        if (message == null || message.role != LLMMessage.Role.USER) return false
+        if (message.contentParts.size != 1) return false
+        val text = (message.contentParts.first() as? AgentContentPart.Text)?.text ?: return false
+        return text.contains(LENGTH_WALL_REMINDER_MARKER)
+    }
+
+    /**
      * Fold [incoming] (the assistant turn a continuation just re-entered) into
      * the previous assistant entry and drop the reminders that sat between the
      * segments. Returns false and mutates nothing when this is not a
@@ -379,6 +399,35 @@ internal object ContinuationHistoryMerge {
             prev + next
         }
     }
+}
+
+/**
+ * [R5-C2] Pure decision: does the run owe the DB a turn row before the
+ * post-loop finalize?
+ *
+ * The two finalize hand-holdings (`finalizeAtTurnLimit` / `finalizeBudgetStop`)
+ * write the banner through `updateLastAssistantError` = "the session's LAST
+ * assistant row". A run that exits on a turn/budget ceiling right after a
+ * continuation `continue` never persisted that segment — `unpersistedBlockStart`
+ * still points behind the blocks it already streamed and showed — so the old
+ * shape lost the text on reload AND stamped the banner onto the previous
+ * turn's row.
+ *
+ * The question is exactly "is there an un-persisted range", which is what the
+ * two in-loop terminals already answer with the same index pair; kept pure and
+ * top-level so the table can be pinned without driving the loop.
+ */
+internal object ContinuationFlushPolicy {
+
+    /**
+     * True when `[unpersistedBlockStart, blockCount)` is non-empty. Every value
+     * outside `0 until blockCount` is NO flush: `start == count` is the
+     * already-durable case, and a start beyond the list (or a negative one)
+     * would slice nothing, so writing a row for it would fabricate an empty
+     * assistant message.
+     */
+    fun mustFlushBeforeFinalize(unpersistedBlockStart: Int, blockCount: Int): Boolean =
+        unpersistedBlockStart in 0 until blockCount
 }
 
 /**
@@ -611,6 +660,74 @@ internal class AgentLoopEngine(
         loopState.lastOtherToolInputMs = 0L
     }
 
+    /**
+     * [R5-C2] Persist the run's un-persisted block range as ONE assistant row and
+     * hand the row id to [markTurnPersisted].
+     *
+     * Used by the pre-finalize flush: a turn/budget ceiling right after a
+     * continuation `continue` leaves blocks the user already watched with no row
+     * over them, and both finalizers write their banner through
+     * `updateLastAssistantError` = "the session's LAST assistant row".
+     *
+     * An empty range is NOT an error here — every exit that went through an
+     * in-loop terminal has one, and writing a row for it would fabricate a
+     * message. The two empty-reply terminals therefore keep writing their banner
+     * row directly through `TerminalErrorPlacement.partsForTerminalError`, which
+     * is the call order `TerminalErrorPlacementTest` pins.
+     *
+     * Returns the row id, or null when no row was written.
+     */
+    private suspend fun flushUnpersistedTurnRow(
+        loopState: AgentLoopState,
+        usage: LLMUsage?,
+        reasoningContent: String?,
+    ): String? {
+        val parts = host.buildTurnParts(
+            loopState.allToolBlocks,
+            loopState.unpersistedBlockStart,
+            loopState.allToolInputs,
+        )
+        if (parts.isEmpty()) return null
+        val flushedRowId = host.persistAssistantTurn(
+            parts, usage, reasoningContent, turnBlockMeta(loopState),
+            modelId = loopState.currentProvider.model.id,
+            entryId = host.activeEntryId,
+        )
+        markTurnPersisted(loopState, flushedRowId)
+        return flushedRowId
+    }
+
+    /**
+     * [R5-C2] Tool-block metadata for a persist — the same shape the two in-loop
+     * terminals build, lifted so the failure terminals cannot drift from it
+     * (a missing entry here strips a tool block of its result).
+     */
+    private fun turnBlockMeta(loopState: AgentLoopState): Map<String, AssistantBlock> =
+        loopState.allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
+
+    /**
+     * [R5-C2] After a row lands: advance the un-persisted cursor and anchor the
+     * transcript entry that stands for it.
+     *
+     * Advance ONLY on a real row id — a failed insert must leave the range
+     * un-covered, so the next persist (or the next run) still sees those blocks.
+     * The anchor is the same one the two in-loop terminals write: compaction
+     * resolves its boundary through this db id, so an un-anchored entry degrades
+     * the walk after a reload.
+     */
+    private fun markTurnPersisted(loopState: AgentLoopState, rowId: String?) {
+        if (rowId != null) {
+            loopState.unpersistedBlockStart = loopState.allToolBlocks.size
+            val lastAssistantIdx = host.agentHistory.indexOfLast {
+                it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null
+            }
+            if (lastAssistantIdx >= 0) {
+                host.agentHistory[lastAssistantIdx] =
+                    host.agentHistory[lastAssistantIdx].copy(dbMessageId = rowId)
+            }
+        }
+    }
+
     /** Verbatim lift of ChatViewModel.runAgentLoop entry (FE-5 route C step 3). */
     internal suspend fun runAgentLoop(
         provider: LLMProvider,
@@ -728,6 +845,15 @@ internal class AgentLoopEngine(
         // T7-D: 终态 reducer 状态机入口已在 RunStarted 前初始化（见上）；
         // 此处不再重复 init —— 重复 `AgentRunState.initial()` 会重置已经把
         // RunStarted 消费掉的 reducer 回 IDLE，导致后续事件再次 REJECTED。
+
+        // [R5-C2] The last streamed segment's usage/reasoning, lifted out of the
+        // turn loop for the pre-finalize flush: that flush runs OUTSIDE the loop,
+        // while `lastUsage` / `turnReasoningContent` are per-turn locals. An exit
+        // with nothing to flush never reads them; an exit right after a
+        // continuation `continue` (the defect's shape) reads exactly the segment
+        // whose blocks are still un-persisted.
+        var lastSegmentUsage: LLMUsage? = null
+        var lastSegmentReasoning: String? = null
 
         try {
         // [feat/runtime-limits-panel] 循环上界从 prefs 读（默认 256）。取一次局部
@@ -2396,37 +2522,64 @@ internal class AgentLoopEngine(
                         // partial reply has NOT been added yet — the loop's
                         // single `agentHistory.add(ASSISTANT)` sits far below
                         // (after this branch, at the assistantParts build).
-                        // Without this add, the text the model just streamed
+                        // Without an entry, the text the model just streamed
                         // (already on screen) never enters history: the
                         // continuation request carries the previous USER turn
                         // immediately followed by our stub USER message (the
                         // model loses its own output and the turn is never
                         // persisted — reload drops it). Same shape as the
                         // EOF-stub branch below, which runs after the add.
-                        host.agentHistory.add(
-                            LLMMessage(
-                                role = LLMMessage.Role.ASSISTANT,
-                                content = turnText,
-                                contentParts = listOf(AgentContentPart.Text(turnText)),
-                                reasoningContent = turnReasoningBlob
-                                    ?: turnThinking.toString().takeIf { it.isNotEmpty() },
-                            )
+                        //
+                        // [R5-C2] A segment that CONTINUES an earlier one
+                        // belongs to the SAME assistant entry: this branch may
+                        // follow a length-wall / EOF-stub turn, whose assistant
+                        // entry is still un-persisted (`dbMessageId == null`).
+                        // The blind `add` used to open a SECOND entry for the
+                        // same answer — and because the terminals back-fill
+                        // only the LAST un-persisted entry, the first one kept
+                        // a null anchor forever while the next request carried
+                        // two assistant messages for one turn. Fold when the
+                        // tail is a continuation; otherwise append as before.
+                        val errContinuationMessage = LLMMessage(
+                            role = LLMMessage.Role.ASSISTANT,
+                            content = turnText,
+                            contentParts = listOf(AgentContentPart.Text(turnText)),
+                            reasoningContent = turnReasoningBlob
+                                ?: turnThinking.toString().takeIf { it.isNotEmpty() },
                         )
-                        // [deep-audit-1018 ISSUE-12c] Stacking guard — the
-                        // EOF-stub branch below has had this since its own
-                        // introduction, but this error-shaped twin shipped
-                        // without it: consecutive error-shaped continuations
-                        // piled identical reminders into history (the model
-                        // saw N stacked "continue where you left off"
-                        // instructions). Drop the stale reminder sitting
-                        // behind this turn's assistant message before adding
-                        // the fresh one. Same off-by-one note as the EOF-stub
-                        // sibling: the previous reminder lives at size - 2,
-                        // BEHIND this turn's assistant message added just above.
-                        val errPrevTailIdx = host.agentHistory.size - 2
-                        val errPrevTail = host.agentHistory.getOrNull(errPrevTailIdx)
-                        if (EofStubReminderStackGuard.isStaleEofStubReminder(errPrevTail)) {
-                            host.agentHistory.removeAt(errPrevTailIdx)
+                        if (!ContinuationHistoryMerge.mergeIntoPreviousAssistant(
+                                host.agentHistory,
+                                errContinuationMessage,
+                            )
+                        ) {
+                            host.agentHistory.add(errContinuationMessage)
+                            // [deep-audit-1018 ISSUE-12c] Stacking guard — the
+                            // EOF-stub branch below has had this since its own
+                            // introduction, but this error-shaped twin shipped
+                            // without it: consecutive error-shaped continuations
+                            // piled identical reminders into history (the model
+                            // saw N stacked "continue where you left off"
+                            // instructions). Drop the stale reminder sitting
+                            // behind this turn's assistant message before adding
+                            // the fresh one. Same off-by-one note as the EOF-stub
+                            // sibling: the previous reminder lives at size - 2,
+                            // BEHIND this turn's assistant message added just above.
+                            //
+                            // [R5-C2] The predicate covers BOTH reminder families
+                            // now: this branch can equally follow a length-wall
+                            // segment, and the EOF-only check left that reminder
+                            // in place (a folded continuation has already dropped
+                            // it through the merge, so this guard only matters
+                            // when the merge declined). One family predicate per
+                            // source — the shared EOF guard, and the length-wall
+                            // marker on [ContinuationHistoryMerge].
+                            val errPrevTailIdx = host.agentHistory.size - 2
+                            val errPrevTail = host.agentHistory.getOrNull(errPrevTailIdx)
+                            if (EofStubReminderStackGuard.isStaleEofStubReminder(errPrevTail) ||
+                                ContinuationHistoryMerge.isLengthWallReminder(errPrevTail)
+                            ) {
+                                host.agentHistory.removeAt(errPrevTailIdx)
+                            }
                         }
                         val stubReminder = eofStubReminder(turnText.takeLast(80))
                         host.agentHistory.add(
@@ -2493,14 +2646,32 @@ internal class AgentLoopEngine(
                     // Text("") keeps the parts list non-empty for
                     // persistAssistantTurn's guard; the row is the same empty
                     // assistant message the user sees.
-                    host.persistAssistantTurn(
-                        listOf(AgentContentPart.Text("")),
+                    //
+                    // [R5-C2] …but "empty" describes THIS turn only. A
+                    // continuation loop can still hold un-persisted segments
+                    // streamed by the earlier `continue` branches; writing the
+                    // blank row alone dropped them for good (the run breaks out
+                    // of the loop right here). Route the slice through
+                    // partsForTerminalError: an un-persisted range IS this
+                    // turn's row, an empty one still gets the blank row the
+                    // banner needs.
+                    val carriedTurnParts = TerminalErrorPlacement.partsForTerminalError(
+                        host.buildTurnParts(
+                            loopState.allToolBlocks,
+                            loopState.unpersistedBlockStart,
+                            loopState.allToolInputs,
+                        ),
+                        host.string(R.string.error_stream_interrupted),
+                    )
+                    val carriedRowId = host.persistAssistantTurn(
+                        carriedTurnParts,
                         lastUsage,
                         null,
-                        emptyMap(),
+                        turnBlockMeta(loopState),
                         modelId = loopState.currentProvider.model.id,
                         entryId = host.activeEntryId,
                     )
+                    markTurnPersisted(loopState, carriedRowId)
                     withContext(Dispatchers.Main) {
                         host.setInlineError(host.string(R.string.error_stream_interrupted))
                     }
@@ -2595,14 +2766,26 @@ internal class AgentLoopEngine(
                 // error-shaped empty branch: this turn has no persisted row
                 // yet, so updateLastAssistantError would stamp the previous
                 // turn's row. See that branch for the full rationale.
-                host.persistAssistantTurn(
-                    listOf(AgentContentPart.Text("")),
+                // [R5-C2] Same "empty means THIS turn" correction: any segment
+                // still un-persisted (a continuation `continue` above streamed
+                // it) rides this row instead of being dropped by the blank write.
+                val carriedTurnParts = TerminalErrorPlacement.partsForTerminalError(
+                    host.buildTurnParts(
+                        loopState.allToolBlocks,
+                        loopState.unpersistedBlockStart,
+                        loopState.allToolInputs,
+                    ),
+                    host.string(R.string.error_content_filtered),
+                )
+                val carriedRowId = host.persistAssistantTurn(
+                    carriedTurnParts,
                     lastUsage,
                     null,
-                    emptyMap(),
+                    turnBlockMeta(loopState),
                     modelId = loopState.currentProvider.model.id,
                     entryId = host.activeEntryId,
                 )
+                markTurnPersisted(loopState, carriedRowId)
                 withContext(Dispatchers.Main) {
                     host.setInlineError(host.string(R.string.error_content_filtered))
                 }
@@ -2640,6 +2823,10 @@ internal class AgentLoopEngine(
             // an empty buffer becomes null (no field to round-trip).
             val turnReasoningContent: String? = turnReasoningBlob
                 ?: turnThinking.toString().takeIf { it.isNotEmpty() }
+            // [R5-C2] Snapshot this segment for the pre-finalize flush (it runs
+            // outside the loop, where these per-turn locals are gone).
+            lastSegmentUsage = lastUsage
+            lastSegmentReasoning = turnReasoningContent
 
             // [FIX-R4-Q F-08] A continuation (length wall / EOF stub) re-enters
             // THIS loop and keeps streaming into the same bubble, so its segment
@@ -2941,11 +3128,11 @@ internal class AgentLoopEngine(
                         // back and drop it there.
                         val prevTailIdx = host.agentHistory.size - 2
                         val prevTail = host.agentHistory.getOrNull(prevTailIdx)
-                        val tailIsLengthWallReminder = prevTail != null &&
-                            prevTail.role == LLMMessage.Role.USER &&
-                            prevTail.contentParts.size == 1 &&
-                            (prevTail.contentParts.first() as? AgentContentPart.Text)?.text
-                                ?.contains("cut off mid-sentence") == true
+                        // [R5-C2] Same family predicate the error-shaped branch
+                        // ORs in — one source per reminder family, instead of a
+                        // second copy of the marker text drifting here.
+                        val tailIsLengthWallReminder =
+                            ContinuationHistoryMerge.isLengthWallReminder(prevTail)
                         if (tailIsLengthWallReminder) {
                             host.agentHistory.removeAt(prevTailIdx)
                         }
@@ -4243,6 +4430,38 @@ internal class AgentLoopEngine(
                 // null return = empty-after-build / drain rejected; fall
                 // through to normal next-turn dispatch so the queue doesn't
                 // pin the loop indefinitely.
+            }
+        }
+        // [R5-C2] Flush BEFORE any finalize hand-holding. Both finalizers below
+        // write their banner through `updateLastAssistantError` = "the session's
+        // LAST assistant row", and both run after a loop that may have left via a
+        // continuation `continue` — i.e. with blocks the user already watched but
+        // that no row covers. Without this, the text evaporated on reload AND the
+        // banner stamped the PREVIOUS turn's row; the row written here is what
+        // makes the banner land on the turn that actually stopped.
+        //
+        // Idempotent by construction: the two in-loop terminals advance
+        // `unpersistedBlockStart` past everything they wrote, so a clean exit has
+        // an empty range and this is a no-op. A failing insert is swallowed on
+        // purpose — the finalize hand-holding (UI teardown + banner + resume) is
+        // still the more urgent truth, and the caller's error path reports the DB
+        // failure.
+        if (ContinuationFlushPolicy.mustFlushBeforeFinalize(
+                loopState.unpersistedBlockStart,
+                loopState.allToolBlocks.size,
+            )
+        ) {
+            runCatching {
+                flushUnpersistedTurnRow(
+                    loopState = loopState,
+                    usage = lastSegmentUsage,
+                    reasoningContent = lastSegmentReasoning,
+                )
+            }.onFailure { e ->
+                AppLogger.warning(
+                    TAG_STREAM,
+                    "runAgentLoop EXIT — flushing the un-persisted continuation failed: ${e.message}",
+                )
             }
         }
         // Two ways to leave the for-loop above:
