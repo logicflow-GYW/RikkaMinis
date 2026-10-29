@@ -1,8 +1,9 @@
 package com.rikkaminis.app.diagnostics
 
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 
@@ -119,7 +120,15 @@ object MemorySpikeRecorder {
     private val currentCmd = AtomicReference<CmdContext?>(null)
     private var started = false
     private var sampleIndex = 0L
-    private val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    // [fix/r4-s F-04] SimpleDateFormat is NOT thread-safe, and this single
+    // instance is shared by the sampling loop, by measurePhase (from whatever
+    // thread the measured work runs on) and by installFileSink's closure.
+    // Concurrent format() on one instance garbles the prefix or throws — at
+    // precisely the moment a spike is being recorded. DateTimeFormatter is
+    // immutable and thread-safe (minSdk 26 ships java.time natively).
+    private val stamp: DateTimeFormatter = DateTimeFormatter
+        .ofPattern("HH:mm:ss.SSS", Locale.US)
+        .withZone(ZoneId.systemDefault())
 
     // ---------- 纯函数 ----------
 
@@ -224,7 +233,7 @@ object MemorySpikeRecorder {
     fun formatEvent(tsMs: Long, kind: String, detail: String): String =
         stampFormat(tsMs) + " [" + kind + "] " + detail
 
-    private fun stampFormat(tsMs: Long): String = stamp.format(Date(tsMs))
+    private fun stampFormat(tsMs: Long): String = stamp.format(Instant.ofEpochMilli(tsMs))
 
     private fun sign(v: Long): String = if (v > 0) "+$v" else v.toString()
 
@@ -245,16 +254,25 @@ object MemorySpikeRecorder {
         try {
             return block()
         } finally {
-            val after = safeSnapshot()
-            val sb = StringBuilder(160)
-            sb.append("rss=").append(after.rssMb).append("MB(")
-                .append(sign((after.rssKb - before.rssKb) / 1024L)).append("MB)")
-                .append(" native=").append(before.nativeHeapKb / 1024L)
-                .append("→").append(after.nativeHeapKb / 1024L).append("MB")
-                .append(" java=").append(after.javaUsedKb / 1024L).append("MB")
-                .append(" dur=").append(clock() - t0).append("ms")
-            if (detail.isNotEmpty()) sb.append(' ').append(detail)
-            write(formatEvent(clock(), kind, sb.toString()))
+            // [fix/r4-s F-04] A `finally` that throws REPLACES the exception
+            // `block` was already unwinding with — a diagnostics-side failure
+            // (clock supplier, formatter, /proc read) would then surface as
+            // the failure of the measured operation. Swallow it here; write()
+            // keeps its own sink-level guard.
+            try {
+                val after = safeSnapshot()
+                val sb = StringBuilder(160)
+                sb.append("rss=").append(after.rssMb).append("MB(")
+                    .append(sign((after.rssKb - before.rssKb) / 1024L)).append("MB)")
+                    .append(" native=").append(before.nativeHeapKb / 1024L)
+                    .append("→").append(after.nativeHeapKb / 1024L).append("MB")
+                    .append(" java=").append(after.javaUsedKb / 1024L).append("MB")
+                    .append(" dur=").append(clock() - t0).append("ms")
+                if (detail.isNotEmpty()) sb.append(' ').append(detail)
+                write(formatEvent(clock(), kind, sb.toString()))
+            } catch (_: Throwable) {
+                // 诊断路径失败不得反噬被测路径
+            }
         }
     }
 
@@ -266,16 +284,25 @@ object MemorySpikeRecorder {
         try {
             return block()
         } finally {
-            val after = safeSnapshot()
-            val sb = StringBuilder(160)
-            sb.append("rss=").append(after.rssMb).append("MB(")
-                .append(sign((after.rssKb - before.rssKb) / 1024L)).append("MB)")
-                .append(" native=").append(before.nativeHeapKb / 1024L)
-                .append("→").append(after.nativeHeapKb / 1024L).append("MB")
-                .append(" java=").append(after.javaUsedKb / 1024L).append("MB")
-                .append(" dur=").append(clock() - t0).append("ms")
-            if (detail.isNotEmpty()) sb.append(' ').append(detail)
-            write(formatEvent(clock(), kind, sb.toString()))
+            // [fix/r4-s F-04] A `finally` that throws REPLACES the exception
+            // `block` was already unwinding with — a diagnostics-side failure
+            // (clock supplier, formatter, /proc read) would then surface as
+            // the failure of the measured operation. Swallow it here; write()
+            // keeps its own sink-level guard.
+            try {
+                val after = safeSnapshot()
+                val sb = StringBuilder(160)
+                sb.append("rss=").append(after.rssMb).append("MB(")
+                    .append(sign((after.rssKb - before.rssKb) / 1024L)).append("MB)")
+                    .append(" native=").append(before.nativeHeapKb / 1024L)
+                    .append("→").append(after.nativeHeapKb / 1024L).append("MB")
+                    .append(" java=").append(after.javaUsedKb / 1024L).append("MB")
+                    .append(" dur=").append(clock() - t0).append("ms")
+                if (detail.isNotEmpty()) sb.append(' ').append(detail)
+                write(formatEvent(clock(), kind, sb.toString()))
+            } catch (_: Throwable) {
+                // 诊断路径失败不得反噬被测路径
+            }
         }
     }
 
@@ -496,27 +523,38 @@ object MemorySpikeRecorder {
      * 每行 append + close → 崩溃瞬间（SIGABRT）也不丢已写内容。
      */
     fun installFileSink(logsDir: File) {
-        val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        // [fix/r4-s F-04] Same thread-safety problem as `stamp`, plus `day` /
+        // `file` are mutable: the sink runs on the sampling coroutine, on
+        // whatever thread measurePhase measured, and from the command hooks.
+        // Unsynchronised, two calls can resolve different day files at once or
+        // rotate while the other appends. One lock around
+        // resolve→rotate→append; file IO already dominates, so the
+        // serialisation costs nothing extra.
+        val dayFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)
+            .withZone(ZoneId.systemDefault())
+        val lock = Any()
         var day = ""
         var file: File? = null
         sink = { line ->
             try {
-                val today = dayFmt.format(Date(clock()))
-                var f = file
-                if (f == null || today != day) {
-                    f = File(logsDir, FILE_PREFIX + today + ".log")
-                    f.parentFile?.mkdirs()
-                    day = today
-                    file = f
+                synchronized(lock) {
+                    val today = dayFmt.format(Instant.ofEpochMilli(clock()))
+                    var f = file
+                    if (f == null || today != day) {
+                        f = File(logsDir, FILE_PREFIX + today + ".log")
+                        f.parentFile?.mkdirs()
+                        day = today
+                        file = f
+                    }
+                    // 轮转判断读真实文件长度（而非进程内计数），外部改动/多次
+                    // install 后仍准确。
+                    if (shouldRotate(f.length())) {
+                        val rotated = File(f.parentFile, f.name + ".1")
+                        runCatching { rotated.delete() }
+                        runCatching { f.renameTo(rotated) }
+                    }
+                    f.appendText(line + "\n")
                 }
-                // 轮转判断读真实文件长度（而非进程内计数），外部改动/多次
-                // install 后仍准确。
-                if (shouldRotate(f.length())) {
-                    val rotated = File(f.parentFile, f.name + ".1")
-                    runCatching { rotated.delete() }
-                    runCatching { f.renameTo(rotated) }
-                }
-                f.appendText(line + "\n")
             } catch (t: Throwable) {
                 // 磁盘满 / 权限异常：静默降级，绝不影响执行路径
             }
