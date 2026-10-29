@@ -38,7 +38,7 @@ class MirrorAutoDetectWiringTest {
     fun `the boot path snapshots the prior selection before the speed test`() {
         val body = declarationSlice(readRepoFile(SCREEN), "fun autoDetectOnceIfNeeded(")
         val snapshot = body.indexOf("val alreadySelected = selectedMirrorId.keys.toSet()")
-        val start = body.indexOf("startAllTests(context, autoApplyOnComplete = false)")
+        val start = body.indexOf("startAllTests(context)")
         assertTrue("autoDetectOnceIfNeeded must snapshot`alreadySelected`", snapshot > 0)
         assertTrue("autoDetectOnceIfNeeded must run the speed test", start > 0)
         assertTrue(
@@ -56,13 +56,17 @@ class MirrorAutoDetectWiringTest {
     @Test
     fun `the boot path does not let the shared body settle`() {
         val body = declarationSlice(readRepoFile(SCREEN), "fun autoDetectOnceIfNeeded(")
+        val flag = body.indexOf("settleOnComplete = false")
+        val start = body.indexOf("startAllTests(context)")
+        assertTrue("autoDetectOnceIfNeeded must ask for a detection-only run", flag > 0)
         assertTrue(
-            "autoDetectOnceIfNeeded must pass autoApplyOnComplete = false",
-            body.contains("startAllTests(context, autoApplyOnComplete = false)"),
+            "the request must be set BEFORE the call — the body consumes it at entry",
+            start > 0 && flag < start,
         )
-        assertTrue(
-            "…and must not ALSO call the settling overload",
-            !body.contains("startAllTests(context)\n"),
+        assertEquals(
+            "exactly one request per boot — a second one would be dead weight",
+            1,
+            Regex(Regex.escape("settleOnComplete = false")).findAll(body).count(),
         )
     }
 
@@ -79,11 +83,21 @@ class MirrorAutoDetectWiringTest {
     @Test
     fun `the shared body's auto-selection is behind the flag`() {
         val body = declarationSlice(readRepoFile(SCREEN), "fun startAllTests(")
+        // The signature must stay `(context: Context)`: MirrorSpeedTestShapeTest
+        // arm E4 pins that literal and reads the body it opens.
         assertTrue(
-            "startAllTests must take autoApplyOnComplete",
-            body.contains("autoApplyOnComplete: Boolean = true"),
+            "startAllTests must keep its pinned signature",
+            body.startsWith("fun startAllTests(context: Context)"),
         )
-        val guard = body.indexOf("if (autoApplyOnComplete) {")
+        val consume = body.indexOf("val settle = settleOnComplete")
+        val reset = body.indexOf("settleOnComplete = true")
+        assertTrue("startAllTests must consume the one-shot flag", consume > 0 && reset > consume)
+        assertTrue(
+            "the flag must be restored at entry, not after the run: a user tap " +
+                "landing while the boot run is in flight must still settle",
+            reset < body.indexOf("currentJob?.cancel()"),
+        )
+        val guard = body.indexOf("if (settle) {")
         val write = body.indexOf("useCustomMirror[cat] = true")
         assertTrue("no auto-selection write found in startAllTests", write > 0)
         assertTrue("the auto-selection write must be inside the flag", guard > 0 && guard < write)

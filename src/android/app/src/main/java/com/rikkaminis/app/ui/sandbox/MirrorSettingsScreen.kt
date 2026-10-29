@@ -195,6 +195,18 @@ object MirrorSpeedTestViewModel {
         .build()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * [R4-V F-03] Should the shared speed-test body settle on its own when the
+     * run finishes? TRUE for a user tap ("test and auto-select"), FALSE for the
+     * first-boot detector, which settles through [decideAutoApply] instead.
+     *
+     * One-shot by construction: [startAllTests] reads it and immediately
+     * restores `true`, so the flag cannot leak into the next user-initiated run.
+     * The read happens on the caller's thread in the same (non-suspending) block
+     * that sets it.
+     */
+    private var settleOnComplete = true
     @Volatile private var currentJob: Job? = null
     // [dv25-B1] First-boot auto-detection settles long after the run it reuses
     // has finished, so it needs a job slot of its own: a user-initiated test
@@ -270,7 +282,16 @@ object MirrorSpeedTestViewModel {
      * reuses the normal test flow). Separate from the public entry point because
      * only a user tap may preempt auto-detection.
      */
-    private fun startAllTests(context: Context, autoApplyOnComplete: Boolean = true) {
+    private fun startAllTests(context: Context) {
+        // [R4-V F-03] One-shot settlement request, consumed at entry (see the
+        // field's KDoc): the boot path asks for detection WITHOUT the settle
+        // loop. A parameter would read better, but
+        // `private fun startAllTests(context: Context)` is pinned as a literal
+        // by MirrorSpeedTestShapeTest arm E4 (it asserts the shared body still
+        // carries the auto-select tail and NonCancellable) — that arm's stance is
+        // right, so the shape stays and the intent travels as a flag.
+        val settle = settleOnComplete
+        settleOnComplete = true
         currentJob?.cancel()
         // [dv25-B1] LAZY + explicit start publishes `currentJob` *before* the
         // body can read it — the settlement/finally ownership checks compare
@@ -338,7 +359,7 @@ object MirrorSpeedTestViewModel {
                     // else is known — decideAutoApply), and letting this body
                     // settle first made that rule unreachable, because the map
                     // it inspects was already filled by the write below.
-                    if (autoApplyOnComplete) {
+                    if (settle) {
                         for ((cat, fastest) in autoSelectFastest(sorted) { selectedMirrorId[it] != null }) {
                             selectedMirrorId[cat] = fastest.mirror.id
                             useCustomMirror[cat] = true
@@ -546,11 +567,12 @@ object MirrorSpeedTestViewModel {
             val alreadySelected = selectedMirrorId.keys.toSet()
             // Reuse the normal test flow — startAllTests, not runAllTests: the
             // public entry point cancels auto-detection first, which here would
-            // be the job this very coroutine is running in. `autoApplyOnComplete
-            // = false` keeps the settlement out of the decision: this function
-            // settles through decideAutoApply, not through the shared body's
-            // "fastest wins" loop.
-            startAllTests(context, autoApplyOnComplete = false)
+            // be the job this very coroutine is running in. `settleOnComplete =
+            // false` keeps the shared settlement out of the decision: this
+            // function settles through decideAutoApply, not through the body's
+            // "fastest wins, official included" loop.
+            settleOnComplete = false
+            startAllTests(context)
             currentJob?.join()
             val toApply = mutableListOf<MirrorCategory>()
             withContext(Dispatchers.Main) {
