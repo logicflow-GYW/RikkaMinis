@@ -385,9 +385,18 @@ private fun AudioReplyContent(data: ByteArray) {
     // onFailure log — i.e. the button silently did nothing, with no way for the
     // user to tell a slow write from a dead control.
     var isReady by remember(data) { mutableStateOf(false) }
+    // [R4-V F-12] A failed cache write used to be swallowed: isReady flipped to
+    // true anyway and play() then failed silently, so the control looked live
+    // and did nothing. The failure is now a visible state.
+    var writeFailed by remember(data) { mutableStateOf(false) }
     val player = remember { android.media.MediaPlayer() }
+    // [R4-V F-12] `ByteArray.hashCode()` is IDENTITY (Kotlin arrays do not
+    // override it), so the cache name was different for identical bytes on
+    // every composition and identical for none of them — a name that carries
+    // no information about the clip. Content-derived (size + content hash):
+    // the same clip reuses its file, a different clip never collides.
     val file = remember(data) {
-        java.io.File(context.cacheDir, "quicktest-audio-${data.hashCode()}.bin")
+        java.io.File(context.cacheDir, quickTestClipFileName(data))
     }
 
     fun play() {
@@ -409,7 +418,17 @@ private fun AudioReplyContent(data: ByteArray) {
     // auto-play — same order as before, so setDataSource never sees a
     // half-written file.
     androidx.compose.runtime.LaunchedEffect(file) {
-        withContext(Dispatchers.IO) { runCatching { file.writeBytes(data) } }
+        // [R4-V F-12] Only a write that really landed enables the control.
+        val written = withContext(Dispatchers.IO) {
+            runCatching { file.writeBytes(data) }.isSuccess && file.length() == data.size.toLong()
+        }
+        if (!written) {
+            AppLogger.warning(TAG, "[QuickTest] audio clip cache write failed: ${file.name}")
+            writeFailed = true
+            isReady = false
+            return@LaunchedEffect
+        }
+        writeFailed = false
         isReady = true
         play()
     }
@@ -443,12 +462,38 @@ private fun AudioReplyContent(data: ByteArray) {
                 tint = MaterialTheme.colorScheme.primary,
             )
         }
-        Text(
-            "%.1f KB".format(data.size / 1024.0),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (writeFailed) {
+            // Reuses the existing clip-failure copy rather than adding a key:
+            // the strings files are outside this branch's file set, and "the
+            // local test clip could not be produced" is exactly what happened
+            // from the user's side.
+            Text(
+                stringResource(R.string.quicktest_clip_failed),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        } else {
+            Text(
+                "%.1f KB".format(data.size / 1024.0),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
+}
+
+/**
+ * [R4-V F-12] Cache name for a Quick Test audio clip, derived from its CONTENT.
+ *
+ * `ByteArray.hashCode()` is `Object.hashCode()` — identity, not content — so the
+ * old name was stable within one composition and meaningless across them: two
+ * identical clips never shared a file and the name told a reader nothing. Size
+ * plus [contentHashCode] is stable, cheap, and never collides on equal bytes.
+ * (Cache dir only; this is a name, not a security boundary.)
+ */
+internal fun quickTestClipFileName(data: ByteArray): String {
+    val hash = data.contentHashCode().toUInt().toString(16)
+    return "quicktest-audio-${data.size}-$hash.bin"
 }
 
 /** Reset every run to Running and fire each test concurrently. */
