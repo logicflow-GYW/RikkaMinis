@@ -8,6 +8,8 @@ import androidx.security.crypto.MasterKey
 import java.io.File
 import java.security.KeyStore
 
+import com.rikkaminis.app.logging.AppLogger
+
 private const val TAG = "EncryptedPrefsFactory"
 
 /** The single Tink keyset blob shared by every encrypted store (security-crypto). */
@@ -62,7 +64,37 @@ object EncryptedPrefsFactory {
         val appContext = context.applicationContext ?: context
         return registry.resolve(fileName) {
             val created = createOrRecover(appContext, fileName)
-            if (created.degraded) registry.markDegraded(fileName)
+            if (created.degraded) {
+                // [FIX-R4-T F-08] Record degradation BEFORE announcing it, so a
+                // consumer woken by the error snapshot already sees
+                // isDegraded(fileName) == true.
+                registry.markDegraded(fileName)
+                // [FIX-R4-T F-08] Until this line NOTHING in production read
+                // `isDegraded` / `degradedStores` (only the definition site and
+                // one unit test): a keystore-degraded store silently served an
+                // empty, memory-only map, so every credential the user typed
+                // looked saved and vanished on the next cold start with no
+                // trace anywhere. The class KDoc already claimed this exact
+                // line existed ("visible to telemetry through
+                // `AppLogger.error("EncryptedPrefs", ...)` which emits a
+                // structured `step=keystore_degraded` line that
+                // `error-snapshot-*.log` captures") — the contract was written,
+                // never implemented; the only signal was android.util.Log.e,
+                // which reaches `error-snapshot-*.log` never and the daily file
+                // only while the logcat tailer happens to be running.
+                //
+                // One ERROR line (not a new UI surface): the snapshot ring
+                // captures the surrounding scene and the message carries the
+                // verdict in a greppable form. A user-facing banner and the
+                // InMemorySharedPreferences locking are tracked separately —
+                // locking is DESIGN-08, already registered.
+                AppLogger.error(
+                    "EncryptedPrefs",
+                    "step=keystore_degraded file=$fileName attempts=${created.attempts} " +
+                        "drops=${created.drops} consequence=credentials_in_memory_only " +
+                        "next_cold_start_starts_empty reentry_required=true",
+                )
+            }
             created.prefs
         }
     }
@@ -98,7 +130,7 @@ object EncryptedPrefsFactory {
                         "${outcome.drops} destructive step(s) — backups left in shared_prefs/",
                 )
             }
-            return Created(prefs, degraded = false)
+            return Created(prefs, degraded = false, attempts = outcome.attempts, drops = outcome.drops)
         }
 
         Log.e(
@@ -109,7 +141,7 @@ object EncryptedPrefsFactory {
                 "${outcome.drops} destructive step(s); backups (if any) are " +
                 "\"shared_prefs/${fileName}.xml${KeystorePrefsBackup.SUFFIX}<epoch>\".",
         )
-        return Created(InMemorySharedPreferences(), degraded = true)
+        return Created(InMemorySharedPreferences(), degraded = true, attempts = outcome.attempts, drops = outcome.drops)
     }
 
     private fun build(context: Context, fileName: String): SharedPreferences {
@@ -126,7 +158,13 @@ object EncryptedPrefsFactory {
     }
 }
 
-private data class Created(val prefs: SharedPreferences, val degraded: Boolean)
+private data class Created(
+    val prefs: SharedPreferences,
+    val degraded: Boolean,
+    /** [FIX-R4-T F-08] Recovery attempts / destructive steps that led here. */
+    val attempts: Int,
+    val drops: Int,
+)
 
 private fun prefsDir(context: Context) = File(context.applicationInfo.dataDir, "shared_prefs")
 
@@ -213,13 +251,42 @@ internal class InMemoryEditor(
     private val staged = mutableMapOf<String, Any?>()
     private val removed = mutableSetOf<String>()
 
-    override fun putString(key: String, value: String?): SharedPreferences.Editor { staged[key] = value; return this }
-    override fun putStringSet(key: String, values: MutableSet<String>?): SharedPreferences.Editor { staged[key] = values; return this }
-    override fun putInt(key: String, value: Int): SharedPreferences.Editor { staged[key] = value; return this }
-    override fun putLong(key: String, value: Long): SharedPreferences.Editor { staged[key] = value; return this }
-    override fun putFloat(key: String, value: Float): SharedPreferences.Editor { staged[key] = value; return this }
-    override fun putBoolean(key: String, value: Boolean): SharedPreferences.Editor { staged[key] = value; return this }
-    override fun remove(key: String): SharedPreferences.Editor { removed.add(key); return this }
+    // [FIX-R4-T F-08] The degraded store has to obey the SharedPreferences
+    // contract exactly, because it is indistinguishable from the real one to
+    // every caller. Two violations lived here, and both are the same confusion
+    // between "the key is absent" and "the key reads back empty":
+    //
+    //  * `putString(k, null)` stored the null, so `contains(k)` answered true
+    //    while `getString(k)` handed back the caller's default — a write that
+    //    the framework defines as a REMOVAL became a phantom key.
+    //  * `remove(k)` never cleared `staged[k]`, and commit() applied removals
+    //    BEFORE staged writes — so `putString(k, x).remove(k)` landed as a
+    //    write, and a secret the user deleted came back. Same class of bug as
+    //    the one that made credentials "vanish": the operation ran, the effect
+    //    did not.
+    //
+    // Fix keeps the documented semantics: null put == remove, and for a given
+    // key the LAST operation wins regardless of the order it was queued in.
+    override fun putString(key: String, value: String?): SharedPreferences.Editor =
+        if (value == null) remove(key) else stage(key, value)
+    override fun putStringSet(key: String, values: MutableSet<String>?): SharedPreferences.Editor =
+        if (values == null) remove(key) else stage(key, values)
+    override fun putInt(key: String, value: Int): SharedPreferences.Editor = stage(key, value)
+    override fun putLong(key: String, value: Long): SharedPreferences.Editor = stage(key, value)
+    override fun putFloat(key: String, value: Float): SharedPreferences.Editor = stage(key, value)
+    override fun putBoolean(key: String, value: Boolean): SharedPreferences.Editor = stage(key, value)
+    override fun remove(key: String): SharedPreferences.Editor {
+        staged.remove(key)
+        removed.add(key)
+        return this
+    }
+
+    /** Stage a write and cancel any earlier removal of the same key. */
+    private fun stage(key: String, value: Any?): SharedPreferences.Editor {
+        staged[key] = value
+        removed.remove(key)
+        return this
+    }
     override fun clear(): SharedPreferences.Editor { staged.clear(); removed.addAll(values.keys); return this }
 
     /** Applies to memory, then reports `false`: nothing was persisted. */
