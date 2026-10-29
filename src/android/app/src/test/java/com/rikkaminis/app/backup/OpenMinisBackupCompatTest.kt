@@ -1265,8 +1265,18 @@ class OpenMinisBackupCompatTest {
         // 都会弹——包括刚刚把 secrets.json 原样搬过来的那些。
         val members = mutableListOf<Pair<String, ByteArray>>()
         members += "manifest.json" to jsonEntry(plainManifest())
+        // [FIX-R5-B1 / C-08] The fixture used to be a flat
+        // `{"inst-1":{"apiKey":…}}` map — NOT the shape this converter reads
+        // (convertProviders walks `secrets.providers[]` by `instanceId`). It
+        // only ever passed because the criterion was "how many KEYS does the
+        // object have"; the criterion is now "does any credential VALUE exist".
         members += "secrets.json" to jsonEntry(
-            JSONObject().put("inst-1", JSONObject().put("apiKey", "sk-live")),
+            JSONObject().put(
+                "providers",
+                JSONArray().put(
+                    JSONObject().put("instanceId", "inst-1").put("apiKey", "sk-live")
+                ),
+            ),
         )
         val doc = JSONObject(OpenMinisBackupCompat.convert(zipOf(*members.toTypedArray())))
         assertTrue(doc.getBoolean("includesSecrets"))
