@@ -74,12 +74,14 @@ class MirrorPlanTest {
     }
 
     @Test
-    fun shouldWrite_throttlesInsideTheInterval() {
+    fun shouldWrite_coalescesInsideOneMinute() {
         val last = 1_000_000L
-        // 9:59 inside the 10-minute window → wait.
-        assertFalse(MirrorPlan.shouldWrite(last, last + 599_999L, true))
-        // 10:00 exactly → go.
-        assertTrue(MirrorPlan.shouldWrite(last, last + 600_000L, true))
+        // 0:59 inside the 60 s coalescing window → wait.
+        assertFalse(MirrorPlan.shouldWrite(last, last + 59_999L, true))
+        // 1:00 exactly → go. Ten minutes was the pre-2026-10-29 value and it
+        // gated freshness, not cost: this test is what keeps it from creeping
+        // back.
+        assertTrue(MirrorPlan.shouldWrite(last, last + 60_000L, true))
     }
 
     @Test
@@ -90,10 +92,183 @@ class MirrorPlanTest {
     }
 
     @Test
-    fun shouldWrite_intervalIsTheConstantTenMinutes() {
-        // Literal: pins the constant itself, so bumping MIN_INTERVAL_MS is a
+    fun shouldWrite_intervalIsTheCoalesceWindow() {
+        // Literal: pins the constant itself, so widening the window is a
         // conscious test change, not a silent re-baseline.
-        assertEquals(600_000L, MirrorPlan.MIN_INTERVAL_MS)
+        assertEquals(60_000L, MirrorPlan.WRITE_COALESCE_MS)
+    }
+
+    // --------------------------------------------------------- shouldMintPoint
+
+    @Test
+    fun shouldMintPoint_noPointsYetMints() {
+        assertTrue(MirrorPlan.shouldMintPoint(emptyList(), 1_000L))
+    }
+
+    @Test
+    fun shouldMintPoint_spacingIsTenMinutesRegardlessOfWriteWindow() {
+        // The point spacing is the OTHER job the old 10-minute interval did.
+        // Writes coalesce at 60 s; history must still span minutes.
+        val lastPoint = 1_700_000_000_000L
+        val stamp = BackupRotation.stamp(lastPoint)
+        // 9:59 later → reuse the newest point, do not mint a 4th in 10 minutes.
+        assertFalse(MirrorPlan.shouldMintPoint(listOf(stamp), lastPoint + 599_999L))
+        // 10:00 exactly → mint.
+        assertTrue(MirrorPlan.shouldMintPoint(listOf(stamp), lastPoint + 600_000L))
+    }
+
+    @Test
+    fun shouldMintPoint_clockRollbackMints() {
+        // Same polarity as shouldWrite: unknown age is not "recent enough".
+        val stamp = BackupRotation.stamp(5_000_000L)
+        assertTrue(MirrorPlan.shouldMintPoint(listOf(stamp), 1_000_000L))
+    }
+
+    @Test
+    fun shouldMintPoint_unparseableNamesDoNotBlockMinting() {
+        // A folder a user dropped in has no age; it must not hold history back
+        // (the deletion side already refuses to make it a victim).
+        assertTrue(MirrorPlan.shouldMintPoint(listOf("not-a-stamp"), 1_000L))
+    }
+
+    @Test
+    fun shouldMintPoint_newestPointDecides() {
+        val old = BackupRotation.stamp(1_000_000L)
+        val recent = BackupRotation.stamp(1_700_000_000_000L)
+        // Oldest is ancient, newest is recent: the NEWEST decides.
+        assertFalse(
+            MirrorPlan.shouldMintPoint(listOf(old, recent), 1_700_000_000_000L + 1_000L),
+        )
+    }
+
+    // ------------------------------------------------------- outcomeKind/health
+
+    @Test
+    fun outcomeKind_mapsEveryRecordedLine() {
+        assertEquals("ok", MirrorPlan.outcomeKind("ok 12w/3d/0a of 1810"))
+        assertEquals("no-changes", MirrorPlan.outcomeKind("no-changes"))
+        assertEquals("throttled", MirrorPlan.outcomeKind("throttled"))
+        assertEquals("busy", MirrorPlan.outcomeKind("busy"))
+        assertEquals("unavailable", MirrorPlan.outcomeKind("unavailable"))
+        assertEquals("disabled", MirrorPlan.outcomeKind("disabled"))
+        assertEquals("failed", MirrorPlan.outcomeKind("failed: disk full"))
+        assertEquals("none", MirrorPlan.outcomeKind(null))
+        assertEquals("unknown", MirrorPlan.outcomeKind("something else"))
+    }
+
+    @Test
+    fun health_disabledShortCircuits() {
+        assertTrue(
+            MirrorPlan.classifyHealth(
+                enabled = false,
+                lastSyncMs = 0L,
+                pending = 99,
+                lastOutcome = "failed: x",
+                nowMs = 1_000_000L,
+            ) == MirrorPlan.Health.Disabled,
+        )
+    }
+
+    @Test
+    fun health_failureOutranksStaleness() {
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = 1_000L,
+            pending = 5,
+            lastOutcome = "failed: no space left on device",
+            nowMs = 100_000_000L,
+        )
+        assertEquals(
+            MirrorPlan.Health.Failed("no space left on device"),
+            h,
+        )
+    }
+
+    @Test
+    fun health_unavailableIsAFailureWithoutReason() {
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = 1_000L,
+            pending = 5,
+            lastOutcome = "unavailable",
+            nowMs = 100_000_000L,
+        )
+        assertEquals(MirrorPlan.Health.Failed(null), h)
+    }
+
+    @Test
+    fun health_neverSyncedIsNever() {
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = 0L,
+            pending = 3,
+            lastOutcome = null,
+            nowMs = 100_000_000L,
+        )
+        assertEquals(MirrorPlan.Health.Never(3), h)
+    }
+
+    @Test
+    fun health_pendingInsideTheCoalesceWindowIsHealthy() {
+        // THE regression this design exists for: a non-zero pending count right
+        // after a write is normal coalescing, not a warning. The old button sat
+        // here and did nothing.
+        val last = 1_700_000_000_000L
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = last,
+            pending = 4,
+            lastOutcome = "ok 4w/0d/0a of 1810",
+            nowMs = last + 45_000L,
+        )
+        assertEquals(MirrorPlan.Health.Healthy(4), h)
+    }
+
+    @Test
+    fun health_pendingBeyondThirtyMinutesIsStale() {
+        val last = 1_700_000_000_000L
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = last,
+            pending = 4,
+            lastOutcome = "no-changes",
+            nowMs = last + 30L * 60_000L,
+        )
+        assertEquals(MirrorPlan.Health.Stale(4, 30L), h)
+    }
+
+    @Test
+    fun health_staleNeedsPendingFiles() {
+        // A quiet install with nothing waiting is healthy at any age: there is
+        // nothing the mirror is failing to do.
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = 1_000L,
+            pending = 0,
+            lastOutcome = "no-changes",
+            nowMs = 100_000_000L,
+        )
+        assertEquals(MirrorPlan.Health.Healthy(0), h)
+    }
+
+    @Test
+    fun health_unreadablePendingDoesNotClaimZero() {
+        // pendingCount null = the target could not be read. The row must show
+        // no count rather than a reassuring 0.
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = 1_000L,
+            pending = null,
+            lastOutcome = "ok 1w/0d/0a of 1810",
+            nowMs = 100_000_000L,
+        )
+        assertEquals(MirrorPlan.Health.Healthy(null), h)
+    }
+
+    @Test
+    fun health_staleThresholdIsThirtyMinutes() {
+        // Literal, same rule as the other constant pins.
+        assertEquals(1_800_000L, MirrorPlan.STALE_AFTER_MS)
     }
 
     // -------------------------------------------------------- previousVictims

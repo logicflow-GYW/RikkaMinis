@@ -112,15 +112,17 @@ class BackupFetchBusyGateTest {
         // alternative (claiming inside each handler) is what the count is protecting
         // against. The contract behind the bump is pinned by RestorePayloadBusyGateTest
         // (claim-before-payload per entry, preClaimed handoff, release on failure).
-        // 8 → 9: [feat/auto-backup-external-mirror] the external-mirror "sync now"
-        // row. It is a genuine disk-writing entry (writes Download/… via MediaStore)
-        // and must therefore serialise against restore/fetch exactly like the rows
-        // above it — claiming the gate is the point, not an accident of code shape.
-        // It has its own release site in the same finally (the false count below).
+        // 8 → 9 was the external-mirror "sync now" row; 9 → 8 again on
+        // 2026-10-29 [silent-mirror]: that row is gone (the mirror runs
+        // silently, its status row is passive). The only mirror action left is
+        // the status row's retry, which is a bounded text write and
+        // deliberately does NOT claim the gate — it reads `operationBusy` to
+        // stay disabled while a restore/fetch holds it, which is the ordering
+        // that matters (no 70 MB payload is built by a mirror sync).
         assertEquals(
             "exactly one new operationBusy = true site (the fetch path + the shared " +
-                "restore-payload claim helper + the external-mirror sync)",
-            9,
+                "restore-payload claim helper)",
+            8,
             code.split("operationBusy = true").size - 1,
         )
         // 10 = the pre-[FIX-P1A] baseline. The 11th site is the restore path's
@@ -135,13 +137,14 @@ class BackupFetchBusyGateTest {
         // gate before restoreWithSnapshot re-acquires it (see [preClaimed]). A new release
         // site appearing here means someone lowered the gate by hand instead of through
         // the helper.
-        // 11 → 12: the external-mirror sync row pays for its own claim with its own
-        // release in the same finally — a site that reaches the database only by
-        // pairing with the true-count bump above, never as a free release.
+        // 12 → 11 follows the true-count above: the mirror row's paired release
+        // left with its claim. The mirror retry has no release site because it
+        // has no claim — a release site appearing here without a claim above
+        // means someone lowered another path's gate by hand.
         assertEquals(
             "exactly one new operationBusy = false site (the fetch path's finally), " +
                 "plus the restore snapshot-abort branch (pinned by snapshotFailure_abortsBeforeImport)",
-            12,
+            11,
             code.split("operationBusy = false").size - 1,
         )
     }

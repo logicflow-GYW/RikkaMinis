@@ -1640,8 +1640,11 @@
     <string name="mirror_section_footer">Постоянно обновляемая копия вне хранилища приложения. Она сохраняется при очистке данных приложения и открывается любым файловым менеджером.</string>
     <string name="mirror_enable">Внешнее зеркало</string>
     <string name="mirror_enable_sub">Download/RikkaMinis/backup — обновляется автоматически</string>
-    <string name="mirror_sync_now">Синхронизировать сейчас</string>
     <string name="mirror_last_sync">Последняя синхронизация: %1$s</string>
     <string name="mirror_never">Ещё не синхронизировано</string>
     <string name="mirror_pending_count">Ожидают синхронизации: %1$d</string>
+    <string name="mirror_diag_stale">Синхронизация задерживается: %1$d файл(ов) в очереди (%2$d мин с последней записи)</string>
+    <string name="mirror_diag_failed">Последняя синхронизация не удалась</string>
+    <string name="mirror_diag_unavailable">Нет доступного хранилища</string>
+    <string name="mirror_retry">Повторить</string>
 </resources>
