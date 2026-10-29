@@ -159,6 +159,25 @@ fun stripPinnedSection(summary: String?): String? {
 }
 
 /**
+ * [fix/r5-c1-compact-F01] True when [summary] carries REAL summary text —
+ * i.e. something survives stripping the pinned block.
+ *
+ * The pinned block is appended AFTER the LLM returns ([appendPinnedSection]),
+ * so a "did the summarizer produce anything at all?" test placed after that
+ * append can never fire while the fold region holds a single user message:
+ * the block alone makes the string non-empty. Callers that read "empty" as
+ * "nothing was summarised, therefore nothing may be folded" must ask THIS
+ * instead of `String.isEmpty()` — otherwise an empty provider answer (content
+ * filter, refusal, thinking-only reply) is persisted as a marker with no body,
+ * and `effectiveAgentHistory` then trades the entire folded range for verbatim
+ * quotes of the user's own words.
+ *
+ * Block only → false. One real sentence + block → true. Idempotent by
+ * construction (delegates to [stripPinnedSection]).
+ */
+fun summaryHasBody(summary: String?): Boolean = !stripPinnedSection(summary).isNullOrBlank()
+
+/**
  * A carried-vs-fresh payload pair that fits [PINNED_USER_MESSAGES_TOKEN_LIMIT].
  * See [fitPinnedPayload].
  */
@@ -195,13 +214,25 @@ internal fun splitCarriedInner(inner: String?): Pair<String?, List<String>> {
  * rides EVERY request inside `<context-summary>`, so a long session marched
  * itself into `PressureLevel.EXHAUSTED` with the pinned payload alone.
  *
- * Allocation is newest-first over the merged chronological list (fresh pins
- * are newer than anything carried), which is the same rule
- * [extractPinnedUserMessages] already applies within one fold: recency wins,
- * the oldest pins are the growth that gets dropped. One entry that alone
- * exceeds the budget is still kept when it is the newest one — dropping it
- * would delete the user's actual last paste — so the hard ceiling is
- * `max(tokenLimit, newest entry)` rather than `tokenLimit`.
+ * Allocation over the merged chronological list (fresh pins are newer than
+ * anything carried) has TWO exemptions and fills the rest newest-first:
+ *
+ *  1. the NEWEST entry is always kept — dropping it would delete the user's
+ *     actual last paste;
+ *  2. the OLDEST entry is kept whenever it still fits next to (1) —
+ *     [fix/r5-c1-compact-C01] the previous pure newest-first walk dropped it on
+ *     EVERY over-cap fold, which silently inverted the feature: the pin exists
+ *     precisely so the original task statement survives (see the decay
+ *     experiment in this file's header), and `extractPinnedUserMessages`
+ *     already promises "recent N + earliest 1 unconditionally". A trimmer that
+ *     honours the first half of that promise and eats the second half is the
+ *     regression this rule closes;
+ *  3. the middle is filled newest-first (recency wins, the middle growth is
+ *     what gets dropped).
+ *
+ * The oldest entry is exempt from the TRIM, not from the CEILING: an oldest
+ * entry that cannot fit beside the newest one yields, so the hard ceiling
+ * stays `max(tokenLimit, newest entry)` rather than `tokenLimit`.
  *
  * Under budget the inputs are returned byte-identical (today's behaviour, and
  * the reason the multi-round "carried survives verbatim" tests keep passing).
@@ -226,14 +257,26 @@ internal fun fitPinnedPayload(
         // small-pin session keeps producing byte-identical summaries.
         return FittedPinnedPayload(carriedInner, pinned)
     }
+    // [fix/r5-c1-compact-C01] Two exemptions, then newest-first fill of the
+    // middle. The pre-fix loop carried a single `keptAny` exemption (only the
+    // newest entry), so the earliest pin — the one `extractPinnedUserMessages`
+    // re-adds unconditionally, and the reason this whole pin exists — was the
+    // FIRST thing the trim threw away on every over-cap fold.
     val keep = BooleanArray(entries.size)
-    var used = 0L
-    var keptAny = false
-    for (i in entries.indices.reversed()) {
-        if (keptAny && used + costs[i] > tokenLimit) break
+    val newest = entries.lastIndex
+    keep[newest] = true
+    var used = costs[newest]
+    val oldest = 0
+    if (oldest != newest && used + costs[oldest] <= tokenLimit) {
+        keep[oldest] = true
+        used += costs[oldest]
+    }
+    var i = newest - 1
+    while (i > oldest) {
+        if (used + costs[i] > tokenLimit) break
         keep[i] = true
-        keptAny = true
         used += costs[i]
+        i--
     }
     val keptCarried = carriedEntries.filterIndexed { idx, _ -> keep[idx] }
     val keptFresh = fresh.filterIndexed { idx, _ -> keep[carriedEntries.size + idx] }
@@ -242,6 +285,9 @@ internal fun fitPinnedPayload(
     } else {
         (listOfNotNull(header) + keptCarried).joinToString("\n\n")
     }
+    // Fitted payload must stay monotone: what the caller hands back next round
+    // is exactly what the ceiling sees, so "trim never regrows" is testable
+    // end-to-end (CompactPinBudgetTest).
     return FittedPinnedPayload(newCarried, keptFresh)
 }
 

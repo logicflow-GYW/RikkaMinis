@@ -49,18 +49,30 @@ class CompactPinBudgetTest {
         assertTrue(fit.pinned.isEmpty())
     }
 
-    // ── over budget: newest wins, oldest carried goes ─────────────────
+    // ── over budget: newest + earliest win, middle growth goes ────────
 
     @Test
-    fun `over budget keeps the newest entries and drops the oldest carried ones`() {
+    fun `over budget keeps the newest entries and the earliest carried pin`() {
         val c1 = ascii(400) // 100 tokens
         val c2 = "B".repeat(400) // 100 tokens
         val n1 = "C".repeat(400) // 100 tokens
         val n2 = "D".repeat(400) // 100 tokens
-        // 400 tokens offered into a 350 budget: n2 + n1 + c2 fit (300), c1
-        // would make 400 — it is the oldest pin, so it is the one that goes.
+        // [fix/r5-c1-compact-C01] Two exemptions, then newest-first fill: the
+        // newest entry always survives; the OLDEST carried pin survives
+        // whenever it still fits next to it (it carries the original task
+        // statement — the reason the pin exists); the middle is the growth
+        // that gets dropped.
+        // 400 tokens offered into a 350 budget: newest n2 (100) + oldest c1
+        // (100) + n1 (100) = 300; c2 would make 400 — middle growth, it goes.
         val fit = fitPinnedPayload("$c1\n\n$c2", listOf(n1, n2), tokenLimit = 350L)
-        assertEquals(c2, fit.carriedInner)
+        assertTrue(
+            "the earliest carried pin must survive — it is what the pin exists for",
+            fit.carriedInner!!.endsWith(c1),
+        )
+        assertFalse(
+            "the middle carried pin is the growth that gets dropped",
+            fit.carriedInner.contains(c2),
+        )
         assertEquals(listOf(n1, n2), fit.pinned)
     }
 
@@ -76,25 +88,31 @@ class CompactPinBudgetTest {
         assertTrue(carried2.startsWith(headerPrefix))
         assertTrue("both rounds must be pinned while under budget", carried2.contains(c1) && carried2.contains(c2))
         val fresh = "E".repeat(4_000) // 1_000 tokens
-        // 1_200 offered into 1_150: fresh + c2 fit (1_100), c1 would make 1_200.
+        // 1_200 offered into 1_150: fresh (1_000) + the OLDEST carried pin c1
+        // (100) = 1_100 [fix/r5-c1-compact-C01 — the earliest pin is exempt
+        // from the trim, not from the ceiling]; c2 (middle growth) would make
+        // 1_200, so it is dropped.
         val fit = fitPinnedPayload(carried2, listOf(fresh), tokenLimit = 1_150L)
         val newCarried = fit.carriedInner!!
         assertTrue(
             "the block lost its header — the model no longer sees where the text came from: $newCarried",
             newCarried.startsWith(headerPrefix),
         )
-        assertTrue("the newest carried entry must survive", newCarried.endsWith(c2))
-        assertFalse("the oldest carried entry must be the one dropped", newCarried.contains(c1))
+        assertTrue(
+            "the earliest carried pin must survive — it is what the pin exists for",
+            newCarried.endsWith(c1),
+        )
+        assertFalse("the middle carried pin is the growth that gets dropped", newCarried.contains(c2))
         assertEquals(listOf(fresh), fit.pinned)
     }
 
     @Test
-    fun `a newest entry larger than the whole budget is still pinned alone`() {
+    fun `a newest entry larger than the whole budget still evicts the oldest exemption`() {
+        // [fix/r5-c1-compact-C01] The earliest pin is exempt from the TRIM,
+        // not from the CEILING: newest consumes the whole budget, so the
+        // oldest exemption cannot fit beside it and yields.
         val huge = ascii(80_000) // 20_000 tokens
         val fit = fitPinnedPayload("old context", listOf(huge), tokenLimit = 100L)
-        // The single-oversized exemption is kept (dropping the user's actual
-        // last paste would defeat the pin) but it must CONSUME the budget:
-        // nothing older rides along.
         assertNull(fit.carriedInner)
         assertEquals(listOf(huge), fit.pinned)
     }
@@ -135,7 +153,12 @@ class CompactPinBudgetTest {
         // ~32_000 tokens. The ceiling is the budget plus the header line.
         assertTrue("pinned block grew to $tokens tokens", tokens <= 8_100L)
         assertTrue("the newest round must survive", inner.contains("r8-"))
-        assertTrue("the second newest round must survive", inner.contains("r7-"))
-        assertFalse("the third newest round must be gone", inner.contains("r6-"))
+        // [fix/r5-c1-compact-C01] The exemption set is {newest, oldest}: the
+        // earliest pin — the original task statement — is exactly what the pin
+        // exists to keep, so round 1 rides along with round 8 while the middle
+        // growth (r7 … r2) is the part that gets dropped.
+        assertTrue("the earliest round must survive (it is the pin's whole point)", inner.contains("r1-"))
+        assertFalse("the middle rounds are the growth that gets dropped", inner.contains("r7-"))
+        assertFalse("the middle rounds are the growth that gets dropped", inner.contains("r4-"))
     }
 }
