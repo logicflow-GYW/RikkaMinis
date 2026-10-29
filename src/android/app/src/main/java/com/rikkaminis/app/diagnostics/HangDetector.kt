@@ -30,8 +30,10 @@ import kotlinx.coroutines.flow.asStateFlow
  * home" (mode 3) so the user isn't trapped in a loop where every cold start
  * lands on a session that hangs the UI again.
  *
- * The counter resets when the user successfully runs a chat session for
- * [RESET_AFTER_QUIET_MS] without another hang firing — see [markHealthyTick].
+ * The counter resets once [RESET_AFTER_QUIET_MS] have passed since the last
+ * counted hang without another one firing. [fix/r5-d3] The watchdog now does
+ * this itself from its own healthy ticks ([healQuietHang]) instead of relying
+ * on a chat screen happening to mount — see [markHealthyTick].
  *
  * [T-android-hangdetector-foreground-gate] A silent main thread while the app
  * is BACKGROUND is classified as a background process freeze (HyperOS freezes
@@ -159,6 +161,17 @@ object HangDetector {
     /** [audit-0917] Serialises the read-modify-write of the hang counter
      *  between markHealthyTick (main thread) and recordHang (watchdog). */
     private val hangCounterLock = Any()
+
+    /**
+     * [fix/r5-d3] True once [recordHang] has counted a hang in THIS process.
+     * The watchdog self-heals only counters it owns: a count persisted by a
+     * previous process must stay readable by the cold-start breakers —
+     * [shouldForceHomeOnLaunch] is consulted from MainActivity / AppNavigation
+     * right after [start], so zeroing a carried-over count on the first
+     * healthy tick would silently disarm the "previous launches kept
+     * hanging" gate.
+     */
+    private val hangCountedThisProcess = AtomicBoolean(false)
     private const val KEY_LAST_HANG_AT = "last_hang_at_ms"
 
     private const val STALL_LOG_DIR = "logs"
@@ -229,17 +242,22 @@ object HangDetector {
     }
 
     /**
-     * Called by long-running healthy UI surfaces (e.g. ChatScreen) to confirm
-     * the main thread has been responsive for [RESET_AFTER_QUIET_MS] since the
-     * last hang. Cheap on the hot path — early-returns when the count is
-     * already 0.
+     * Called by healthy surfaces to confirm the main thread has been
+     * responsive for [RESET_AFTER_QUIET_MS] since the last hang. Two callers:
+     * the watchdog's own healthy branch ([healQuietHang] — [fix/r5-d3] this is
+     * the caller that actually closes the loop; the single ChatScreen
+     * `LaunchedEffect(sessionId)` tick fired once 10 s after mount and could
+     * never settle a hang that came later), and ChatScreen's entry tick.
+     * Thread-safe: the read-modify-write runs under [hangCounterLock]. Cheap
+     * on the hot path — early-returns when the count is already 0.
      */
     fun markHealthyTick() {
         val ctx = appContext ?: return
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         // [audit-0917] Read + reset under one lock. markHealthyTick is called
-        // from the main thread (ChatScreen) while recordHang does a concurrent
-        // read-modify-write of the same keys from the watchdog thread; without
+        // from the main thread (ChatScreen) and from the watchdog thread
+        // ([healQuietHang]) while recordHang does a concurrent
+        // read-modify-write of the same keys; without
         // mutual exclusion a reset landing between recordHang's read and write
         // was lost, and a hang recorded during the tick could be zeroed out.
         // Cheap on the hot path: the count check stays outside the lock.
@@ -300,6 +318,26 @@ object HangDetector {
 
     // -- internals -----------------------------------------------------------
 
+    /**
+     * [fix/r5-d3] Self-heal for a hang counted by THIS process. Runs on the
+     * watchdog thread from the healthy branch (a heartbeat just landed, so the
+     * main thread is responsive right now). [markHealthyTick] owns the rule —
+     * only after [RESET_AFTER_QUIET_MS] of quiet — and zeroes the count and
+     * the render breaker together under [hangCounterLock], so the reset still
+     * shares one critical section with [recordHang]'s read-modify-write.
+     *
+     * The gate flag keeps this from touching a counter carried over from a
+     * previous process: the cold-start breakers read that count, and a
+     * process that just launched has not earned a reset yet. The flag clears
+     * once the count reads 0, so healthy ticks stay free of prefs reads.
+     */
+    private fun healQuietHang() {
+        if (!hangCountedThisProcess.get()) return
+        val ctx = appContext ?: return
+        markHealthyTick()
+        if (currentHangCount(ctx) == 0) hangCountedThisProcess.set(false)
+    }
+
     private fun scheduleHeartbeat() {
         mainHandler.postDelayed({
             lastHeartbeatAt.set(System.currentTimeMillis())
@@ -355,6 +393,15 @@ object HangDetector {
                         println("[T-HANG-DIAG] ${outcome.log}")
                     }
                 }
+                // [fix/r5-d3] The main thread is responsive on this tick: settle
+                // a hang this process already counted once the quiet period has
+                // passed. Before this no caller could — the ChatScreen tick
+                // fired once 10 s after mount and resetHangCount has no
+                // production caller — so the counter stayed > 0 for the rest of
+                // the process and the next launch's LaunchCycleBeacon read it
+                // as a stall that killed the process (false banner + forced
+                // home after four accumulated cycles).
+                healQuietHang()
                 continue
             }
             if (phase == BackgroundFreezePolicy.Phase.HANG) {
@@ -473,6 +520,12 @@ object HangDetector {
                 .putInt(KEY_HANG_COUNT, n)
                 .putLong(KEY_LAST_HANG_AT, System.currentTimeMillis())
                 .apply()
+            // [fix/r5-d3] Mark the counter as this process's own so the
+            // watchdog's healthy branch may clear it once it goes quiet
+            // (see healQuietHang). A count carried over from a previous
+            // process deliberately stays untouched — the cold-start
+            // breakers depend on it.
+            hangCountedThisProcess.set(true)
             // [T-android-render-breaker] Trip the render degrade one hang BEFORE
             // the system would ANR-kill us (baseline showed death between #2/#3).
             // [fix/r4-s F-13] The trip lives inside the counter's critical
