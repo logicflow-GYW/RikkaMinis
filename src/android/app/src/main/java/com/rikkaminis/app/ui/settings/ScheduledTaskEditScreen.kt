@@ -79,6 +79,11 @@ fun ScheduledTaskEditScreen(
     // with Save locked for good (`original == null`) while Delete stayed live
     // on an id that no longer exists.
     var recordMissing by remember { mutableStateOf(false) }
+    // [R5-B2 F-04] The delete confirm's result: a refused write (disk full, or
+    // the store's unreadable guard) hands back the PRE-delete document, so the
+    // task is still there — closing the screen as if it were gone is the
+    // "silent close" the report pinned.
+    var deleteRefused by remember { mutableStateOf(false) }
     // [deep-audit-1046 S-11] "This screen has finished its initial read." The
     // change watcher below must not speak before it: a refresh that fires while
     // the load effect is still in flight would judge the form against a document
@@ -198,7 +203,17 @@ fun ScheduledTaskEditScreen(
                 TextButton(onClick = {
                     showDeleteConfirm = false
                     scope.launch {
-                        ScheduledTasksStore.deleteTask(context, taskId ?: return@launch)
+                        val after = ScheduledTasksStore.deleteTask(context, taskId ?: return@launch)
+                        // [R5-B2 F-04] The store returns the document that is
+                        // actually on disk. `deleteTask` now leaves the runner's
+                        // single-flight state alone when the write did not land,
+                        // so the screen must not pretend it did either: stay
+                        // here and say so instead of popping to a list where
+                        // the task is still visible.
+                        if (after.tasks.any { it.id == taskId }) {
+                            deleteRefused = true
+                            return@launch
+                        }
                         onDone()
                     }
                 }) { Text(stringResource(R.string.common_delete)) }
@@ -367,6 +382,23 @@ fun ScheduledTaskEditScreen(
         // dialog, never a bare swipe). Hidden for brand-new tasks — there
         // is nothing to delete yet.
         if (!isNew) {
+            // [R5-B2 F-04] A refused delete stays on this screen and says why,
+            // instead of popping back as if the task were gone. Reuses the
+            // existing write-failure wording (the store could not persist the
+            // deletion) — a dedicated string would be a 7-locale change, which
+            // this branch's file set does not carry.
+            if (deleteRefused) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = stringResource(
+                        R.string.backup_err_write,
+                        ScheduledTasksStore.fileFor(context).name,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             Spacer(Modifier.height(12.dp))
             MinisButton(
                 onClick = { showDeleteConfirm = true },

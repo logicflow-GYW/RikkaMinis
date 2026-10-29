@@ -302,6 +302,16 @@ object ScheduledTaskRunner {
             if (!ScheduledTaskStorePolicy.markerLanded(marked, task.id)) {
                 AppLogger.info(TAG, "abandon task=${task.id} reason=removed-mid-fire")
                 MemorySpikeRecorder.onEvent(TAG, "abandon task=${task.id} reason=removed-mid-fire")
+                // [R5-B2 C-06①] `prepareSession` already INSERTED this session
+                // (source="scheduled", titled after the task) — it is the only
+                // thing this fire pass leaves behind on the early return, and
+                // it would sit in the user's session drawer forever as an empty
+                // "scheduled" chat. It has never carried a prompt (this branch
+                // returns before ChatMutationMethods.prompt), so nothing the
+                // user wrote or saw lives in it: delete the session this pass
+                // created, not "the session" — [sid] is a fresh id from
+                // [HeadlessChatRunner.ensureSession], never a reused one.
+                dropNewSession(app, sid)
                 if (runningTaskId == task.id) runningTaskId = null
                 AgentRunBudgetCeilings.clear(sid)
                 return
@@ -364,12 +374,51 @@ object ScheduledTaskRunner {
 
     private suspend fun prepareSession(app: MinisApp, task: ScheduledTask): String {
         val sessionId = HeadlessChatRunner.ensureSession(app)
-        app.chatRepository.dao.updateSource(sessionId, "scheduled")
-        app.chatRepository.updateSessionTitle(
-            sessionId,
-            task.title.ifBlank { app.getString(R.string.scheduled_tasks_title) },
-        )
+        // [R5-B2 C-06①] `ensureSession` has already INSERTED the row. If either
+        // presentation step below throws, [fire]'s catch block cannot name the
+        // session (its `sessionId` local is still null), so the empty
+        // `scheduled` session would stay in the drawer forever. Drop the
+        // session THIS pass created, then rethrow: the fire path still settles
+        // the run exactly as before.
+        try {
+            app.chatRepository.dao.updateSource(sessionId, "scheduled")
+            app.chatRepository.updateSessionTitle(
+                sessionId,
+                task.title.ifBlank { app.getString(R.string.scheduled_tasks_title) },
+            )
+        } catch (t: Throwable) {
+            dropNewSession(app, sessionId)
+            throw t
+        }
         return sessionId
+    }
+
+    /**
+     * [R5-B2 C-06①] Delete a session this fire pass created and never used.
+     *
+     * The orphan: `fire` used to leave the freshly created `scheduled` session
+     * behind on both paths that abandon a run before dispatch — the
+     * `!markerLanded` early return (task deleted/disabled, or the marker write
+     * refused, during the `prepareSession` suspension) and a throwing
+     * `prepareSession`. Nothing was ever prompted into it, so it is an empty
+     * chat in the session drawer with a task title, one per abandoned fire.
+     *
+     * Scope: the CALLER decides that the id is disposable (this pass created
+     * it, no prompt was sent), so this helper never looks up ownership — it
+     * only contains the failure, because a failed cleanup must not take the
+     * fire path's own error handling down with it.
+     */
+    private suspend fun dropNewSession(app: MinisApp, sessionId: String) {
+        try {
+            val result = app.chatRepository.deleteSession(sessionId)
+            AppLogger.info(
+                TAG,
+                "dropped unused session=$sessionId" +
+                    if (result != null && !result.fullyDeleted) " (partial on-disk reclamation)" else "",
+            )
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "could not drop unused session=$sessionId: ${t.javaClass.simpleName}")
+        }
     }
 
     /**

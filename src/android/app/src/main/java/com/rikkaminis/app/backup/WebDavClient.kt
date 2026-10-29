@@ -492,7 +492,11 @@ class WebDavClient(
         val resources = mutableListOf<WebDavResourceInfo>()
 
         var inResponse = false
-        var statusOk = true
+        // [R5-B2 F-07①] Fail-closed: a response whose status was never written
+        // is not a success. It used to start at `true`, so a malformed answer
+        // (no `<status>` at all) was read as "200 OK" and its properties were
+        // committed.
+        var statusOk = false
         var href: String? = null
         var displayName: String? = null
         var contentLength = 0L
@@ -513,7 +517,10 @@ class WebDavClient(
         var inPropstat = false
         var sawPropstat = false
         var acceptedPropstat = false
-        var propstatOk = true
+        // [R5-B2 F-07①] Fail-closed, same reason as `statusOk`: a `<propstat>`
+        // without a `<status>` (or with an empty one) used to be committed as
+        // if it had answered 200.
+        var propstatOk = false
         var stagedDisplayName: String? = null
         var stagedContentLength: Long? = null
         var stagedLastModified: Instant? = null
@@ -561,7 +568,9 @@ class WebDavClient(
                         "propstat" -> if (inResponse) {
                             inPropstat = true
                             sawPropstat = true
-                            propstatOk = true
+                            // [R5-B2 F-07①] A new group starts as FAILED: only
+                            // an explicit 2xx `<status>` may arm it again.
+                            propstatOk = false
                             stagedDisplayName = null
                             stagedContentLength = null
                             stagedLastModified = null
@@ -579,14 +588,24 @@ class WebDavClient(
                         val text = parser.text?.trim().orEmpty()
                         if (text.isNotEmpty()) {
                             when (lastTag) {
-                                "href" -> href = text
+                                // [R5-B2 F-07②] An `<href>` inside a
+                                // `<propstat>` (lockdiscovery, or a 404 group
+                                // that echoes one) is a property value, not the
+                                // response's resource path: committing it
+                                // overwrote the real file path and every later
+                                // consumer (list / dedupe / filename) read the
+                                // wrong resource.
+                                "href" -> if (!inPropstat) href = text
                                 "status" -> if (inPropstat) {
-                                    propstatOk = text.contains(" 200")
+                                    // [R5-B2 F-07①] Explicit 2xx, not `" 200"`:
+                                    // the substring missed 201/204 and would
+                                    // also have matched inside other text.
+                                    propstatOk = isSuccessStatus(text)
                                 } else {
                                     // Response-level status (an error response
                                     // with no propstat at all): still the whole
                                     // answer.
-                                    statusOk = text.contains(" 200")
+                                    statusOk = isSuccessStatus(text)
                                 }
                                 "displayname" -> if (inPropstat) {
                                     stagedDisplayName = text
@@ -630,16 +649,34 @@ class WebDavClient(
                         // resource exists iff one group was 2xx; without them
                         // the response-level status is the only evidence.
                         val ok = if (sawPropstat) acceptedPropstat else statusOk
-                        if (h != null && ok && hrefPath(h) != requestPath) {
-                            resources.add(
-                                WebDavResourceInfo(
-                                    href = h,
-                                    displayName = displayName ?: decodeHrefSegment(h),
-                                    contentLength = contentLength,
-                                    lastModified = lastModified,
-                                    isCollection = isCollection,
+                        if (h != null) {
+                            val self = hrefPath(h) == requestPath
+                            if (self) {
+                                // [R5-B2 F-07③] The requested collection is
+                                // itself in the multistatus (depth-0 always,
+                                // depth-1 usually). Dropping it silently was
+                                // safe only while "no entries" meant "the
+                                // folder is empty": a server that answers 207
+                                // with `<status>404</status>` /
+                                // `403` for the collection made this parse
+                                // return an EMPTY LIST, which
+                                // `ensureCollectionExists` read as "the folder
+                                // exists" (no MKCOL, the following PUT fails)
+                                // and `testConnection` read as "connected".
+                                // Fail closed instead: the caller's null path
+                                // throws, so a failure is reported as one.
+                                if (!ok) return null
+                            } else if (ok) {
+                                resources.add(
+                                    WebDavResourceInfo(
+                                        href = h,
+                                        displayName = displayName ?: decodeHrefSegment(h),
+                                        contentLength = contentLength,
+                                        lastModified = lastModified,
+                                        isCollection = isCollection,
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                     lastTag = null
@@ -655,6 +692,24 @@ class WebDavClient(
         // not a document either.
         if (!rootSeen) return null
         return resources
+    }
+
+    /** [R5-B2 F-07①] A `<status>` line is a success only when the status code it
+     *  carries is 2xx.
+     *
+     *  The old criterion was `text.contains(" 200")` — it missed every other
+     *  2xx (201/204 in a multistatus, which RFC 4918 allows) and, being a
+     *  substring test, it also had to be read as "contains the word 200" rather
+     *  than "is 200". The code is the first 3-digit token, so
+     *  `HTTP/1.1 207 Multi-Status`, `HTTP/2 200` and a bare `200 OK` all read
+     *  correctly. Anything else (empty, truncated, non-numeric) is NOT a
+     *  success — the callers now default to false, so an unreadable status
+     *  must never be armed by a guess. */
+    private fun isSuccessStatus(statusLine: String): Boolean {
+        val code = statusLine.split(' ', '\t')
+            .firstOrNull { token -> token.length == 3 && token.all { it.isDigit() } }
+            ?: return false
+        return code[0] == '2'
     }
 
     /** Normalize an href (absolute URL or server path) to a bare path. */
