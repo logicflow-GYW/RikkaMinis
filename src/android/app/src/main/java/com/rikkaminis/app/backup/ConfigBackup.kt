@@ -2917,7 +2917,11 @@ object ConfigBackup {
         return url.substring(0, qIdx + 1) + redacted + frag
     }
 
-    internal fun sanitizeChatParts(partsJson: String?): String? {
+    internal fun sanitizeChatParts(partsJson: String?, slimText: Boolean = true): String? {
+        // [FIX-R5-B1 / F-15] slimText=false is the IMPORT face: dead media
+        // pointers are still dropped, but text is left at full size because
+        // ChatRepository.capPartsJsonForRow (500 KB, marker + original length)
+        // is the import-side size authority — see sanitizeIncomingParts.
         if (partsJson.isNullOrBlank()) return null
         val arr = try {
             JSONArray(partsJson)
@@ -2958,7 +2962,7 @@ object ConfigBackup {
                 // pasted logs / code dumps previously rode uncapped.
                 el.put(
                     "value",
-                    if (cleaned.length > MAX_BACKUP_TEXT_CHARS) {
+                    if (slimText && cleaned.length > MAX_BACKUP_TEXT_CHARS) {
                         cleaned.take(MAX_BACKUP_TEXT_CHARS) +
                             "\n… [truncated ${cleaned.length - MAX_BACKUP_TEXT_CHARS} chars]"
                     } else cleaned
@@ -2973,7 +2977,7 @@ object ConfigBackup {
                 // lands mid-JSON.
                 val value = el.optJSONObject("value") ?: el
                 val input = value.optString("input")
-                if (input.length > MAX_BACKUP_TOOL_INPUT_CHARS) {
+                if (slimText && input.length > MAX_BACKUP_TOOL_INPUT_CHARS) {
                     value.put(
                         "input",
                         input.take(MAX_BACKUP_TOOL_INPUT_CHARS) +
@@ -2993,7 +2997,7 @@ object ConfigBackup {
                 // pointer goes.
                 value.remove("mediaRef")
                 val output = value.optString("output")
-                if (output.length > MAX_BACKUP_TOOL_OUTPUT_CHARS) {
+                if (slimText && output.length > MAX_BACKUP_TOOL_OUTPUT_CHARS) {
                     value.put(
                         "output",
                         output.take(MAX_BACKUP_TOOL_OUTPUT_CHARS) +
@@ -3029,10 +3033,18 @@ object ConfigBackup {
      * pass re-truncates an already-"… [truncated N chars]" text), which is why
      * the `.minisbak` converter does NOT sanitize its own output — everything
      * passes through [importChatSections] before it reaches the database.
+     *
+     * It also runs with `slimText = false`: media pointers are still dropped,
+     * but text/tool payloads are NOT slimmed to the export caps, because the
+     * writer's byte ceiling ([ChatRepository.capPartsJsonForRow], 500 KB,
+     * "Content truncated at 500 KB — original length N chars") is the
+     * import-side size authority (pinned by PartsJsonFunnelTest). Slimming
+     * here first would leave that ceiling nothing to truncate and silently
+     * shorten a restored row short of the budget it is allowed to use.
      */
     internal fun sanitizeIncomingParts(raw: String): String {
         if (raw.isBlank()) return raw
-        sanitizeChatParts(raw)?.let { return it }
+        sanitizeChatParts(raw, slimText = false)?.let { return it }
         return if (runCatching { JSONArray(raw) }.isSuccess) "" else raw
     }
 
