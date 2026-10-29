@@ -105,7 +105,7 @@ object SessionActivityTracker {
      * [R4-U F-05] Idle-stop deadline extended so a background turn end can show
      * the completion capsule (pure core, [CompletionLinger]). 0 = no linger.
      */
-    private var completionLingerUntilMs = 0L
+    private var completionLingerUntilMs = CompletionLinger.CLEARED
 
     /**
      * [R4-U F-06] Which registry key an unattributed tool update belongs to.
@@ -135,6 +135,25 @@ object SessionActivityTracker {
             // Only an attributed entry may retarget the capsule: the shared
             // bucket cannot say which chat the work belongs to.
             if (slot.sessionId.isNotBlank()) _currentSessionId.value = slot.sessionId
+        } else {
+            // [R5-D F-01②] Nothing left to render. Keeping the ended session's
+            // tool line here left the notification describing a tool nobody is
+            // running any more, and kept the capsule's tap target pointed at a
+            // finished chat while another session still streams. Reset to the
+            // idle line and re-align the id to whoever is still active.
+            _currentToolStatus.value = ToolSlotRegistry.IDLE_STATUS
+            val active = _activeSessions.value
+            if (active.isNotEmpty()) {
+                _currentSessionId.value = when {
+                    active.size == 1 -> active.first()
+                    // Several sessions but no tool: keep the id only if it is
+                    // one of them, else the most recently activated session.
+                    else -> _currentSessionId.value?.takeIf { it in active }
+                        ?: active.lastOrNull()
+                }
+            }
+            // active.isEmpty() deliberately keeps the id: setInactive preserves
+            // the finished turn's tap target for the completion capsule.
         }
     }
 
@@ -245,7 +264,7 @@ object SessionActivityTracker {
             mainHandler.postDelayed(pendingIdleStop, remaining)
             return@Runnable
         }
-        completionLingerUntilMs = 0L
+        completionLingerUntilMs = CompletionLinger.CLEARED
         stopServiceNow()
     }
 
@@ -286,6 +305,18 @@ object SessionActivityTracker {
     fun maybeRefreshService() {
         if (isAppForeground && shouldRunService()) {
             startServiceIfNeeded()
+            return
+        }
+        // [R5-D F-04②] Back in the foreground with nothing left to run. The
+        // overlay hides itself on a foreground transition (the user is reading
+        // the chat), so the completion window has nothing left to buy — without
+        // this the capsule's 30 s linger kept a foreground service (and its
+        // "tool running" row) alive while the user was looking at the finished
+        // reply. Only reached when a linger is actually armed, i.e. the state
+        // setInactive armed for a BACKGROUND turn end.
+        if (isAppForeground && completionLingerUntilMs > CompletionLinger.CLEARED) {
+            completionLingerUntilMs = CompletionLinger.CLEARED
+            scheduleIdleStop()
         }
     }
 
@@ -410,6 +441,16 @@ object SessionActivityTracker {
         _lastToolName.value = null
         _lastToolTitle.value = null
         _lastToolStatus.value = null
+        // [R5-D F-04②] Dismissing the capsule removes the ONLY reason the
+        // service is still alive after the turn ended. Leave the linger armed
+        // and the idle stop stays deferred for the rest of the 30 s window: a
+        // foreground service (and its ongoing row) kept up by a capsule the
+        // user just closed. Clearing the deadline lets the next idle-stop pass
+        // stop immediately; re-arming it through scheduleIdleStop() keeps the
+        // same 500 ms debounce as every other stop so a draft→persisted session
+        // swap in adjacent frames still cannot turn into a stop/start race.
+        completionLingerUntilMs = CompletionLinger.CLEARED
+        if (!shouldRunService()) scheduleIdleStop()
     }
 
     /**
@@ -455,9 +496,17 @@ object SessionActivityTracker {
         _lastToolName.value = null
         _lastToolTitle.value = null
         _lastToolStatus.value = null
+        // [R5-D F-01①] Run-boundary slot reset. A session runs one agent loop
+        // at a time, so any tool entry left under THIS session's key belongs to
+        // a finished run — most often a start whose finish never arrived (a
+        // preflight/loop-guard refusal skips clearToolRunning, which is the one
+        // leak the finish fallback cannot see because no finish ever comes).
+        // Dropping it here and in [setInactive] bounds the phantom to a single
+        // turn; it must not outlive the run that created it.
+        toolSlots.drop(sessionId)
         AppLogger.info(TAG, "Session activated: $sessionId (total: ${_activeSessions.value.size})")
         // [R4-U F-05] A new run supersedes any completion capsule window.
-        completionLingerUntilMs = 0L
+        completionLingerUntilMs = CompletionLinger.CLEARED
 
         if (wasIdle) {
             startServiceIfNeeded()
@@ -522,6 +571,19 @@ object SessionActivityTracker {
                 appForeground = isAppForeground,
                 eligible = AgentForegroundService.completionLingerEligible(),
             )
+            // [R5-D F-04①] The service now outlives the turn to carry the
+            // capsule, so its ongoing notification has to be repainted with
+            // the state the flows above just cleared into (no tool, no
+            // spinner). Skipping the refresh froze row 9001 on the finished
+            // turn's tool line + indeterminate progress for the WHOLE window —
+            // the exact "假运行" this window must not produce. Safe from the
+            // background: notify on an already-running service, no start call.
+            if (completionLingerUntilMs > CompletionLinger.CLEARED) {
+                AgentForegroundService.refreshIfRunning(
+                    sessionCountForNotification(),
+                    statusForNotification(),
+                )
+            }
             stopService()
         } else {
             // [R4-U F-06] Another session is still streaming: re-derive the
