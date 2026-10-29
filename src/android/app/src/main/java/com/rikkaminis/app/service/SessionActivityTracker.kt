@@ -239,7 +239,7 @@ object SessionActivityTracker {
         )
         if (remaining > 0L) {
             AppLogger.info(TAG, "idle stop deferred $remaining ms for completion capsule")
-            mainHandler.postDelayed(this, remaining)
+            mainHandler.postDelayed(pendingIdleStop, remaining)
             return@Runnable
         }
         completionLingerUntilMs = 0L
