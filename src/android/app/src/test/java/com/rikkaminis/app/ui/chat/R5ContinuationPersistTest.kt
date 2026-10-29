@@ -409,24 +409,23 @@ class R5ContinuationPersistTest {
     }
 
     @Test
-    fun emptyReplyTerminalsGoThroughTheSharedFlush() {
+    fun emptyReplyTerminalsCarryTheUnpersistedSliceIntoTheirBannerRow() {
         val code = withoutComments(readRepoFile(engineRel))
         assertEquals(
-            "no terminal may hand-write the blank row any more: it dropped every segment the " +
+            "no site may hand-write a blank parts list any more: it dropped every segment the " +
                 "continuation `continue` branches had already streamed",
-            1,
-            count(code, "listOf(AgentContentPart.Text(\"\"))"),
-        )
-        assertTrue(
-            "the one remaining blank-row write belongs to the shared helper",
-            code.contains(
-                "writeEmptyRowWhenNothingToPersist -> listOf(AgentContentPart.Text(\"\"))",
-            ),
+            0,
+            count(code, "listOf(AgentContentPart.Text(\"\")"),
         )
         assertEquals(
-            "the two empty-reply terminals both ride the helper now",
-            3,
-            count(code, "writeEmptyRowWhenNothingToPersist ="),
+            "both empty-reply terminals route their parts through the placement helper",
+            2,
+            count(code, "carriedTurnParts = TerminalErrorPlacement.partsForTerminalError("),
+        )
+        assertEquals(
+            "…and both anchor the row they just wrote",
+            2,
+            count(code, "markTurnPersisted(loopState, carriedRowId)"),
         )
     }
 

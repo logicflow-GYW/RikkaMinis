@@ -661,22 +661,19 @@ internal class AgentLoopEngine(
     }
 
     /**
-     * [R5-C2] Write the run's un-persisted block range as ONE assistant row and
-     * anchor the transcript entry that stands for it.
+     * [R5-C2] Persist the run's un-persisted block range as ONE assistant row and
+     * hand the row id to [markTurnPersisted].
      *
-     * The two in-loop terminals (`toolCalls.isEmpty()` tail, tool path) already
-     * do this inline; the failure terminals added here are outside the loop, so
-     * they cannot reuse those locals. Sharing one helper is what keeps the
-     * three copies from drifting — `scripts/scan/loop_persist_slice_check.py`
-     * R1/R8/R9 pin the slice start, the "advance only on a real row id" rule
-     * and the anchor, so a drifted copy fails the gate rather than shipping.
+     * Used by the pre-finalize flush: a turn/budget ceiling right after a
+     * continuation `continue` leaves blocks the user already watched with no row
+     * over them, and both finalizers write their banner through
+     * `updateLastAssistantError` = "the session's LAST assistant row".
      *
-     * [writeEmptyRowWhenNothingToPersist] preserves the "this turn owes the
-     * user a banner, so it first needs a row" contract of the two empty-reply
-     * branches: `persistAssistantTurn` refuses an empty part list, and
-     * `setInlineError` then stamps the banner onto the PREVIOUS turn's row (see
-     * [TerminalErrorPlacement]). It is NOT used by the pre-finalize flush:
-     * there, an empty range legitimately means "nothing to write".
+     * An empty range is NOT an error here — every exit that went through an
+     * in-loop terminal has one, and writing a row for it would fabricate a
+     * message. The two empty-reply terminals therefore keep writing their banner
+     * row directly through `TerminalErrorPlacement.partsForTerminalError`, which
+     * is the call order `TerminalErrorPlacementTest` pins.
      *
      * Returns the row id, or null when no row was written.
      */
@@ -684,41 +681,51 @@ internal class AgentLoopEngine(
         loopState: AgentLoopState,
         usage: LLMUsage?,
         reasoningContent: String?,
-        writeEmptyRowWhenNothingToPersist: Boolean,
     ): String? {
         val parts = host.buildTurnParts(
             loopState.allToolBlocks,
             loopState.unpersistedBlockStart,
             loopState.allToolInputs,
         )
-        val partsToWrite = when {
-            parts.isNotEmpty() -> parts
-            writeEmptyRowWhenNothingToPersist -> listOf(AgentContentPart.Text(""))
-            else -> return null
-        }
-        val blockMeta = loopState.allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
+        if (parts.isEmpty()) return null
         val flushedRowId = host.persistAssistantTurn(
-            partsToWrite, usage, reasoningContent, blockMeta,
+            parts, usage, reasoningContent, turnBlockMeta(loopState),
             modelId = loopState.currentProvider.model.id,
             entryId = host.activeEntryId,
         )
-        if (flushedRowId != null) {
-            // Advance ONLY on a real row id: a failed insert must leave the
-            // range un-covered so the next persist (or the next run's retry)
-            // still sees those blocks.
+        markTurnPersisted(loopState, flushedRowId)
+        return flushedRowId
+    }
+
+    /**
+     * [R5-C2] Tool-block metadata for a persist — the same shape the two in-loop
+     * terminals build, lifted so the failure terminals cannot drift from it
+     * (a missing entry here strips a tool block of its result).
+     */
+    private fun turnBlockMeta(loopState: AgentLoopState): Map<String, AssistantBlock> =
+        loopState.allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
+
+    /**
+     * [R5-C2] After a row lands: advance the un-persisted cursor and anchor the
+     * transcript entry that stands for it.
+     *
+     * Advance ONLY on a real row id — a failed insert must leave the range
+     * un-covered, so the next persist (or the next run) still sees those blocks.
+     * The anchor is the same one the two in-loop terminals write: compaction
+     * resolves its boundary through this db id, so an un-anchored entry degrades
+     * the walk after a reload.
+     */
+    private fun markTurnPersisted(loopState: AgentLoopState, rowId: String?) {
+        if (rowId != null) {
             loopState.unpersistedBlockStart = loopState.allToolBlocks.size
-            // Same anchor the two in-loop terminals write — compaction resolves
-            // its boundary through this db id; without it the reloaded answer
-            // has no DB anchor and falls back to a degraded walk.
             val lastAssistantIdx = host.agentHistory.indexOfLast {
                 it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null
             }
             if (lastAssistantIdx >= 0) {
                 host.agentHistory[lastAssistantIdx] =
-                    host.agentHistory[lastAssistantIdx].copy(dbMessageId = flushedRowId)
+                    host.agentHistory[lastAssistantIdx].copy(dbMessageId = rowId)
             }
         }
-        return flushedRowId
     }
 
     /** Verbatim lift of ChatViewModel.runAgentLoop entry (FE-5 route C step 3). */
@@ -2644,15 +2651,27 @@ internal class AgentLoopEngine(
                     // continuation loop can still hold un-persisted segments
                     // streamed by the earlier `continue` branches; writing the
                     // blank row alone dropped them for good (the run breaks out
-                    // of the loop right here). The shared flush persists the
-                    // un-persisted range when there is one and keeps the
-                    // blank-row contract when there is not.
-                    flushUnpersistedTurnRow(
-                        loopState = loopState,
-                        usage = lastUsage,
-                        reasoningContent = null,
-                        writeEmptyRowWhenNothingToPersist = true,
+                    // of the loop right here). Route the slice through
+                    // partsForTerminalError: an un-persisted range IS this
+                    // turn's row, an empty one still gets the blank row the
+                    // banner needs.
+                    val carriedTurnParts = TerminalErrorPlacement.partsForTerminalError(
+                        host.buildTurnParts(
+                            loopState.allToolBlocks,
+                            loopState.unpersistedBlockStart,
+                            loopState.allToolInputs,
+                        ),
+                        host.string(R.string.error_stream_interrupted),
                     )
+                    val carriedRowId = host.persistAssistantTurn(
+                        carriedTurnParts,
+                        lastUsage,
+                        null,
+                        turnBlockMeta(loopState),
+                        modelId = loopState.currentProvider.model.id,
+                        entryId = host.activeEntryId,
+                    )
+                    markTurnPersisted(loopState, carriedRowId)
                     withContext(Dispatchers.Main) {
                         host.setInlineError(host.string(R.string.error_stream_interrupted))
                     }
@@ -2750,12 +2769,23 @@ internal class AgentLoopEngine(
                 // [R5-C2] Same "empty means THIS turn" correction: any segment
                 // still un-persisted (a continuation `continue` above streamed
                 // it) rides this row instead of being dropped by the blank write.
-                flushUnpersistedTurnRow(
-                    loopState = loopState,
-                    usage = lastUsage,
-                    reasoningContent = null,
-                    writeEmptyRowWhenNothingToPersist = true,
+                val carriedTurnParts = TerminalErrorPlacement.partsForTerminalError(
+                    host.buildTurnParts(
+                        loopState.allToolBlocks,
+                        loopState.unpersistedBlockStart,
+                        loopState.allToolInputs,
+                    ),
+                    host.string(R.string.error_content_filtered),
                 )
+                val carriedRowId = host.persistAssistantTurn(
+                    carriedTurnParts,
+                    lastUsage,
+                    null,
+                    turnBlockMeta(loopState),
+                    modelId = loopState.currentProvider.model.id,
+                    entryId = host.activeEntryId,
+                )
+                markTurnPersisted(loopState, carriedRowId)
                 withContext(Dispatchers.Main) {
                     host.setInlineError(host.string(R.string.error_content_filtered))
                 }
@@ -3098,11 +3128,11 @@ internal class AgentLoopEngine(
                         // back and drop it there.
                         val prevTailIdx = host.agentHistory.size - 2
                         val prevTail = host.agentHistory.getOrNull(prevTailIdx)
-                        val tailIsLengthWallReminder = prevTail != null &&
-                            prevTail.role == LLMMessage.Role.USER &&
-                            prevTail.contentParts.size == 1 &&
-                            (prevTail.contentParts.first() as? AgentContentPart.Text)?.text
-                                ?.contains("cut off mid-sentence") == true
+                        // [R5-C2] Same family predicate the error-shaped branch
+                        // ORs in — one source per reminder family, instead of a
+                        // second copy of the marker text drifting here.
+                        val tailIsLengthWallReminder =
+                            ContinuationHistoryMerge.isLengthWallReminder(prevTail)
                         if (tailIsLengthWallReminder) {
                             host.agentHistory.removeAt(prevTailIdx)
                         }
@@ -4426,7 +4456,6 @@ internal class AgentLoopEngine(
                     loopState = loopState,
                     usage = lastSegmentUsage,
                     reasoningContent = lastSegmentReasoning,
-                    writeEmptyRowWhenNothingToPersist = false,
                 )
             }.onFailure { e ->
                 AppLogger.warning(
