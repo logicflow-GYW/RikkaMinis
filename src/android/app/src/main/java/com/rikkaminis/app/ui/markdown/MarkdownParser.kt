@@ -694,6 +694,14 @@ object MarkdownParser {
         // `$5>$3`, `US$5-US$10`). Price ranges with no space around the operator
         // are the common case in LLM prose about money.
         if (isCurrencyShaped(content)) return false
+        // [r5-f / F-07, P1] The same net, one shape wider: a price whose amount
+        // carries a unit/magnitude suffix (`$5k-$10k`, `$5M-$10M`,
+        // `$10/mo-$20/mo`, `$5B+$2B`, `US$5k-US$10k`). `isCurrencyShaped`
+        // refuses a price by requiring "no letter at all", so these forms
+        // (`5k-`, `5M-`, `10/mo-`) slipped past it and the operator scan below
+        // accepted the trailing `-`/`+` — both `$` were consumed and `5k-` went
+        // to KaTeX. Ruled out BEFORE that scan, same as the digit-only forms.
+        if (isCurrencyRangeShaped(content)) return false
         // T208 Layer B: previous heuristic rejected single-letter math like
         // `$c$` or `$i$` — `length > 2` returned false and the literal
         // dollar-wrapped text leaked into the rendered output. Any of:
@@ -744,6 +752,40 @@ object MarkdownParser {
         }
         return true
     }
+
+    /**
+     * [r5-f / F-07, P1] The "price range with a suffix" twin of
+     * [isCurrencyShaped]: true when a `$ … $` candidate is the LEFT HALF of a
+     * money range whose amounts carry a unit or a magnitude suffix —
+     * `$5k-$10k`, `$5M-$10M`, `$10/mo-$20/mo`, `$5B+$2B`, `US$5k-US$10k`.
+     *
+     * Every part of the shape is something a price writes and a formula does
+     * not, read from the inside out:
+     *  - a number (`5`, `1.5`, `1,000`);
+     *  - an optional magnitude suffix of 1–3 ASCII letters (`k`, `M`, `B`, `bn`);
+     *  - an optional `/unit` run of 1–6 letters/digits (`/mo`, `/user`, `/月`);
+     *  - exactly one money operator — `-` `+` `<` `>`. `=` `^` `_` `{` `}` are
+     *    absent on purpose: those mean equation or LaTeX structure, not price
+     *    arithmetic (same split as [NON_CURRENCY_MATH_GLYPHS]);
+     *  - an optional CAPS currency prefix of 1–3 letters, which the pairing
+     *    swallowed together with the operator (`US$5k-US$10k` → `5k-US`).
+     *
+     * The CAPS clause is the narrowest one on purpose: `$5-x$` still reads as
+     * `5 − x` and stays math, while `US$5k-US$10k` reads as money and stays
+     * text. Text is the honest failure here — a missed formula still shows its
+     * own `$…$` to the user, a swallowed price range silently deletes the `$`.
+     *
+     * ponytail: decision by content shape, not by reading the sentence |
+     * 天花板: a formula literally shaped `<number><unit><op><CAPS>` in caps
+     * (e.g. `$5k-X$`) reads as money and stays text | 升级触发: a report of a
+     * swallowed formula whose `$ … $` content matches this pattern verbatim.
+     */
+    private val MONEY_RANGE_CONTENT = Regex(
+        "^[0-9][0-9.,]*\\s*(?:[A-Za-z]{1,3})?(?:/[\\p{L}\\p{N}]{1,6})?\\s*[-+<>]\\s*(?:[A-Z]{1,3})?$"
+    )
+
+    private fun isCurrencyRangeShaped(content: String): Boolean =
+        MONEY_RANGE_CONTENT.matches(content)
 
     /**
      * Walk the AST replacing math placeholders. Display-math placeholders
