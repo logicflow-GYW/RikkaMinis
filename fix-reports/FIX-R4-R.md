@@ -2,8 +2,11 @@
 
 - **分支**：`fix/r4-b12-rpc`
 - **基线**：main `2103729f`
-- **提交**：`83429223`（五条主体）→ `653b79ee`（F-02 按门 C16 归位）→ `c0d3f0d6`（F-10 头部边界）→ `e65a8724`（F-10 活性守卫）
-- **改动面**：3 个生产文件 `+283 / −45`（`DebugRPCHandler.kt` / `HeadlessChatRunner.kt` / `ProviderMutationMethods.kt`），测试 0，`scripts/scan/**` **零触碰**
+- **提交**（7 笔，全在 `fix/r4-b12-rpc`）：`83429223`（五条主体）→ `653b79ee`（F-02 按门 C16 归位）→
+  `c0d3f0d6`（F-10 头部边界）→ `e65a8724`（F-10 活性守卫）→ `a3828b3c`（本报告首版）→
+  `3841f258`（F-02 helper 返回 `MutableList`，CI 编译红）→ `421669bc`（测试负控锚点跟踪新签名 + 行门两臂）
+- **改动面**：生产 3 文件 `+288 / −45`（`DebugRPCHandler.kt` / `HeadlessChatRunner.kt` / `ProviderMutationMethods.kt`）+ 既有形状测试 1 文件 `+39 / −1`（`HeadlessChatCancelStoreWiringTest.kt`）+ 本报告。`scripts/scan/**` **零触碰**
+- **CI**：**绿** — run `40798297683` #2876 @ `421669bc`（success 21m34s，27 步 25 success + 2 skipped + 0 其他）
 - **判读口径**：本报告的证据分三级并逐条标注 —— **读码级**（真码锚点，可指认行）> **门级**（`scripts/scan/*` rc=0，机械）> **运行时级**（JVM 探针 / 真机）。本支**没有运行时级证据**，原因见 §8。
 
 ---
@@ -159,11 +162,24 @@ if (id.isNotEmpty() && SystemVoiceEntries.isKnownGroupMemberId(id, knownEntryIds
 
 | 项 | 读数 |
 |---|---|
-| workflow | `build-apk.yml`（`workflow_dispatch`, `ref=fix/r4-b12-rpc`） |
-| run id | 见下方「CI 回填」 |
-| head_sha | 见下方「CI 回填」（应为 `e65a8724`，逐字符核对） |
+| workflow | `build-apk.yml`（`workflow_dispatch`，`ref=fix/r4-b12-rpc`） |
+| run | **#2876 / `40798297683`** |
+| head_sha | **`421669bc`** — 与本地 HEAD 逐字符一致 |
+| 结论 | **success**，21m34s（01:05:54Z → 01:27:28Z） |
+| 步骤 | 27 步 = **25 success + 2 skipped**（rolling tag / Publish，均为 `if: main` 门控）+ **0 其他** |
+| 日志 | 1,571,568 字符 / NUL 0 / `^e: ` **0** / 含 `FAILED` 的 6 行**逐条确认全是 `PASSED` 用例名子串** |
+| 门集 | `[1/113]` 头 + `Summary: 113 passed, 0 failed` |
+| 单测 | 7 段 `Summary: N passed, 0 failed`（25 / 16 / 44 / 19 / 30 / 18 / 113，全部 0 failed）；`ALL 349 CASES PASS` ×1；`HeadlessChatCancelStoreWiringTest` **10 passed / 0 failed**（含本支新增 2 例） |
 
-**CI 回填**：dispatch 后回填本表（结论 / 耗时 / 27 步非 success 计数 / `Summary: N passed, 0 failed` / `ALL … CASES PASS` / `^e: ` 计数 / `head_sha` 逐字符比对）。
+**本支 CI 三轮（两红一绿，两红都是自身缺陷，逐轮记清以免下次重犯）**
+
+| 轮 | run | head | 结果 | 失败点 | 根因 | 修在 |
+|---|---|---|---|---|---|---|
+| 1 | `40794528308` #2867 | `a3828b3c` | failure | `:app:compileReleaseKotlin` | F-02 helper 返回 `List<String>`，而 `ModelGroup.memberEntryIds` 是 `MutableList<String>` —— 两个写入面的 `copy(…)` 参数类型不匹配（`ProviderMutationMethods.kt:711 / :746`） | `3841f258` |
+| 2 | `40795892663` #2869 | `3841f258` | failure | unit tests（唯一用例） | `HeadlessChatCancelStoreWiringTest > negative control - cancel back to reading only the private cache is caught` —— **不是生产侧没被挡住**：该负控的变异锚点写死了旧调用 `viewModelForCancel(context, sessionId)`，F-01 给 resolver 加了 `persisted` 实参后锚点失配，`assertTrue("the wiring must exist to be mutated", mutated != original)` 先红。生产侧 `cancel` 体内 `providers[sessionId]` 已不存在（只在 resolver 里，属快路径契约），`assertResolvesThroughStore` 的正向判据在第 2 轮其实是**成立的** | `421669bc`：锚点跟踪新形状 + 新增行门正/负两臂（`holdsRowGate` + 删 `peekViewModel` 行必须判红） |
+| 3 | `40798297683` #2876 | `421669bc` | **success** | — | — | — |
+
+第 2 轮的性质要单列，因为容易被误读：**「负控判红」有两种完全不同的含义** ——(a) 生产侧真的没挡住（负控的变异体逃过了判据）、(b) 负控的**变异锚点**没匹配上生产（变异没落地，`mutated == original`）。本轮是 (b)：断言信息 `"the wiring must exist to be mutated"` 是判据自带的判别位，(a) 会红在 `"...must fail the single-source probe"` 那一句。修法因此不是改生产代码，而是让锚点跟上生产签名——并顺手补上新守卫的正臂/负臂，让这一条从「只测 store 单源」扩到「store 单源 + 行门」。三轮之后该测试类从 8 例变 10 例、10/10 绿。
 
 ---
 
@@ -178,16 +194,21 @@ if (id.isNotEmpty() && SystemVoiceEntries.isKnownGroupMemberId(id, knownEntryIds
 | R5 | F-10 只保证头/尾落在字符边界；页内中间若有坏字节，仍会整页判二进制 | 同上 | 同 R4 |
 | R6 | 五条全链路**真机未验** | 需要真机时 | 用 `debug.readFile` 对中文日志按 `limit=1000` 翻页两次比对；`provider.instances.test` 指向首页 URL；`groups.update` 传重复 id 后进组详情页 |
 | R7 | 本报告的「报告说法」是笔记重述（任务书原文随事故丢失） | 需要逐字比对时 | 主会话若留有任务书副本，按原文校对 §2 |
+| R8 | 新增测试段的分节注释缩进为列 0（见 §8 第 7 条）——刻意不改，避免绿 sha 与 tip 出现非报告差异 | 下次触碰 `HeadlessChatCancelStoreWiringTest.kt` 时 | 顺手缩进对齐即可，无语义 |
 
 ---
 
 ## 7. 改动面
 
 ```
-src/android/app/src/main/java/com/rikkaminis/app/debug/DebugRPCHandler.kt          +80 −5
-src/android/app/src/main/java/com/rikkaminis/app/debug/HeadlessChatRunner.kt       +38 −2
-src/android/app/src/main/java/com/rikkaminis/app/debug/ProviderMutationMethods.kt +165 −38
+src/android/app/src/main/java/com/rikkaminis/app/debug/DebugRPCHandler.kt                          +85  −5
+src/android/app/src/main/java/com/rikkaminis/app/debug/HeadlessChatRunner.kt                       +38  −2
+src/android/app/src/main/java/com/rikkaminis/app/debug/ProviderMutationMethods.kt                 +165 −38
+src/android/app/src/test/java/com/rikkaminis/app/debug/HeadlessChatCancelStoreWiringTest.kt        +39  −1
+fix-reports/FIX-R4-R.md                                                                           +204  −0
 ```
+
+生产 **+288 / −45**（3 文件），测试 **+39 / −1**（1 文件，既有的形状测试跟踪新签名 + 新增 2 例）。
 
 禁改域**全部零触碰**（`git diff --name-only 2103729f HEAD` 只含上面三个文件）：`scripts/scan/**`、`scan.sh`、`test_scan.py`、`src/**/ui/**`、`backup/**`、`sandbox/**`、`strings.xml`。
 
@@ -202,3 +223,5 @@ src/android/app/src/main/java/com/rikkaminis/app/debug/ProviderMutationMethods.k
 3. **代码安全网**：首笔提交后立刻 push（`83429223` 上远端），此后每完成一条即 commit + push；worktree 另 tar 到 `/var/minis/mounts/背景包/_shared/r4-rescue/fix-r4-b12-rpc.tar.gz`。
 4. **门是唯一可靠的自动判据**（本支实证）：`provider_rpc_symmetry_check` C16 抓到了我「更优雅但破形状」的重构。教训与 R3 各支一致 —— **改形状敏感面之前先想它被哪道门的函数体判据钉住**；本轮的正确动作是改修法（谓词留在面），不是改门。
 5. **自查抓到的两处自身缺陷**（`c0d3f0d6` / `e65a8724`）：严格解码必须以字符边界起解（自定义 `offset` 场景）；截短不得把推进量压到 0（`limit` < 单字符会死循环）。两条都是「修一个 bug 引入的另一类 bug」，靠写完自己读一遍 diff 抓到，没有装置可依赖 —— 这是本支最薄的一环。
+6. **沙箱内没有 Kotlin 编译器 ⇒ 编译级错误只能由云端 CI 兜**（本支实证两轮：`MutableList` 类型不匹配、形状测试锚点失配）。可复用的替代手段只有两条：①改「被既有测试钉死形状」的函数签名时，`rg` 出整个 `src/test` 的引用点并逐个跟（本轮漏了一条负控锚点）；②纯逻辑（判据、切页、枚举解析）用 Python 复现同一套断言（本支 `replay_wiring_test.py` 12/12，逐条对应 Kotlin 用例的正/负臂）——它不能替代编译，但能在 dispatch 之前抓掉判据级回归。
+7. **保留一处刻意的不修**：新增测试段的分节注释缩进（`// ── [R4-R F-01] the row gate`）落在列 0（R8）。修它会让本地 tip 与绿 sha 差一行非报告改动，而 V4 收口判据要求「绿 sha..tip 只含 fix-reports」⇒ 留到下一次触碰该文件时顺手对齐。
