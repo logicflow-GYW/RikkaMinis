@@ -32,6 +32,12 @@ object LaunchCycleBeacon {
      * banner: in the ANR-restart loop the banner was an unguarded "continue"
      * button that re-entered the exact load that killed the previous cycle —
      * with this flag it warns and requires a confirming second tap.
+     *
+     * [fix/r4-s F-12] "crash_or_stall" is decided by [crashVerdict]: a
+     * `crash-*.log` / `native-crash-*.log` in the previous cycle is proof; a
+     * `stall-*.log` alone is only proof that a hang HAPPENED — it counts as a
+     * bad exit only while HangDetector's persisted counter is still > 0 (i.e.
+     * the hang never self-healed). See [crashVerdict] for the full rationale.
      */
     @Volatile
     var lastCycleWasCrash: Boolean = false
@@ -265,17 +271,76 @@ object LaunchCycleBeacon {
         // Look for crash artefacts produced between previous launch and now.
         val logsDir = File(context.filesDir, "logs")
         val previousLaunchMs = parseTs(lastLaunch) ?: return "ambiguous_no_timestamp"
-        val crashLogs = logsDir.listFiles()?.filter { f ->
+        val artefacts = logsDir.listFiles()?.filter { f ->
             val name = f.name
             (name.startsWith("crash-") || name.startsWith("native-crash-") || name.startsWith("stall-")) &&
                 f.lastModified() in previousLaunchMs..now
         }.orEmpty()
-        if (crashLogs.isNotEmpty()) {
-            return "crash_or_stall (${crashLogs.joinToString { it.name }})"
+        // [fix/r4-s F-12] HangDetector's persisted counter is the only signal
+        // that separates "a hang happened but the app recovered" from "the
+        // process died at/after a hang". Read failures fall back to 0 (treat
+        // the stall as healed): the nagging direction — banner + forced home —
+        // is the one that hurts users, and a real crash is still caught by the
+        // crash-*.log arm above.
+        val unrecoveredHangCount = try {
+            HangDetector.currentHangCount(context)
+        } catch (_: Throwable) {
+            0
         }
-        // No crash, no clean exit — likely OOM / LMK / MIUI background cleanup.
+        val verdict = crashVerdict(
+            crashArtefacts = artefacts
+                .filterNot { it.name.startsWith("stall-") }
+                .map { it.name },
+            stallArtefacts = artefacts
+                .filter { it.name.startsWith("stall-") }
+                .map { it.name },
+            unrecoveredHangCount = unrecoveredHangCount,
+        )
+        if (verdict != null) return verdict
+        // No crash, no clean exit. Two very different histories land here:
+        // a background kill (OOM / LMK / MIUI cleanup) and a stall that
+        // self-healed before the user swiped the app away. Neither ended
+        // abnormally, so both report silent_kill — the uptime is what tells
+        // them apart in the log.
         val ageMs = now - previousLaunchMs
         return "silent_kill (uptime_was=${ageMs}ms)"
+    }
+
+    /**
+     * [fix/r4-s F-12] Pure verdict for the "did the previous cycle end badly?"
+     * half of [classifyPrevious].
+     *
+     * Crash artefacts are unambiguous — `crash-*.log` / `native-crash-*.log`
+     * are only written when a Java / native crash was captured in that cycle.
+     *
+     * `stall-*.log` is not: HangDetector appends a sample to the day file for
+     * every counted hang episode and [HangDetector.markHealthyTick] zeroes the
+     * persisted counter once the app stays healthy for 10 s. So the file's
+     * existence proves "a hang happened", not "the process died abnormally".
+     * Before this split, a recovered hang followed by the user simply swiping
+     * the app away was reported as `crash_or_stall`: the Resume banner claimed
+     * an abnormal exit, the consecutive-bad-cycle counter grew, and four such
+     * normal relaunches force-landed on the session list.
+     *
+     * `unrecoveredHangCount > 0` is the discriminator: only markHealthyTick
+     * zeroes the counter, so a positive count at classify time means the app
+     * never got 10 healthy seconds after that hang.
+     *
+     * @return the verdict, or null when the previous cycle left no crash
+     *   artefact (the caller falls through to the silent_kill verdict).
+     */
+    internal fun crashVerdict(
+        crashArtefacts: List<String>,
+        stallArtefacts: List<String>,
+        unrecoveredHangCount: Int,
+    ): String? {
+        if (crashArtefacts.isNotEmpty()) {
+            return "crash_or_stall (${crashArtefacts.joinToString { it }})"
+        }
+        if (stallArtefacts.isNotEmpty() && unrecoveredHangCount > 0) {
+            return "crash_or_stall (${stallArtefacts.joinToString { it }})"
+        }
+        return null
     }
 
     private fun parseTs(line: String): Long? {

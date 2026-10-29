@@ -27,6 +27,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -81,6 +82,20 @@ object CrashFrequencyDetector {
     @Volatile
     var pendingShareFiles: List<File>? = null
         private set
+
+    /**
+     * [fix/r4-s F-03] The Activity the current prompt belongs to, and whether
+     * that prompt flow is still in flight.
+     *
+     * Both are process-scoped on purpose: a config change (rotation / fold /
+     * theme switch — MainActivity declares no `configChanges`) destroys the
+     * Activity *and* the AlertDialog attached to it, while [pendingShareFiles]
+     * must survive so the recreated Activity can show the prompt again. Only
+     * [finishClose] — i.e. the user actually resolving the prompt — clears the
+     * burst and stamps the dismissal clock.
+     */
+    private var promptHost: WeakReference<Activity>? = null
+    private var promptInFlight: Boolean = false
 
     /**
      * T-android-crash-safe-mode-v2: listeners notified when safe-mode
@@ -314,9 +329,19 @@ object CrashFrequencyDetector {
     }
 
     /**
-     * Called from the first foreground Activity onResume. One-shot —
-     * clears [pendingShareFiles] before showing the dialog so a config
-     * change / second resume doesn't re-prompt.
+     * Called from the first foreground Activity onResume (and from
+     * [com.rikkaminis.app.MinisApp]'s lifecycle callbacks).
+     *
+     * [fix/r4-s F-03] The prompt is **not** one-shot per process any more —
+     * it is one-shot per *Activity instance*. Clearing [pendingShareFiles]
+     * here (as this used to) meant a config change destroyed the dialog and
+     * the recreated Activity fell into the "no pending burst" branch, which
+     * invoked the safe-mode `finish()` and killed the app while the user was
+     * rotating the device; the dismissal clock had already been stamped, so
+     * the burst was also silenced for good. Now: a second resume of the SAME
+     * Activity is a no-op (the dialog is up), a DIFFERENT Activity instance
+     * re-shows the prompt, and only [finishClose] clears the burst + stamps
+     * the dismissal clock.
      *
      * [onClosed] fires after any of the three exit paths (Share /
      * Dismiss / Cancel). When MinisApp.onCreate has early-returned (safe
@@ -348,18 +373,14 @@ object CrashFrequencyDetector {
             onClosed?.invoke()
             return
         }
-        pendingShareFiles = null
+        // [fix/r4-s F-03] Same Activity resuming again (MinisApp's
+        // ActivityLifecycleCallbacks also call this) while the prompt is on
+        // screen: neither re-prompt nor invoke onClosed — calling `finish()`
+        // behind a live dialog would kill the very screen showing it.
+        if (promptInFlight && promptHost?.get() === activity) return
+        promptInFlight = true
+        promptHost = WeakReference(activity)
         try {
-            // Always reset the dismiss / burst clock the moment the user
-            // sees the picker — regardless of which exit path they take
-            // (Continue → method picker, Not now, or back-cancel). After
-            // this point new crashes only count toward the next prompt if
-            // they're newer than `now`. Without this, the same files that
-            // triggered THIS dialog stayed in the 1-hour window and tripped
-            // the next cold start again.
-            val dismissAtCheckpoint = System.currentTimeMillis()
-            setDismissedAt(activity, dismissAtCheckpoint)
-
             val pickable = buildPickableEntries(activity, triggerFiles)
             showFilePickerDialog(
                 activity = activity,
@@ -379,7 +400,15 @@ object CrashFrequencyDetector {
                 },
             )
         } catch (t: Throwable) {
+            // The dialog never reached the screen (typically a finishing
+            // Activity). Drop this attempt's ownership, but leave the burst's
+            // dismissal clock untouched: the user has not seen or resolved
+            // anything, so the next cold start (or the recreated Activity)
+            // must still be able to prompt.
             android.util.Log.w(TAG, "dialog failed: ${t.message}")
+            promptInFlight = false
+            promptHost = null
+            pendingShareFiles = null
             setSafeMode(false)
             onClosed?.invoke()
         }
@@ -622,7 +651,15 @@ object CrashFrequencyDetector {
     }
 
     /**
-     * Common close path — clears safe-mode and invokes onClosed.
+     * Common close path — clears the pending burst, stamps the dismissal
+     * clock, clears safe-mode and invokes onClosed.
+     *
+     * [fix/r4-s F-03] This is the ONLY place the burst is considered handled.
+     * The dismissal clock used to be stamped the moment the picker appeared,
+     * which (together with the pre-display `pendingShareFiles = null`) turned
+     * a config change into "prompt lost + burst silenced + Activity finished".
+     * Stamping here means the 1-hour window keeps re-evaluating until the user
+     * actually shares, saves, or opts out.
      *
      * [dismissContext] = the activity, when the close was triggered by
      * an explicit "Not now" / back / cancel exit. Triggers the 24-hour
@@ -631,6 +668,16 @@ object CrashFrequencyDetector {
      * engaged with the prompt — fresh future bursts should still alert.
      */
     private fun finishClose(onClosed: (() -> Unit)?, dismissContext: Context? = null) {
+        val burstCtx = dismissContext ?: promptHost?.get()
+        promptInFlight = false
+        promptHost = null
+        pendingShareFiles = null
+        if (burstCtx != null) {
+            // New crashes only count toward the next prompt if they are newer
+            // than this checkpoint; the files that produced THIS prompt can't
+            // re-trigger it on the next cold start.
+            setDismissedAt(burstCtx, System.currentTimeMillis())
+        }
         if (dismissContext != null) {
             val until = System.currentTimeMillis() + SUPPRESS_AFTER_DISMISS_MS
             setSuppressUntil(dismissContext, until)
@@ -891,9 +938,21 @@ object CrashFrequencyDetector {
                 }
                 val target = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                     ?: throw IllegalStateException("MediaStore insert returned null")
-                resolver.openOutputStream(target).use { out ->
-                    requireNotNull(out) { "MediaStore openOutputStream returned null" }
-                    FileInputStream(zip).use { input -> input.copyTo(out) }
+                // [fix/r4-s F-06] insert() publishes the row immediately, so a
+                // failure below (null stream, ENOSPC mid-copy, cancellation
+                // between open and close) used to leave a 0-byte / truncated
+                // .zip visible in Downloads while the toast reported failure —
+                // and the next save of the same name would collide with it.
+                // Roll the row back before rethrowing.
+                try {
+                    resolver.openOutputStream(target).use { out ->
+                        requireNotNull(out) { "MediaStore openOutputStream returned null" }
+                        FileInputStream(zip).use { input -> input.copyTo(out) }
+                    }
+                } catch (t: Throwable) {
+                    runCatching { resolver.delete(target, null, null) }
+                        .onFailure { android.util.Log.w(TAG, "save rollback failed: ${it.message}") }
+                    throw t
                 }
                 "Downloads/${zip.name}"
             } else {
@@ -903,8 +962,16 @@ object CrashFrequencyDetector {
                 )
                 downloads.mkdirs()
                 val dest = File(downloads, zip.name)
-                FileInputStream(zip).use { input ->
-                    FileOutputStream(dest).use { out -> input.copyTo(out) }
+                // [fix/r4-s F-06] Same rollback on the legacy path: a partial
+                // file that carries the real archive's name is worse than no
+                // file at all.
+                try {
+                    FileInputStream(zip).use { input ->
+                        FileOutputStream(dest).use { out -> input.copyTo(out) }
+                    }
+                } catch (t: Throwable) {
+                    runCatching { dest.delete() }
+                    throw t
                 }
                 dest.absolutePath
             }
