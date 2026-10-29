@@ -466,6 +466,11 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
 
     // 2. Parse subagent config
     val config = SubagentSkill.parseSubagentConfig(skill)
+    // [FIX-R4-Q F-14] Dispatching a sub-agent IS a skill use: the main path
+    // records SKILL.md reads (executeTool's FileReadTool arm), so the "最近
+    // 使用" ordering never saw sub-agent usage at all — a skill dispatched
+    // 50 times a day sorted as if it had been read once.
+    runCatching { skillRepository?.recordSkillUse(skill.id) }
     if (!config.isSubagent) {
         // Answer with the skills that ARE sub-agents instead of a bare
         // rejection — same "give the model a way back" rule as
@@ -536,6 +541,32 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         config = config,
         systemPrompt = systemPrompt,
         streamProvider = { messages ->
+            // [FIX-R4-Q F-14] The sub-agent must not escape the run's
+            // observation budget: the main loop checks the deadline and
+            // consumes one PROVIDER_ATTEMPTS unit before every provider
+            // request (AgentLoopEngine:1201/:1226). Without these two gates a
+            // runaway sub-agent burned provider attempts the host budget never
+            // counted, so the budget line undercounted the run and the
+            // deadline guard could be exceeded. A denial aborts the sub-agent
+            // run with a visible reason (runSubagentLoop turns the throw into
+            // a failed ToolExecutionResult, so the dispatching agent learns
+            // the run was refused rather than timed out).
+            if (traceObserver.activeRunBudget?.isExpired() == true) {
+                throw SubagentBudgetExhaustedException(
+                    "run deadline reached — sub-agent request refused"
+                )
+            }
+            // Same single-line gate shape as the main loop (AgentLoopEngine
+            // :1226): the lambda and the `if` body open on the line that names
+            // the dimension, so source-shape probes see the refusal (the
+            // throw) inside this gate's body — a multi-line lambda makes the
+            // brace matcher close the body at `}) {` and read the gate as
+            // non-terminal.
+            if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS) { it.consumeProviderAttempt() }) {
+                throw SubagentBudgetExhaustedException(
+                    "provider-attempt budget exhausted — sub-agent request refused"
+                )
+            }
             val instance = provider.instanceContext!!
             com.rikkaminis.app.sandbox.offload.ProviderExecutionGateway.stream(
                 context = context,
@@ -585,7 +616,20 @@ internal suspend fun ChatViewModel.executeSubagentTool(
     // (or forbidden) tool with the real options instead of a bare rejection.
     allowedToolNames: List<String>,
 ): ToolExecutionResult = when (name) {
-    FileReadTool.NAME -> FileReadTool.execute(argsJson, activeSessionId, context)
+    FileReadTool.NAME -> FileReadTool.execute(argsJson, activeSessionId, context).also { result ->
+        // [FIX-R4-Q F-14] Same arm as the main dispatch (executeTool's
+        // FileReadTool branch): a sub-agent reading SKILL.md is a skill use.
+        if (result.success) {
+            runCatching {
+                val readPath = JSONObject(argsJson).optString("path", "")
+                if (readPath.isNotEmpty()) {
+                    skillRepository?.skillIdFromPath(readPath)?.let { sid ->
+                        skillRepository.recordSkillUse(sid)
+                    }
+                }
+            }
+        }
+    }
     FileWriteTool.NAME -> FileWriteTool.execute(argsJson, activeSessionId, context).also {
         if (it.success) maybeReloadSkillsForPath(argsJson)
     }
@@ -1951,6 +1995,19 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
     titleGenerationInFlight = true
     titleGenerationAttempts++
 
+    // [FIX-R4-Q F-11] One predicate for "this failure ends the title attempt"
+    // so a MANUAL regeneration cannot fail silently. With force=true the
+    // attempt counter is 1 after the first try, so the old
+    // `attempts >= TITLE_MAX_ATTEMPTS` gate made the click invisible for the
+    // two retries the user never sees. A manual attempt on a session that
+    // still has no real title falls back to the first-message title
+    // immediately; a manual attempt on an already-titled session keeps that
+    // title (needs-generation is false — the fallback must not overwrite a
+    // good title with a truncated first message).
+    fun titleFailureIsFinal(): Boolean =
+        titleGenerationAttempts >= TITLE_MAX_ATTEMPTS ||
+            (force && sessionTitleNeedsGenerationOf(_sessionTitle.value))
+
     // [T-titlegen-context-first-last-pair] Build the summary from the first
     // user + first assistant message, and — when the session has more than
     // one user turn — also the last user + last assistant message, each
@@ -2022,7 +2079,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                 // Cannot dispatch a provider-created title call without an
                 // instance — surface as a typed error (never in-process).
                 AppLogger.warning("TitleGen", "outcome=no-instance-context attempt=$titleGenerationAttempts")
-                if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+                if (titleFailureIsFinal()) {
                     applyFallbackTitleFromFirstMessage("no provider instance context")
                 }
                 return@launch
@@ -2048,7 +2105,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                         "TitleGen",
                         "outcome=remote-failure attempt=$titleGenerationAttempts (${titleResult.code}): ${titleResult.message.take(200)}",
                     )
-                    if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+                    if (titleFailureIsFinal()) {
                         applyFallbackTitleFromFirstMessage("remote failure ${titleResult.code}")
                     }
                     return@launch
@@ -2058,7 +2115,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                         "TitleGen",
                         "outcome=unavailable attempt=$titleGenerationAttempts: ${titleResult.reason}",
                     )
-                    if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+                    if (titleFailureIsFinal()) {
                         applyFallbackTitleFromFirstMessage("title service unavailable: ${titleResult.reason}")
                     }
                     return@launch
@@ -2093,7 +2150,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                         "(empty / unparseable response) stopReason=${response.stopReason} " +
                         "textLen=${response.text.length}",
                 )
-                if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+                if (titleFailureIsFinal()) {
                     AppLogger.warning("TitleGen", "outcome=gave-up ($titleGenerationAttempts/$TITLE_MAX_ATTEMPTS) — applying first-message fallback title")
                     applyFallbackTitleFromFirstMessage("empty/unparseable title response")
                 }
@@ -2108,7 +2165,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                 "outcome=exception attempt=$titleGenerationAttempts/$TITLE_MAX_ATTEMPTS " +
                     "${e.javaClass.simpleName}: ${e.message?.take(200)}",
             )
-            if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+            if (titleFailureIsFinal()) {
                 AppLogger.warning("TitleGen", "outcome=gave-up ($titleGenerationAttempts/$TITLE_MAX_ATTEMPTS) — applying first-message fallback title")
                 applyFallbackTitleFromFirstMessage("request failed: ${e.message?.take(200)}")
             }
@@ -2181,3 +2238,13 @@ internal fun ChatViewModel.resolveTitleProvider(): LLMProvider? {
     // capability questions as the primary — pass the enriched model.
     return ProviderFactory.create(instance, apiKey, providerModelFor(entry), context)
 }
+
+/**
+ * [FIX-R4-Q F-14] Raised from `executeSpawnAgentTool`'s streamProvider when the
+ * host run's observation budget refuses another provider request (deadline
+ * reached / attempts exhausted). A dedicated type so the sub-agent's failure
+ * text says WHY it stopped instead of looking like a provider error, and so a
+ * future change to the budget gate cannot be silently swallowed by a generic
+ * catch that assumes "provider went wrong".
+ */
+internal class SubagentBudgetExhaustedException(message: String) : RuntimeException(message)

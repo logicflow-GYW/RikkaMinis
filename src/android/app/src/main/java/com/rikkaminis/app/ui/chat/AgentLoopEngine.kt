@@ -277,6 +277,111 @@ internal object EofStubReminderStackGuard {
 }
 
 /**
+ * [FIX-R4-Q F-08] Keeps the in-memory transcript in step with the single DB row
+ * a continuation run produces.
+ *
+ * A length-wall / EOF-stub continuation does not open a new bubble: the branches
+ * that decide to continue `continue` back into the same turn loop, keep streaming
+ * into `loopState.assistantId`, and the terminal persist writes ONE `assistant`
+ * row covering every segment (the run-scoped `unpersistedBlockStart` slice). The
+ * history, on the other hand, got one ASSISTANT entry per segment — plus the
+ * transient "<system-reminder>…continue where you left off" USER turn the branch
+ * injected, which then stayed in the transcript forever. Three segments meant
+ * three assistant turns (only the last one carrying the row's dbMessageId) and
+ * two leftover reminder turns, while the user saw one bubble.
+ *
+ * [mergeIntoPreviousAssistant] folds the segment into the previous assistant
+ * entry and drops those reminders, so the request sent to the next provider is
+ * "one assistant message per answer" — the same shape the DB and the UI have.
+ *
+ * Pure (no host/ViewModel access) so the fold is JVM-testable; the caller decides
+ * whether to append or to fold.
+ */
+internal object ContinuationHistoryMerge {
+
+    /** Marker unique to [lengthWallReminder] (vs the EOF-stub sibling). */
+    internal const val LENGTH_WALL_REMINDER_MARKER = "cut off mid-sentence"
+
+    private val CONTINUATION_REMINDER_MARKERS = listOf(
+        EofStubReminderStackGuard.REMINDER_MARKER,
+        LENGTH_WALL_REMINDER_MARKER,
+    )
+
+    /**
+     * True when [message] is one of the synthetic continuation reminders — a
+     * USER turn whose single Text part carries the EOF-stub or length-wall
+     * payload. Anything else (tool_result, user text, statement tails) is NOT
+     * a continuation anchor and must stop the peel.
+     */
+    fun isContinuationReminder(message: LLMMessage?): Boolean {
+        if (message == null || message.role != LLMMessage.Role.USER) return false
+        if (message.contentParts.size != 1) return false
+        val text = (message.contentParts.first() as? AgentContentPart.Text)?.text ?: return false
+        return CONTINUATION_REMINDER_MARKERS.any { text.contains(it) }
+    }
+
+    /**
+     * Fold [incoming] (the assistant turn a continuation just re-entered) into
+     * the previous assistant entry and drop the reminders that sat between the
+     * segments. Returns false and mutates nothing when this is not a
+     * continuation:
+     *
+     *  - [incoming] carries no content — an EMPTY restarted turn must stay a
+     *    separate entry: [EmptyTurnRecovery.plan] reads `history[size - 2]`, the
+     *    entry behind "the assistant turn just appended", and folding the empty
+     *    turn would make it nudge (and delete) the *previous* segment;
+     *  - the entry behind the reminders is not an ASSISTANT, or is already
+     *    persisted (`dbMessageId != null`) — folding into a persisted row would
+     *    re-create the memory/DB mismatch in the other direction.
+     */
+    fun mergeIntoPreviousAssistant(history: MutableList<LLMMessage>, incoming: LLMMessage): Boolean {
+        if (incoming.role != LLMMessage.Role.ASSISTANT) return false
+        if (incoming.content.isEmpty() && incoming.contentParts.isEmpty()) return false
+
+        val reminderIdx = mutableListOf<Int>()
+        var idx = history.lastIndex
+        while (idx >= 0 && isContinuationReminder(history[idx])) {
+            reminderIdx.add(idx)
+            idx--
+        }
+        if (idx < 0) return false
+        val prev = history[idx]
+        if (prev.role != LLMMessage.Role.ASSISTANT) return false
+        if (prev.dbMessageId != null) return false
+
+        history[idx] = prev.copy(
+            content = prev.content + incoming.content,
+            contentParts = mergeParts(prev.contentParts, incoming.contentParts),
+            reasoningContent = when {
+                prev.reasoningContent == null -> incoming.reasoningContent
+                incoming.reasoningContent == null -> prev.reasoningContent
+                else -> prev.reasoningContent + incoming.reasoningContent
+            },
+        )
+        // Indices above were collected tail-first and all sit above `idx`.
+        reminderIdx.forEach { history.removeAt(it) }
+        return true
+    }
+
+    /** Adjacent Text parts collapse into one, so the folded entry does not grow
+     *  a part boundary in the middle of a sentence. */
+    private fun mergeParts(
+        prev: List<AgentContentPart>,
+        next: List<AgentContentPart>,
+    ): List<AgentContentPart> {
+        if (prev.isEmpty()) return next
+        if (next.isEmpty()) return prev
+        val lastPrev = prev.last()
+        val firstNext = next.first()
+        return if (lastPrev is AgentContentPart.Text && firstNext is AgentContentPart.Text) {
+            prev.dropLast(1) + AgentContentPart.Text(lastPrev.text + firstNext.text) + next.drop(1)
+        } else {
+            prev + next
+        }
+    }
+}
+
+/**
  * [deep-audit-1019 ISSUE-02] Pure transition table for the tool-block status a
  * dispatch publishes, for the three-pass tool dispatch in
  * [AgentLoopEngine.runAgentLoop].
@@ -2010,7 +2115,15 @@ internal class AgentLoopEngine(
                         }
                         if (newEntry != null) {
                             host.setActiveEntryId(newEntry.id)
-                            host.updateCurrentModel(newEntry.model)
+                            // [FIX-R4-Q F-06] Publish the ENRICHED model, not the
+                            // raw entry model: `next.provider` was built with
+                            // `providerModelFor(entry)` (= ModelsDevApi.effectiveModel),
+                            // while `ModelEntry.model` carries only what the user
+                            // stored — no contextWindow / maxOutputTokens. Writing the
+                            // raw model here left `currentModel.contextWindow` null on
+                            // the fallback target, so CompactOrchestration's window
+                            // math silently lost the real ceiling after any fallback.
+                            host.updateCurrentModel(next.provider.model)
                             val newLabel = host.providerInstanceLabel(newEntry.providerInstanceId)
                             if (newLabel != null) {
                                 host.setProviderName(newLabel.ifEmpty { newEntry.model.provider })
@@ -2442,7 +2555,10 @@ internal class AgentLoopEngine(
                     // different instances).
                     host.activeConfigModelEntries.find { it.id == next.entryId }?.let { newEntry ->
                         host.setActiveEntryId(newEntry.id)
-                        host.updateCurrentModel(newEntry.model)
+                        // [FIX-R4-Q F-06] Enriched model, same reason as the
+                        // error-path fallback above: `next.provider.model` came
+                        // from `providerModelFor(entry)`, `newEntry.model` did not.
+                        host.updateCurrentModel(next.provider.model)
                         val newLabel = host.providerInstanceLabel(newEntry.providerInstanceId)
                         if (newLabel != null) {
                             host.setProviderName(newLabel.ifEmpty { newEntry.model.provider })
@@ -2525,12 +2641,22 @@ internal class AgentLoopEngine(
             val turnReasoningContent: String? = turnReasoningBlob
                 ?: turnThinking.toString().takeIf { it.isNotEmpty() }
 
-            host.agentHistory.add(LLMMessage(
+            // [FIX-R4-Q F-08] A continuation (length wall / EOF stub) re-enters
+            // THIS loop and keeps streaming into the same bubble, so its segment
+            // belongs to the previous assistant entry — not to a new one. Folding
+            // here keeps the in-memory transcript in step with the single row the
+            // terminal persist writes (and drops the "<system-reminder>…continue"
+            // turns the continuation branch injected, which used to stay in the
+            // transcript forever). Non-continuation turns take the plain append.
+            val turnAssistantMessage = LLMMessage(
                 role = LLMMessage.Role.ASSISTANT,
                 content = turnText,
                 contentParts = assistantParts,
                 reasoningContent = turnReasoningContent,
-            ))
+            )
+            if (!ContinuationHistoryMerge.mergeIntoPreviousAssistant(host.agentHistory, turnAssistantMessage)) {
+                host.agentHistory.add(turnAssistantMessage)
+            }
 
             // T321: empty-turn diagnostic — fires when GPT-5.5 (or any other
             // provider) returns a turn with no visible text AND no tool calls.
@@ -2993,63 +3119,6 @@ internal class AgentLoopEngine(
                 // bubble froze at the pre-recovery text for the rest of the run
                 // and only refreshed at the next terminal event. It now runs once,
                 // immediately before the `break` below.
-                // [deep-audit-1016c ISSUE-01] Slice from the run-scoped
-                // unpersisted start, NOT from this turn's start: a continuation
-                // branch above (EOF-stub / length-wall / verify nudge / residue
-                // refill) may have streamed blocks that no persist ever picked
-                // up — they ride along in this terminal row instead of being
-                // skipped forever.
-                val turnParts = host.buildTurnParts(loopState.allToolBlocks, loopState.unpersistedBlockStart, toolInputMap)
-                val blockMeta = loopState.allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
-                // [deep-audit-1015 BUG-01b] A failure branch above may have
-                // queued the turn's terminal banner. Persist THIS turn's row
-                // first and surface the banner from the row id that came back:
-                // setInlineError persists through updateLastAssistantError =
-                // "the session's LAST assistant row", so surfacing before the
-                // row exists stamps the banner onto the PREVIOUS turn (and,
-                // when the model streamed nothing, onto a turn the user knows
-                // succeeded). The empty-text filler keeps the row-present
-                // precondition true even for an empty-output failure — the
-                // same shape the two early-persist branches above already use.
-                val pendingInlineError = loopState.pendingInlineError
-                // Consume-once: the slot belongs to THIS turn. Clearing it
-                // before the persist (rather than after) means a throwing
-                // insert cannot leak the banner into the NEXT turn's row —
-                // a DB failure surfaces through the caller's
-                // reportAgentLoopError instead, which is the more urgent
-                // truth anyway.
-                loopState.pendingInlineError = null
-                val persistedRowId = host.persistAssistantTurn(
-                    TerminalErrorPlacement.partsForTerminalError(turnParts, pendingInlineError),
-                    lastUsage, turnReasoningContent, blockMeta,
-                    modelId = loopState.currentProvider.model.id,
-                    entryId = host.activeEntryId,
-                )
-                // [deep-audit-1016c ISSUE-01/A] Every block up to now is durable
-                // (the row above was written with parts covering the full
-                // unpersisted range). Advance only on success — if the DB write
-                // produced no row id, the next persist must re-cover this range
-                // rather than silently assume it landed.
-                if (persistedRowId != null) {
-                    loopState.unpersistedBlockStart = loopState.allToolBlocks.size
-                    // [deep-audit-1016c ISSUE-01/B] dbId backfill, same shape as
-                    // the tool-path terminal below — without it the assistant
-                    // message reloads with a null DB anchor and compaction falls
-                    // back to a degraded walk. Skip (do NOT invent an entry) when
-                    // no matching message exists.
-                    val lastAssistantIdx = host.agentHistory.indexOfLast {
-                        it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null
-                    }
-                    if (lastAssistantIdx >= 0) {
-                        host.agentHistory[lastAssistantIdx] =
-                            host.agentHistory[lastAssistantIdx].copy(dbMessageId = persistedRowId)
-                    }
-                }
-                TerminalErrorPlacement
-                    .terminalErrorToSurface(pendingInlineError, persistedRowId)
-                    ?.let { banner ->
-                        withContext(Dispatchers.Main) { host.setInlineError(banner) }
-                    }
                 // [T-error-persist-android] Empty-response hint: the model ended a
                 // turn (finish=stop/end_turn) with no visible text anywhere in the
                 // reply and no tool blocks — the user just sees a blank bubble.
@@ -3143,16 +3212,16 @@ internal class AgentLoopEngine(
                         else ->
                             host.string(R.string.error_empty_response_generic)
                     }
-                    // [deep-audit-1015 BUG-01b — KNOWN RESIDUAL] NOT deferred:
-                    // this block runs AFTER the turn tail's flush point, so
-                    // queuing here would never be surfaced. Routing it through
-                    // pendingInlineError requires moving the flush, which the
-                    // retry `continue`s between the persist and the end of the
-                    // turn (empty-turn recovery, EOF one-shot retry) rule out.
-                    // Same mislabel class as the fixed sites though: a blank
-                    // turn persists NO row, so this hint's DB write lands on
-                    // the previous turn. Registered in backlog §116.
-                    withContext(Dispatchers.Main) { host.setInlineError(hint) }
+                    // [FIX-R4-Q F-01 closes deep-audit-1015 BUG-01b §116]
+                    // Deferred instead of written inline: the terminal flush now
+                    // sits BELOW this block (it moved below the continuation
+                    // `continue`s so a resumed turn persists one row), so there
+                    // is no "after the flush point" left to worry about. Queuing
+                    // here lets the flush create/own this turn's row first and
+                    // then surface the hint onto IT — the old inline write landed
+                    // on the PREVIOUS turn's row whenever this blank turn
+                    // persisted nothing.
+                    loopState.pendingInlineError = hint
                 }
                 // [fix/rv1014-g1] Auto-title: semantic condition, not
                 // positional. The old `turn == 0` guard fired the title
@@ -3234,9 +3303,13 @@ internal class AgentLoopEngine(
                         TAG_STREAM,
                         "runAgentLoop turn=$turn EOF-truncated ×$loopState.eofStubContinues (ceiling $MAX_EOF_STUB_CONTINUES) — giving up with visible error",
                     )
-                    withContext(Dispatchers.Main) {
-                        host.setInlineError(host.string(R.string.error_output_truncated_repeated))
-                    }
+                    // [FIX-R4-Q F-01] Queue the banner instead of writing it now:
+                    // the terminal flush is below this branch, so nothing has been
+                    // persisted yet. Surfacing through pendingInlineError makes the
+                    // banner ride the row this fall-through persists (the same
+                    // idiom the length-wall branches above already use).
+                    loopState.pendingInlineError =
+                        host.string(R.string.error_output_truncated_repeated)
                     // [audit-0907 B5] Failure-terminal (specific banner shown)
                     // — prevents the exit-side runaway misclassification from
                     // overwriting it.
@@ -3257,6 +3330,73 @@ internal class AgentLoopEngine(
                     host.agentHistory.removeAt(host.agentHistory.size - 1)
                     continue
                 }
+
+                // [FIX-R4-Q F-01] The terminal persist sits BELOW every no-tool
+                // continuation branch (empty-turn recovery, EOF stub continuation,
+                // EOF one-shot retry) on purpose: those branches `continue` and keep
+                // streaming into the SAME assistant bubble, so persisting above them
+                // wrote a first row for the head of the answer and appended a second
+                // row for the tail — one bubble in the UI, two `assistant` rows in
+                // the DB (reload seam + `retryLast` only rolls back the tail row).
+                // The run-scoped `unpersistedBlockStart` slice exists exactly to let
+                // the persist below pick up everything the continues streamed.
+                // [deep-audit-1016c ISSUE-01] Slice from the run-scoped
+                // unpersisted start, NOT from this turn's start: a continuation
+                // branch above (EOF-stub / length-wall / verify nudge / residue
+                // refill) may have streamed blocks that no persist ever picked
+                // up — they ride along in this terminal row instead of being
+                // skipped forever.
+                val turnParts = host.buildTurnParts(loopState.allToolBlocks, loopState.unpersistedBlockStart, toolInputMap)
+                val blockMeta = loopState.allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
+                // [deep-audit-1015 BUG-01b] A failure branch above may have
+                // queued the turn's terminal banner. Persist THIS turn's row
+                // first and surface the banner from the row id that came back:
+                // setInlineError persists through updateLastAssistantError =
+                // "the session's LAST assistant row", so surfacing before the
+                // row exists stamps the banner onto the PREVIOUS turn (and,
+                // when the model streamed nothing, onto a turn the user knows
+                // succeeded). The empty-text filler keeps the row-present
+                // precondition true even for an empty-output failure — the
+                // same shape the two early-persist branches above already use.
+                val pendingInlineError = loopState.pendingInlineError
+                // Consume-once: the slot belongs to THIS turn. Clearing it
+                // before the persist (rather than after) means a throwing
+                // insert cannot leak the banner into the NEXT turn's row —
+                // a DB failure surfaces through the caller's
+                // reportAgentLoopError instead, which is the more urgent
+                // truth anyway.
+                loopState.pendingInlineError = null
+                val persistedRowId = host.persistAssistantTurn(
+                    TerminalErrorPlacement.partsForTerminalError(turnParts, pendingInlineError),
+                    lastUsage, turnReasoningContent, blockMeta,
+                    modelId = loopState.currentProvider.model.id,
+                    entryId = host.activeEntryId,
+                )
+                // [deep-audit-1016c ISSUE-01/A] Every block up to now is durable
+                // (the row above was written with parts covering the full
+                // unpersisted range). Advance only on success — if the DB write
+                // produced no row id, the next persist must re-cover this range
+                // rather than silently assume it landed.
+                if (persistedRowId != null) {
+                    loopState.unpersistedBlockStart = loopState.allToolBlocks.size
+                    // [deep-audit-1016c ISSUE-01/B] dbId backfill, same shape as
+                    // the tool-path terminal below — without it the assistant
+                    // message reloads with a null DB anchor and compaction falls
+                    // back to a degraded walk. Skip (do NOT invent an entry) when
+                    // no matching message exists.
+                    val lastAssistantIdx = host.agentHistory.indexOfLast {
+                        it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null
+                    }
+                    if (lastAssistantIdx >= 0) {
+                        host.agentHistory[lastAssistantIdx] =
+                            host.agentHistory[lastAssistantIdx].copy(dbMessageId = persistedRowId)
+                    }
+                }
+                TerminalErrorPlacement
+                    .terminalErrorToSurface(pendingInlineError, persistedRowId)
+                    ?.let { banner ->
+                        withContext(Dispatchers.Main) { host.setInlineError(banner) }
+                    }
 
                 // T9: close out the final turn (no tool calls → normal completion)
                 traceObserver.agentTraceRecorder.turnEnd(
