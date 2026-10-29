@@ -846,6 +846,15 @@ internal object HeadlessChatRunner {
         messageId: String? = null,
         includesBoundary: Boolean = true,
     ): CompactResult = withContext(Dispatchers.Main) {
+        // [R4-R F-01] Gate BEFORE materialising the ViewModel. `viewModel(…)`
+        // runs `ChatViewModelStore.ownerFor(…)` (allocates the process-wide
+        // store entry) and then a `ViewModelProvider` lookup (builds the VM),
+        // so a compaction aimed at a deleted or misspelled id used to leave a
+        // resident, row-less ChatViewModel behind — which `requireSendableSession`
+        // then accepts as "the user is looking at it" for every later send.
+        // The RPC faces above this one already read the row, so this is the
+        // runner's own contract made self-contained.
+        requireSendableSession(app(context), sessionId)
         val vm = viewModel(context, sessionId)
         // Same readiness wait as prompt(): compactAll() needs currentProvider
         // resolved before it can call provider.sendMessage for the summary.
@@ -973,6 +982,10 @@ internal object HeadlessChatRunner {
      * coroutine the way compact is.
      */
     suspend fun revertCompact(context: Context, sessionId: String) = withContext(Dispatchers.Main) {
+        // [R4-R F-01] Same existence gate as [compact]: a revert for a row-less
+        // id must answer `-32602`, never build the resident VM that hides the
+        // missing row from every later send.
+        requireSendableSession(app(context), sessionId)
         val vm = viewModel(context, sessionId)
         val ready = withContext(Dispatchers.Default) {
             withTimeoutOrNull(5000L) {
@@ -1023,7 +1036,15 @@ internal object HeadlessChatRunner {
      * Return-value contract is unchanged: false when nothing is streaming.
      */
     suspend fun cancel(context: Context, sessionId: String): Boolean = withContext(Dispatchers.Main) {
-        val vm = viewModelForCancel(context, sessionId) ?: return@withContext false
+        // [R4-R F-01] One row read decides whether the resolver below may build
+        // a ViewModel at all: a cancel is a request to stop something that
+        // EXISTS, so an id with no `chat_sessions` row must answer `false`
+        // (nothing was streaming) instead of creating the resident VM that
+        // every later `requireSendableSession` would take as "a live session".
+        val persisted = withContext(Dispatchers.IO) {
+            app(context).chatRepository.dao.getSession(sessionId) != null
+        }
+        val vm = viewModelForCancel(context, sessionId, persisted) ?: return@withContext false
         val wasRunning = vm.isStreaming.value
         if (wasRunning) vm.cancelStream()
         wasRunning
@@ -1035,11 +1056,26 @@ internal object HeadlessChatRunner {
      * with the draft alias resolved before the VM is built. Kept as one
      * function so the resolution order is a property of `cancel` alone
      * (asserted in `HeadlessChatCancelStoreWiringTest`).
+     *
+     * [R4-R F-01] Two rules keep this from becoming a factory:
+     *  - the store is read non-destructively first ([ChatViewModelStore.peekViewModel]),
+     *    which is what a draft key (`__new__<uuid>`, no row yet) needs;
+     *  - the building fallback ([ChatViewModelStore.ownerFor] + a
+     *    `ViewModelProvider` lookup) is only reached for a session whose row
+     *    actually exists — [persistedSession]. Before this, `chat.session.cancel`
+     *    on a deleted or misspelled id materialised a resident, row-less
+     *    `ChatViewModel` that never went away.
      */
-    private fun viewModelForCancel(context: Context, sessionId: String): ChatViewModel? {
+    private fun viewModelForCancel(
+        context: Context,
+        sessionId: String,
+        persistedSession: Boolean,
+    ): ChatViewModel? {
         providers[sessionId]?.let { cached ->
             runCatching { cached[ChatViewModel::class.java] }.getOrNull()?.let { return it }
         }
+        ChatViewModelStore.peekViewModel(sessionId)?.let { return it }
+        if (!persistedSession) return null
         val owner = runCatching { ChatViewModelStore.ownerFor(sessionId) }.getOrNull() ?: return null
         val app = app(context)
         return runCatching {

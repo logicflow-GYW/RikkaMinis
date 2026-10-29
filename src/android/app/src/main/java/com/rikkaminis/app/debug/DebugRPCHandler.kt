@@ -21,6 +21,8 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.lang.ref.WeakReference
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import kotlin.coroutines.resume
 
 /**
@@ -410,11 +412,28 @@ class DebugRPCHandler(private val context: Context) {
         // 8-12) and `skip`'s return value was dropped, so a short skip silently
         // read from the wrong offset. RandomAccessFile.seek + bounded read has
         // neither problem — same shape as AppLogger.readLogSegment.
-        val bytes = readFileSegment(hostFile, offset, limit)
+        val raw = readFileSegment(hostFile, offset, limit)
 
-        val isText = !forceBase64 && bytes.all {
-            it in 0x09..0x0D || it in 0x20..0x7E || it.toInt() and 0xFF > 0x7F
-        }
+        // [R4-R F-10] A page must not split a character. `offset`/`limit` are
+        // BYTE windows, so a 1000-byte page over a Chinese log used to cut a
+        // 3-byte UTF-8 sequence in half, and `String(bytes, UTF_8)` answered
+        // U+FFFD for the fragment — silently, on every page boundary. Trim the
+        // page back to the last complete character and report the trimmed size
+        // in `bytesRead`: a client advances by that, so the next page starts on
+        // the character's lead byte and nothing is lost.
+        // `bytesRead` is the caller's advance, so the trim must never empty the
+        // page: a `limit` shorter than the single character it starts with would
+        // otherwise answer 0 and loop forever. Fail open — keep the page and
+        // accept one replacement character.
+        val trimmedEnd = if (forceBase64) raw.size else utf8CompletePrefixLength(raw)
+        val textEnd = if (trimmedEnd == 0 && raw.isNotEmpty()) raw.size else trimmedEnd
+        val textCandidate = if (textEnd == raw.size) raw else raw.copyOf(textEnd)
+        // Binary detection is a real UTF-8 validity check rather than the old
+        // "any byte above 0x7F counts as text" whitelist, which decoded binary
+        // as text (U+FFFD soup) while refusing ANSI-coloured terminal output
+        // because ESC (0x1B) sat outside the allowlist.
+        val isText = !forceBase64 && looksLikeUtf8Text(textCandidate)
+        val bytes = if (isText) textCandidate else raw
 
         return JSONObject().apply {
             put("size", fileSize)
@@ -1324,6 +1343,67 @@ internal fun readFileSegment(file: File, offset: Long, limit: Int): ByteArray {
         }
         return if (read == out.size) out else out.copyOf(read)
     }
+}
+
+/**
+ * [R4-R F-10] Length of the longest prefix of [bytes] that ends on a UTF-8
+ * character boundary — `bytes.size` when the slice already does, the position
+ * of the trailing incomplete sequence's lead byte when it does not.
+ *
+ * Page reads are byte windows, so the LAST character of a sliced page can be
+ * cut in half. Walking back over at most three continuation bytes (a valid
+ * UTF-8 sequence has at most three) finds the lead byte; the sequence's own
+ * length decides whether the whole character made it into the slice. An
+ * invalid lead byte is not a boundary problem — the strict decode in
+ * [looksLikeUtf8Text] is what classifies those as binary.
+ */
+internal fun utf8CompletePrefixLength(bytes: ByteArray): Int {
+    var i = bytes.size - 1
+    var seen = 0
+    while (i >= 0 && (bytes[i].toInt() and 0xC0) == 0x80 && seen < 3) {
+        i--
+        seen++
+    }
+    if (i < 0) return bytes.size
+    val lead = bytes[i].toInt() and 0xFF
+    val needed = when {
+        lead and 0x80 == 0x00 -> 1
+        lead and 0xE0 == 0xC0 -> 2
+        lead and 0xF0 == 0xE0 -> 3
+        lead and 0xF8 == 0xF0 -> 4
+        else -> 1
+    }
+    return if (bytes.size - i >= needed) bytes.size else i
+}
+
+/**
+ * [R4-R F-10] Strict UTF-8 text classification for a sliced page.
+ *
+ * The old whitelist (`0x09..0x0D || 0x20..0x7E || > 0x7F`) accepted EVERY high
+ * byte as text — so a binary file decoded into U+FFFD soup — while refusing a
+ * plain ANSI-coloured terminal transcript because ESC (0x1B) was outside the
+ * allowlist. This is the same decision the text branch makes, made decodable:
+ * no NUL bytes (the whitelist's own "no null bytes" intent) and a decode with
+ * `CodingErrorAction.REPORT` that answers `false` on any malformed sequence.
+ * An empty slice is text, exactly as `bytes.all { … }` answered before.
+ *
+ * The decode starts at the first character boundary: [utf8CompletePrefixLength]
+ * only guarantees the page does not END mid-character, while a caller-supplied
+ * `offset` can land inside one — a leading continuation byte is a fragment of
+ * a character the caller asked to skip past, not evidence of binary content.
+ * The content still decodes it to the replacement character (baseline
+ * behaviour); only the classification looks past it.
+ */
+internal fun looksLikeUtf8Text(bytes: ByteArray): Boolean {
+    if (bytes.any { it == 0.toByte() }) return false
+    var head = 0
+    while (head < bytes.size && head < 3 && (bytes[head].toInt() and 0xC0) == 0x80) head++
+    val decoder = Charsets.UTF_8.newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+    return runCatching {
+        decoder.decode(ByteBuffer.wrap(bytes, head, bytes.size - head))
+    }.isSuccess
 }
 
 
