@@ -100,6 +100,17 @@ object ArtifactBackupScope {
         // `mcp/oauth/` filter (neither matches that entry name). The resolved
         // target now has to live under the shared root AND its resolved name
         // has to survive DENIED_DIRS.
+        //
+        // [FIX-R5-A2 / A-F-06] …and "stays inside the root" is still not
+        // "stays out of the bridge". That first cut compared the canonical
+        // path to the root PREFIX only, so a FILE link
+        // `linear_bak.json -> oauth/linear.json` — inside the root the whole
+        // way — passed, skipped the directory-only DENIED_DIRS check below
+        // (the link is a file, not a directory), and rode every automatic
+        // backup with its plaintext token. The guard now reads the resolved
+        // path's SEGMENTS: any segment naming a credential directory, or the
+        // first segment naming an excluded one, is "not an artifact of this
+        // root" — the same fail-closed stance as the escape check above.
         val rootCanon = try { sharedRoot.canonicalFile.path } catch (_: Exception) {
             return Selection(files, 0, 0, 0)
         }
@@ -107,9 +118,21 @@ object ArtifactBackupScope {
         fun resolveInside(child: File): File? = try {
             val resolved = child.canonicalFile
             val path = resolved.path
-            // Fail-closed: a link that escapes, an unreadable inode, and a
-            // canonicalisation error are all "not an artifact of this root".
-            if (path == rootCanon || path.startsWith(rootPrefix)) resolved else null
+            when {
+                // Fail-closed: a link that escapes, an unreadable inode, and a
+                // canonicalisation error are all "not an artifact of this root".
+                path == rootCanon -> resolved
+                !path.startsWith(rootPrefix) -> null
+                else -> {
+                    val segments = path.substring(rootPrefix.length)
+                        .split(File.separatorChar)
+                        .filter { it.isNotEmpty() }
+                    val denied = segments.any { it.lowercase() in DENIED_DIRS }
+                    val excludedTop =
+                        segments.firstOrNull()?.lowercase()?.let { it in EXCLUDED_DIRS } == true
+                    if (denied || excludedTop) null else resolved
+                }
+            }
         } catch (_: Exception) {
             null
         }
@@ -125,7 +148,10 @@ object ArtifactBackupScope {
                 val target = resolveInside(child) ?: continue
                 if (child.isDirectory) {
                     // [da1034-A1] Credential directories are dropped wherever
-                    // they appear in the tree — see DENIED_DIRS.
+                    // they appear in the tree — see DENIED_DIRS. [FIX-R5-A2]
+                    // resolveInside now rejects these by path segment, so this
+                    // pair is a second belt (it also carries the leaf-name
+                    // intent if the segment rule is ever edited).
                     if (child.name in DENIED_DIRS || target.name in DENIED_DIRS) continue
                     // Only the shared root has environment payloads; nested
                     // directories are always walked.

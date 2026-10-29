@@ -177,6 +177,90 @@ class ArtifactBackupScopeTest {
         }
     }
 
+    // ── [FIX-R5-A2 / A-F-06] the guard reads path SEGMENTS, not just the root ──
+
+    @Test
+    fun fileSymlinkIntoTheOauthBridgeInsideTheRootIsNotArchived() {
+        // The residual shape of F-06: the link stays inside the root the whole
+        // way, so the escape check passed, and it is a FILE, so the
+        // directory-only DENIED_DIRS check was never reached —
+        // `linear_bak.json -> oauth/linear.json` shipped plaintext tokens to
+        // WebDAV on every automatic backup.
+        val base = File.createTempFile("scope-link-into-oauth", "").apply { delete(); mkdirs() }
+        try {
+            val root = File(base, "shared").apply { mkdirs() }
+            val oauth = File(root, "mcp/oauth").apply { mkdirs() }
+            val token = File(oauth, "linear.json").apply { writeText("{\"access_token\":\"t\"}") }
+            writeFile(root, "keep.md", 10)
+            symlinkOrSkip(token, File(root, "linear_bak.json"))
+
+            val sel = ArtifactBackupScope.select(root)
+            assertEquals(listOf("keep.md"), sel.files.map { it.relPath })
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun symlinkToTheTopLevelSandboxEnvDirectoryIsNotArchived() {
+        // The second half of F-06: a DIRECTORY link renamed to `env_link` was
+        // walked because only the resolved leaf name was compared — the root
+        // exclusion never saw the real first segment.
+        val base = File.createTempFile("scope-link-sandbox-env", "").apply { delete(); mkdirs() }
+        try {
+            val root = File(base, "shared").apply { mkdirs() }
+            writeFile(root, "sandbox-env/apk-world.txt", 10)
+            writeFile(root, "keep.md", 10)
+            symlinkOrSkip(File(root, "sandbox-env"), File(root, "env_link"))
+
+            val sel = ArtifactBackupScope.select(root)
+            assertEquals(listOf("keep.md"), sel.files.map { it.relPath })
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun oauthDirectoryIsDeniedRegardlessOfCase() {
+        // `OAuth/` on a case-sensitive filesystem is a different directory, but
+        // the same shape of secret — and the mirror-side rule is
+        // case-insensitive, so the backup-side rule has to be too.
+        val base = File.createTempFile("scope-oauth-case", "").apply { delete(); mkdirs() }
+        try {
+            val root = File(base, "shared").apply { mkdirs() }
+            writeFile(root, "OAuth/linear.json", 10)
+            writeFile(root, "keep.md", 10)
+
+            val sel = ArtifactBackupScope.select(root)
+            assertEquals(listOf("keep.md"), sel.files.map { it.relPath })
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun symlinkToAnOrdinaryFileInsideTheRootIsStillArchived() {
+        // Negative control: fail-closed must not become "no symlinks at all".
+        // A link to an ordinary in-root artifact is a legitimate layout.
+        val base = File.createTempFile("scope-link-ordinary", "").apply { delete(); mkdirs() }
+        try {
+            val root = File(base, "shared").apply { mkdirs() }
+            val real = File(root, "real/report.md").apply {
+                parentFile?.mkdirs(); writeText("report")
+            }
+            writeFile(root, "keep.md", 10)
+            symlinkOrSkip(real, File(root, "alias.md"))
+
+            val sel = ArtifactBackupScope.select(root)
+            assertEquals(
+                listOf("alias.md", "keep.md", "real/report.md"),
+                sel.files.map { it.relPath }.sorted(),
+            )
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
     @Test
     fun symlinkInsideTheRootIsStillFollowed() {
         // Fail-closed must not become "no symlinks at all": a link to a real

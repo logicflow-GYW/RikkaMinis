@@ -219,4 +219,81 @@ class MirrorScopeTest {
         assertFalse(MirrorScope.isDeniedName("keyboard-notes.md"))
         assertFalse(MirrorScope.isDeniedName("monkeys.md"))
     }
+
+    // ------------------------------------- [FIX-R5-A2 / A-F-04] case + roots
+
+    @Test
+    fun isDeniedName_table_coversCaseAndTheMissingRoots() {
+        // The spellings a person actually types: the first cut matched
+        // case-sensitively, so all of these shipped to public Download/.
+        assertTrue(MirrorScope.isDeniedName("API_KEYS.md"))
+        assertTrue(MirrorScope.isDeniedName("Secrets.json"))
+        assertTrue(MirrorScope.isDeniedName(".ENV"))
+        assertTrue(MirrorScope.isDeniedName("Credentials.txt"))
+        // camelCase and the auth/cookie/bearer families
+        assertTrue(MirrorScope.isDeniedName("apiKey.json"))
+        assertTrue(MirrorScope.isDeniedName("auth.json"))
+        assertTrue(MirrorScope.isDeniedName("cookies.txt"))
+        assertTrue(MirrorScope.isDeniedName("bearer_token.txt"))
+        // Word-boundary discipline for the added roots: a prefix or suffix
+        // that merely STARTS like a root is an ordinary word.
+        assertFalse(MirrorScope.isDeniedName("author-notes.md"))
+        assertFalse(MirrorScope.isDeniedName("authored-by-agent.md"))
+        assertFalse(MirrorScope.isDeniedName("cookiecutter.md"))
+        assertFalse(MirrorScope.isDeniedName("bearing-capacity.md"))
+    }
+
+    @Test
+    fun capitalisedCredentialNamesAreNeverMirrored() {
+        write("memory/2026-10-29.md", "log")
+        write("memory/API_KEYS.md", "k=v")
+        write("memory/.ENV", "K=V")
+        write("shared/Secrets.json", "{}")
+        write("shared/backlog.md", "doc")
+
+        assertEquals(
+            listOf("memory/2026-10-29.md"),
+            MirrorScope.selectMemory(File(root, "memory")).map { it.relPath },
+        )
+        assertEquals(
+            listOf("shared/backlog.md"),
+            MirrorScope.selectShared(File(root, "shared")).map { it.relPath },
+        )
+    }
+
+    @Test
+    fun credentialDirectoriesAreNotWalkedAtAnyDepth() {
+        // `oauth/linear.json` and `secrets/config.json` carry tokens under
+        // entirely ordinary file names — only the directory tells the truth.
+        write("memory/oauth/linear.json", "{}")
+        write("memory/Secrets/config.json", "{}")
+        write("memory/credentials/nested/deep.json", "{}")
+        write("memory/keep.md", "doc")
+
+        assertEquals(
+            listOf("memory/keep.md"),
+            MirrorScope.selectMemory(File(root, "memory")).map { it.relPath },
+        )
+    }
+
+    @Test
+    fun skillDirectoryWithKeyInItsNameStillMirrors() {
+        // Negative control for the directory rule, and the reason it is a
+        // whole-name container list instead of isDeniedName(): this directory
+        // DOES match the file rule ("-key-"), so reusing that rule on
+        // directories would silently drop the user's most-used skill from the
+        // mirror — a functional regression dressed up as a red line.
+        assertTrue(MirrorScope.isDeniedName("tierflow-key-harvest"))
+        write("skills/tierflow-key-harvest/SKILL.md", "skill")
+        write("skills/tierflow-key-harvest/scripts/tf_status.py", "print(1)")
+        write("skills/tierflow-key-harvest/keys/ledger.json", "{}")
+
+        assertEquals(
+            listOf(
+                "skills/tierflow-key-harvest/SKILL.md",
+                "skills/tierflow-key-harvest/scripts/tf_status.py",
+            ),
+            MirrorScope.selectSkills(File(root, "skills")).map { it.relPath },
+        )
+    }
 }
