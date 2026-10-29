@@ -121,7 +121,11 @@ class TerminalSessionInitOrderTest {
     private fun blockAt(code: String, decl: Regex): String? {
         val matches = decl.findAll(code).toList()
         if (matches.size != 1) return null
-        val open = code.indexOf('{', matches[0].range.first)
+        return blockFrom(code, code.indexOf('{', matches[0].range.first))
+    }
+
+    /** The `{ … }` block that opens at [open] (index of `{`), else null. */
+    private fun blockFrom(code: String, open: Int): String? {
         if (open < 0) return null
         var depth = 0
         var i = open
@@ -192,14 +196,50 @@ class TerminalSessionInitOrderTest {
 
     // ── analyser: TerminalScreen prefill ─────────────────────────────────────
 
+    /**
+     * [R5-F F-C-10] The prefill is located by CONTENT, not by its key list.
+     *
+     * The effect key had to move from `Unit` to `(terminalSession, initCommand)`:
+     * `launchSingleTop` keeps TERMINAL on top and REPLACES its NavBackStackEntry
+     * with a copy carrying the new route arguments (navigation 2.8.5
+     * `NavController.launchSingleTopInternal` → `NavBackStackEntry(entry, args)`
+     * → `visibleEntries` → `NavHost` `collectAsState`), so the content lambda
+     * re-runs with the new `initCommand` while `LaunchedEffect(Unit)` never
+     * restarts — "terminal already on screen, then
+     * `open_terminal?init_command=…`" did nothing at all, silently.
+     *
+     * Every ordering invariant this arm was written for is unchanged and still
+     * graded: the prefill awaits RUNNING instead of a wall-clock delay, the wait
+     * precedes the send, and the control-character filter survives. The new
+     * criterion is the key itself — it must name the command (or the command is
+     * still dropped) and the session object (or a changed `sessionId` keeps a
+     * PTY whose proot args and env name the old session).
+     */
     private fun screenViolations(rawSrc: String): List<String> {
         val code = codeOnly(rawSrc)
-        val body = blockAt(code, Regex("LaunchedEffect\\(\\s*Unit\\s*\\)\\s*\\{"))
-            ?: return listOf("TerminalScreen LaunchedEffect(Unit) block missing or ambiguous")
+        // Every `LaunchedEffect(<keys>) { … }` whose body prefills the PTY.
+        val prefills = Regex("LaunchedEffect\\s*\\(([^)]*)\\)\\s*\\{").findAll(code)
+            .mapNotNull { m ->
+                val body = blockFrom(code, code.indexOf('{', m.range.last)) ?: return@mapNotNull null
+                if (body.contains("sendText(")) m.groupValues[1] to body else null
+            }
+            .toList()
+        if (prefills.isEmpty()) {
+            return listOf(
+                "TerminalScreen: no LaunchedEffect block sends the prefill (`sendText(`) — " +
+                    "the command cannot be delivered at all",
+            )
+        }
+        if (prefills.size > 1) {
+            return listOf(
+                "TerminalScreen: ${prefills.size} LaunchedEffect blocks call sendText — " +
+                    "one prefill path, or the characters land twice",
+            )
+        }
+        val (keys, body) = prefills[0]
         val out = mutableListOf<String>()
 
         val send = body.indexOf("sendText(")
-        if (send < 0) out += "TerminalScreen: the prefill (`sendText(`) is gone"
         if (code.contains("delay(500)")) {
             out += "TerminalScreen: a fixed `delay(500)` is back — the prefill must wait for " +
                 "the session's RUNNING state (which is published after the cd preamble), not " +
@@ -215,6 +255,14 @@ class TerminalSessionInitOrderTest {
         }
         if (!body.contains("initCommand.filter {")) {
             out += "TerminalScreen: the control-character filter on initCommand is gone"
+        }
+        if (!keys.contains("initCommand")) {
+            out += "TerminalScreen: the prefill effect is not keyed on `initCommand` — a " +
+                "TERMINAL destination already on screen never re-delivers the command"
+        }
+        if (!keys.contains("terminalSession")) {
+            out += "TerminalScreen: the prefill effect is not keyed on `terminalSession` — a " +
+                "changed sessionId would keep delivering into the replaced PTY"
         }
         return out
     }
@@ -295,6 +343,36 @@ class TerminalSessionInitOrderTest {
         assertTrue(
             "a prefill without the RUNNING wait must be RED, got $violations",
             violations.any { it.contains("no longer awaits") },
+        )
+    }
+
+    /**
+     * [R5-F F-C-10] Teeth for the NEW criterion. The pre-fix screen is also
+     * unkeyed, so remove the fixed delay and add the RUNNING wait: nothing else
+     * is wrong with this body — it still drops the command the moment the
+     * TERMINAL destination is reused, because the key is still `Unit`.
+     */
+    @Test
+    fun `a prefill keyed on Unit is rejected even when the ordering is right`() {
+        val unitKeyed = preFixScreen
+            .replace(
+                "            kotlinx.coroutines.delay(500)\n",
+                "            terminalSession.state.first { it == TerminalSession.State.RUNNING }\n",
+            )
+        val violations = screenViolations(unitKeyed)
+        assertTrue(
+            "a correct-but-unkeyed prefill must still be RED, got $violations",
+            violations.any { it.contains("not keyed on `initCommand`") },
+        )
+        assertTrue(
+            "the unkeyed fixture must also name the missing session key, got $violations",
+            violations.any { it.contains("not keyed on `terminalSession`") },
+        )
+        // …and the ordering arms must be quiet on it, or the fixture is not
+        // isolating what this test claims to isolate.
+        assertTrue(
+            "the ordering arms must be green on this fixture, got $violations",
+            violations.none { it.contains("delay(500)") || it.contains("no longer awaits") },
         )
     }
 

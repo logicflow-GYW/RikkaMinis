@@ -48,10 +48,74 @@ fun formatFileSize(bytes: Long): String {
 }
 
 /**
+ * [R5-F F-F-02] Host directory a listing must read for [hostDir], following a
+ * link whose target is a GUEST path at ANY depth.
+ *
+ * [resolveListedEntry] already maps a link's own target and [FileItem.from]
+ * uses it to DESCRIBE the entry — but entering the entry is a different
+ * question. `navigateTo` appends the link's *name* to the logical path, so the
+ * next listing asks the filesystem for `<root>/dirLink` (and later
+ * `<root>/dirLink/sub`), and `toRealPath()` cannot resolve either: PRoot stored
+ * `/var/minis/…` in the link, a path the Android host does not have. The old
+ * code fell back to the literal path, `listFiles()` returned `null` and the
+ * folder the user had just tapped opened EMPTY. Walking up to the deepest
+ * symlink ancestor and rebasing the remainder onto its mapped target is what
+ * makes both the one-level tap and sub-navigation work.
+ *
+ * Pure except for [mapGuest] (the browser's own guest→host mapper) and the
+ * filesystem reads, so the JVM test source set can pin every arm.
+ */
+internal fun resolveListingHostDir(
+    hostDir: File,
+    mapGuest: (String) -> File?,
+): File {
+    // Fast path — every non-link path, and every link whose target exists on
+    // the host under its literal spelling.
+    try {
+        return hostDir.toPath().toRealPath().toFile()
+    } catch (_: Exception) {
+        // Fall through: an unresolvable path may sit under a guest-path link.
+    }
+    var node: File? = hostDir
+    // Segments below [node], root-first; rebased onto the mapped target.
+    val tail = ArrayDeque<String>()
+    while (node != null) {
+        val linkTarget = try {
+            if (Files.isSymbolicLink(node.toPath())) {
+                Files.readSymbolicLink(node.toPath()).toString()
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+        val target = resolveListedEntry(node, linkTarget, mapGuest)
+        // `target != node` skips the unmappable case (resolveListedEntry then
+        // answers the link itself — refuse-instead-of-guess); `exists()` keeps
+        // a dangling link from being rebased onto a fabricated path.
+        if (target != node && target.exists()) {
+            var out = target
+            for (name in tail) out = File(out, name)
+            return out
+        }
+        tail.addFirst(node.name)
+        node = node.parentFile
+    }
+    return hostDir
+}
+
+/**
  * File item model — corresponds to iOS FileItem.
  */
 @Immutable
 data class FileItem(
+    /**
+     * The entry as it sits in the listing — for a symlink this is the LINK
+     * (lstat), never what it points at. Delete/unlink and every path-based
+     * gesture must keep reading this field: [R4-V F-11] removing a
+     * directory-shaped link has to unlink the NAME, and
+     * `deleteRecursively()` on the resolved tree would wipe the target.
+     */
     val file: File,
     val name: String,
     val isDirectory: Boolean,
@@ -59,6 +123,20 @@ data class FileItem(
     val size: Long,
     /** lastModified() in epoch ms, 0 when unavailable. */
     val modifiedMs: Long = 0L,
+    /**
+     * [R5-F F-F-02] Host-READABLE path — what the entry resolves to for
+     * reading, i.e. [resolveListedEntry]'s answer, which is [file] itself for
+     * every non-link entry (and for a link that cannot be mapped, the
+     * documented refuse-instead-of-guess answer).
+     *
+     * Consumers that OPEN the entry use this; consumers that remove or rename
+     * it use [file]. Keeping both on the item is what lets a container-absolute
+     * link (`ln -s /var/minis/workspace/x dirLink`) be listed AND opened: the
+     * preview route used to be handed [file]'s absolutePath — the host path of
+     * the link — and every content read followed it to a target the Android
+     * host does not have, so the preview screen came up empty.
+     */
+    val hostPath: File = file,
 ) {
     val iconRes: String
         get() {
@@ -194,6 +272,10 @@ data class FileItem(
                 isSymlink = isSymlink,
                 size = if (resolved.isDirectory) 0L else resolved.length(),
                 modifiedMs = resolved.lastModified(),
+                // [R5-F F-F-02] The resolved target — what opening the entry
+                // must read. `file` stays the link so delete/unlink keeps
+                // working on the name (see the field KDoc).
+                hostPath = resolved,
             )
         }
     }
@@ -576,12 +658,13 @@ class FileBrowserViewModel(
         val hostPath = currentHostPath
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Resolve symlinks for listing but keep logical path for breadcrumbs
-                val resolvedPath = try {
-                    hostPath.toPath().toRealPath().toFile()
-                } catch (_: Exception) {
-                    hostPath
-                }
+                // Resolve symlinks for listing but keep logical path for breadcrumbs.
+                // [R5-F F-F-02] `toRealPath()` alone cannot resolve a PRoot link
+                // (it stores a GUEST path the Android host does not have), so a
+                // folder whose name the user just tapped listed as EMPTY. The
+                // helper walks up to the deepest symlink ancestor and rebases —
+                // see its KDoc for the shape.
+                val resolvedPath = resolveListingHostDir(hostPath, ::resolveGuestAbsoluteTarget)
 
                 // Dotfile filter is gated on the user-facing "Show Hidden
                 // Files" preference (T-hidden-files a3e7f1d0). Snapshot

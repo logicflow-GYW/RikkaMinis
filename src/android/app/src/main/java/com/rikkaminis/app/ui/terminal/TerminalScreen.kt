@@ -95,8 +95,30 @@ fun TerminalScreen(
     val sessionState by terminalSession.state.collectAsStateEffect()
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
-    LaunchedEffect(Unit) {
+    // [R5-F F-C-10] Keyed on the SESSION OBJECT, not on Unit: AppNavigation
+    // rebuilds the session when the route's `sessionId` changes (that id is
+    // baked into the proot args and the PTY env at start, so a different
+    // session is a different PTY). An unkeyed effect kept starting and
+    // stopping the object it captured on the first composition — i.e. nothing
+    // for the live screen.
+    LaunchedEffect(terminalSession) {
         if (!terminalSession.isRunning) terminalSession.start(sessionId = sessionId)
+    }
+
+    // [R5-F F-C-10] The prefill is keyed on the COMMAND. `launchSingleTop`
+    // keeps this destination on top and REPLACES its NavBackStackEntry with a
+    // copy carrying the new route arguments (NavController.launchSingleTopInternal
+    // → NavBackStackEntry(entry, args)), so the screen recomposes with the new
+    // `initCommand` — but the old `LaunchedEffect(Unit)` never ran again, which
+    // made "open_terminal?init_command=… while the terminal is already on
+    // screen" silently do nothing.
+    //
+    // Re-delivery is idempotent by construction — not by the navigation
+    // library's entry equality: the key is the command STRING, so navigating
+    // with the SAME command twice leaves this effect un-restarted and the
+    // characters are never stacked twice into the input line. A DIFFERENT
+    // command is a different key and does restart it, which is the whole point.
+    LaunchedEffect(terminalSession, initCommand) {
         if (!initCommand.isNullOrBlank()) {
             // [da1032-D] Wait for READY, never a fixed wall-clock guess. RUNNING
             // is published by TerminalSession only after its `cd /var/minis &&
@@ -129,7 +151,11 @@ fun TerminalScreen(
         }
     }
 
-    DisposableEffect(Unit) {
+    // [R5-F F-C-10] Keyed on the session for the same reason as the start
+    // effect above: with `remember(sessionId)` in AppNavigation a changed
+    // sessionId produces a NEW object, and an unkeyed dispose would leave that
+    // new PTY running forever (the closure captured the old one).
+    DisposableEffect(terminalSession) {
         onDispose { terminalSession.stop() }
     }
 

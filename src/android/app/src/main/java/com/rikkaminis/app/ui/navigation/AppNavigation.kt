@@ -790,7 +790,14 @@ fun AppNavigation(
                     )
                 },
                 onPreviewAttachment = { item ->
-                    navController.safeNavigate(Routes.filePreview(item.file.absolutePath))
+                    // [R5-F F-F-02] Pass the entry's HOST-READABLE path, not the
+                    // link's own host path: the route param is what the preview
+                    // dialog re-opens from disk, and for a container-absolute
+                    // link (`ln -s /var/minis/… dirLink`) the link's host path
+                    // points at a target the Android host does not have — the
+                    // preview came up empty. `hostPath == file` for every plain
+                    // entry, so this is a no-op for the normal case.
+                    navController.safeNavigate(Routes.filePreview(item.hostPath.absolutePath))
                 },
                 onModelGroupsClick = { navController.safeNavigate(Routes.MODEL_GROUPS) },
                 // Chat-history drawer: open another conversation (same funnel
@@ -1246,7 +1253,10 @@ fun AppNavigation(
                 viewModel = vm,
                 onBack = { navController.safePopBackStack() },
                 onPreviewFile = { item ->
-                    navController.safeNavigate(Routes.filePreview(item.file.absolutePath))
+                    // [R5-F F-F-02] hostPath, not file: a container-absolute
+                    // symlink's own path is unreadable on the host — see
+                    // onPreviewAttachment.
+                    navController.safeNavigate(Routes.filePreview(item.hostPath.absolutePath))
                 },
             )
         }
@@ -1298,7 +1308,10 @@ fun AppNavigation(
                 viewModel = vm,
                 onBack = { navController.safePopBackStack() },
                 onPreviewFile = { item ->
-                    navController.safeNavigate(Routes.filePreview(item.file.absolutePath))
+                    // [R5-F F-F-02] hostPath, not file: a container-absolute
+                    // symlink's own path is unreadable on the host — see
+                    // onPreviewAttachment.
+                    navController.safeNavigate(Routes.filePreview(item.hostPath.absolutePath))
                 },
             )
         }
@@ -1463,9 +1476,19 @@ fun AppNavigation(
             ),
         ) { backStackEntry ->
             val context = androidx.compose.ui.platform.LocalContext.current
+            // [R5-F F-C-10] `launchSingleTop` keeps this destination on top and
+            // REPLACES its NavBackStackEntry with a copy carrying the new route
+            // arguments (NavController.launchSingleTopInternal →
+            // NavBackStackEntry(entry, args)), so this lambda re-runs with the
+            // new args while the composition (and every `remember {}`) below is
+            // reused. Keying the session on `sessionId` is what makes that safe:
+            // the id is baked into the PTY at start (proot args + env), so a
+            // different session must be a different TerminalSession object —
+            // TerminalScreen's lifecycle effects are keyed on the object, which
+            // stops the old PTY and boots the new one exactly once.
             val initCommand = backStackEntry.arguments?.getString("initCommand")
             val sessionId = backStackEntry.arguments?.getString("sessionId")
-            val session = remember { TerminalSession(context.applicationContext) }
+            val session = remember(sessionId) { TerminalSession(context.applicationContext) }
             TerminalScreen(
                 terminalSession = session,
                 onBack = { navController.safePopBackStack() },
