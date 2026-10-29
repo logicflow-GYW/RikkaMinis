@@ -75,10 +75,9 @@ object EncryptedPrefsFactory {
                 // empty, memory-only map, so every credential the user typed
                 // looked saved and vanished on the next cold start with no
                 // trace anywhere. The class KDoc already claimed this exact
-                // line existed ("visible to telemetry through
-                // `AppLogger.error("EncryptedPrefs", ...)` which emits a
-                // structured `step=keystore_degraded` line that
-                // `error-snapshot-*.log` captures") — the contract was written,
+                // line existed ("visible to telemetry through an AppLogger
+                // error line whose message carries `step=keystore_degraded`
+                // into `error-snapshot-*.log`") — the contract was written,
                 // never implemented; the only signal was android.util.Log.e,
                 // which reaches `error-snapshot-*.log` never and the daily file
                 // only while the logcat tailer happens to be running.
