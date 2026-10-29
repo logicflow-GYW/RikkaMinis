@@ -95,4 +95,44 @@ class OpenCatchUpGuardTest {
         if (decide(userEngaged = engaged, canScrollForward = true)) rolls++
         assertEquals(1, rolls)
     }
+
+    // ── [FIX-R4-Q F-12] wiring: the two jump-away entry points must mark ──
+
+    @Test
+    fun fabUpTapAndFocusJumpMarkTheUserEngagedBeforeScrollingAway() {
+        // [FIX-R4-Q F-12] Both entry points scroll AWAY from the bottom while
+        // the open-catchup window may still be armed (<2.5s after opening the
+        // session — e.g. a search-result tap into the same session). Without
+        // the marking the collector rolls the viewport straight back to the
+        // bottom and the jump the user asked for is cancelled.
+        val src = readChatScreen()
+        assertMarkedBefore(src, "tracedScrollToItem(\"FAB-UP\"")
+        assertMarkedBefore(src, "tracedScrollToItem(\"FOCUS-MESSAGE\"")
+    }
+
+    /** `openCatchUpUserEngaged = true` must appear in the 1200 chars before
+     *  the jump call — i.e. on the code path that leads to the scroll, not
+     *  somewhere unrelated in the file. */
+    private fun assertMarkedBefore(src: String, marker: String) {
+        val at = src.indexOf(marker)
+        assertTrue("marker not found: $marker", at >= 0)
+        val windowStart = (at - 1200).coerceAtLeast(0)
+        assertTrue(
+            "engagement marking missing before $marker",
+            src.substring(windowStart, at).contains("openCatchUpUserEngaged = true"),
+        )
+    }
+
+    private fun readChatScreen(): String {
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
+            val f = java.io.File(
+                dir,
+                "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt",
+            )
+            if (f.exists()) return f.readText()
+            dir = dir.parentFile
+        }
+        throw java.io.FileNotFoundException("ChatScreen.kt not found from user.dir=${System.getProperty("user.dir")}")
+    }
 }

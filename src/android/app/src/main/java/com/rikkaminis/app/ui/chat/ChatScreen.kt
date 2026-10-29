@@ -3429,6 +3429,14 @@ fun ChatScreen(
                     }
                     tracedScrollToItem("FOCUS-MESSAGE", idx, 0)
                     highlightedMessageId = originalMessageId(target)
+                    // [FIX-R4-Q F-12] A focus jump scrolls AWAY from the bottom
+                    // — mark the user as engaged or the OPEN-CATCHUP collector
+                    // (armed while the session has been open <2.5s, e.g. a
+                    // search-result tap into the same session) rolls the
+                    // viewport straight back to the bottom and cancels the
+                    // jump the user just asked for. Same marking the
+                    // InputHistorySheet jump already does.
+                    openCatchUpUserEngaged = true
                     // Clearing pendingFocusId cancels THIS coroutine (it is a
                     // key of the enclosing LaunchedEffect), so the highlight
                     // fade-out must not live here — it gets its own effect
@@ -4386,6 +4394,13 @@ fun ChatScreen(
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
                             coroutineScope.launch {
+                                // [FIX-R4-Q F-12] The FAB-UP tap is a user
+                                // scroll-away from the bottom: mark it or the
+                                // OPEN-CATCHUP collector (still armed within
+                                // 2.5s of opening the session) rolls the
+                                // viewport back down and the "scroll to top"
+                                // tap appears to do nothing.
+                                openCatchUpUserEngaged = true
                                 // [forward-stable] Forward list: oldest message
                                 // is index 0 (was totalItemsCount-1 under
                                 // reverseLayout).
