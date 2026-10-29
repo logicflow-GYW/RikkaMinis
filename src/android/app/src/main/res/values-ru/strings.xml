@@ -1643,4 +1643,5 @@
     <string name="mirror_sync_now">Синхронизировать сейчас</string>
     <string name="mirror_last_sync">Последняя синхронизация: %1$s</string>
     <string name="mirror_never">Ещё не синхронизировано</string>
+    <string name="mirror_pending_count">Ожидают синхронизации: %1$d</string>
 </resources>

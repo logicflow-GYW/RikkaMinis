@@ -1693,4 +1693,5 @@
     <string name="mirror_sync_now">立即同步</string>
     <string name="mirror_last_sync">上次同步：%1$s</string>
     <string name="mirror_never">尚未同步</string>
+    <string name="mirror_pending_count">待同步 %1$d 個檔案</string>
 </resources>

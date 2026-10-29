@@ -100,6 +100,33 @@ object MirrorStore {
     /** Human-readable outcome of the last run, for the settings row. */
     fun lastResult(context: Context): String? = prefs(context).getString(KEY_RESULT, null)
 
+    /**
+     * How many files the next sync would touch (writes + deletions), or null
+     * when the target is unreachable.
+     *
+     * Read-only and lock-free on purpose: §5 of the behaviour spec makes
+     * "freshness + pending count" the operator's signal that the apparatus is
+     * alive, so it must answer even while a sync is in flight. It shares the
+     * exact selection and diff the writer uses, so the number cannot drift
+     * from what `syncNow` would actually do.
+     */
+    suspend fun pendingCount(context: Context): Int? = withContext(Dispatchers.IO) {
+        runCatching {
+            val app = context.applicationContext
+            val target = openTarget(app) ?: return@withContext null
+            val manifestRel = "$MIRROR_REL/${MirrorPlan.MANIFEST_NAME}"
+            val manifest = MirrorPlan.decodeManifest(target.read(manifestRel)?.toString(Charsets.UTF_8))
+            val current = ArrayList<MirrorPlan.Entry>(2048)
+            for ((dir, pick) in SOURCES) {
+                for (f in pick(File(app.filesDir, "minis-global/$dir"))) {
+                    current += MirrorPlan.Entry(f.relPath, f.size, f.modifiedMs)
+                }
+            }
+            val diff = MirrorPlan.diff(manifest?.entries ?: emptyList(), current)
+            diff.toWrite.size + diff.removed.size
+        }.getOrNull()
+    }
+
     /** "MM-dd HH:mm" of the last WRITTEN sync, or null before the first one.
      *  Mirrors [AutoBackupManager.lastRunLabel]: the label is read on IO by the
      *  entry LaunchedEffect, never inside remember. */

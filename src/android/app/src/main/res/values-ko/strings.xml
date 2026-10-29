@@ -1689,4 +1689,5 @@
     <string name="mirror_sync_now">지금 동기화</string>
     <string name="mirror_last_sync">마지막 동기화: %1$s</string>
     <string name="mirror_never">아직 동기화하지 않음</string>
+    <string name="mirror_pending_count">동기화 대기 중인 파일 %1$d개</string>
 </resources>

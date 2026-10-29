@@ -1802,4 +1802,5 @@
     <string name="mirror_sync_now">Sync now</string>
     <string name="mirror_last_sync">Last sync: %1$s</string>
     <string name="mirror_never">Never synced yet</string>
+    <string name="mirror_pending_count">%1$d file(s) waiting to sync</string>
 </resources>

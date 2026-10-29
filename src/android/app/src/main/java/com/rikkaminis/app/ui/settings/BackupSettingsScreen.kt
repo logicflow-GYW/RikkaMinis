@@ -207,6 +207,10 @@ fun BackupSettingsScreen(
     var mirrorEnabled by remember { mutableStateOf(false) }
     var mirrorRunning by remember { mutableStateOf(false) }
     var mirrorLastSync by remember { mutableStateOf<String?>(null) }
+    // §5 of the behaviour spec: the operator's liveness signal is freshness
+    // PLUS the pending count. A stale timestamp alone cannot distinguish
+    // "nothing changed" from "the trigger stopped firing".
+    var mirrorPending by remember { mutableStateOf<Int?>(null) }
     // [T-auto-backup-remote-dir] Remote automatic-backup management state:
     // the WebDAV `auto/` subdirectory listing (plus legacy root stragglers),
     // managed from a dedicated dialog inside the auto-backup section so the
@@ -268,6 +272,17 @@ fun BackupSettingsScreen(
         }
         mirrorEnabled = mirrorRow.first
         mirrorLastSync = mirrorRow.second
+    }
+    // Independent IO pass: pendingCount walks the source tree (1810 stats) and
+    // reads the remote manifest, so it must not delay the prefs-backed rows.
+    LaunchedEffect(mirrorEnabled) {
+        mirrorPending = if (mirrorEnabled) {
+            withContext(Dispatchers.IO) {
+                com.rikkaminis.app.backup.MirrorStore.pendingCount(context)
+            }
+        } else {
+            null
+        }
     }
 
     val refreshSnapshots: () -> Unit = {
@@ -924,9 +939,15 @@ fun BackupSettingsScreen(
                 title = stringResource(R.string.mirror_sync_now),
                 subtitle = run {
                     val last = mirrorLastSync
-                    if (mirrorRunning) stringResource(R.string.backup_progress_title)
-                    else if (last != null) stringResource(R.string.mirror_last_sync, last)
-                    else stringResource(R.string.mirror_never)
+                    val pending = mirrorPending
+                    when {
+                        mirrorRunning -> stringResource(R.string.backup_progress_title)
+                        last == null -> stringResource(R.string.mirror_never)
+                        pending != null && pending > 0 ->
+                            stringResource(R.string.mirror_last_sync, last) + " · " +
+                                stringResource(R.string.mirror_pending_count, pending)
+                        else -> stringResource(R.string.mirror_last_sync, last)
+                    }
                 },
                 icon = Icons.Filled.Refresh,
                 onClick = if (operationBusy || mirrorRunning) null else ({
@@ -937,7 +958,11 @@ fun BackupSettingsScreen(
                             val manager = com.rikkaminis.app.backup.MirrorStore
                             withContext(Dispatchers.IO) { manager.syncNow(context) }
                             val refreshed = withContext(Dispatchers.IO) { manager.lastSyncLabel(context) }
-                            withContext(Dispatchers.Main) { mirrorLastSync = refreshed }
+                            val pendingNow = withContext(Dispatchers.IO) { manager.pendingCount(context) }
+                            withContext(Dispatchers.Main) {
+                                mirrorLastSync = refreshed
+                                mirrorPending = pendingNow
+                            }
                         } catch (t: Throwable) {
                             withContext(Dispatchers.Main) { errorMessage = t.message ?: errUnknown }
                         } finally {
