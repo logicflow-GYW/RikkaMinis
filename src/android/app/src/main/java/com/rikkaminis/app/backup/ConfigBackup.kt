@@ -1313,16 +1313,11 @@ object ConfigBackup {
         // stage can re-attach rules to the instance that now owns the label
         // (merge and append paths both re-mint or reuse ids).
         val providerKeyToId = HashMap<String, String>()
-        // [FIX-R5-B1 / F-05] …and the ids that came BEFORE the last one, per
-        // key. A single-slot map cannot answer "in which ORDER": a payload
-        // with two providers under the same (providerType, label) overwrote the
-        // first one's id, so Stage 1.5 handed BOTH thinking-rules groups to the
-        // SECOND instance (whose rules were then replaced by the second group,
-        // while the first instance came out with none). The rules groups are
-        // written in the same provider order as the `providers` array, so the
-        // i-th group for a key belongs to the i-th provider for that key: keep
-        // the earlier ids in arrival order and let Stage 1.5 consume them.
-        val earlierIdsByProviderKey = HashMap<String, MutableList<String>>()
+        // [FIX-R5-B1 / F-05] The ids that took each (providerType, label), in
+        // arrival order — the order the `providers` array and the
+        // `thinkingRules` groups share. Consumed front-first by Stage 1.5 so a
+        // duplicate label no longer loses one instance's whole rules group.
+        val idsByProviderKey = HashMap<String, MutableList<String>>()
         // [FIX-R3-D / F-08] Instance ids Stage 1 already created or merged into
         // during THIS run. A backup legitimately carries two providers with the
         // same (providerType, label) — e.g. the user duplicated an OpenAI
@@ -1440,8 +1435,6 @@ object ConfigBackup {
                         // into is off the table as a merge target for the REST
                         // of this document.
                         claimedInstanceIds.add(instId)
-                        // The thinking-rules key, exactly as Stage 1.5 spells it.
-                        val ruleKey = obj.optString("providerType", "") + "\u0000" + label
                         // [da1031-A] Key by the BACKUP's original label, not the
                         // possibly auto-renamed one: Stage 1.5 looks rules up by
                         // the (providerType, providerLabel) pair the rules export
@@ -1450,19 +1443,24 @@ object ConfigBackup {
                         // resolvedLabel made every renamed import lose its whole
                         // thinking-rules group.
                         //
-                        // [FIX-R5-B1 / F-05] Remember the id this key pointed at
-                        // BEFORE overwriting it — see [earlierIdsByProviderKey].
-                        // The key expression is spelled inline on the assignment
-                        // line because `backup_remap_rollup_check.py` pins that
-                        // exact shape (Stage 1 registers, Stage 1.5 looks up).
-                        val previousForThisKey = providerKeyToId[ruleKey]
+                        // The key expression stays spelled inline here (no local
+                        // val, no helper) because `backup_remap_rollup_check.py`
+                        // pins this exact shape as the Stage-1 registration and
+                        // mutates it to prove the criterion has teeth.
                         providerKeyToId[
                             obj.optString("providerType", "") + "\u0000" + label
                         ] = instId
-                        if (previousForThisKey != null && previousForThisKey != instId) {
-                            earlierIdsByProviderKey.getOrPut(ruleKey) { ArrayList() }
-                                .add(previousForThisKey)
-                        }
+                        // [FIX-R5-B1 / F-05] …and keep EVERY id that took this
+                        // key, in arrival order. The single slot above can only
+                        // answer "who owns this key" (last write wins), which
+                        // made Stage 1.5 hand BOTH thinking-rules groups of a
+                        // duplicate-label pair to the SECOND instance — the
+                        // first came out with no rules at all. The rules groups
+                        // are written in provider order, so the i-th group for a
+                        // key belongs to the i-th provider for that key.
+                        idsByProviderKey.getOrPut(
+                            obj.optString("providerType", "") + "\u0000" + label
+                        ) { ArrayList() }.add(instId)
                     }
                 } catch (t: Throwable) {
                     skipped.add("provider \"$label\": ${t.message ?: "import failed"}")
@@ -1483,21 +1481,27 @@ object ConfigBackup {
                 val type = group.optString("providerType", "")
                 val label = group.optString("providerLabel", "")
                 val rules = group.optJSONArray("rules") ?: continue
-                // [FIX-R5-B1 / F-05] A payload may carry more than one rules
-                // group per (type, label) — one per provider entry that had
-                // rules. Consume the earlier ids first (arrival order), then
-                // fall back to the single-slot map (the LAST instance that took
-                // this key), which is exactly the pre-fix behaviour for the
-                // ordinary one-provider-per-key payload.
-                val earlier = earlierIdsByProviderKey["$type\u0000$label"]
-                val instId = if (earlier.isNullOrEmpty()) {
-                    providerKeyToId["$type\u0000$label"]
+                // [FIX-R5-B1 / F-05] One rules group per provider entry that had
+                // rules, in provider order. Take the next id registered for this
+                // key from the arrival-order list; the single slot (the LAST
+                // instance that took the key) is the fallback for a payload that
+                // carries more groups than providers.
+                val pendingForThisKey = idsByProviderKey["$type\u0000$label"]
+                val nextInOrder = if (pendingForThisKey.isNullOrEmpty()) {
+                    null
                 } else {
-                    earlier.removeAt(0)
+                    pendingForThisKey.removeAt(0)
                 }
+                val instId = nextInOrder ?: providerKeyToId["$type\u0000$label"]
                 if (instId == null) {
                     skipped.add("thinking rules for \"$label\" (provider not restored)")
                     continue
+                }
+                if (nextInOrder == null && pendingForThisKey != null) {
+                    skipped.add(
+                        "thinking rules for \"$label\": more rule groups than restored " +
+                            "providers for this key, applied to its last instance"
+                    )
                 }
                 try {
                     thinkingRulesImported += providerRepo.restoreThinkingRules(instId, rules)
