@@ -9,7 +9,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -50,6 +52,14 @@ class AgentForegroundService : Service() {
         private const val EXTRA_TOOL_STATUS = "tool_status"
 
         /**
+         * [R4-U F-04] The live instance, if any. Set in [onCreate], cleared in
+         * [onDestroy] — a companion-level reference (not a static Context) so the
+         * service can be addressed without `startForegroundService`.
+         */
+        @Volatile
+        private var liveInstance: AgentForegroundService? = null
+
+        /**
          * Starts or updates the foreground service with current status.
          */
         fun startService(context: Context, sessionCount: Int, toolStatus: String) {
@@ -65,6 +75,48 @@ class AgentForegroundService : Service() {
         }
 
         /**
+         * [R4-U F-04] Re-render the ongoing notification of an ALREADY RUNNING
+         * instance.
+         *
+         * `startForegroundService()` is the operation that races an OEM
+         * reclaim (5-second startForeground deadline); a `notify()` on a
+         * notification the service already owns is not. Splitting the two is
+         * what lets the status row stay truthful while the app is backgrounded
+         * (previously `SessionActivityTracker.updateService()` refused both, so
+         * the row froze at the moment the user pressed Home while tools kept
+         * running).
+         *
+         * @return true when a running instance took the update; false when there
+         *   is nothing to refresh (caller must not fall back to a start while
+         *   invisible — that is the crash this guards).
+         */
+        fun refreshIfRunning(sessionCount: Int, toolStatus: String): Boolean {
+            val instance = liveInstance ?: return false
+            if (!instance.foregroundStarted) return false
+            // Callers run on IO threads; the builder touches app resources and
+            // the notification is owned by the main thread's service.
+            instance.mainHandler.post {
+                instance.applyStatusNotification(sessionCount, toolStatus)
+            }
+            return true
+        }
+
+        /**
+         * [R4-U F-05] Whether a finished background turn could still show its
+         * completion capsule — i.e. whether keeping the service alive for
+         * [CompletionLinger.LINGER_MS] buys the user anything. Requires a live
+         * foreground service, the overlay toggle ON and SYSTEM_ALERT_WINDOW
+         * granted; otherwise the notification row would linger showing "Idle"
+         * for no reason and the stop proceeds after the normal debounce.
+         */
+        fun completionLingerEligible(): Boolean {
+            val instance = liveInstance ?: return false
+            return instance.foregroundStarted &&
+                instance.overlayEnabledNow &&
+                instance.overlayPermissionNow
+        }
+
+        /**
          * Stops the foreground service.
          */
         fun stopService(context: Context) {
@@ -74,6 +126,25 @@ class AgentForegroundService : Service() {
     }
 
     private var startTimeMs: Long = 0L
+
+    /**
+     * [R4-U F-04] Main-thread queue for notification refreshes requested by the
+     * tracker from IO threads, plus the two flags that make a refresh safe:
+     * [foregroundStarted] (the service owns the notification — nothing to update
+     * before `startForeground`) and the overlay eligibility pair
+     * ([overlayEnabledNow] / [overlayPermissionNow]) consulted by
+     * [completionLingerEligible].
+     */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var foregroundStarted = false
+
+    @Volatile
+    private var overlayEnabledNow = false
+
+    @Volatile
+    private var overlayPermissionNow = false
     /**
      * Partial wake lock acquired while the foreground service is alive.
      * Required because Android can put the CPU to sleep even with a
@@ -143,6 +214,10 @@ class AgentForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // [R4-U F-04] Publish the instance so the tracker can refresh the
+        // notification from the background without going through
+        // startForegroundService. Cleared in onDestroy.
+        liveInstance = this
         // [T-android-downgrade-compat] MinisApp.onCreate can bail out before
         // building the lateinit repositories in two states: safe mode (a
         // crash burst tripped CrashFrequencyDetector) and database guidance
@@ -228,6 +303,9 @@ class AgentForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        // [R4-U F-04] From here on the notification exists and may be refreshed
+        // from the background (see refreshIfRunning).
+        foregroundStarted = true
 
         return START_STICKY
     }
@@ -290,6 +368,11 @@ class AgentForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        // [R4-U F-04] Drop the instance reference first: a tracker refresh that
+        // lands during teardown must find nothing rather than touch a dying
+        // NotificationManager owner.
+        foregroundStarted = false
+        if (liveInstance === this) liveInstance = null
         // [RC4] The wakelock is normally driven by the active-stream collector
         // below; releaseWakeLock() here is a defensive final cleanup (it is
         // idempotent) so a service teardown can never leave a wakelock behind.
@@ -416,6 +499,12 @@ class AgentForegroundService : Service() {
     private fun applyOverlayState(state: OverlayState) {
         val controller = overlayController ?: return
         val hasPerm = controller.hasOverlayPermission()
+        // [R4-U F-05] Cached so the tracker can ask (synchronously, off the
+        // collector) whether a completion capsule could actually be shown —
+        // the 500 ms idle-stop debounce is shorter than a collector round trip,
+        // so live-querying the toggle here would race and lose.
+        overlayEnabledNow = state.enabled
+        overlayPermissionNow = hasPerm
 
         // [T-android-overlay-show-if-busy] Overlay surfaces while the
         // agent is actively working — either an assistant streamJob is
@@ -648,6 +737,24 @@ class AgentForegroundService : Service() {
             Log.d(TAG, "overlay permission nudge posted (SAW not granted but toggle is ON)")
         } catch (e: Throwable) {
             Log.w(TAG, "overlay permission nudge failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * [R4-U F-04] Apply a tracker-driven status refresh to the notification this
+     * service already owns. Main thread only ([refreshIfRunning] posts here).
+     *
+     * `buildNotification` reads the tracker's live tool name / running flag, so
+     * this repaint is what keeps the row's title, text and indeterminate
+     * progress in step with the agent while the app is backgrounded.
+     */
+    private fun applyStatusNotification(sessionCount: Int, toolStatus: String) {
+        if (!foregroundStarted) return
+        try {
+            getSystemService(NotificationManager::class.java)
+                ?.notify(NOTIFICATION_ID, buildNotification(sessionCount, toolStatus))
+        } catch (t: Throwable) {
+            Log.w(TAG, "background notification refresh failed: ${t.message}")
         }
     }
 
