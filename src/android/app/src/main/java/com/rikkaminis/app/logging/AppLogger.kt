@@ -457,24 +457,32 @@ object AppLogger {
             // stays correct; see listLogFiles / listLogFileMetas /
             // pruneOldLogs / ErrorSnapshotOrderingTest.
             val file = File(dir, "error-snapshot-$stamp-${android.os.Process.myPid()}.log")
-            // [FIX-R4-T F-09] Compose on the CALLER thread, write on the
-            // snapshot worker. error() is reachable from the main thread
-            // (every UI-side failure log goes through it) and the write is
-            // up to ~500 ring lines — a real, if short, main-thread stall on
+            // [FIX-R4-T F-09] Compose on the CALLER thread, write off it ONLY
+            // for the main thread. error() is reachable from the UI (every
+            // failure log raised by a composable / Activity path) and the
+            // write is up to ~500 ring lines — a real, if short, stall on
             // busy flash. The composition must stay here: contentIncluding
             // guarantees the trigger line is appended under the ring's own
             // lock, and the caller thread is the only place that line is
             // certainly correct.
             //
+            // An already-off-main caller keeps the old INLINE write: nothing
+            // is blocked there, and "the error that is about to kill the
+            // process" is exactly the case where landing on disk beats
+            // latency. (It also keeps ErrorSnapshotOrderingTest deterministic
+            // — its KDoc promises "no drain thread, no race" — because a
+            // plain JVM has no Looper and therefore takes the inline path.)
+            //
             // Durability note: the old synchronous writeText never called
             // fsync either — "synchronous" only bought order within THIS
             // call, not survival of a hard kill (the kernel may hold dirty
-            // pages for seconds). Moving the write to the worker keeps that
-            // order (single-thread worker, FIFO) and adds a bounded flush in
-            // stopCapture; the remaining window — process killed between
-            // compose and write — is the same one the previous code had
-            // between writeText and the kernel flush.
+            // pages for seconds). Ordering across calls is kept by the
+            // single-thread worker, and stopCapture flushes it.
             val body = buffer.contentIncluding(triggerLine).joinToString(separator = "\n") + "\n"
+            if (!isMainThread()) {
+                file.writeText(body)
+                return
+            }
             try {
                 snapshotExecutor.execute {
                     try {
@@ -490,6 +498,22 @@ object AppLogger {
             }
         } catch (_: Exception) {
             // Snapshot must never take the logger down.
+        }
+    }
+
+    /**
+     * [FIX-R4-T F-09] True when the caller is the Android main thread.
+     *
+     * Fails closed (false = "not main") wherever Looper is unavailable — a
+     * plain JVM test or a non-Android host — which is the SAFE answer: the
+     * inline write is what the code did before this fix.
+     */
+    private fun isMainThread(): Boolean {
+        return try {
+            val main = android.os.Looper.getMainLooper()
+            main != null && android.os.Looper.myLooper() === main
+        } catch (_: Throwable) {
+            false
         }
     }
 
