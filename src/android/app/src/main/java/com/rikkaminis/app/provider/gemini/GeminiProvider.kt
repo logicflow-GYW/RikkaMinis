@@ -131,10 +131,35 @@ class GeminiProvider(
             }
 
             val json = JSONObject(responseBody)
+            // [R5-E2 E-C-02②] A 2xx status is not the same thing as a successful
+            // generateContent: Google itself answers `200 {"error":{…}}` on some
+            // relay/edge shapes, and a blocked prompt comes back as
+            // `{"promptFeedback":{…}}` with NO candidates. Both used to fall
+            // through extractText (which returns "" for a missing array) into
+            // `finishReason ?: "end_turn"`, i.e. an EMPTY ANSWER REPORTED AS A
+            // CLEAN end_turn — the caller persisted a fabricated empty turn and
+            // never retried. The verdict below is pure and unit-tested
+            // (GeminiNonStreamingVerdictTest); see geminiGenerateContentVerdict
+            // for why "no candidates" throws instead of returning a
+            // `finishReason = "error"` response.
+            when (val verdict = geminiGenerateContentVerdict(json)) {
+                GeminiGenerateContentVerdict.Ok -> Unit
+                is GeminiGenerateContentVerdict.HttpError ->
+                    // Same mapping the streaming arm uses for an inline error
+                    // frame (geminiStreamErrorStatus + mapHttpError), so a rate
+                    // limit is RateLimited and a revoked key is InvalidApiKey on
+                    // both paths instead of two different classifications.
+                    throw mapHttpError(verdict.status, responseBody)
+                is GeminiGenerateContentVerdict.EmptyCandidates ->
+                    throw LLMError.ProviderError(verdict.describe())
+            }
             val text = extractText(json)
             val finishReason = extractFinishReason(json)
             val usage = extractUsage(json)
             val mediaAttachments = extractInlineMedia(json)
+            // Unchanged: a response that DOES carry a candidate but no
+            // finishReason (notably a pure functionCall turn, where text is
+            // legitimately empty) still defaults to end_turn.
             LLMResponse(text, finishReason ?: "end_turn", usage, mediaAttachments)
         }
     }
@@ -415,6 +440,39 @@ class GeminiProvider(
         // here is empty, so nothing thread-sensitive moves.
     }.flowOn(Dispatchers.IO)
 
+    /**
+     * [R5-E2 E-F-06] Emit one turn's images as Gemini `inlineData` parts (or a
+     * text placeholder when the model has no vision input — [§27a]).
+     *
+     * Extracted so the two carriers (the turn's structured `contentParts` and
+     * the request/message-level `imageParts` lists) go through ONE assembly:
+     * the shape that produced this defect was two mutually exclusive branches,
+     * each with its own copy of the image assembly, so whichever branch a turn
+     * landed in decided which images the wire saw.
+     */
+    private fun appendImageParts(
+        parts: JSONArray,
+        images: List<LLMMessage.ImagePart>,
+        supportsImages: Boolean,
+    ) {
+        for (part in images) {
+            val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
+            if (visionText != null) {
+                // [§27a] Non-vision model — text placeholder, mirrors the
+                // contentParts branch above.
+                parts.put(JSONObject().put("text", visionText))
+            } else {
+                // T5-L1: same backstop as the contentParts branch above.
+                val safeBytes = ImageBudget.compressUnderBudget(part.data)
+                val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
+                val inlineData = JSONObject()
+                inlineData.put("mimeType", safeMime)
+                inlineData.put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                parts.put(JSONObject().put("inlineData", inlineData))
+            }
+        }
+    }
+
     private fun buildRequestBody(
         messages: List<LLMMessage>,
         systemPrompt: String?,
@@ -526,6 +584,29 @@ class GeminiProvider(
                         }
                     }
                 }
+                // [R5-E2 E-F-06] The image carriers are NOT the content/else
+                // branch selector. Before this, a turn whose `contentParts` was
+                // non-empty (structured text, tool blocks — the normal shape
+                // since T132) read NEITHER the request-level `imageParts` (the
+                // list `sendMessage`/`streamMessage` take for "this turn's
+                // images") NOR `msg.imageParts`, so the entire image payload of
+                // such a turn was silently dropped on the wire.
+                //
+                // The guard is what keeps the live chat path byte-identical: a
+                // chat turn already carries its images as `ImageData` parts of
+                // this same `contentParts` (and the SAME arrays again in
+                // `msg.imageParts`), so with an inline image present, appending
+                // either carrier would send every attachment twice. Only a turn
+                // that has NO inlined ImageData needs the other carriers.
+                val extraImages = geminiTurnExtraImages(
+                    isLastUserTurn = index == lastUserIndex,
+                    requestImages = imageParts,
+                    messageImages = msg.imageParts,
+                    inlineImageCount = msg.contentParts.count { it is AgentContentPart.ImageData },
+                )
+                if (extraImages.isNotEmpty()) {
+                    appendImageParts(parts, extraImages, supportsImages)
+                }
             } else {
                 // Legacy: plain text with optional images
                 // [deep-audit-1047 A-03] `msg.imageParts` is a per-message carrier the
@@ -541,22 +622,7 @@ class GeminiProvider(
                     messageImageCount = msg.imageParts.size,
                 )
                 if (legacyImageCount > 0) {
-                    for (part in legacyImages) {
-                        val visionText = visionPlaceholder(supportsImages, VISION_UNSUPPORTED_PLACEHOLDER)
-                        if (visionText != null) {
-                            // [§27a] Non-vision model — text placeholder, mirrors
-                            // the contentParts branch above.
-                            parts.put(JSONObject().put("text", visionText))
-                        } else {
-                            // T5-L1: same backstop as the contentParts branch above.
-                            val safeBytes = ImageBudget.compressUnderBudget(part.data)
-                            val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                            val inlineData = JSONObject()
-                            inlineData.put("mimeType", safeMime)
-                            inlineData.put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
-                            parts.put(JSONObject().put("inlineData", inlineData))
-                        }
-                    }
+                    appendImageParts(parts, legacyImages, supportsImages)
                 }
                 val legacyText = msg.content.ifEmpty { " " }
                 parts.put(JSONObject().put("text", legacyText))
@@ -892,4 +958,99 @@ internal fun geminiStreamErrorStatus(code: Int, googleStatus: String): Int {
         "ABORTED" -> 503
         else -> 500
     }
+}
+
+/**
+ * [R5-E2 E-F-06] Which image parts belong to a turn whose `contentParts` are
+ * non-empty, i.e. the branch that previously emitted no images at all.
+ *
+ * Returns EMPTY when the turn already carries its images inline as
+ * [AgentContentPart.ImageData] parts: those are the same bytes (chat builds
+ * both carriers from one `prepared.imageParts` list), so appending the
+ * parallel carriers would double every attachment in the request. Otherwise
+ * the set is exactly the one the legacy branch uses — the request-level list
+ * on the LAST user turn only (`sendMessage`'s documented contract), plus the
+ * message's own parts on its own turn.
+ *
+ * Pure + top-level so the carrier table is unit-testable
+ * (see GeminiNonStreamingVerdictTest) instead of hidden in the serializer.
+ * Shared with the legacy branch's assembly (`GeminiProvider.appendImageParts`)
+ * so the two branches cannot drift into two wire shapes again.
+ */
+internal fun geminiTurnExtraImages(
+    isLastUserTurn: Boolean,
+    requestImages: List<LLMMessage.ImagePart>,
+    messageImages: List<LLMMessage.ImagePart>,
+    inlineImageCount: Int,
+): List<LLMMessage.ImagePart> {
+    if (inlineImageCount > 0) return emptyList()
+    if (requestImages.isEmpty() && messageImages.isEmpty()) return emptyList()
+    val out = ArrayList<LLMMessage.ImagePart>(requestImages.size + messageImages.size)
+    if (isLastUserTurn) out.addAll(requestImages)
+    out.addAll(messageImages)
+    return out
+}
+
+/**
+ * [R5-E2 E-C-02②] Verdict for a NON-STREAMING `generateContent` body that came
+ * back with a 2xx status.
+ *
+ * Gemini (and relays in front of it) can answer 200 with the failure inside the
+ * body — `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED",…}}` — exactly the
+ * shape the streaming arm already intercepts ([geminiStreamErrorStatus] +
+ * `mapHttpError`). The non-streaming arm read it as an empty candidate list and
+ * returned `LLMResponse("", "end_turn")`, i.e. a fabricated successful empty
+ * answer over a rate limit or a revoked key.
+ *
+ * ## Why "no candidates" THROWS instead of returning `finishReason = "error"`
+ *
+ * The callers cannot express the difference any other way:
+ *  • nothing in the app gives an `"error"` stop reason any meaning — the only
+ *    stop reason ever compared against a literal is `"length"`
+ *    (`compactSummaryIsTruncated`), while `text` stays empty, so an "error"
+ *    response would still be persisted as an assistant answer that says
+ *    nothing, which is the very symptom being fixed;
+ *  • throwing is the ONE classification path callers already treat as a
+ *    failure (typed [LLMError] → error card + retry), and the streaming arm
+ *    reaches the same place by throwing (`mapHttpError` on an inline error
+ *    frame, `failOnSilentEmptyCompletion` on a fully empty stream).
+ *
+ * A response that DOES carry a candidate is left alone: a pure `functionCall`
+ * turn with empty text, or a candidate that only carries `finishReason:
+ * "SAFETY"`, are legitimate responses whose meaning downstream already owns.
+ */
+internal sealed class GeminiGenerateContentVerdict {
+    /** A candidate is present — parse it the way this arm always has. */
+    data object Ok : GeminiGenerateContentVerdict()
+
+    /** The body carries an error object; [status] is its HTTP class. */
+    data class HttpError(val status: Int) : GeminiGenerateContentVerdict()
+
+    /** No candidate at all: blocked prompt, relay truncation, empty body. */
+    data class EmptyCandidates(val blockReason: String?) : GeminiGenerateContentVerdict() {
+        fun describe(): String = buildString {
+            append("Gemini returned no candidates")
+            if (!blockReason.isNullOrEmpty()) append(" (blocked: $blockReason)")
+            append(" — refusing to report an empty answer as a completed turn")
+        }
+    }
+}
+
+internal fun geminiGenerateContentVerdict(json: JSONObject): GeminiGenerateContentVerdict {
+    json.optJSONObject("error")?.let { err ->
+        return GeminiGenerateContentVerdict.HttpError(
+            geminiStreamErrorStatus(
+                code = err.optInt("code", 0),
+                googleStatus = err.optString("status", ""),
+            ),
+        )
+    }
+    val candidates = json.optJSONArray("candidates")
+    if (candidates == null || candidates.length() == 0) {
+        val blockReason = json.optJSONObject("promptFeedback")
+            ?.safeOptString("blockReason", "")
+            ?.ifEmpty { null }
+        return GeminiGenerateContentVerdict.EmptyCandidates(blockReason)
+    }
+    return GeminiGenerateContentVerdict.Ok
 }
