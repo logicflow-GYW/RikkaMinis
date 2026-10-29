@@ -63,6 +63,7 @@ import com.rikkaminis.app.service.MemoryPressureGate
 import com.rikkaminis.app.service.MemoryPressureLevel
 import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.service.TrimPolicy
+import com.rikkaminis.app.service.TrimReclaimPolicy
 import com.rikkaminis.app.ui.MinisImageFetcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
