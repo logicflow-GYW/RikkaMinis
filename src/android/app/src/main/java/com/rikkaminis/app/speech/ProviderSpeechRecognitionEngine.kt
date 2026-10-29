@@ -5,6 +5,8 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.rikkaminis.app.MinisApp
 import com.rikkaminis.app.provider.ModelsDevApi
@@ -59,6 +61,13 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
     override val supportedLocales: List<Locale> = emptyList()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // [r5f-F05] Main-looper delivery point for Listener callbacks. The capture
+    // and transcription coroutines run on Dispatchers.IO, but the interface's
+    // sibling implementation (SystemSpeechRecognitionEngine) delivers every
+    // callback through `Handler(Looper.getMainLooper())`, and the manager's
+    // listener forwards into UI-facing state; the provider path must match
+    // instead of calling senders on an IO worker thread.
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var captureJob: Job? = null
     private var transcribeJob: Job? = null
     // [sweep1014-B20a] Shared-flag wipe race: `recording` used to be ONE
@@ -136,13 +145,46 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
         }
         val mySession = sessionToken.incrementAndGet()
 
+        // [r5f-F05] Single delivery gate for EVERY Listener callback this
+        // session produces. Two independent signals gate it, each covering a
+        // different window:
+        //   * liveness — the session token still belongs to this take
+        //     (bumped by start()/cancel()/shutdown());
+        //   * capture epoch — the single-flight guard still belongs to it
+        //     (cleared by stop()/cancel(), superseded by any newer start()).
+        // stop() releases the capture flag but deliberately keeps the session
+        // live (the interface contract promises the final result after stop);
+        // cancel() moves BOTH, which is what makes "no further callbacks will
+        // fire" true. Delivering while either signal still points at this
+        // session is therefore correct.
+        //
+        // Why this exists (the defect): the IO coroutine outlives cancel() —
+        // AudioRecord.read() is a blocking call that ignores job cancellation.
+        // Any exception raised afterwards (`read()` throwing on an OEM HAL, or
+        // startRecording()/AudioRecord in contention with the replacement
+        // session that selectLocale() starts back-to-back) reached
+        // listener.onError unguarded, and the manager's onError resets shared
+        // state and nulls activeEngine — killing the session that cancel() had
+        // just swapped in. Same for a stale onReadyForSpeech (resurrected the
+        // rec state) and per-chunk onRmsDb (polluted the new waveform).
+        //
+        // The predicate is re-evaluated INSIDE the posted lambda, not at post
+        // time: cancel() can land between post and run.
+        val deliver: (() -> Unit) -> Unit = { block ->
+            mainHandler.post {
+                if (!captureDeliverySuperseded(captureGuard.isCurrent(myEpoch), isSessionLive(mySession))) {
+                    block()
+                }
+            }
+        }
+
         captureJob = scope.launch {
             val minBuf = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
             )
             if (minBuf <= 0) {
                 captureGuard.releaseIfCurrent(myEpoch)
-                listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord unsupported buffer size.")
+                deliver { listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord unsupported buffer size.") }
                 return@launch
             }
             val recorder = try {
@@ -155,13 +197,13 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                 )
             } catch (e: Exception) {
                 captureGuard.releaseIfCurrent(myEpoch)
-                listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord init failed: ${e.message}")
+                deliver { listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord init failed: ${e.message}") }
                 return@launch
             }
             if (recorder.state != AudioRecord.STATE_INITIALIZED) {
                 recorder.release()
                 captureGuard.releaseIfCurrent(myEpoch)
-                listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord not initialized.")
+                deliver { listener.onError(RecognitionError.AUDIO_ERROR, "AudioRecord not initialized.") }
                 return@launch
             }
 
@@ -170,7 +212,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             val maxBytes = SAMPLE_RATE * 2 * MAX_RECORD_SECONDS
             try {
                 recorder.startRecording()
-                listener.onReadyForSpeech()
+                deliver { listener.onReadyForSpeech() }
                 // [sweep1014-B20a] isCurrent (not just isActive): if a rapid
                 // stop→start handed the guard to a newer session, THIS stale
                 // job must stop reading the mic immediately instead of
@@ -179,12 +221,12 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                     val n = recorder.read(buf, 0, buf.size)
                     if (n <= 0) continue
                     pcm.write(buf, 0, n)
-                    listener.onRmsDb(rmsDb(buf, n))
+                    deliver { listener.onRmsDb(rmsDb(buf, n)) }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "capture failed: ${e.message}", e)
                 captureGuard.releaseIfCurrent(myEpoch)
-                listener.onError(RecognitionError.AUDIO_ERROR, e.message)
+                deliver { listener.onError(RecognitionError.AUDIO_ERROR, e.message) }
                 return@launch
             } finally {
                 runCatching { recorder.stop() }
@@ -205,7 +247,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             if (!isSessionLive(mySession)) return@launch
             val audio = pcm.toByteArray()
             if (audio.isEmpty()) {
-                listener.onError(RecognitionError.NO_MATCH, "No audio captured.")
+                deliver { listener.onError(RecognitionError.NO_MATCH, "No audio captured.") }
                 return@launch
             }
 
@@ -264,9 +306,9 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                             // A successful round-trip that heard nothing is a
                             // semantic no-match, not a provider failure — do
                             // NOT advance the chain for it.
-                            listener.onError(RecognitionError.NO_MATCH, "Empty transcription.")
+                            deliver { listener.onError(RecognitionError.NO_MATCH, "Empty transcription.") }
                         } else {
-                            listener.onFinal(text)
+                            deliver { listener.onFinal(text) }
                         }
                         return@launch
                     } catch (e: kotlinx.coroutines.CancellationException) {
@@ -283,11 +325,13 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                     // letting it fall through to "All voice-input candidates
                     // failed" with kind=UNKNOWN.
                     if (e == null && skipped > 0) {
-                        listener.onError(
-                            RecognitionError.UNKNOWN,
-                            "No usable voice-input provider: all $skipped candidate(s) were skipped " +
-                                "(missing provider implementation or API key).",
-                        )
+                        deliver {
+                            listener.onError(
+                                RecognitionError.UNKNOWN,
+                                "No usable voice-input provider: all $skipped candidate(s) were skipped " +
+                                    "(missing provider implementation or API key).",
+                            )
+                        }
                         return@launch
                     }
                     val kind = when {
@@ -295,7 +339,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
                         e is java.io.IOException -> RecognitionError.NETWORK
                         else -> RecognitionError.UNKNOWN
                     }
-                    listener.onError(kind, e?.message ?: "All voice-input candidates failed.")
+                    deliver { listener.onError(kind, e?.message ?: "All voice-input candidates failed.") }
                 }
             }
         }
@@ -437,3 +481,28 @@ internal class CaptureEpochGuard {
     fun isCurrent(epoch: Int): Boolean =
         current.get()?.epoch == epoch
 }
+
+/**
+ * [r5f-F05] Pure liveness predicate for Listener delivery out of a provider
+ * capture session. The two inputs mirror the two invalidation signals each
+ * session carries; expected verdicts are pinned by unit tests:
+ *
+ *  | isCaptureCurrent | isSessionLive | superseded |
+ *  |------------------|---------------|------------|
+ *  | true             | true          | false      |
+ *  | true             | false         | false      |
+ *  | false            | true          | false      |
+ *  | false            | false         | true       |
+ *
+ * Only when BOTH signals have moved on is the callback stale:
+ *  - stop() clears the capture flag but keeps the session live on purpose —
+ *    the interface contract ("Stop capture; a final result (or error) is
+ *    still delivered via Listener") requires post-stop delivery;
+ *  - cancel()/shutdown() move both signals — contract ("Abort capture; no
+ *    further callbacks will fire") requires everything to go inert;
+ *  - (true, false) cannot arise from a live start()/stop()/cancel() sequence
+ *    today (every path that releases the capture flag also keeps the token),
+ *    but the predicate stays monotone-safe if one appears.
+ */
+internal fun captureDeliverySuperseded(isCaptureCurrent: Boolean, isSessionLive: Boolean): Boolean =
+    !isCaptureCurrent && !isSessionLive

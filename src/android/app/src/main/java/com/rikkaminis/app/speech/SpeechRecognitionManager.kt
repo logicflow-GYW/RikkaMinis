@@ -121,6 +121,14 @@ object SpeechRecognitionManager {
         val engine = currentEngine() ?: return
         if (engine is SystemSpeechRecognitionEngine) {
             engine.fetchSupportedLocales { locales ->
+                // [r5f-F05] The broadcast is asynchronous (up to 2500 ms), and
+                // its result belongs to the engine that ASKED for it. Without
+                // this check, selectEngine("provider") inside that window let
+                // the late system reply overwrite the provider engine's (empty)
+                // locale table with the system offline list — and re-validate /
+                // move the user's `_locale` against a list that does not
+                // describe the engine now in use.
+                if (localeProbeSuperseded(engine.id, currentEngine()?.id)) return@fetchSupportedLocales
                 _supportedLocales.value = locales
                 if (locales.isNotEmpty() && locales.none { it.toLanguageTag() == _locale.value.toLanguageTag() }) {
                     val fallback = locales.firstOrNull { it.language == Locale.getDefault().language }
@@ -130,6 +138,8 @@ object SpeechRecognitionManager {
                 }
             }
         } else {
+            // Synchronous branch: no suspension between currentEngine() and the
+            // write, so the probe cannot be superseded here.
             _supportedLocales.value = engine.supportedLocales
         }
     }
@@ -311,3 +321,24 @@ object SpeechRecognitionManager {
         engines.forEach { it.shutdown() }
     }
 }
+
+/**
+ * [r5f-F05] Pure staleness predicate for an asynchronous locale probe. A
+ * probe issued for one engine only applies while [SpeechRecognitionManager]
+ * would still resolve that same engine (same id ⇔ same registry instance:
+ * engines are singletons re-created together in [init], ids are distinct).
+ *
+ * The resolved-engine accessor is used on both sides on purpose: a fallback
+ * resolution (selected engine degraded) that lands back on the probed engine
+ * is not "stale" — the data still describes the engine in use. Expected
+ * verdicts are pinned by unit tests:
+ *
+ *  | probeEngineId | activeEngineId | superseded |
+ *  |---------------|----------------|------------|
+ *  | "system"      | "system"       | false      |
+ *  | "provider"    | "provider"     | false      |
+ *  | "system"      | "provider"     | true       |
+ *  | "system"      | null           | true       |
+ */
+internal fun localeProbeSuperseded(probeEngineId: String, activeEngineId: String?): Boolean =
+    activeEngineId != probeEngineId
