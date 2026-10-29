@@ -80,8 +80,12 @@
 
 ## 5. CI 读数
 
-- dispatch：`build-apk.yml` @ `fix/r4-b12-diag`，run created `2026-10-29T00:58:12Z`
-- （待 CI 完成回填：run id / conclusion / head_sha 逐字符比对 / 27 步非 success 清单 / 门集与夹具读数）
+- run **`40797467893`**（`build-apk.yml` @ `fix/r4-b12-diag`，`workflow_dispatch`）→ **success**
+- `head_sha` = `29bd728cdb10c8788e3c9471a9dfcae919456890`（F-15 代码提交，与本地 `git rev-parse 29bd728c` 逐字符一致）；created `2026-10-29T00:58:12Z` → completed `01:18:27Z`（≈20.2 min）
+- 27 步：**0 个非 success**；仅 2 步 skipped = `Move the rolling tag android-latest to this commit` + `Publish to Releases`（均 main 门控，分支必 skip）
+- 日志 1,575,458 B / **NUL 0**；`Summary: 113 passed, 0 failed`（门集）+ 六个分片 `Summary: 25/16/44/19/30/18 passed, 0 failed`；`ALL 349 CASES PASS` ×1；`^e: ` **0**；含 `FAILED` 的 6 行全是 PASSED 用例名子串；`BUILD SUCCESSFUL` ×4 / `BUILD FAILED` 0；`testReleaseUnitTest` 真跑
+- 收口判据：`git diff --name-only 29bd728cdb10..HEAD -- . ':(exclude)fix-reports'` = **0**（差异仅 `fix-reports/FIX-R4-S.md`）；远端 `origin/fix/r4-b12-diag` = 本地 `20c68e82`
+- **停在分支，未合并 main**（合并起手权在用户）
 
 ## 6. 残留（三件套）
 
