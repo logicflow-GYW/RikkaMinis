@@ -1024,6 +1024,14 @@ object CrashFrequencyDetector {
         }.onFailure { android.util.Log.w(TAG, "stale zip prune failed: ${it.message}") }
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val zipFile = File(shareDir, "minis-logs-$stamp.zip")
+        // [r5-d2 D-C-09③] Count what actually made it into the archive. The
+        // per-entry `catch` below is deliberate (one unreadable crash file must
+        // not cost the user the other fifteen), but when EVERY entry throws the
+        // loop still finishes and the caller got a 22-byte end-of-central-
+        // directory record — reported to the user as "Saved logs to …". A zip
+        // with no entries is not a crash bundle; drop it and let the callers'
+        // existing `packageZip(...) ?: run { … zip_failed toast }` arm handle it.
+        var entriesWritten = 0
         ZipOutputStream(FileOutputStream(zipFile).buffered()).use { zout ->
             val buf = ByteArray(64 * 1024)
             for (f in readable) {
@@ -1037,10 +1045,16 @@ object CrashFrequencyDetector {
                         }
                     }
                     zout.closeEntry()
+                    entriesWritten++
                 } catch (t: Throwable) {
                     android.util.Log.w(TAG, "zip skip ${f.name}: ${t.message}")
                 }
             }
+        }
+        if (entriesWritten == 0) {
+            android.util.Log.w(TAG, "packageZip: every source file failed to read — dropping the empty archive")
+            zipFile.delete()
+            return@withContext null
         }
         return@withContext zipFile
     }
