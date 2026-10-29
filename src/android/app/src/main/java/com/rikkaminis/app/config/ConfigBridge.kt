@@ -9,6 +9,7 @@ import com.rikkaminis.app.logging.AppLogger
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Bridge between the offload handler (Kotlin / shell args / JSON
@@ -285,6 +286,30 @@ object ConfigBridge {
      * Internal write path — used by [writeFields] and routed through the
      * confirmation gate. `skipConfirmation` lets the debug/offload RPC apply
      * without a UI dialog when the caller has already collected consent.
+     *
+     * [R5-E F-03] OUTCOME CONTRACT (every arm answers one of exactly four
+     * shapes — the whole-batch verdict is built by [buildWriteEnvelope]):
+     *
+     * | situation                                   | `ok`  | `error`           | payload                |
+     * |---------------------------------------------|-------|-------------------|------------------------|
+     * | nothing applied, some row failed            | false | row's own code    | `reason`               |
+     * | nothing applied, nothing failed             | false | `all_rejected`    | `user_message`         |
+     * | some applied, **some failed**               | false | `partial_write`   | `applied[]` + `failed[]` |
+     * | everything applied                          | true  | —                 | `applied[]`            |
+     *
+     * The partial case is the one this used to get wrong: as long as ONE row
+     * applied it answered `ok=true` / "Settings updated.", so
+     * `minis-config set-batch` exited 0 and the agent told the user all N
+     * settings were saved while row 2 had been refused. `ok` stays false
+     * because it is the field the offload handler turns into the process exit
+     * code (see `ConfigOffloadHandler.exitCodeFromEnvelope`) — a
+     * successful-looking envelope would exit 0 again. `applied[]` is carried
+     * either way, so nothing that DID land is hidden from the caller.
+     *
+     * A cancelled coroutine is not a write outcome: [classifyWriteFailure]
+     * answers null for `CancellationException` and the loop rethrows, so
+     * cancellation reaches the caller instead of being recorded as a failed
+     * row.
      */
     suspend fun performWriteBatch(
         items: JSONArray,
@@ -570,6 +595,11 @@ object ConfigBridge {
             }
             is ConfirmOutcome.Approved -> {
                 val applied = JSONArray()
+                // [R5-E F-03] Per-row failures, in the order they happened.
+                // `failed` is what lets a partial batch answer precisely
+                // (`partial_write` + which items failed) instead of the old
+                // all-or-nothing pair of `earlyError` / `applied`.
+                val failed = JSONArray()
                 // Per-row error envelope captured for any collection.add
                 // that surfaces a structural error (already_exists,
                 // permission_denied) — we abort the batch and surface
@@ -643,67 +673,41 @@ object ConfigBridge {
                             put("old", effectiveOldDisplay)
                             put("new", effectiveNewDisplay)
                         })
-                    } catch (e: ConfigError.AlreadyExists) {
-                        if (earlyError == null) {
-                            earlyError = JSONObject().apply {
-                                put("ok", false)
-                                put("error", "already_exists")
-                                put("reason", e.message ?: "already exists")
-                            }
-                        }
-                        AppLogger.warning(TAG, "${r.rawPath}: ${e.message}")
-                    } catch (e: ConfigError.PermissionDenied) {
-                        if (earlyError == null) {
-                            earlyError = JSONObject().apply {
-                                put("ok", false)
-                                put("error", "permission_denied")
-                                put("reason", e.message ?: "permission denied")
-                            }
-                        }
-                        AppLogger.warning(TAG, "${r.rawPath}: ${e.message}")
-                    } catch (e: ConfigError) {
-                        if (earlyError == null) {
-                            earlyError = JSONObject().apply {
-                                put("ok", false)
-                                put("error", "invalid_value")
-                                put("reason", e.message ?: "invalid value")
-                            }
-                        }
-                        AppLogger.warning(TAG, "${r.rawPath}: ${e.message}")
                     } catch (e: Throwable) {
-                        // [r3-b08 F-10] Every ConfigError arm above records
-                        // `earlyError`; this one only logged. A writer/collection
-                        // throwing a plain RuntimeException (IllegalState,
-                        // SQLite, …) therefore fell through to the
-                        // `applied.length() == 0` arm and was reported to the
-                        // caller as `all_rejected` — "User rejected every row."
-                        // for a change the user had just approved.
+                        // [R5-E F-03] ONE arm for every row failure; the code
+                        // mapping lives in [classifyWriteFailure] so it can be
+                        // asserted off-device. Two defects lived in the four
+                        // separate arms this replaces:
+                        //  * a non-ConfigError (IllegalState, SQLite, …) was only
+                        //    logged by the last arm [r3-b08 F-10] — it fell
+                        //    through to `all_rejected` / "User rejected every
+                        //    row." for a change the user had just approved;
+                        //  * nothing rethrew CancellationException, so a
+                        //    cancelled batch recorded the cancellation as a
+                        //    failed row and then reported the rows that had
+                        //    already landed as `ok:true` ("Settings updated.").
+                        val failure = classifyWriteFailure(e)
+                        if (failure == null) throw e
+                        val (code, reason) = failure
+                        failed.put(writeFailureEntry(r.rawPath, code, reason))
                         if (earlyError == null) {
                             earlyError = JSONObject().apply {
                                 put("ok", false)
-                                put("error", "write_failed")
-                                put("reason", e.message ?: "Write failed.")
+                                put("error", code)
+                                put("reason", reason)
                             }
                         }
-                        AppLogger.error(TAG, "write failed for ${r.rawPath}: ${e.message}")
+                        // Log level mirrors the old arms: a classified
+                        // ConfigError is a rejected value (warning), anything
+                        // else is the genuine write_failed path (error).
+                        if (code == "write_failed") {
+                            AppLogger.error(TAG, "write failed for ${r.rawPath}: ${e.message}")
+                        } else {
+                            AppLogger.warning(TAG, "${r.rawPath}: ${e.message}")
+                        }
                     }
                 }
-                if (applied.length() == 0 && earlyError != null) {
-                    earlyError!!
-                } else if (applied.length() == 0) {
-                    JSONObject().apply {
-                        put("ok", false)
-                        put("error", "all_rejected")
-                        put("reason", "User rejected every row.")
-                        put("user_message", "No changes applied.")
-                    }
-                } else {
-                    JSONObject().apply {
-                        put("ok", true)
-                        put("applied", applied)
-                        put("user_message", "Settings updated.")
-                    }
-                }
+                buildWriteEnvelope(applied = applied, failed = failed, earlyError = earlyError)
             }
         }
     }
@@ -777,5 +781,90 @@ object ConfigBridge {
             out[leaf] = v
         }
         return ConfigValue.Obj(out)
+    }
+}
+
+/**
+ * [R5-E F-03] Classify one row's write failure into the envelope's
+ * `(error, reason)` pair.
+ *
+ * Returns **null** for [CancellationException]: a cancelled coroutine is not a
+ * failed write. The single `catch (e: Throwable)` this replaces recorded the
+ * cancellation as `write_failed` and then answered `ok:true` for whatever had
+ * already landed, so the caller never learned the batch had been abandoned.
+ * The null return is the ONE expression of that rule — the apply loop rethrows
+ * on null rather than repeating an `is CancellationException` test.
+ *
+ * Order matters: [ConfigError.AlreadyExists] and
+ * [ConfigError.PermissionDenied] are [ConfigError] subclasses, and each keeps
+ * the exact code string the pre-existing per-arm catches answered, so a caller
+ * that branched on `error` sees no change.
+ */
+internal fun classifyWriteFailure(e: Throwable): Pair<String, String>? = when {
+    e is CancellationException -> null
+    e is ConfigError.AlreadyExists -> "already_exists" to (e.message ?: "already exists")
+    e is ConfigError.PermissionDenied -> "permission_denied" to (e.message ?: "permission denied")
+    e is ConfigError -> "invalid_value" to (e.message ?: "invalid value")
+    else -> "write_failed" to (e.message ?: "Write failed.")
+}
+
+/** [R5-E F-03] One `failed[]` row: which path, which code, why. */
+internal fun writeFailureEntry(path: String, error: String, reason: String): JSONObject =
+    JSONObject().apply {
+        put("path", path)
+        put("error", error)
+        put("reason", reason)
+    }
+
+/**
+ * [R5-E F-03] The whole-batch verdict, from the three lists the apply loop
+ * fills. Pure and total, so the partial-write contract is testable off-device
+ * (the loop around it needs the confirmation gate, the registry and a live
+ * repository).
+ *
+ * Arms, in order — see the contract table on
+ * [ConfigBridge.performWriteBatch]:
+ *  1. nothing applied, a failure recorded → that failure's envelope (the
+ *     pre-existing shape: `ok=false` + the row's own `error`);
+ *  2. nothing applied, no failure → `all_rejected` (unchanged);
+ *  3. some applied **and** some failed → `ok=false` + `error="partial_write"` +
+ *     `applied[]` + `failed[]`;
+ *  4. else → `ok=true` + `applied[]` (unchanged).
+ *
+ * Arm 3 is the fix: it used to fall into arm 4, so one refused row out of N
+ * was reported as "Settings updated." with exit code 0.
+ */
+internal fun buildWriteEnvelope(
+    applied: JSONArray,
+    failed: JSONArray,
+    earlyError: JSONObject?,
+): JSONObject {
+    val appliedCount = applied.length()
+    val failedCount = failed.length()
+    return when {
+        appliedCount == 0 && earlyError != null -> earlyError
+        appliedCount == 0 -> JSONObject().apply {
+            put("ok", false)
+            put("error", "all_rejected")
+            put("reason", "User rejected every row.")
+            put("user_message", "No changes applied.")
+        }
+        failedCount > 0 -> JSONObject().apply {
+            put("ok", false)
+            put("error", "partial_write")
+            put("reason", "$appliedCount change(s) applied, $failedCount failed.")
+            put("applied", applied)
+            put("failed", failed)
+            put(
+                "user_message",
+                "Only part of that went through: $appliedCount setting(s) were saved and " +
+                    "$failedCount failed. Retry just the failed ones — nothing was rolled back.",
+            )
+        }
+        else -> JSONObject().apply {
+            put("ok", true)
+            put("applied", applied)
+            put("user_message", "Settings updated.")
+        }
     }
 }
