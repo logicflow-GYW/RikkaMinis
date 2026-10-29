@@ -1951,6 +1951,19 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
     titleGenerationInFlight = true
     titleGenerationAttempts++
 
+    // [FIX-R4-Q F-11] One predicate for "this failure ends the title attempt"
+    // so a MANUAL regeneration cannot fail silently. With force=true the
+    // attempt counter is 1 after the first try, so the old
+    // `attempts >= TITLE_MAX_ATTEMPTS` gate made the click invisible for the
+    // two retries the user never sees. A manual attempt on a session that
+    // still has no real title falls back to the first-message title
+    // immediately; a manual attempt on an already-titled session keeps that
+    // title (needs-generation is false — the fallback must not overwrite a
+    // good title with a truncated first message).
+    fun titleFailureIsFinal(): Boolean =
+        titleGenerationAttempts >= TITLE_MAX_ATTEMPTS ||
+            (force && sessionTitleNeedsGenerationOf(_sessionTitle.value))
+
     // [T-titlegen-context-first-last-pair] Build the summary from the first
     // user + first assistant message, and — when the session has more than
     // one user turn — also the last user + last assistant message, each
@@ -2022,7 +2035,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                 // Cannot dispatch a provider-created title call without an
                 // instance — surface as a typed error (never in-process).
                 AppLogger.warning("TitleGen", "outcome=no-instance-context attempt=$titleGenerationAttempts")
-                if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+                if (titleFailureIsFinal()) {
                     applyFallbackTitleFromFirstMessage("no provider instance context")
                 }
                 return@launch
@@ -2048,7 +2061,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                         "TitleGen",
                         "outcome=remote-failure attempt=$titleGenerationAttempts (${titleResult.code}): ${titleResult.message.take(200)}",
                     )
-                    if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+                    if (titleFailureIsFinal()) {
                         applyFallbackTitleFromFirstMessage("remote failure ${titleResult.code}")
                     }
                     return@launch
@@ -2058,7 +2071,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                         "TitleGen",
                         "outcome=unavailable attempt=$titleGenerationAttempts: ${titleResult.reason}",
                     )
-                    if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+                    if (titleFailureIsFinal()) {
                         applyFallbackTitleFromFirstMessage("title service unavailable: ${titleResult.reason}")
                     }
                     return@launch
@@ -2093,7 +2106,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                         "(empty / unparseable response) stopReason=${response.stopReason} " +
                         "textLen=${response.text.length}",
                 )
-                if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+                if (titleFailureIsFinal()) {
                     AppLogger.warning("TitleGen", "outcome=gave-up ($titleGenerationAttempts/$TITLE_MAX_ATTEMPTS) — applying first-message fallback title")
                     applyFallbackTitleFromFirstMessage("empty/unparseable title response")
                 }
@@ -2108,7 +2121,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                 "outcome=exception attempt=$titleGenerationAttempts/$TITLE_MAX_ATTEMPTS " +
                     "${e.javaClass.simpleName}: ${e.message?.take(200)}",
             )
-            if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
+            if (titleFailureIsFinal()) {
                 AppLogger.warning("TitleGen", "outcome=gave-up ($titleGenerationAttempts/$TITLE_MAX_ATTEMPTS) — applying first-message fallback title")
                 applyFallbackTitleFromFirstMessage("request failed: ${e.message?.take(200)}")
             }
