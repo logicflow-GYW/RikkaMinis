@@ -1489,6 +1489,7 @@
     <string name="sysmsg_compact_failed">Compaction failed: %1$s</string>
     <string name="sysmsg_context_full_hint">Context is getting full (%1$d / %2$d tokens). Consider running /compact to fold older turns into a summary.</string>
     <string name="sysmsg_wait_compact">Wait for the current compact to finish before sending.</string>
+    <string name="sysmsg_edit_wait_stream">You are editing a message. Stop the current response first - an edit replaces the old message and cannot be queued.</string>
     <string name="sysmsg_context_trimmed">Context reached the %1$d limit; trimmed the oldest %2$d messages to continue.</string>
     <string name="sysmsg_compact_no_provider">No provider configured. Cannot compact.</string>
     <string name="sysmsg_compact_empty_session">Nothing to compact — the session is empty.</string>

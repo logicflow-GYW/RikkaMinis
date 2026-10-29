@@ -834,6 +834,7 @@
     <string name="sysmsg_compact_failed">壓縮失敗：%1$s</string>
     <string name="sysmsg_context_full_hint">上下文即將佔滿（%1$d / %2$d tokens），可執行 /compact 將較早的對話摺疊為摘要。</string>
     <string name="sysmsg_wait_compact">請等待目前壓縮完成後再傳送。</string>
+    <string name="sysmsg_edit_wait_stream">正在編輯訊息。請先停止目前回覆——編輯會取代原訊息，不能排隊傳送。</string>
     <string name="sysmsg_context_trimmed">上下文已達 %1$d 限制，已自動裁剪 %2$d 則最舊的對話以繼續任務。</string>
     <string name="sysmsg_compact_no_provider">未設定模型提供者，無法壓縮。</string>
     <string name="sysmsg_compact_empty_session">沒有可壓縮的內容——工作階段為空。</string>
