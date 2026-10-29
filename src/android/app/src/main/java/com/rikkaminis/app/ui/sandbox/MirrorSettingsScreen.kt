@@ -270,7 +270,7 @@ object MirrorSpeedTestViewModel {
      * reuses the normal test flow). Separate from the public entry point because
      * only a user tap may preempt auto-detection.
      */
-    private fun startAllTests(context: Context) {
+    private fun startAllTests(context: Context, autoApplyOnComplete: Boolean = true) {
         currentJob?.cancel()
         // [dv25-B1] LAZY + explicit start publishes `currentJob` *before* the
         // body can read it — the settlement/finally ownership checks compare
@@ -332,11 +332,19 @@ object MirrorSpeedTestViewModel {
                     // is disk IO, so applied categories are collected here and
                     // applied below, off the main thread (same shape as
                     // selectMirror / setUseCustom).
-                    for ((cat, fastest) in autoSelectFastest(sorted) { selectedMirrorId[it] != null }) {
-                        selectedMirrorId[cat] = fastest.mirror.id
-                        useCustomMirror[cat] = true
-                        persist(context, cat)
-                        autoApplied += cat
+                    // [R4-V F-03] The first-boot path passes
+                    // autoApplyOnComplete = false: detection has its OWN rule
+                    // (prior selection wins, official mirrors only when nothing
+                    // else is known — decideAutoApply), and letting this body
+                    // settle first made that rule unreachable, because the map
+                    // it inspects was already filled by the write below.
+                    if (autoApplyOnComplete) {
+                        for ((cat, fastest) in autoSelectFastest(sorted) { selectedMirrorId[it] != null }) {
+                            selectedMirrorId[cat] = fastest.mirror.id
+                            useCustomMirror[cat] = true
+                            persist(context, cat)
+                            autoApplied += cat
+                        }
                     }
                     Log.i(TAG, "Mirror speed test complete: ${sorted.mapValues { it.value.size }}")
                 }
@@ -528,10 +536,21 @@ object MirrorSpeedTestViewModel {
                 Log.i(TAG, "Auto mirror detection skipped: a speed test is already in flight")
                 return@launch
             }
+            // [R4-V F-03] Snapshot the prior selection BEFORE the shared body
+            // runs. It used to be read after `join()`, i.e. after startAllTests
+            // had auto-applied into `selectedMirrorId` — so `alreadySelected`
+            // was always the complete set, `decideAutoApply` returned nothing,
+            // and the boot path silently behaved like a user tap (official
+            // mirrors included). The snapshot is a read of a map whose writes
+            // are main-thread gated below.
+            val alreadySelected = selectedMirrorId.keys.toSet()
             // Reuse the normal test flow — startAllTests, not runAllTests: the
             // public entry point cancels auto-detection first, which here would
-            // be the job this very coroutine is running in.
-            startAllTests(context)
+            // be the job this very coroutine is running in. `autoApplyOnComplete
+            // = false` keeps the settlement out of the decision: this function
+            // settles through decideAutoApply, not through the shared body's
+            // "fastest wins" loop.
+            startAllTests(context, autoApplyOnComplete = false)
             currentJob?.join()
             val toApply = mutableListOf<MirrorCategory>()
             withContext(Dispatchers.Main) {
@@ -542,8 +561,8 @@ object MirrorSpeedTestViewModel {
                 // First-boot detection is a convenience, not a decision: a
                 // category the user already picked keeps its mirror — the same
                 // "prior selection wins" predicate the user-initiated path hands
-                // to autoSelectFastest.
-                val alreadySelected = selectedMirrorId.keys.toSet()
+                // to autoSelectFastest. `alreadySelected` is the snapshot taken
+                // before the speed test (F-03), not a read of the settled map.
                 for ((cat, fastest) in decideAutoApply(results.toMap(), alreadySelected)) {
                     selectedMirrorId[cat] = fastest.mirror.id
                     useCustomMirror[cat] = true
