@@ -357,6 +357,96 @@ class AutoBackupFetchHardeningTest {
             dir.deleteRecursively()
         }
     }
+
+    // ── [R5-A / A-C-05②] "move the filter before drop(keep)" — REFUTED ───────
+    //
+    // The report claims the filter-after-drop order wastes淘汰名额 and leaves
+    // more than AUTO_BACKUP_KEEP files on disk. The two orderings are compared
+    // mechanically below on the only input production produces (newest-first,
+    // see listLocal) plus the caller-supplied eligibility/protection predicates.
+
+    /** The report's proposed order: eligibility and protection first, then the
+     *  keep window. */
+    private fun hoistedVictims(
+        files: List<File>,
+        keep: Int,
+        victimEligible: (File) -> Boolean,
+        protectName: String?,
+    ): List<File> {
+        val eligible = files.filter(victimEligible)
+            .filter { protectName == null || it.name != protectName }
+        return if (keep <= 0) eligible else eligible.drop(keep)
+    }
+
+    private fun virtualBackups(count: Int): List<File> {
+        // Newest-first, exactly the order listLocal guarantees. The files are
+        // never touched: the selection is name-only.
+        val stamps = listOf(
+            "20261029-120000", "20261028-120000", "20261027-120000",
+            "20261026-120000", "20261025-120000",
+        )
+        return stamps.take(count).map { File("/nonexistent", "rikkaminis-auto-$it.json") }
+    }
+
+    @Test
+    fun `hoisting the eligibility filter never deletes a file the shipped order keeps`() {
+        // If hoisting cannot delete MORE, it cannot reduce retention either —
+        // which is what the finding was about. It can only keep more, because a
+        // filtered list is a subsequence of the original and `drop(keep)` then
+        // walks further down it.
+        for (count in 1..5) {
+            val files = virtualBackups(count)
+            for (keep in 0..3) {
+                for (protectIdx in -1 until count) {
+                    val protectName = if (protectIdx < 0) null else files[protectIdx].name
+                    val shipped = AutoBackupManager.selectLocalRotationVictims(
+                        files = files,
+                        keep = keep,
+                        victimEligible = { AutoBackupManager.localStampMillis(it) != null },
+                        protectName = protectName,
+                    ).map { it.name }
+                    val hoisted = hoistedVictims(
+                        files,
+                        keep,
+                        { AutoBackupManager.localStampMillis(it) != null },
+                        protectName,
+                    ).map { it.name }
+                    assertTrue(
+                        "hoisting deleted $hoisted while the shipped order kept them " +
+                            "(count=$count keep=$keep protect=$protectName)",
+                        shipped.containsAll(hoisted),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `retention above keep comes from the protection, not the filter order`() {
+        // keep=2 with three stamped copies where the protected one sorts OLDEST:
+        // the protected copy must survive (R3-D F-01 — it is the copy the caller
+        // is about to upload), so three files stay under BOTH orders. The extra
+        // file is the protection working, and it self-corrects on the next run;
+        // the filter order has nothing to do with it.
+        val files = virtualBackups(3)
+        val protectName = files[2].name
+        val shipped = AutoBackupManager.selectLocalRotationVictims(
+            files = files,
+            keep = 2,
+            victimEligible = { AutoBackupManager.localStampMillis(it) != null },
+            protectName = protectName,
+        )
+        val hoisted = hoistedVictims(
+            files,
+            2,
+            { AutoBackupManager.localStampMillis(it) != null },
+            protectName,
+        )
+        assertEquals(emptyList<File>(), shipped)
+        assertEquals(emptyList<File>(), hoisted)
+        assertEquals(3, files.size - shipped.size) // = keep + 1, both orders
+        assertFalse(shipped.any { it.name == protectName })
+    }
 }
 
 /** Indirection so the rotation tests read like production usage without
