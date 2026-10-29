@@ -78,6 +78,17 @@ internal fun ChatViewModel.retryLast() {
             // (poppedAssistant is non-null Boolean here — the null case was
             // returned above.)
             if (poppedAssistant) {
+                // [R5-C C-C-04②] The rewind deleted the transcript's tail (the
+                // popped assistant row is gone from memory AND from the DB).
+                // Same rewind rules as rerunFromToolBlock / retryFromMessage
+                // ([FIX-R4-P F-05/F-02]): a marker anchored in the deleted
+                // range must not survive — its summary describes turns the user
+                // just rewound past, and the stale reading would be re-injected
+                // into the retry request (the createdAt heal can re-anchor it
+                // onto the retry rows) — and the context-pressure reading
+                // belongs to the PRE-rewind transcript.
+                dropCompactMarkerIfRewound(sid)
+                resetContextPressureState()
                 val dbMessages = chatRepository.loadMessages(sid)
                 val trailingAssistantSortOrder = dbMessages
                     .lastOrNull { it.role == "assistant" }?.sortOrder
