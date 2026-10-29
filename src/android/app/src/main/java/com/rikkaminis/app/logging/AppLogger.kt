@@ -832,6 +832,15 @@ object AppLogger {
      * Result of a bounded segment read — [content] holds at most [bytesRead]
      * bytes starting at the requested offset, and [truncated] tells the caller
      * whether more data remains past the end of [content].
+     *
+     * [FIX-R4-T F-14] The slice is BYTE-aligned, not line- or character-
+     * aligned: a caller that pages through a multi-MB file with
+     * `offset += bytesRead` can cut a multi-byte UTF-8 character in half and
+     * see one `U+FFFD` at each seam. That is the deliberate trade — aligning
+     * to lines would make `offset + bytesRead` land INSIDE the last returned
+     * line, so a paging client would re-read (or skip) that line forever
+     * instead of making progress. Single-shot readers (`offset = 0`) are
+     * unaffected.
      */
     data class LogSegment(
         val totalSize: Long,
@@ -848,21 +857,54 @@ object AppLogger {
         return try {
             java.io.RandomAccessFile(file, "r").use { raf ->
                 val fileSize = raf.length()
-                val start = offset.toLong().coerceIn(0L, fileSize)
-                val end = (start + limit.coerceAtLeast(0).toLong()).coerceAtMost(fileSize)
-                val buf = ByteArray((end - start).toInt())
-                raf.seek(start)
-                raf.readFully(buf)
+                // [FIX-R4-T F-14] `limit` is caller-supplied over RPC and used
+                // to be trusted verbatim: `debug.logs.read` with limit=50_000_000
+                // allocated `(end - start)` = the whole file (up to the 200 MB
+                // storage cap) in one ByteArray, then a same-size String, then
+                // the JSON body — a 3x amplification of the largest log file on
+                // an RPC thread. [segmentBounds] applies the same 4 MB bound
+                // handleReadFile already used.
+                val bounds = segmentBounds(fileSize, offset.toLong(), limit)
+                val buf = ByteArray(bounds.length)
+                raf.seek(bounds.start)
+                // Short-read tolerant instead of readFully: a concurrent
+                // rotate/clear/truncate between `length()` and the read made
+                // readFully throw EOFException, which the catch-all collapsed
+                // into `null`, which DebugRPCHandler reports as
+                // `-32602 "Log file not found"` — an I/O race disguised as a
+                // missing file. Now the caller gets the bytes that existed.
+                val read = readAtMost(raf, buf)
+                val content = if (read == buf.size) buf else buf.copyOf(read)
                 LogSegment(
                     totalSize = fileSize,
-                    content = String(buf, Charsets.UTF_8),
-                    bytesRead = buf.size,
-                    truncated = (start + buf.size) < fileSize,
+                    content = String(content, Charsets.UTF_8),
+                    bytesRead = content.size,
+                    truncated = (bounds.start + content.size) < fileSize,
                 )
             }
         } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * Fill as much of [buf] as the file currently holds. Returns the number of
+     * bytes actually read (`< buf.size` when the file shrank mid-read).
+     * [FIX-R4-T F-14] — the short-read-tolerant counterpart of readFully.
+     *
+     * `internal` (not private) so the JVM probe can pin the difference: on a
+     * file seeked past its end this returns 0, while readFully throws
+     * EOFException — the exact swap that turned a concurrent rotation into
+     * `-32602 "Log file not found"`.
+     */
+    internal fun readAtMost(raf: java.io.RandomAccessFile, buf: ByteArray): Int {
+        var off = 0
+        while (off < buf.size) {
+            val n = raf.read(buf, off, buf.size - off)
+            if (n < 0) break
+            off += n
+        }
+        return off
     }
 
     /**
@@ -998,4 +1040,30 @@ internal fun utf8ByteLength(line: String): Long {
         i++
     }
     return bytes
+}
+
+/**
+ * [FIX-R4-T F-14] Upper bound for a single `debug.logs.read` segment — the
+ * same 4 MiB `handleReadFile` clamps to. Kept next to the reader (not in the
+ * RPC layer) so every caller of [AppLogger.readLogSegment] inherits the
+ * bound: the RPC handler reads raw `params.optInt` and would otherwise hand
+ * an unbounded value straight to the allocation.
+ */
+internal const val MAX_LOG_SEGMENT_BYTES = 4 * 1024 * 1024
+
+/** Resolved byte window of a segment read: [length] bytes starting at [start]. */
+internal data class SegmentBounds(val start: Long, val length: Int)
+
+/**
+ * [FIX-R4-T F-14] Clamp an untrusted `(fileSize, offset, limit)` triple to a
+ * readable window. Pure and total: negative or absurd inputs collapse to an
+ * empty read at a valid offset instead of throwing — a bad RPC request must
+ * not become an exception on the handler thread.
+ */
+internal fun segmentBounds(fileSize: Long, offset: Long, limit: Int): SegmentBounds {
+    val size = fileSize.coerceAtLeast(0L)
+    val start = offset.coerceIn(0L, size)
+    val capped = limit.coerceIn(0, MAX_LOG_SEGMENT_BYTES)
+    val length = (size - start).coerceAtMost(capped.toLong()).toInt()
+    return SegmentBounds(start, length)
 }
