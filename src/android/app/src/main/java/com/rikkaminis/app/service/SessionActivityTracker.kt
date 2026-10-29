@@ -223,7 +223,10 @@ object SessionActivityTracker {
      */
     private const val IDLE_STOP_DELAY_MS = 500L
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val pendingIdleStop = Runnable {
+    // Explicit `: Runnable` is required: the body re-arms itself via
+    // `postDelayed(pendingIdleStop, …)`, and an inferred type makes the
+    // compiler's type check recursive (CI #2871: "recursive problem").
+    private val pendingIdleStop: Runnable = Runnable {
         if (shouldRunService()) {
             // A session came back mid-debounce: cancelPendingIdleStop() already
             // removed this callback, so reaching here means the state is fresh.
