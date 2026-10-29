@@ -123,18 +123,18 @@ val extraRequestImages =
     } else emptyList()
 ```
 
-3. 分支条件从「有图或有文本」扩为「有图或有文本或有待补的请求级图」（否则「只有请求级图 + contentParts 里只有别的东西」仍被跳过），并把追加块放在结构数组组装之后：
+3. 分支条件从「有图或有文本」扩为「有图或有文本或有待补的请求级图」（否则「只有请求级图 + contentParts 里只有别的东西」仍被跳过），并把待补图**并入该轮自己的遍历**：
 
 ```kotlin
-val extra = OpenAIToolResultImages.chatUserContent(        // Responses 侧用 responsesUserContent
-    entries = extraRequestImages.map { OpenAIToolResultImages.Entry("", it.data, it.mimeType) },
-    supportsImages = supportsImages,
-    compress = { ImageBudget.compressUnderBudget(it) },
-    encodeBase64 = { Base64.encodeToString(it, Base64.NO_WRAP) },
-)
+val wireTurnParts =
+    if (extraRequestImages.isEmpty()) msg.contentParts
+    else msg.contentParts + extraRequestImages.map { AgentContentPart.ImageData(it.data, it.mimeType) }
+for (part in wireTurnParts) { ... }        // 既有的 Text / ImageData 序列化分支，一行未改
 ```
 
-复用两支里现成的编码器（**没有第二套序列化**），`supportsImages == false` 时它自带 `VISION_UNSUPPORTED_PLACEHOLDER` 分支。
+**为什么不是「再调一次 helper」**：第一版就是这么写的（`OpenAIToolResultImages.chatUserContent(entries = extras…)`），CI run 1 被既有的两条**形状判据**当场打红 —— `OpenAIToolResultImagesTest` 数调用点（`chatUserContent` 必须 1 处、`responsesUserContent` 必须 2 处）。**门是对的**：图片序列化就该只有一个入口，多开一个入口正是「两套序列化会漂移」的起点。改成并入既有遍历后：零新调用点、零新编码器、零新格式，`extra` 图与 turn 图走**同一段** `ImageData` 分支（同样的 `compressUnderBudget`、同样的 `NO_WRAP`）。
+
+顺带消掉一个我自己造的雷：第一版给新调用点传的 `encodeBase64 = { Base64.encodeToString(it, Base64.NO_WRAP) }` 在 JVM 单测里 **NPE**（`android.util.Base64` 由 `unitTests.isReturnDefaultValues` 兜底返回 `null`，而 lambda 的类型是非空 `String`；生产里既有内联写法因为平台类型不会炸，只是把 `null` 拼进 data-uri）。并入遍历后该 lambda 不存在，问题同源消失。
 
 **这改变什么用户行为？** ①非 2xx 的图片下载不再变成裂图，改为一条带状态码的失败（P1，用户会看到错误而不是坏图）；②Mistral 类方言不再刷 T321 误报（日志可读性）；③（当前不可达）调用方在结构化末轮传顶层图时，图不再被静默丢弃，且双载体路径不会重复上线。
 
@@ -153,7 +153,7 @@ val extra = OpenAIToolResultImages.chatUserContent(        // Responses 侧用 r
 
 ### 4.2 形状探针 —— 10 判据，钉「真的被调用」
 
-`shapes.py <provider.kt>`：S1 状态码门在 body 读取**之前**、S2 失败状态被记录、S3 出口守卫按 `dataArray.length()` 且抛既有错误类型、S4 计数走共享读取器、S5 发射侧无第二套读取器、S6/S7 两个 builder 的追加块与分支条件、S8 未遮蔽的捕获、S9 两条 T321 文案、S10 EOF 守卫行（被 `truncated_call_guard_check` C3 钉住的那行）。
+`shapes.py <provider.kt>`：S1 状态码门在 body 读取**之前**、S2 失败状态被记录、S3 出口守卫按 `dataArray.length()` 且抛既有错误类型、S4 计数走共享读取器、S5 发射侧无第二套读取器、S6/S7 两个 builder 的**合并遍历**（`val wireTurnParts =` + `msg.contentParts + extraRequestImages.map {`）与分支条件、S8 未遮蔽的捕获、S9 两条 T321 文案、S10 EOF 守卫行（被 `truncated_call_guard_check` C3 钉住的那行）。
 
 ### 4.3 变异臂 —— 14/14 MATCH
 
@@ -199,7 +199,26 @@ val extra = OpenAIToolResultImages.chatUserContent(        // Responses 侧用 r
 
 ## 5. CI
 
-（本节在 CI 出结论后回填）
+**最终绿：run #2924 / `40890556458`**，`head_sha = 03e4459e17c9b549218328bb50be851884ced4b7`（与本地 HEAD 逐字符一致），**success 21.2 min**（`14:20:53Z → 14:42:03Z`，attempt 1），27 步 **25 success + 2 skipped**（`Move the rolling tag` + `Publish to Releases`，均 main 门控）。
+
+日志判读（job 日志 723,328 B zip → 3,301,537 字符，NUL 0）：
+
+| 判据 | 读数 |
+|---|---|
+| `Summary: 113 passed, 0 failed` | ✔（门 113，与基线一致；`scripts/scan/**` 本支零触碰） |
+| `ALL 349 CASES PASS` | ✔（夹具 349，与基线一致） |
+| `Summary: N passed, 0 failed` 其余分片 | 16/18/19/25/30/44 全部 0 failed；另有 2 条 `Summary: 0 violation(s) found`（i18n 检查，非测试分片） |
+| `^ e: file` 编译错误 | 0 |
+| 真 ` FAILED$` 行 | 0（12 条含 `FAILED` 的行全是 PASSED 用例名子串，逐条确认） |
+| `R5E1OpenAIImageContractTest` 6 例 | 全 PASSED（两遍：release/debug 变体各跑一次） |
+| `OpenAIToolResultImagesTest` 12 例 | 全 PASSED（含被我改回绿的两条形状判据） |
+
+**run 1（`40886000685` @ `7e633f8e`）是红的，两个红都是判据在工作**：
+
+1. `OpenAIToolResultImagesTest` 的两条 `countOf(...)` 形状判据（`chatUserContent == 1`、`responsesUserContent == 2`）打红 —— 我第一版为「追加请求级图」新开了一个 helper 调用点，把它们顶成 2/3。**门是对的**：图片序列化只该有一个入口。改实现不改门（并入既有遍历，见 §3.3）。
+2. 我自己的两条契约测试 NPE：`android.util.Base64` 在 JVM 单测里由 `unitTests.isReturnDefaultValues` 兜底返回 `null`，而新调用点的 `encodeBase64` lambda 是非空 `String` 类型 ⇒ `encodeToString(...) must not be null`。并入既有遍历后该 lambda 消失（生产里既有的内联写法因为平台类型不会炸，只是会把 `null` 拼进 data-uri —— 见 §6 R7）。
+
+⇒ 本支的「先证后修」不止对生产成立，对**我自己的补丁**也成立：run 1 证明第一版实现越过了既有形状契约。
 
 ---
 
@@ -247,6 +266,6 @@ python3 scripts/scan/truncated_call_guard_check.py .
  src/android/app/src/test/java/com/rikkaminis/app/provider/openai/R5E1OpenAIImageContractTest.kt | 256 + / 0 -
 ```
 
-- 生产改动集中在三处（下载分支 / 计数器与发射 / 两个 builder 的 USER 分支）+ 文件尾两个纯判据对象与一个纯读取函数。
+- 生产改动集中在三处（下载分支 / 计数器与发射 / 两个 builder 的 USER 分支）+ 文件尾两个纯判据对象与一个纯读取函数；**没有新增任何 `OpenAIToolResultImages` 调用点**（既有形状判据计数 1 / 2 不变）。
 - 下载分支的 diff 行数偏大是因为状态码门把原有块整体缩进了一层（**语义未变**，`readBodyBounded` 调用仍只有一处、体积上限与 chunked 处理逐字保留）。
 - `scripts/scan/**`、`scan.sh`、`test_scan.py`、`assets/skills/**`：**零触碰**。
