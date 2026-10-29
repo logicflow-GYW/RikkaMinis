@@ -252,9 +252,14 @@ object HangDetector {
                 .putInt(KEY_HANG_COUNT, 0)
                 .putLong(KEY_LAST_HANG_AT, 0L)
                 .apply()
+            // [fix/r4-s F-13] Flip the breaker INSIDE the same critical section
+            // as the counter reset. Outside it, a concurrent recordHang (which
+            // trips the breaker under this lock) could interleave and leave the
+            // breaker ON with the counter at 0 — a state nothing ever clears
+            // again, because the early return above exits on count == 0. The
+            // measured window: 200 reset×hang races → breaker/counter disagree.
+            _renderBreakerActive.value = false
         }
-        // [T-android-render-breaker] Healthy again — restore full rendering.
-        _renderBreakerActive.value = false
         Log.i(TAG, "hang count reset after quiet period")
     }
 
@@ -272,13 +277,21 @@ object HangDetector {
 
     /** Manual reset (Settings → "Reset hang counter") — clears immediately. */
     fun resetHangCount(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putInt(KEY_HANG_COUNT, 0)
-            .putLong(KEY_LAST_HANG_AT, 0L)
-            .apply()
-        // [T-android-render-breaker] Manual reset also restores full rendering.
-        _renderBreakerActive.value = false
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // [fix/r4-s F-13] This path used to run without any lock, racing
+        // recordHang's read-modify-write of the same keys from the watchdog
+        // thread: the reset could zero the counter, the hang could bump it and
+        // trip the breaker, and this line then cleared the breaker afterwards —
+        // or the trip landed after the reset and left breaker ON with count 0.
+        // Both writer paths now share one critical section.
+        synchronized(hangCounterLock) {
+            prefs.edit()
+                .putInt(KEY_HANG_COUNT, 0)
+                .putLong(KEY_LAST_HANG_AT, 0L)
+                .apply()
+            // [T-android-render-breaker] Manual reset also restores full rendering.
+            _renderBreakerActive.value = false
+        }
     }
 
     fun currentHangCount(context: Context): Int =
@@ -460,13 +473,18 @@ object HangDetector {
                 .putInt(KEY_HANG_COUNT, n)
                 .putLong(KEY_LAST_HANG_AT, System.currentTimeMillis())
                 .apply()
+            // [T-android-render-breaker] Trip the render degrade one hang BEFORE
+            // the system would ANR-kill us (baseline showed death between #2/#3).
+            // [fix/r4-s F-13] The trip lives inside the counter's critical
+            // section: tripping outside let a concurrent reset (markHealthyTick
+            // or the Settings reset) zero the counter and clear the breaker
+            // first, after which this trip flipped the breaker back ON — leaving
+            // it ON with count 0, a state no reset path ever revisits.
+            if (n >= RENDER_DEGRADE_HANG_COUNT && !_renderBreakerActive.value) {
+                _renderBreakerActive.value = true
+                Log.w(TAG, "render breaker TRIPPED at hang count=$n — streaming markdown degrades to plain text")
+            }
             n
-        }
-        // [T-android-render-breaker] Trip the render degrade one hang BEFORE
-        // the system would ANR-kill us (baseline showed death between #2/#3).
-        if (newCount >= RENDER_DEGRADE_HANG_COUNT && !_renderBreakerActive.value) {
-            _renderBreakerActive.value = true
-            Log.w(TAG, "render breaker TRIPPED at hang count=$newCount — streaming markdown degrades to plain text")
         }
         val tail = "hang detected duration=${durationMs}ms count=$newCount " +
             "breakerActive=${newCount >= HANG_LIMIT_FOR_BREAKER}"
