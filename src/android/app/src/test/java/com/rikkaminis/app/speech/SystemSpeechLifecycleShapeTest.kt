@@ -149,6 +149,56 @@ class SystemSpeechLifecycleShapeTest {
         assertRejects(body, mutated, src)
     }
 
+    // ── [r3-B11-F06] cancel() must invalidate the session BEFORE the post ──
+    //
+    // cancel() used to only post its teardown to the main looper while leaving
+    // `sessionToken` alone. onResults/onError are delivered ON the main thread,
+    // so a callback the system had already queued ran ahead of that posted
+    // teardown, still matched the live token, and delivered a late transcript
+    // (or ERROR_CLIENT) into a session the user had just cancelled. The bump has
+    // to be synchronous to make those queued callbacks inert.
+
+    private fun cancelBody(src: String): String {
+        val start = src.indexOf("override fun cancel()")
+        assertTrue("cancel() not found in $engineRel", start >= 0)
+        val end = src.indexOf("override fun markDegraded()", start)
+        assertTrue("markDegraded must follow cancel (probe anchor lost)", end > start)
+        return src.substring(start, end)
+    }
+
+    private fun assertCancelInvalidatesFirst(body: String) {
+        val code = codeOnly(body)
+        val bump = code.indexOf("sessionToken++")
+        val post = code.indexOf("mainHandler.post")
+        assertTrue("cancel() no longer bumps the session token", bump >= 0)
+        assertTrue("cancel() no longer posts its teardown", post >= 0)
+        assertTrue(
+            "the token bump must come BEFORE the posted teardown, or a queued " +
+                "callback still looks live",
+            bump < post,
+        )
+    }
+
+    @Test
+    fun `cancel invalidates the session before posting the teardown`() {
+        assertCancelInvalidatesFirst(cancelBody(readRepoFile(engineRel)))
+    }
+
+    @Test
+    fun `probe rejects a cancel that only posts the teardown`() {
+        val body = cancelBody(readRepoFile(engineRel))
+        assertCancelInvalidatesFirst(body) // probe must accept the real source
+        val mutated = body.replace("sessionToken++", "")
+        assertFalse("mutation must remove the bump", mutated.contains("sessionToken++"))
+        var rejected = false
+        try {
+            assertCancelInvalidatesFirst(mutated)
+        } catch (_: AssertionError) {
+            rejected = true
+        }
+        assertTrue("negative control: probe accepted a cancel() with no invalidation", rejected)
+    }
+
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {

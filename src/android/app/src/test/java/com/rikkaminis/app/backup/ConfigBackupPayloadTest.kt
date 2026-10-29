@@ -275,9 +275,53 @@ class ConfigBackupPayloadTest {
     }
 
     @Test
+    fun `chat parts sanitizer drops the current mediaRef shape too`() {
+        // [FIX-R3-D / F-15] Rows written today carry `mediaRef` (see
+        // ChatMessageJson.buildMediaRefPartJson), not "image"/"video" — a
+        // pointer into the EXPORTING device's media store. The attach filter
+        // only knew the pre-migration names, so cross-device backups shipped
+        // those absolute/relative paths in every affected message: the
+        // receiving device cannot resolve them and the file leaks a private
+        // path for no benefit (the media bytes never travel).
+        val json = """
+            [
+              {"type":"text","value":"see this"},
+              {"type":"mediaRef","mediaRef":{"id":"m-1","kind":"image",
+                 "mimeType":"image/png","relativePath":"Pictures/secret-shot.png",
+                 "linuxPath":"/storage/emulated/0/Pictures/secret-shot.png"}},
+              {"type":"toolResult","value":{
+                  "toolUseId":"call_1","name":"read_image","success":true,"output":"ok",
+                  "mediaRef":{"id":"m-2","kind":"image","linuxPath":"/data/x.png"}
+              }}
+            ]
+        """.trimIndent()
+
+        val out = ConfigBackup.sanitizeChatParts(json)!!
+        val arr = JSONArray(out)
+        assertEquals(2, arr.length())
+        assertTrue(
+            "no mediaRef part may survive",
+            (0 until arr.length()).none { arr.getJSONObject(it).optString("type") == "mediaRef" },
+        )
+        // The tool result itself stays (its text is the evidence), only the
+        // unresolvable pointer goes.
+        val tool = (0 until arr.length())
+            .map { arr.getJSONObject(it) }
+            .first { it.optString("type") == "toolResult" }
+        assertFalse(tool.getJSONObject("value").has("mediaRef"))
+        assertEquals("ok", tool.getJSONObject("value").optString("output"))
+        assertFalse("no private media path may ride the payload", out.contains("secret-shot.png"))
+    }
+
+    @Test
     fun `chat parts sanitizer returns null for media-only or unparseable`() {
         assertNull(ConfigBackup.sanitizeChatParts("""[{"type":"image","image_base64":"x"}]"""))
         assertNull(ConfigBackup.sanitizeChatParts("""[{"type":"video","url":"x"}]"""))
+        assertNull(
+            ConfigBackup.sanitizeChatParts(
+                """[{"type":"mediaRef","mediaRef":{"id":"m-1","linuxPath":"/data/x.png"}}]""",
+            ),
+        )
         assertNull(ConfigBackup.sanitizeChatParts("not json"))
         assertNull(ConfigBackup.sanitizeChatParts(null))
         assertNull(ConfigBackup.sanitizeChatParts(""))

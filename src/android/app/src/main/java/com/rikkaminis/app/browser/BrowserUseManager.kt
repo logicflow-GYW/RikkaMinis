@@ -18,6 +18,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.core.content.FileProvider
@@ -204,6 +205,18 @@ class BrowserUseManager(
     @Volatile
     private var lastMainDocUrl: String? = null
 
+    /**
+     * [r3-B09 F-14] Status code of the last main-frame HTTP error on this tab
+     * (403 / 429 / …), cleared when a new document starts loading. Read by
+     * `BrowserTabPool` and handed to
+     * [BrowserRiskControl.detectChallenge] as `statusCode` — the field existed
+     * for a long time with no producer at all, so the two status-based kinds
+     * (`rate_limited`, `access_denied`) were unreachable.
+     */
+    @Volatile
+    var lastMainFrameHttpError: Int? = null
+        private set
+
     private val _pageTitle = MutableStateFlow("")
     val pageTitle: StateFlow<String> = _pageTitle.asStateFlow()
 
@@ -237,6 +250,18 @@ class BrowserUseManager(
      * injected FileReader and hands the decoded bytes back through the bridge.
      */
     var onBlobDownloadData: ((data: ByteArray, filename: String, mimeType: String?) -> Unit)? = null
+
+    /**
+     * [r3-B09 F-10] A blob:/data: download failed before any bytes reached the
+     * pool (no bridge token match, FileReader error, unsafe name, malformed or
+     * oversized data URL, decode failure, or the tab died mid-flight).
+     *
+     * The pool cannot infer any of these: they happen entirely inside the page
+     * JS / bridge handshake, so without this callback the only trace was a
+     * Log.w here and the user saw nothing at all after tapping "download".
+     * `filename` is null when the failure is before a name exists.
+     */
+    var onBlobDownloadFailed: ((filename: String?, reason: String) -> Unit)? = null
 
     /**
      * Deferred for awaiting navigation completion.
@@ -446,7 +471,10 @@ class BrowserUseManager(
         @JavascriptInterface
         fun saveBlobDownload(token: String, dataUrl: String, filename: String) {
             if (token != blobDownloadActiveToken) {
-                Log.w(TAG, "blob download rejected: bad bridge token")
+                // [r3-B09 F-10] A newer blob: fetch overwrote the single-slot
+                // token before this reader answered; say so instead of dropping
+                // the download on the floor.
+                reportBlobFailure(filename, "the page replaced this download request before it finished")
                 return
             }
             // One-shot: the credential dies with the call it authorised.
@@ -456,7 +484,9 @@ class BrowserUseManager(
 
         @JavascriptInterface
         fun blobDownloadError(error: String) {
-            Log.w(TAG, "blob download failed in page JS: $error")
+            // [r3-B09 F-10] No token on this member (the page-side error hook is
+            // not credentialed), so no name is known here either.
+            reportBlobFailure(null, error.ifBlank { "the page failed to read the download" })
         }
     }
 
@@ -478,19 +508,19 @@ class BrowserUseManager(
         // (The page-side string itself is built inside the WebView before we
         // ever see it, so this bounds our amplification, not the page's.)
         if (dataUrl.length > MAX_BLOB_DATA_URL_CHARS) {
-            Log.w(TAG, "blob download rejected: data URL too large (${dataUrl.length} > $MAX_BLOB_DATA_URL_CHARS chars)")
+            reportBlobFailure(filename, "payload too large (${dataUrl.length} > $MAX_BLOB_DATA_URL_CHARS chars)")
             return
         }
         // [audit-RC11] Defense-in-depth: page-provided names are untrusted.
         // The pool also sanitizes, but refuse as early as possible so the
         // bytes are never even handed off for an unsafe name.
         val safeName = BrowserTabPool.sanitizeDownloadName(filename) ?: run {
-            Log.w(TAG, "blob download rejected: unsafe filename '${filename.take(80)}'")
+            reportBlobFailure(filename, "the page supplied an unusable filename")
             return
         }
         val comma = dataUrl.indexOf(',')
         if (comma < 0 || !dataUrl.startsWith("data:")) {
-            Log.w(TAG, "blob download: malformed data URL (len=${dataUrl.length})")
+            reportBlobFailure(filename, "malformed data URL (len=${dataUrl.length})")
             return
         }
         val header = dataUrl.substring(5, comma)
@@ -502,11 +532,21 @@ class BrowserUseManager(
             // was created for.
             decodeDataUrlPayload(header, dataUrl.substring(comma + 1))
         } catch (t: Throwable) {
-            Log.w(TAG, "blob download: payload decode failed: ${t.message}")
+            reportBlobFailure(filename, "payload decode failed: ${t.message}")
             return
         }
         Log.i(TAG, "blob download decoded: $safeName (${bytes.size} bytes, mime=$mime)")
         onBlobDownloadData?.invoke(bytes, safeName, mime)
+    }
+
+    /**
+     * [r3-B09 F-10] One funnel for "this download died before the pool saw a
+     * byte": log for forensics AND tell the owner, so the failure reaches the
+     * downloads panel + chat instead of dying in logcat.
+     */
+    private fun reportBlobFailure(filename: String?, reason: String) {
+        Log.w(TAG, "blob download failed${filename?.let { " ($it)" } ?: ""}: $reason")
+        onBlobDownloadFailed?.invoke(filename, reason)
     }
 
     init {
@@ -567,7 +607,10 @@ class BrowserUseManager(
         // a dispatch that [runJsOnMain] will refuse must not leave a one-shot
         // bridge token armed for a request that can never come back.
         if (destroyed) {
-            Log.w(TAG, "blob download dropped: the WebView was already destroyed")
+            reportBlobFailure(
+                android.webkit.URLUtil.guessFileName(blobUrl, contentDisposition, mimeType),
+                "the tab was closed before the download could start",
+            )
             return
         }
         val guessedName = android.webkit.URLUtil.guessFileName(blobUrl, contentDisposition, mimeType)
@@ -713,6 +756,11 @@ class BrowserUseManager(
              */
             override fun onRendererGone(view: WebView?) {
                 _isLoading.value = false
+                // [r3-B09 F-02] Arm the inertness latch FIRST: every later entry
+                // into this instance (this navigation's metadata read, the next
+                // navigate(), the auto-snapshot) has to be able to see that no
+                // callback will ever arrive again.
+                rendererDead = true
                 Log.e(TAG, "renderer gone — failing pending navigation")
                 navigationDeferred?.complete(
                     NavigationResult(
@@ -850,11 +898,40 @@ class BrowserUseManager(
                 // viewport instead of the pre-scale layout viewport. Without
                 // this, fixed-positioned UI on some sites drifts off the
                 // visible region after the synthetic measure+layout pass.
-                view.postDelayed({
-                    view.evaluateJavascript(
-                        "window.dispatchEvent(new Event('resize'));", null,
-                    )
+                // [r3-B09 F-06] NOT `view.postDelayed`: a pool tab is detached
+                // until the sheet opens, and `View.post*` on a detached view
+                // parks the runnable in its HandlerActionQueue — which the
+                // destroy-path's `removeCallbacks(null)` cannot reach, because
+                // that API is a documented no-op for a null token. The 80ms
+                // resize therefore survived the tab: it either fired on a dead
+                // renderer after destroy() or was flushed into the next page
+                // attach. A main-Looper hop always drains, and [runJsNow]
+                // re-checks the destroyed latch when it runs (which is what
+                // `browser_destroy_wakeup_check`'s chokepoint criterion pins).
+                Handler(Looper.getMainLooper()).postDelayed({
+                    runJsNow("post-scale-resize") {
+                        webView.evaluateJavascript(
+                            "window.dispatchEvent(new Event('resize'));", null,
+                        )
+                    }
                 }, 80)
+            }
+
+            /**
+             * [r3-B09 F-14] HTTP-level failures (403 / 429 / 503) are NOT
+             * [onReceivedError] — that one only reports transport errors, so a
+             * rate-limited page used to reach no callback at all and
+             * `BrowserRiskControl.detectChallenge(statusCode = …)` had no
+             * caller that ever passed a status. Recorded for the main frame
+             * only; subresource 404s are page furniture, not a challenge.
+             */
+            override fun onReceivedHttpError(
+                view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse
+            ) {
+                if (request.isForMainFrame) {
+                    lastMainFrameHttpError = errorResponse.statusCode
+                    Log.w(TAG, "main-frame HTTP ${errorResponse.statusCode} for ${request.url}")
+                }
             }
 
             override fun onReceivedError(
@@ -882,6 +959,11 @@ class BrowserUseManager(
 
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                // [r3-B09 F-14] One HTTP-error reading per document: the risk
+                // detector reads this after every action, and a stale 429 from
+                // the previous page would keep throttling a page that loaded
+                // fine.
+                lastMainFrameHttpError = null
                 // [audit-RC13] Commit the main document for the minis://
                 // subresource gate BEFORE its subresources fire (onPageStarted
                 // is invoked before subresource resolution begins).
@@ -1220,6 +1302,14 @@ class BrowserUseManager(
     private suspend fun navigate(urlString: String?): BrowserActionResult {
         if (urlString.isNullOrEmpty()) return BrowserActionResult.error("Missing 'url' parameter")
 
+        // [r3-B09 F-02] A dead tab never reports back. Before this short-circuit
+        // an explicit-tab navigate onto a renderer-killed / destroyed tab loaded
+        // into nothing, waited out the whole navigation timeout, then asked the
+        // live page for its title/viewport/scroll — and `evaluateJavascript` has
+        // no timeout at all, so the call hung past the timeout until the tool
+        // deadline (~120s) and reported a network problem for a tab that is gone.
+        if (webViewInert()) return webViewGoneResult()
+
         // [audit-0916] Scheme-aware normalization — see normalizeBrowserUrl.
         // The previous `contains("://")` test turned `about:blank` into
         // `https://about:blank`, which Chromium refuses to load.
@@ -1290,7 +1380,11 @@ class BrowserUseManager(
         val report = navigationReport(
             outcome = navResult.outcome,
             url = reportedUrl,
-            details = navigationDetails(),
+            // [r3-B09 F-02] The wake-up can be "the renderer died" / "the tab was
+            // destroyed" instead of "the page finished": reading the live page
+            // then hangs on a JS callback that cannot arrive, so say plainly that
+            // there is no page to describe.
+            details = if (webViewInert()) "  (no live WebView — the tab's renderer is gone)" else navigationDetails(),
             errorDescription = navResult.errorDescription,
             routedTarget = navResult.routedTarget,
             timeoutSec = navTimeoutSec,
@@ -1522,6 +1616,15 @@ class BrowserUseManager(
     suspend fun captureLiveSnapshot(): Bitmap? = captureWebViewBitmap()
 
     private suspend fun captureWebViewBitmap(): Bitmap? = withContext(Dispatchers.Main) {
+        // [r3-B09 F-02] `navigate()` captures a snapshot even when it fails, so a
+        // dead tab reached the capture path by design; touching a destroyed
+        // WebView throws, and a renderer-killed one is a blank surface. Either
+        // way there is nothing to show: report "no image" instead of burning the
+        // call on a crash log.
+        if (webViewInert()) {
+            Log.w(TAG, "snapshot skipped: the WebView is gone")
+            return@withContext null
+        }
         try {
             // WebView may be detached (pool-owned, never added to a window), so
             // width/height can be 0. Ensure it has a layout box matching the
@@ -1833,6 +1936,14 @@ class BrowserUseManager(
             val status = json.optInt("status", 0)
             val finalURL = json.optString("url", urlString)
 
+            // [r3-B09 F-11] 404's body is an error PAGE, not the fetch result:
+            // the pre-fix code only read `status` to print it and handed the
+            // body over as a successful download. The policy is pure
+            // ([fetchHttpFailure]) so the two directions can be pinned with
+            // literals: non-2xx (when the JS reported one) is a failure, and a
+            // 0-byte 2xx is a legal empty resource, not an error.
+            fetchHttpFailure(status, finalURL)?.let { return BrowserActionResult.error(it) }
+
             // `base64` is optional — only present when the JS captured bytes.
             // If missing, fall back to `text` (JSON / plain text) so callers
             // can fetch human-readable payloads without forcing a byte roundtrip.
@@ -1841,6 +1952,23 @@ class BrowserUseManager(
             } ?: json.optString("text").takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8)
 
             if (data == null) {
+                // [r3-B09 F-11] The 200/204-no-body direction: the old code
+                // answered "no body" as an ERROR for exactly the responses the
+                // fetch succeeded on. An empty 2xx body is a real (empty)
+                // result — report it, don't fail it.
+                if (status in 200..299) {
+                    val text = buildString {
+                        appendLine("Fetched $finalURL")
+                        appendLine("  Status: $status")
+                        appendLine("  Content-Type: $contentType")
+                        appendLine("  Size: 0 bytes (empty body)")
+                    }
+                    return BrowserActionResult(
+                        text = text,
+                        fetchedFileData = ByteArray(0),
+                        fetchedFileName = "fetch_${System.currentTimeMillis()}.${extensionForMimeType(contentType)}",
+                    )
+                }
                 return BrowserActionResult.error("Fetch returned no body (status=$status)")
             }
             val size = json.optInt("size", data.size)
@@ -2139,6 +2267,16 @@ class BrowserUseManager(
     // -- JS Evaluation Helpers --
 
     private suspend fun evaluateJavascript(js: String): String = withContext(Dispatchers.Main) {
+        // [r3-B09 F-02] The callback handed to `WebView.evaluateJavascript` runs
+        // in the renderer. With the renderer gone (or the view destroyed) it
+        // never runs, and this `deferred.await()` has no timeout — the caller
+        // would sit until the tool deadline. Answer with the bridge's own reject
+        // shape so `evaluateAndReturn` / `evaluateJSAndParse` surface an error
+        // instead of a hang.
+        if (webViewInert()) {
+            Log.w(TAG, "JS evaluation dropped: the WebView is gone")
+            return@withContext "{\"error\": \"This tab's WebView is gone (renderer killed or tab destroyed) — open a new tab\"}"
+        }
         val deferred = CompletableDeferred<String>()
         webView.evaluateJavascript(js) { result ->
             // Android WebView returns JSON-encoded strings, so unquote
@@ -2625,6 +2763,42 @@ class BrowserUseManager(
     @Volatile
     private var destroyed = false
 
+    /**
+     * [r3-B09 F-02] The renderer behind this WebView was killed by the system
+     * (`onRendererGone`), so the instance is inert: it can never fire
+     * `onPageFinished`, and `evaluateJavascript` callbacks never arrive.
+     *
+     * Deliberately NOT [destroyed] — the pool still holds this tab, the WebView
+     * object is alive (it is only the renderer that died) and it must be
+     * destroyed for real when the tab goes, so a `destroyed = true` here would
+     * make `destroy()` return early and leak the view. This is the "don't wait
+     * for a callback that cannot come" half of the GH#341 latch.
+     */
+    @Volatile
+    private var rendererDead = false
+
+    /** [r3-B09 F-02] No live renderer: destroyed, or renderer killed. */
+    private fun webViewInert(): Boolean = destroyed || rendererDead
+
+    /**
+     * [r3-B09 F-02] The result for an action aimed at a tab that has no live
+     * WebView.
+     *
+     * Two causes, two different fixes on the caller's side, so they get two
+     * different messages: a torn-down tab means "pick another tab", a killed
+     * renderer means "this tab is done, open a new one". Both used to surface as
+     * a network-flavoured timeout.
+     */
+    private fun webViewGoneResult(): BrowserActionResult = BrowserActionResult.error(
+        if (destroyed) {
+            "This tab's WebView was already destroyed (the tab was closed or evicted) — " +
+                "pick another tab or open a new one."
+        } else {
+            "This tab's WebView renderer was killed by the system; this tab can no longer " +
+                "load pages — open a new tab."
+        },
+    )
+
     // ── [feat/browser-console-network-upload] diagnostics + file upload ──────
 
     /**
@@ -2893,6 +3067,7 @@ class BrowserUseManager(
             // new page's subresource gate. Fail-closed: null blocks until the
             // next onPageStarted commits again.
             lastMainDocUrl = null
+            lastMainFrameHttpError = null // [r3-B09 F-14] no status outlives the tab
             // Assign a no-op implementation instead of null — the Kotlin
             // Android SDK bindings expose webViewClient/webChromeClient as
             // non-null types (API 26+), so "= null" won't compile.
@@ -3056,6 +3231,23 @@ internal fun decodeDataUrlPayload(
 /** [deep-audit-1019 ISSUE-08] Production Base64 half of [decodeDataUrlPayload]. */
 private fun decodeDataUrlBase64(payload: String): ByteArray =
     Base64.decode(payload, Base64.DEFAULT)
+
+/**
+ * [r3-B09 F-11] Pure policy for the agent-facing `fetch`: which statuses are a
+ * failure even though the server sent a body.
+ *
+ * Lifted to the top level so both directions can be pinned with literals —
+ * `fetch` itself is a manager method and cannot be exercised without a
+ * WebView. `status = 0` means the JS never reported one (bridge error / older
+ * shape): an unknown status is not a failure, it is reported as-is in the
+ * result text.
+ */
+internal fun fetchHttpFailure(status: Int, url: String): String? = when {
+    status in 200..299 -> null
+    status == 0 -> null
+    else -> "Fetch failed: HTTP $status for $url — the response body is the " +
+        "server's error page, not the resource you asked for"
+}
 
 /**
  * [deep-audit-1045 B-02] Where a one-shot JS injection must land.

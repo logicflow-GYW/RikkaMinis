@@ -138,7 +138,11 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
      * guess. The streaming path ([appendText] / [flush] → [speakQueued]) keeps
      * per-slice auto-detection: it has no explicit language to honor.
      *
-     * @return true when an utterance was actually enqueued.
+     * [r3-B11-F07] @return true only when the engine ACCEPTED the utterance
+     *   (`TextToSpeech.speak` == SUCCESS). An engine refusal (text over the
+     *   engine's length limit, or a dead service) returns false: it delivers no
+     *   callback, so reporting it as enqueued left `isSpeaking` stuck true and
+     *   told `android-speak` the text was "speaking" when nothing played.
      */
     fun speak(text: String, explicitLanguage: String? = null): Boolean {
         if (!isInitialized || text.isBlank()) return false
@@ -158,7 +162,22 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
         applyLanguage(TtsLanguagePolicy.resolveTargetLocale(explicitLanguage, speakable))
 
         val params = buildSpeechParams()
-        tts?.speak(speakable, TextToSpeech.QUEUE_FLUSH, params, drain.utteranceId(sessionEpoch))
+        // [r3-B11-F07] The engine's return code is the ONLY signal that nothing
+        // will be spoken: `speak` answers ERROR (-1) when it refuses the text
+        // (over getMaxSpeechInputLength(), or a service that died) and then
+        // never delivers onDone/onError, so the old unconditional
+        // `_isSpeaking = true` left the flag stuck true AND let android-speak
+        // report {"status":"speaking"} for audio that never played.
+        val result = tts?.speak(speakable, TextToSpeech.QUEUE_FLUSH, params, drain.utteranceId(sessionEpoch))
+            ?: TextToSpeech.ERROR
+        if (result != TextToSpeech.SUCCESS) {
+            // No callback will arrive for this utterance: roll the session
+            // counters back so the drain tracker can't wait on it forever.
+            drain.invalidate()
+            _isSpeaking.value = false
+            Log.e(TAG, "engine refused utterance (result=$result, chars=${speakable.length})")
+            return false
+        }
         _isSpeaking.value = true
         return true
     }
@@ -172,15 +191,25 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
      * would break cross-slice link rewriting. [speak] is the sanitized
      * read-aloud entry.
      */
-    fun speakQueued(text: String) {
-        if (!isInitialized || text.isBlank()) return
+    fun speakQueued(text: String): Boolean {
+        if (!isInitialized || text.isBlank()) return false
 
         val utteranceId = drain.utteranceId(drain.enqueue())
         autoDetectAndSetLanguage(text)
 
         val params = buildSpeechParams()
-        tts?.speak(text, TextToSpeech.QUEUE_ADD, params, utteranceId)
+        // [r3-B11-F07] Same contract as [speak]: a refused utterance never
+        // delivers a callback, so the enqueue it just registered has to be
+        // rolled back or `isSpeaking` waits on it for the rest of the process.
+        val result = tts?.speak(text, TextToSpeech.QUEUE_ADD, params, utteranceId)
+            ?: TextToSpeech.ERROR
+        if (result != TextToSpeech.SUCCESS) {
+            if (drain.rejectPending()) _isSpeaking.value = false
+            Log.e(TAG, "engine refused queued utterance (result=$result, chars=${text.length})")
+            return false
+        }
         _isSpeaking.value = true
+        return true
     }
 
     /**
@@ -390,6 +419,23 @@ internal class TtsDrainTracker {
         epoch.incrementAndGet()
         queued.set(0)
         completed.set(0)
+    }
+
+    /**
+     * [r3-B11-F07] Undo one enqueued utterance that the engine REFUSED
+     * (`TextToSpeech.speak` returned ERROR): no `onDone`/`onError` will ever
+     * arrive for it, so leaving the counter up made the queue look permanently
+     * unfinished — `isSpeaking` stayed true until an unrelated `stop()`.
+     *
+     * Returns true when the queue is now drained, so the caller can clear the
+     * speaking flag. Floors at 0, so a duplicate rollback is harmless.
+     */
+    fun rejectPending(): Boolean {
+        while (true) {
+            val current = queued.get()
+            val next = if (current > 0) current - 1 else 0
+            if (queued.compareAndSet(current, next)) return completed.get() >= next
+        }
     }
 
     fun utteranceId(sessionEpoch: Long): String = "$PREFIX$sessionEpoch-${UUID.randomUUID()}"

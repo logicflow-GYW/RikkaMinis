@@ -82,6 +82,7 @@
     <string name="webpreview_close">關閉</string>
     <string name="webpreview_stop">停止載入</string>
     <string name="webpreview_reload">重新載入</string>
+    <string name="webpreview_renderer_gone">頁面渲染程序已被系統終止，預覽無法繼續顯示。</string>
     <string name="webpreview_open_external">在外部瀏覽器中開啟</string>
     <string name="webpreview_open_fullscreen">全螢幕開啟</string>
     <string name="webpreview_more">更多</string>

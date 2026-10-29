@@ -33,7 +33,10 @@ class SpeechActiveEngineTest {
         override val displayName: String = id
         override var isAvailable: Boolean = available
         override val supportsPartialResults: Boolean = false
-        override val supportedLocales: List<Locale> = emptyList()
+        // [r3-B11-F06] mutable so a test can prove selectEngine re-reads the
+        // NEW engine's list instead of keeping the previous engine's.
+        var locales: List<Locale> = emptyList()
+        override val supportedLocales: List<Locale> get() = locales
         var started: Int = 0
         var stopped: Int = 0
         var cancelled: Int = 0
@@ -165,6 +168,29 @@ class SpeechActiveEngineTest {
         assertNull(activeEngine())
         start()
         assertEquals(2, a.started)
+    }
+
+    /**
+     * [r3-B11-F06] The locale list belongs to the ENGINE. `_supportedLocales` was
+     * only refreshed from init()/selectLocale(), so after switching engines the
+     * panel kept offering the previous engine's languages (and re-validated the
+     * saved locale against a list that engine never advertised).
+     */
+    @Test
+    fun selectEngineRefreshesTheSupportedLocaleList() {
+        a.locales = listOf(Locale.US)
+        b.locales = listOf(Locale.JAPAN)
+        SpeechRecognitionManager.refreshSupportedLocales() // seed from "sys"
+        assertEquals(
+            listOf("en-US"),
+            SpeechRecognitionManager.supportedLocales.value.map { it.toLanguageTag() },
+        )
+        SpeechRecognitionManager.selectEngine("prov")
+        assertEquals(
+            "an engine switch must carry the new engine's locale list",
+            listOf("ja-JP"),
+            SpeechRecognitionManager.supportedLocales.value.map { it.toLanguageTag() },
+        )
     }
 
     /** ⑦ idle selectEngine must not touch any engine (no in-flight session). */

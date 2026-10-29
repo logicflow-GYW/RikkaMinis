@@ -550,6 +550,7 @@
     <string name="webpreview_close">关闭</string>
     <string name="webpreview_stop">停止加载</string>
     <string name="webpreview_reload">重新加载</string>
+    <string name="webpreview_renderer_gone">页面渲染进程已被系统终止，预览无法继续显示。</string>
     <string name="webpreview_open_external">在外部浏览器中打开</string>
     <string name="webpreview_open_fullscreen">全屏打开</string>
     <string name="webpreview_more">更多</string>

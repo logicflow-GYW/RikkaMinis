@@ -1,5 +1,6 @@
 package com.rikkaminis.app.agent
 
+import com.rikkaminis.app.tools.UnknownToolMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -299,4 +300,58 @@ class ToolLoopDetectorTest {
         ToolLoopConfig(criticalThreshold = 30, globalCircuitBreakerThreshold = 30)
     }
 
+    // ─── 2b. [r3-B11-F04] the parser vs. the REAL production message ────────
+
+    /**
+     * Every test above hand-writes its error string as `"unknown tool: foobar"`
+     * — no period, no tool list. Production produces something else entirely:
+     * `UnknownToolMessage.message()` emits `"Unknown tool: foobar. This agent
+     * can use: …"`. The regex character class used to include `.`, so it
+     * captured `"foobar."`, `unk == toolName` was never true, and
+     * `unknown_tool_repeat` could not fire in the field while every unit test
+     * stayed green. These cases feed the REAL message through the REAL parser.
+     */
+    @Test
+    fun `extract parses the real UnknownToolMessage output`() {
+        val detector = ToolLoopDetector()
+        val message = UnknownToolMessage.message("foobar", listOf("file_read", "file_write"))
+        assertEquals("foobar", detector.extractUnknownToolName(message))
+    }
+
+    @Test
+    fun `extract parses the real message when no tools are known`() {
+        val detector = ToolLoopDetector()
+        // Empty tool list → the message is just "Unknown tool: foobar."
+        assertEquals("foobar", detector.extractUnknownToolName(UnknownToolMessage.message("foobar", emptyList())))
+    }
+
+    @Test
+    fun `extract keeps dots inside a name but drops the sentence period`() {
+        val detector = ToolLoopDetector()
+        // MCP-style names legitimately contain dots; only the trailing period is
+        // punctuation from the message template.
+        assertEquals("mcp.files.read", detector.extractUnknownToolName("unknown tool: mcp.files.read."))
+    }
+
+    @Test
+    fun `extract parses the sub-agent forbidden wording`() {
+        val detector = ToolLoopDetector()
+        val message = UnknownToolMessage.message("shell_execute", listOf("file_read"), forbidden = true)
+        assertEquals("shell_execute", detector.extractUnknownToolName(message))
+    }
+
+    @Test
+    fun `unknown_tool_repeat blocks on real production messages`() {
+        val detector = ToolLoopDetector()
+        val message = UnknownToolMessage.message("foobar", listOf("file_read"))
+        repeat(9) {
+            detector.record("foobar", mapOf("x" to it), result = null, errorMessage = message)
+        }
+        assertEquals("9 real messages → still allowed", Level.NONE, detector.check("foobar", mapOf("x" to 99)).level)
+        detector.record("foobar", mapOf("x" to 9), result = null, errorMessage = message)
+        val blocked = detector.check("foobar", mapOf("x" to 100))
+        assertEquals("10 real messages → CRITICAL", Level.CRITICAL, blocked.level)
+        assertTrue("message must name the loop", blocked.message!!.contains("unknown_tool_repeat") ||
+            blocked.message!!.contains("'foobar'"))
+    }
 }

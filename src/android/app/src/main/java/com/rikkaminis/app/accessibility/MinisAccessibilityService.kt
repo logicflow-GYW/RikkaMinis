@@ -269,25 +269,36 @@ class MinisAccessibilityService : AccessibilityService() {
             override fun onCompleted(g: GestureDescription?) { ok[0] = true; done.countDown() }
             override fun onCancelled(g: GestureDescription?) { ok[0] = false; done.countDown() }
         }
-        Handler(Looper.getMainLooper()).post { dispatchGesture(gesture, callback, null) }
+        Handler(Looper.getMainLooper()).post {
+            // [r3-B11-F10] A rejected dispatch fires NO callback at all, so the
+            // await below used to block the full timeout and then report
+            // failure for a gesture the system never started.
+            if (!dispatchGesture(gesture, callback, null)) done.countDown()
+        }
         return done.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS) && ok[0]
     }
 
     fun dispatchPinch(cx: Float, cy: Float, scale: Float, durationMs: Long): Boolean {
-        val initialOffset = 200f
-        val finalOffset = (initialOffset * scale).coerceAtLeast(20f)
-        val (s0, e0) = if (scale > 1f) {
-            (cx - finalOffset to cy) to (cx - initialOffset to cy)
-        } else {
-            (cx - initialOffset to cy) to (cx - finalOffset to cy)
+        // [r3-B11-F10] Geometry comes from [PinchTracks]: the old inline version
+        // multiplied the offset by `scale` AND then swapped start/end for
+        // `scale > 1f`, so a zoom-in request performed a zoom-out (fingers were
+        // always travelling towards the centre), and a small `cx` produced
+        // negative stroke coordinates, which GestureDescription rejects with
+        // IllegalArgumentException.
+        val screen = resources.displayMetrics
+        val track = PinchTracks.forPinch(
+            cx = cx,
+            cy = cy,
+            scale = scale,
+            screenWidth = screen.widthPixels.toFloat(),
+            screenHeight = screen.heightPixels.toFloat(),
+        )
+        val p0 = Path().apply {
+            moveTo(track.leftStartX, track.startY); lineTo(track.leftEndX, track.endY)
         }
-        val (s1, e1) = if (scale > 1f) {
-            (cx + finalOffset to cy) to (cx + initialOffset to cy)
-        } else {
-            (cx + initialOffset to cy) to (cx + finalOffset to cy)
+        val p1 = Path().apply {
+            moveTo(track.rightStartX, track.startY); lineTo(track.rightEndX, track.endY)
         }
-        val p0 = Path().apply { moveTo(s0.first, s0.second); lineTo(e0.first, e0.second) }
-        val p1 = Path().apply { moveTo(s1.first, s1.second); lineTo(e1.first, e1.second) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p0, 0, durationMs))
             .addStroke(GestureDescription.StrokeDescription(p1, 0, durationMs))
@@ -295,10 +306,13 @@ class MinisAccessibilityService : AccessibilityService() {
         val done = java.util.concurrent.CountDownLatch(1)
         val ok = booleanArrayOf(false)
         Handler(Looper.getMainLooper()).post {
-            dispatchGesture(gesture, object : GestureResultCallback() {
+            val callback = object : GestureResultCallback() {
                 override fun onCompleted(g: GestureDescription?) { ok[0] = true; done.countDown() }
                 override fun onCancelled(g: GestureDescription?) { ok[0] = false; done.countDown() }
-            }, null)
+            }
+            // [r3-B11-F10] A rejected dispatch fires no callback; without this
+            // the latch waited durationMs + 2 s for one that could never come.
+            if (!dispatchGesture(gesture, callback, null)) done.countDown()
         }
         return done.await(durationMs + 2000, java.util.concurrent.TimeUnit.MILLISECONDS) && ok[0]
     }
@@ -398,5 +412,72 @@ class MinisAccessibilityService : AccessibilityService() {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+}
+
+/**
+ * [r3-B11-F10] Fingertip tracks for [MinisAccessibilityService.dispatchPinch].
+ *
+ * Two-finger pinch geometry, expressed as numbers only so it is JVM-testable
+ * (the service itself cannot be constructed off-device).
+ *
+ * The contract callers expect: **`scale > 1` spreads the fingers apart (zoom
+ * in), `scale < 1` brings them together (zoom out)**, with the spread growing
+ * linearly from [INITIAL_OFFSET] to `INITIAL_OFFSET * scale` (floored at
+ * [MIN_FINAL_OFFSET]).
+ *
+ * [r3-B11-F10] The service used to compute `finalOffset = initialOffset * scale`
+ * and THEN swap the start/end pair when `scale > 1f` — a double inversion that
+ * made every pinch (in or out) converge on the centre, i.e. `--scale 2.0` zoomed
+ * OUT. It also built raw coordinates: with the common 720 px-wide screen and a
+ * centre at 360 px, `cx - 400 = -40` made `StrokeDescription` throw
+ * `IllegalArgumentException` instead of dispatching.
+ */
+internal data class PinchTrack(
+    val leftStartX: Float,
+    val leftEndX: Float,
+    val rightStartX: Float,
+    val rightEndX: Float,
+    val startY: Float,
+    val endY: Float,
+)
+
+internal object PinchTracks {
+
+    /** Half-distance between the fingers when the gesture starts. */
+    const val INITIAL_OFFSET: Float = 200f
+
+    /**
+     * Floor for the finishing distance: a stroke shorter than this is below
+     * what the gesture pipeline reliably recognises as a two-finger pinch.
+     */
+    const val MIN_FINAL_OFFSET: Float = 20f
+
+    /** Scale outside this range is clamped — beyond it the track is unusable
+     *  (the fingers would start off-screen or collapse to a single point). */
+    const val MIN_SCALE: Float = 0.05f
+    const val MAX_SCALE: Float = 20f
+
+    fun forPinch(
+        cx: Float,
+        cy: Float,
+        scale: Float,
+        screenWidth: Float,
+        screenHeight: Float,
+    ): PinchTrack {
+        val clampedScale = if (scale.isNaN()) 1f else scale.coerceIn(MIN_SCALE, MAX_SCALE)
+        val initial = INITIAL_OFFSET
+        val finalOffset = (initial * clampedScale).coerceAtLeast(MIN_FINAL_OFFSET)
+        // Direction falls out of the arithmetic: finalOffset > initial means the
+        // fingers move away from the centre. No branch, no second inversion.
+        val y = cy.coerceIn(0f, screenHeight)
+        return PinchTrack(
+            leftStartX = (cx - initial).coerceIn(0f, screenWidth),
+            leftEndX = (cx - finalOffset).coerceIn(0f, screenWidth),
+            rightStartX = (cx + initial).coerceIn(0f, screenWidth),
+            rightEndX = (cx + finalOffset).coerceIn(0f, screenWidth),
+            startY = y,
+            endY = y,
+        )
     }
 }

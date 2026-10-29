@@ -45,6 +45,13 @@ object SubagentSkill {
 
     const val NAME = "spawn_agent"
 
+    /**
+     * [r3-B11-F13] One YAML frontmatter mapping line (`key:` / `key: value`).
+     * Used to tell a real frontmatter block apart from a Markdown body that
+     * merely opens with a horizontal rule.
+     */
+    private val KEY_LINE_RE = Regex("""^[A-Za-z][A-Za-z0-9_.\-]*:\s*.*$""")
+
     /** Tools that sub-agents are NEVER allowed to use. */
     val FORBIDDEN_TOOLS: Set<String> = setOf(
         NAME,              // anti-recursion
@@ -231,30 +238,62 @@ object SubagentSkill {
     /**
      * Strip frontmatter from the skill body and return the instruction text.
      * Falls back to the skill description when the body is only frontmatter.
+     *
+     * [r3-B11-F13] Production bodies are ALREADY stripped —
+     * `SkillRepository.parseSkillMd()` drops the block before anything is
+     * stored, and [SkillInfo.frontmatter] carries it — so this second strip
+     * only exists for raw-markdown callers (unit tests, import paths) whose
+     * [SkillInfo.frontmatter] is blank. It also now requires a real
+     * frontmatter shape: a Markdown body that opens with a horizontal rule
+     * (`---`) is PROSE, and the old `startsWith("---")` + any-line-`---` scan
+     * deleted the first section of such a skill's instructions.
      */
     private fun skillInstructions(skill: SkillInfo): String {
         val body = skill.body
         if (body.isBlank()) return skill.description
-
-        val lines = body.lines()
-        if (lines.size >= 2 && lines[0].trim().startsWith("---")) {
-            val endIdx = lines.subList(1, lines.size)
-                .indexOfFirst { it.trim().startsWith("---") }
-                .takeIf { it >= 0 }
-                ?.plus(1)
-            if (endIdx != null) {
-                val contentLines = if (endIdx + 1 < lines.size) {
-                    lines.subList(endIdx + 1, lines.size)
-                } else {
-                    emptyList()
-                }
-                val content = contentLines.joinToString("\n").trim()
-                if (content.isNotBlank()) return content
-                // Frontmatter-only skill (no body content) → fall back to description.
-                return skill.description
-            }
+        // Only raw-markdown callers can still carry frontmatter in [body].
+        val bodyText = if (skill.frontmatter.isBlank()) {
+            stripRealFrontmatter(body) ?: body
+        } else {
+            body
         }
-        return body
+        val content = bodyText.trim()
+        return if (content.isNotEmpty()) content else skill.description
+    }
+
+    /**
+     * [r3-B11-F13] Strip a leading YAML frontmatter block from [raw], or null
+     * when the leading `---` is not frontmatter. "Real" means: both delimiters
+     * are exactly `---` (a Markdown table row `---|---` and a `----` rule do
+     * not count), there is at least one middle line, and every non-blank,
+     * non-list-continuation middle line looks like a `key:` mapping — prose
+     * between two horizontal rules fails that test and is returned untouched.
+     *
+     * Pure string work; covered by [SubagentSkillTest].
+     */
+    internal fun stripRealFrontmatter(raw: String): String? {
+        val lines = raw.lines()
+        if (lines.size < 3) return null
+        if (lines[0].trim() != "---") return null
+        val endIdx = lines.subList(1, lines.size)
+            .indexOfFirst { it.trim() == "---" }
+            .takeIf { it >= 0 }
+            ?.plus(1)
+            ?: return null
+        // Middle lines: index 1 .. endIdx-1 (the closing `---` sits at endIdx).
+        val middle = lines.subList(1, endIdx)
+        if (middle.none { it.isNotBlank() }) return null
+        for (line in middle) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty() || trimmed.startsWith("- ")) continue
+            // A YAML key: optional leading chars, then `:` followed by end or
+            // whitespace (so a URL "http://x" — `http:` — still passes, while
+            // "see chapter 3:4" does not pretend to be a mapping).
+            val isMapping = KEY_LINE_RE.matches(trimmed)
+            if (!isMapping) return null
+        }
+        val contentLines = lines.subList(endIdx + 1, lines.size)
+        return contentLines.joinToString("\n").trim()
     }
 
     /**

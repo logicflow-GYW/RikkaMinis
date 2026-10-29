@@ -52,6 +52,19 @@ internal class StagedBytesLedger(initial: Long = 0L) {
     fun reset() {
         total.set(0L)
     }
+
+    /**
+     * [FIX-R3-E F-14] Re-align the ledger with the files actually on disk
+     * (their summed byte sizes). The old consumers either reset to zero
+     * (under-counting when another share's files were still staged) or left
+     * freed bytes in place (over-counting until the 500 MB cap falsely tripped
+     * with nothing on disk). An absolute reconcile is both clamped and exact:
+     * whatever the callers forgot to debit, the balance snaps back to the
+     * truth.
+     */
+    fun set(bytes: Long) {
+        total.set(bytes.coerceAtLeast(0L))
+    }
 }
 
 /** [§1042-A-07] UTF-8 byte length of a text attachment — the budget counts bytes, not chars. */

@@ -239,12 +239,14 @@ fun WebPreviewBottomSheet(
                 // URL change), so without a key the sheet kept displaying the
                 // *previous* holder's WebView — already `destroy()`ed by the
                 // caller — and the new holder's WebView was never attached.
-                // `key(holder)` re-runs the factory on holder identity change
-                // only. (`update = { }` was the alternative: rejected because
+                // `key(holder, holder.webView)` re-runs the factory on holder
+                // identity change — and, since [r3-c / B09 F-08], on a
+                // renderer-death rebuild that swaps `holder.webView` for a fresh
+                // instance. (`update = { }` was the alternative: rejected because
                 // the factory returns the WebView itself, so re-parenting from
                 // `update` would require switching the node to a container
                 // view and moving the touch-listener setup with it.)
-                key(holder) {
+                key(holder, holder.webView) {
                 AndroidView(
                     factory = {
                         // Issue #24: ModalBottomSheet's nested-scroll grabbed
@@ -274,6 +276,59 @@ fun WebPreviewBottomSheet(
                     modifier = Modifier.fillMaxSize(),
                 )
                 }
+                // [r3-c / B09 F-08, P1] The renderer-death flag had NO reader in
+                // the whole repo: the sheet kept showing the dead WebView (a
+                // blank rectangle), and Reload went into that corpse. Read it and
+                // surface the one recovery that exists.
+                if (holder.rendererGone) {
+                    WebPreviewRendererGone(onRetry = { holder.rebuildAfterRendererGone() })
+                }
+            }
+        }
+    }
+}
+
+/**
+ * [r3-c / B09 F-08, P1] Overlay for a preview whose WebView renderer process
+ * exited (OOM / native crash). Shared by both hosts so the bottom sheet and the
+ * fullscreen screen cannot drift apart — the failure is the same one, and only
+ * the holder can recover from it.
+ */
+@Composable
+internal fun WebPreviewRendererGone(
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(24.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.webpreview_renderer_gone),
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            androidx.compose.material3.TextButton(
+                onClick = onRetry,
+                modifier = Modifier.padding(top = 8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = stringResource(R.string.webpreview_reload),
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(start = 6.dp),
+                )
             }
         }
     }

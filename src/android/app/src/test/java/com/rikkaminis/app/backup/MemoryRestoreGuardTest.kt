@@ -143,6 +143,90 @@ class MemoryRestoreGuardTest {
         assertEquals("backup-yesterday", File(dir, "2026-10-27.md").readText())
     }
 
+    // -- [FIX-R3-D / F-05] empty payload vs real local content --
+
+    @Test
+    fun emptyPayloadNeverOverwritesRealLocalContent() {
+        // The world: device A never created GLOBAL.md; `readFile` folded that
+        // into "" and the payload carried `{"name":"GLOBAL.md","content":""}`.
+        // Restoring onto a device WITH a GLOBAL.md used to truncate it — the
+        // backup's stamp is newer, so no timestamp rule saved it.
+        val d = decideMemoryRestore(
+            name = "GLOBAL.md",
+            localExists = true,
+            localLastModified = backupStamp - 5_000L,
+            backupCreatedAt = backupStamp,
+            backupContentBlank = true,
+            localHasContent = true,
+        )
+        assertEquals(
+            MemoryRestoreDecision.KeepLocal(
+                "memory file \"GLOBAL.md\": the backup's copy is empty, local copy kept"
+            ),
+            d,
+        )
+    }
+
+    @Test
+    fun emptyPayloadIsAppliedWhenTheLocalCopyIsAlsoEmpty() {
+        // Nothing to lose: an empty file over an empty file keeps the two
+        // devices in step (and creating a still-empty GLOBAL.md is harmless).
+        val d = decideMemoryRestore(
+            name = "GLOBAL.md",
+            localExists = true,
+            localLastModified = backupStamp - 5_000L,
+            backupCreatedAt = backupStamp,
+            backupContentBlank = true,
+            localHasContent = false,
+        )
+        assertEquals(MemoryRestoreDecision.Restore, d)
+    }
+
+    @Test
+    fun emptyPayloadStillCreatesAnAbsentFile() {
+        val d = decideMemoryRestore(
+            name = "2026-10-27.md",
+            localExists = false,
+            localLastModified = 0L,
+            backupCreatedAt = backupStamp,
+            backupContentBlank = true,
+            localHasContent = false,
+        )
+        assertEquals(MemoryRestoreDecision.Restore, d)
+    }
+
+    @Test
+    fun blankPayloadWithRealContentIsKeptThroughTheStage6Body() {
+        val dir = tempDir()
+        fileAt(dir, "GLOBAL.md", "# 我的全局记忆\n- 不要清空我\n", backupStamp - 5_000L)
+
+        // Whitespace-only payload (an export of a file that only ever held a
+        // newline) — still "no content worth applying".
+        val (written, skipped) = apply(dir, section("GLOBAL.md" to "\n\n"))
+
+        assertEquals(0, written)
+        assertEquals(
+            listOf("memory file \"GLOBAL.md\": the backup's copy is empty, local copy kept"),
+            skipped,
+        )
+        assertEquals("# 我的全局记忆\n- 不要清空我\n", File(dir, "GLOBAL.md").readText())
+    }
+
+    @Test
+    fun localHasContentTreatsUnreadableAsContent() {
+        // Fail-closed: a path that cannot be read must not be classified as
+        // "empty" (that answer would license the overwrite).
+        val dir = tempDir()
+        assertFalse(localHasContent(File(dir, "absent.md"), localExists = false))
+        val empty = File(dir, "empty.md").apply { writeText("") }
+        assertFalse(localHasContent(empty, localExists = true))
+        val filled = File(dir, "filled.md").apply { writeText("x") }
+        assertTrue(localHasContent(filled, localExists = true))
+        // A directory in the file's place: readText throws ⇒ "has content".
+        val asDir = File(dir, "dir.md").apply { mkdirs() }
+        assertTrue(localHasContent(asDir, localExists = true))
+    }
+
     @Test
     fun keptFilesAreNotCountedAsImported() {
         val dir = tempDir()

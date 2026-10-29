@@ -351,6 +351,7 @@
     <string name="webpreview_close">Close</string>
     <string name="webpreview_stop">Stop loading</string>
     <string name="webpreview_reload">Reload</string>
+    <string name="webpreview_renderer_gone">The page stopped responding and its view was closed by the system.</string>
     <string name="webpreview_open_external">Open in external browser</string>
     <string name="webpreview_open_fullscreen">Open fullscreen</string>
     <string name="webpreview_more">More</string>

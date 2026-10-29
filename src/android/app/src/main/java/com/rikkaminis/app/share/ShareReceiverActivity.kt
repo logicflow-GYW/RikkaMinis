@@ -44,6 +44,9 @@ class ShareReceiverActivity : ComponentActivity() {
         private const val MAX_TOTAL_BYTES = 500L * 1024 * 1024  // 500 MB total
         private const val IO_TIMEOUT_MS = 30_000L               // 30 s per file
 
+        /** [FIX-R3-E F-14] Saved-state slot for the staged items (see [extractedItems]). */
+        private const val STATE_ITEMS = "share_receiver_items"
+
         /**
          * Process-lifetime cumulative budget of bytes staged for the pending
          * share, owned by the pure [StagedBytesLedger] (companion-scoped, not
@@ -59,6 +62,18 @@ class ShareReceiverActivity : ComponentActivity() {
         /** Reset the cumulative staged-byte counter after the staged set is deleted. */
         fun resetStagedBytes() {
             stagedBytes.reset()
+        }
+
+        /**
+         * [FIX-R3-E F-14] Absolute ledger reconcile: set the counter to the
+         * summed size of the files actually left on disk after a selective
+         * cleanup. [SharedShareStore.cleanSharedFiles] now KEEPS the files the
+         * newest pending share still references, so a blind reset would
+         * under-count the surviving bytes and the 500 MB budget would silently
+         * loosen.
+         */
+        fun setStagedBytes(bytes: Long) {
+            stagedBytes.set(bytes)
         }
 
         /**
@@ -81,12 +96,34 @@ class ShareReceiverActivity : ComponentActivity() {
         super.attachBaseContext(com.rikkaminis.app.i18n.LocaleWrap.wrap(newBase))
     }
 
+    /**
+     * [FIX-R3-E F-14] Items staged by THIS instance (or restored from a
+     * previous one). Saved in [onSaveInstanceState] so a configuration-change
+     * rebuild reuses the already-staged files instead of re-running the
+     * extraction against the same intent — which used to write a SECOND copy
+     * of every attachment (`shared-<newid>`), credit its bytes a second time,
+     * and leave the first copy orphaned: no item ever referenced it, so no
+     * cleanup path could reach it, and its bytes stayed in the process-lifetime
+     * ledger until the 500 MB budget falsely tripped.
+     */
+    private var extractedItems: List<PendingShare.Item> = emptyList()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // [FIX-R3-E F-14] A rebuild arrives with a non-null savedInstanceState
+        // and the SAME intent — re-extracting it would re-stage (and re-credit)
+        // everything. Restore the item list instead; the staged files behind
+        // the ATTACHMENT values are untouched by a rebuild, so the values stay
+        // valid. Process death mid-dialog loses the dialog, not the staged
+        // files: the restored flow re-offers them.
+        val restoredItems = savedInstanceState?.getString(STATE_ITEMS)?.let { raw ->
+            runCatching { PendingShare.fromJson(org.json.JSONObject(raw))?.items }.getOrNull()
+        }.orEmpty()
         // Extract share items on the IO dispatcher so the main thread is
         // never blocked by potentially slow ContentResolver reads.
         lifecycleScope.launch(Dispatchers.IO) {
-            val items = extractItems()
+            val items = if (restoredItems.isNotEmpty()) restoredItems else extractItems()
+            extractedItems = items
             // Provider-JSON detection also reads the staged file — keep on IO.
             val providerJson = items.singleOrNull()?.let { providerExportJsonOrNull(it) }
             withContext(Dispatchers.Main) {
@@ -96,6 +133,16 @@ class ShareReceiverActivity : ComponentActivity() {
                     finishWithAttachmentFlow(items)
                 }
             }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        if (extractedItems.isNotEmpty()) {
+            outState.putString(
+                STATE_ITEMS,
+                PendingShare(extractedItems, System.currentTimeMillis()).toJson().toString(),
+            )
         }
     }
 
@@ -318,10 +365,24 @@ class ShareReceiverActivity : ComponentActivity() {
                         AppLogger.warning(TAG, "AttachText not staged: $textBytes bytes would exceed cumulative cap $MAX_TOTAL_BYTES")
                     AttachTextAdmission.Admitted -> {
                         val name = "shared-text-${shortId()}.txt"
-                        File(SharedShareStore.sharedFileDirectory(this), name)
-                            .writeText(d.text, Charsets.UTF_8)
-                        stagedBytes.credit(textBytes)
-                        out += PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, name)
+                        val dest = File(SharedShareStore.sharedFileDirectory(this), name)
+                        // [FIX-R3-E F-14] A write that throws mid-text used to
+                        // leave the partial file on disk with NOTHING in the
+                        // ledger and no item referencing it — an unaccounted
+                        // orphan only a full clean would reach. Delete on
+                        // failure, credit only what landed.
+                        val staged = try {
+                            dest.writeText(d.text, Charsets.UTF_8)
+                            true
+                        } catch (e: Throwable) {
+                            runCatching { dest.delete() }
+                            AppLogger.warning(TAG, "AttachText staging failed: ${e.message}")
+                            false
+                        }
+                        if (staged) {
+                            stagedBytes.credit(textBytes)
+                            out += PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, name)
+                        }
                     }
                 }
             }

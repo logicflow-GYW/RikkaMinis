@@ -83,7 +83,13 @@ private object OpenAIModelListAdapter : ModelListProvider {
         context: Context?,
     ): List<LLMModel> {
         if (apiKey == null) return emptyList()
-        val baseURL = instance.effectiveBaseURL
+        // [r3-b08 F-07] Azure needs the RAW customBaseURL: the data-plane list
+        // endpoint is `{root}/openai/models?api-version=…`, so the `?api-version`
+        // query has to stay LAST. `effectiveBaseURL` appends `/v1` to the whole
+        // string (query included), which put `/v1/models` inside the api-version
+        // VALUE — every Azure refresh 400'd. Same reason ProviderFactory hands
+        // the raw base to `azureUrl()`.
+        val baseURL = if (instance.azureMode) instance.customBaseURL else instance.effectiveBaseURL
         return OpenAIModelsApi.fetchModels(
             apiKey,
             baseURL,
