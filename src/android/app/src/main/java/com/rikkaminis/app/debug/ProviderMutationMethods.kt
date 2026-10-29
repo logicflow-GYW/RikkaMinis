@@ -59,7 +59,10 @@ internal object ProviderMutationMethods {
         val type = try { ProviderType.valueOf(typeRaw) } catch (_: Exception) {
             throw RPCException(-32602, "Unknown providerType: $typeRaw")
         }
-        val label = params.optString("label", "").ifEmpty {
+        // [R4-R F-11] Trim, then refuse empty: `.ifEmpty` alone only caught
+        // `""`, so a whitespace-only label persisted and the Settings list
+        // rendered a nameless instance card.
+        val label = params.optString("label", "").trim().ifEmpty {
             throw RPCException(-32602, "Missing 'label' param")
         }
         val credTypeStr = params.optString("credentialType", "apiKey").ifEmpty { "apiKey" }
@@ -214,8 +217,19 @@ internal object ProviderMutationMethods {
         // it lives so a create→list→update round trip cannot lose it.
         val azureMode = if (params.has("azureMode")) params.optBoolean("azureMode", current.azureMode) else current.azureMode
 
+        // [R4-R F-11] `label` was the one field on this face with neither a
+        // trim nor an emptiness check — `provider.instances.update {label: ""}`
+        // (or `"   "`) was written straight through, and the Settings provider
+        // list rendered a card with no name. Same contract as the create face:
+        // trim, then refuse empty.
+        val label = if (params.has("label")) {
+            params.optString("label", "").trim().ifEmpty {
+                throw RPCException(-32602, "Instance label must be non-empty")
+            }
+        } else current.label
+
         val updated = current.copy(
-            label = if (params.has("label")) params.optString("label", current.label) else current.label,
+            label = label,
             customBaseURL = if (params.has("customBaseURL")) {
                 if (params.isNull("customBaseURL")) null
                 // [deep-audit-1039 A-04] shared normalization: blank ⇒ clear,
@@ -323,7 +337,8 @@ internal object ProviderMutationMethods {
         val start = System.currentTimeMillis()
         try {
             val resp = client.newCall(builder.build()).execute()
-            val ok = resp.isSuccessful
+            val answered = resp.isSuccessful
+            val status = resp.code
             val latency = System.currentTimeMillis() - start
             val bodyStr = resp.body?.string() ?: ""
             resp.close()
@@ -334,12 +349,37 @@ internal object ProviderMutationMethods {
                 val arr = obj.optJSONArray("data") ?: obj.optJSONArray("models")
                 arr?.length() ?: -1
             } catch (_: Exception) { -1 }
+            // [R4-R F-05] A 2xx is only "reachable" when the body is actually a
+            // models list. A `customBaseURL` pointing at a home page, a reverse
+            // proxy's login page or a captive portal answers 200 with HTML (or
+            // with unrelated JSON such as `{"status":"running"}`), and `ok =
+            // resp.isSuccessful` called that a healthy provider — the caller
+            // then only found out mid-conversation. The probe URL is always a
+            // `/models` endpoint (see [providerProbeUrl]), so a body that is
+            // neither `{data:[…]}` / `{models:[…]}` nor a top-level array is a
+            // wrong-endpoint answer, not a list.
+            val modelsList = answered && probePayloadIsModelsList(bodyStr)
             JSONObject().apply {
-                put("ok", ok)
-                put("httpStatus", resp.code)
+                put("ok", modelsList)
+                put("httpStatus", status)
                 put("latencyMs", latency)
                 if (modelCount >= 0) put("reachableModelCount", modelCount)
-                put("error", JSONObject.NULL)
+                put(
+                    "error",
+                    when {
+                        modelsList -> JSONObject.NULL
+                        // HTTP failure: shape unchanged (`ok:false` + null error),
+                        // `httpStatus` already carries the reason.
+                        !answered -> JSONObject.NULL
+                        else -> JSONObject().apply {
+                            put("code", "invalid_value")
+                            put(
+                                "message",
+                                "HTTP $status but the response is not a models list: ${bodyStr.take(200)}",
+                            )
+                        }
+                    },
+                )
             }
         } catch (e: Exception) {
             JSONObject().apply {
@@ -572,27 +612,61 @@ internal object ProviderMutationMethods {
 
     // ─── Groups ─────────────────────────────────────────────────────────────
 
+    /**
+     * [R4-R F-02] The ONE member-list judgement for the two group write faces.
+     *
+     * The faces used to share a hand-rolled loop that dropped what it did not
+     * understand: an unknown entry id vanished, a duplicate id was appended
+     * twice, and a non-array `memberEntryIds` (`"abc"`, `{}`) read as "no
+     * members" — so `provider.groups.update` answered success while wiping the
+     * group. The consequences were not cosmetic:
+     *  - a duplicate id becomes `memberIds` in `ModelGroupDetailScreen`, whose
+     *    `itemsIndexed(memberIds, key = { _, id -> id })` throws
+     *    `IllegalArgumentException: Key … was already used` the moment the user
+     *    opens the group — a reproducible crash from one RPC call;
+     *  - an unknown id silently emptied a group the user still had members in.
+     *
+     * Judgement mirrors the canonical write faces (`GroupWriteRules
+     * .parseMemberEntryIds` + `GroupsCollection.requireKnownEntryIds`): every
+     * element must be a non-empty string, every id must be known (with the
+     * `SystemVoiceEntries` sentinels counted as known — [dv20-a1 A-02]), and
+     * duplicates collapse in place. Unknown / malformed input REFUSES with
+     * `-32602` instead of being swallowed; duplicates are not information loss
+     * (the order of the first occurrence is kept) and the response echoes the
+     * effective `memberEntryIds`, so the caller sees exactly what was written.
+     *
+     * `memberEntryIds: null` keeps the documented meaning "no members" — the
+     * update face reads it as the clear, which is what `optJSONArray(…) ?:
+     * JSONArray()` already did.
+     */
+    private fun readGroupMemberIds(params: JSONObject, repo: ProviderRepository): List<String> {
+        if (!params.has("memberEntryIds") || params.isNull("memberEntryIds")) return emptyList()
+        val arr = params.optJSONArray("memberEntryIds")
+            ?: throw RPCException(-32602, "memberEntryIds must be an array of entry ids")
+        val knownEntryIds = repo.config.value.modelEntries.map { it.id }.toSet()
+        val out = ArrayList<String>(arr.length())
+        for (i in 0 until arr.length()) {
+            val id = (arr.opt(i) as? String)?.trim()
+                ?: throw RPCException(-32602, "memberEntryIds[$i] must be a string entry id")
+            if (id.isEmpty()) throw RPCException(-32602, "memberEntryIds[$i] must be non-empty")
+            // [dv20-a1 A-02] Shared judgement: the System voice sentinels are
+            // virtual members that never appear in `modelEntries`. The
+            // predicate is single-source, so a truly unknown id is refused
+            // (fail-closed) rather than dropped.
+            if (!SystemVoiceEntries.isKnownGroupMemberId(id, knownEntryIds)) {
+                throw RPCException(-32602, "Unknown model entry id: $id")
+            }
+            if (id !in out) out.add(id)
+        }
+        return out
+    }
+
     fun groupsCreate(context: Context, params: JSONObject): JSONObject {
         val repo = repo(context)
         val name = params.optString("name", "").ifEmpty {
             throw RPCException(-32602, "Missing 'name' param")
         }
-        val membersRaw = params.optJSONArray("memberEntryIds")
-        val members = mutableListOf<String>()
-        if (membersRaw != null) {
-            val knownEntryIds = repo.config.value.modelEntries.map { it.id }.toSet()
-            for (i in 0 until membersRaw.length()) {
-                val id = membersRaw.optString(i)
-                // [dv20-a1 A-02] Shared judgement: the System voice sentinels
-                // are virtual members that never appear in `modelEntries`, and
-                // this face used to drop them silently — a voice group created
-                // over the harness lost its members on the spot. The predicate
-                // is single-source, so a truly unknown id is still dropped.
-                if (id.isNotEmpty() && SystemVoiceEntries.isKnownGroupMemberId(id, knownEntryIds)) {
-                    members.add(id)
-                }
-            }
-        }
+        val members = readGroupMemberIds(params, repo)
         val strategy = parseStrategy(params.optString("strategy", "fallback"))
         val fallback = parseFallback(params.optString("fallbackStrategy", "default"))
         // [da1031-D ISSUE-06] The group faces had a fifth asymmetry: the create
@@ -651,19 +725,7 @@ internal object ProviderMutationMethods {
             updated = updated.copy(name = n)
         }
         if (params.has("memberEntryIds")) {
-            val arr = params.optJSONArray("memberEntryIds") ?: JSONArray()
-            val knownIds = repo.config.value.modelEntries.map { it.id }.toSet()
-            val members = mutableListOf<String>()
-            for (i in 0 until arr.length()) {
-                val mid = arr.optString(i)
-                // [dv20-a1 A-02] Same shared judgement as groupsCreate — a
-                // System voice member id is virtual, not unknown, and this
-                // face used to drop it while rewriting the member list.
-                if (mid.isNotEmpty() && SystemVoiceEntries.isKnownGroupMemberId(mid, knownIds)) {
-                    members.add(mid)
-                }
-            }
-            updated = updated.copy(memberEntryIds = members)
+            updated = updated.copy(memberEntryIds = readGroupMemberIds(params, repo))
         }
         if (params.has("strategy")) updated = updated.copy(strategy = parseStrategy(params.optString("strategy")))
         if (params.has("fallbackStrategy")) updated = updated.copy(fallbackStrategy = parseFallback(params.optString("fallbackStrategy")))
@@ -754,15 +816,31 @@ internal object ProviderMutationMethods {
         }
     }
 
-    private fun parseStrategy(s: String): RoutingStrategy = when (s) {
+    // [R4-R F-11] Unknown values used to collapse into the default arm, so
+    // `provider.groups.create {strategy: "random"}` / `{fallbackStrategy:
+    // "never"}` answered 200 and ran a policy the caller never asked for. This
+    // file's own sibling key (`parseImageEndpointMode`) already refuses with
+    // `-32602` + the value domain, and the canonical write faces
+    // (`GroupsCollection.strategyField` / `fallbackStrategyField`) refuse too —
+    // so the silent arm was an RPC-only tolerance, not a compatibility
+    // fallback: the config layer never sends an unknown name. Refuse.
+    internal fun parseStrategy(s: String): RoutingStrategy = when (val raw = s.trim()) {
+        "fallback" -> RoutingStrategy.fallback
         "loadBalance" -> RoutingStrategy.loadBalance
         "cheapestFirst" -> RoutingStrategy.cheapestFirst
-        else -> RoutingStrategy.fallback
+        else -> throw RPCException(
+            -32602,
+            "strategy must be fallback | loadBalance | cheapestFirst (got '$raw')",
+        )
     }
 
-    private fun parseFallback(s: String): FallbackStrategy = when (s) {
+    internal fun parseFallback(s: String): FallbackStrategy = when (val raw = s.trim()) {
+        "default" -> FallbackStrategy.default
         "always" -> FallbackStrategy.always
-        else -> FallbackStrategy.default
+        else -> throw RPCException(
+            -32602,
+            "fallbackStrategy must be default | always (got '$raw')",
+        )
     }
 
     private fun groupToJson(repo: ProviderRepository, group: ModelGroup): JSONObject {
@@ -903,3 +981,31 @@ internal fun providerProbeUrl(type: ProviderType, baseURL: String, key: String?)
         ProviderType.kimiCode ->
             if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
     }
+
+/**
+ * [R4-R F-05] Is this HTTP body the models list the probe endpoint is supposed
+ * to answer with?
+ *
+ * Pure (no I/O) so the judgement is assertable in a JVM unit test. Accepts the
+ * three shapes a real `/models` endpoint answers with — `{"data":[…]}` (OpenAI,
+ * Anthropic, OpenRouter, xAI, Kimi), `{"models":[…]}` (Gemini) and a top-level
+ * array (some OpenAI-compatible relays) — and refuses everything else: an HTML
+ * document (home page / reverse-proxy login page / captive portal), a bare
+ * scalar/other JSON object (`{"status":"running"}`) and an empty body. The
+ * refusal is what turns `provider.instances.test` from "the TCP connect worked"
+ * into "the endpoint this URL names answered like a models endpoint".
+ */
+internal fun probePayloadIsModelsList(body: String): Boolean {
+    val trimmed = body.trimStart(' ', '\n', '\r', '\t', '\uFEFF')
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false
+    val obj = runCatching { JSONObject(trimmed) }.getOrNull()
+    if (obj != null) {
+        return obj.optJSONArray("data") != null || obj.optJSONArray("models") != null
+    }
+    // A top-level array is only reachable when the body parses as an array —
+    // try that before refusing. Every element has to be an object (a models
+    // entry is `{"id": …}`); an empty array is accepted for parity with an
+    // empty `data` array.
+    val arr = runCatching { JSONArray(trimmed) }.getOrNull() ?: return false
+    return (0 until arr.length()).all { arr.opt(it) is JSONObject }
+}
