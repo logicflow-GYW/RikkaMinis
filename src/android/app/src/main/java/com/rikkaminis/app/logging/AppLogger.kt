@@ -14,6 +14,10 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Daily-rotating file logger that mirrors iOS LoggingManager.
@@ -128,6 +132,27 @@ object AppLogger {
     // bound/drop contract. @Volatile: swapped by startCapture/stopCapture.
     @Volatile private var writeQueue: LogWriteQueue? = null
 
+    // [FIX-R4-T F-09] Three logger entry points were doing disk I/O on their
+    // CALLER's thread, and every caller of them is main-thread reachable:
+    //   * error() → dumpErrorSnapshot() → file.writeText() (snapshot worker,
+    //     below);
+    //   * setEnabled() → stopCapture() → LogWriteQueue.flushAndStop(2_000)
+    //     = Thread.join up to 2 s, called from the Settings → Logs switch;
+    //   * init() → pruneOldLogs() = three full directory walks, called from
+    //     Application.onCreate.
+    // All are now scheduled on their own threads. Ordering contracts kept:
+    //  - capture control is a SINGLE-thread queue, so start/stop/prune can
+    //    never interleave and the prune still runs after startCapture created
+    //    the async writer its deferral WARN needs ([T-log-warn-reach-1012]);
+    //  - snapshots keep their own worker so flushing them from stopCapture
+    //    (which itself runs on the control thread) cannot deadlock on itself.
+    // Deliberately NOT reusing a shared pool: AppLogger is initialised first
+    // thing in Application.onCreate, before any dispatcher exists.
+    private val controlExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor { r -> Thread(r, "AppLogger-Control").apply { isDaemon = true } }
+    private val snapshotExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor { r -> Thread(r, "AppLogger-Snapshot").apply { isDaemon = true } }
+
     /**
      * Initialize the logger with app context. Call once from Application.onCreate().
      * If logging was previously enabled (persisted in SharedPreferences),
@@ -152,7 +177,14 @@ object AppLogger {
         // the deferral notice existed only in logcat, where our own tailer
         // filters AppLogger-tagged lines: effectively silent.
         if (enabled) startCapture()
-        pruneOldLogs()
+        // [FIX-R4-T F-09] init() runs on Application.onCreate's (main) thread
+        // and pruneOldLogs() is three full directory walks plus a stat and a
+        // possible delete per entry — a UI freeze of arbitrary length on a
+        // busy flash. Scheduled on the capture-control queue rather than a
+        // bare thread so it cannot overtake startCapture() above: the prune's
+        // "size prune deferred" WARN only reaches the file when the async
+        // writer already exists.
+        submitControl { pruneOldLogs() }
     }
 
     fun isEnabled(context: Context): Boolean {
@@ -164,7 +196,38 @@ object AppLogger {
         enabled = value
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_ENABLED, value).apply()
-        if (value) startCapture() else stopCapture()
+        // [FIX-R4-T F-09] stopCapture() used to run on the caller (the
+        // Settings → Logs switch callback, main thread) and joined the drain
+        // thread for up to 2 s inside flushAndStop — a UI freeze whenever the
+        // queue was still flushing. The toggle-off is scheduled on the
+        // capture-control queue instead. startCapture() stays synchronous in
+        // init() (its contract: capture is live before onCreate continues)
+        // but the setEnabled path goes through the same single-thread queue,
+        // so on/off can never interleave.
+        //
+        // Intent re-check: several setEnabled() calls can queue up (a switch
+        // flicked twice); only the LAST intent may win. Without the re-check,
+        // [stop → start → queued stop] would run the queued stop last and
+        // silently disable a logger the user just turned on.
+        submitControl {
+            if (enabled == value) {
+                if (value) startCapture() else stopCapture()
+            }
+        }
+    }
+
+    /**
+     * [FIX-R4-T F-09] Hand a control action to the capture-control queue.
+     * Falls back to running it inline if the executor rejects (correctness
+     * beats latency) — the logger must never lose a state change because its
+     * worker thread could not be scheduled.
+     */
+    private fun submitControl(block: () -> Unit) {
+        try {
+            controlExecutor.execute(block)
+        } catch (_: Exception) {
+            runCatching { block() }
+        }
     }
 
     /**
@@ -215,6 +278,11 @@ object AppLogger {
         // were produced while logging was still on.)
         writeQueue?.flushAndStop(2_000)
         writeQueue = null
+        // [FIX-R4-T F-09] Snapshots in flight on their worker must land
+        // before the ring goes away — a toggle-off at the wrong moment would
+        // otherwise lose the last error scene. Bounded wait: the worker is a
+        // different thread (no self-deadlock) and the write is one small file.
+        flushSnapshots(500)
         ring = null
         captureActive = false
         // Close the daily writer so any buffered bytes are flushed; getWriter()
@@ -389,9 +457,77 @@ object AppLogger {
             // stays correct; see listLogFiles / listLogFileMetas /
             // pruneOldLogs / ErrorSnapshotOrderingTest.
             val file = File(dir, "error-snapshot-$stamp-${android.os.Process.myPid()}.log")
-            file.writeText(buffer.contentIncluding(triggerLine).joinToString(separator = "\n") + "\n")
+            // [FIX-R4-T F-09] Compose on the CALLER thread, write off it ONLY
+            // for the main thread. error() is reachable from the UI (every
+            // failure log raised by a composable / Activity path) and the
+            // write is up to ~500 ring lines — a real, if short, stall on
+            // busy flash. The composition must stay here: contentIncluding
+            // guarantees the trigger line is appended under the ring's own
+            // lock, and the caller thread is the only place that line is
+            // certainly correct.
+            //
+            // An already-off-main caller keeps the old INLINE write: nothing
+            // is blocked there, and "the error that is about to kill the
+            // process" is exactly the case where landing on disk beats
+            // latency. (It also keeps ErrorSnapshotOrderingTest deterministic
+            // — its KDoc promises "no drain thread, no race" — because a
+            // plain JVM has no Looper and therefore takes the inline path.)
+            //
+            // Durability note: the old synchronous writeText never called
+            // fsync either — "synchronous" only bought order within THIS
+            // call, not survival of a hard kill (the kernel may hold dirty
+            // pages for seconds). Ordering across calls is kept by the
+            // single-thread worker, and stopCapture flushes it.
+            val body = buffer.contentIncluding(triggerLine).joinToString(separator = "\n") + "\n"
+            if (!isMainThread()) {
+                file.writeText(body)
+                return
+            }
+            try {
+                snapshotExecutor.execute {
+                    try {
+                        file.writeText(body)
+                    } catch (_: Exception) {
+                        // Snapshot must never take the logger down.
+                    }
+                }
+            } catch (_: Exception) {
+                // Executor rejected/unavailable: degrade to the old inline
+                // write rather than lose the scene.
+                file.writeText(body)
+            }
         } catch (_: Exception) {
             // Snapshot must never take the logger down.
+        }
+    }
+
+    /**
+     * [FIX-R4-T F-09] True when the caller is the Android main thread.
+     *
+     * Fails closed (false = "not main") wherever Looper is unavailable — a
+     * plain JVM test or a non-Android host — which is the SAFE answer: the
+     * inline write is what the code did before this fix.
+     */
+    private fun isMainThread(): Boolean {
+        return try {
+            val main = android.os.Looper.getMainLooper()
+            main != null && android.os.Looper.myLooper() === main
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * [FIX-R4-T F-09] Wait up to [timeoutMs] for snapshots already handed to
+     * the worker to reach disk. Runs on the capture-control thread inside
+     * stopCapture (a different thread than the worker — no self-deadlock).
+     */
+    private fun flushSnapshots(timeoutMs: Long) {
+        try {
+            val latch = CountDownLatch(1)
+            snapshotExecutor.execute { latch.countDown() }
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
         }
     }
 
@@ -514,7 +650,17 @@ object AppLogger {
                 LogChannel.DEBUG -> synchronized(writerLock) {
                     val w = getDebugWriter(date)
                     w.println(line)
-                    debugBytesWritten += line.length + 1
+                    // [FIX-R4-T F-07] Count the bytes that actually land on
+                    // disk, not UTF-16 chars. The threshold
+                    // ([DEBUG_MAX_BYTES]), the seed (`file.length()` in
+                    // getDebugWriter) and the FileWriter's UTF-8 encoder are
+                    // all byte-denominated; `line.length + 1` counted a CJK
+                    // char as 1 while it occupies 3 bytes, so the counter
+                    // under-read the file by 2-3x and the "5 MB" channel only
+                    // rotated at 12-15 MB of real bytes (4 rolls ⇒ 50-60 MB).
+                    // Costs one branch walk per delivered line on the drain
+                    // thread; no allocation (see [utf8ByteLength]).
+                    debugBytesWritten += utf8ByteLength(line) + 1L
                     if (debugBytesWritten > DEBUG_MAX_BYTES) {
                         rotateDebugFile(date)
                     }
@@ -710,6 +856,15 @@ object AppLogger {
      * Result of a bounded segment read — [content] holds at most [bytesRead]
      * bytes starting at the requested offset, and [truncated] tells the caller
      * whether more data remains past the end of [content].
+     *
+     * [FIX-R4-T F-14] The slice is BYTE-aligned, not line- or character-
+     * aligned: a caller that pages through a multi-MB file with
+     * `offset += bytesRead` can cut a multi-byte UTF-8 character in half and
+     * see one `U+FFFD` at each seam. That is the deliberate trade — aligning
+     * to lines would make `offset + bytesRead` land INSIDE the last returned
+     * line, so a paging client would re-read (or skip) that line forever
+     * instead of making progress. Single-shot readers (`offset = 0`) are
+     * unaffected.
      */
     data class LogSegment(
         val totalSize: Long,
@@ -726,21 +881,54 @@ object AppLogger {
         return try {
             java.io.RandomAccessFile(file, "r").use { raf ->
                 val fileSize = raf.length()
-                val start = offset.toLong().coerceIn(0L, fileSize)
-                val end = (start + limit.coerceAtLeast(0).toLong()).coerceAtMost(fileSize)
-                val buf = ByteArray((end - start).toInt())
-                raf.seek(start)
-                raf.readFully(buf)
+                // [FIX-R4-T F-14] `limit` is caller-supplied over RPC and used
+                // to be trusted verbatim: `debug.logs.read` with limit=50_000_000
+                // allocated `(end - start)` = the whole file (up to the 200 MB
+                // storage cap) in one ByteArray, then a same-size String, then
+                // the JSON body — a 3x amplification of the largest log file on
+                // an RPC thread. [segmentBounds] applies the same 4 MB bound
+                // handleReadFile already used.
+                val bounds = segmentBounds(fileSize, offset.toLong(), limit)
+                val buf = ByteArray(bounds.length)
+                raf.seek(bounds.start)
+                // Short-read tolerant instead of readFully: a concurrent
+                // rotate/clear/truncate between `length()` and the read made
+                // readFully throw EOFException, which the catch-all collapsed
+                // into `null`, which DebugRPCHandler reports as
+                // `-32602 "Log file not found"` — an I/O race disguised as a
+                // missing file. Now the caller gets the bytes that existed.
+                val read = readAtMost(raf, buf)
+                val content = if (read == buf.size) buf else buf.copyOf(read)
                 LogSegment(
                     totalSize = fileSize,
-                    content = String(buf, Charsets.UTF_8),
-                    bytesRead = buf.size,
-                    truncated = (start + buf.size) < fileSize,
+                    content = String(content, Charsets.UTF_8),
+                    bytesRead = content.size,
+                    truncated = (bounds.start + content.size) < fileSize,
                 )
             }
         } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * Fill as much of [buf] as the file currently holds. Returns the number of
+     * bytes actually read (`< buf.size` when the file shrank mid-read).
+     * [FIX-R4-T F-14] — the short-read-tolerant counterpart of readFully.
+     *
+     * `internal` (not private) so the JVM probe can pin the difference: on a
+     * file seeked past its end this returns 0, while readFully throws
+     * EOFException — the exact swap that turned a concurrent rotation into
+     * `-32602 "Log file not found"`.
+     */
+    internal fun readAtMost(raf: java.io.RandomAccessFile, buf: ByteArray): Int {
+        var off = 0
+        while (off < buf.size) {
+            val n = raf.read(buf, off, buf.size - off)
+            if (n < 0) break
+            off += n
+        }
+        return off
     }
 
     /**
@@ -837,4 +1025,69 @@ object AppLogger {
             )
         }
     }
+}
+
+/**
+ * [FIX-R4-T F-07] UTF-8 encoded length of [line] without materialising the
+ * byte array.
+ *
+ * The debug channel's size accounting has to speak ONE unit. The rotation
+ * threshold (`DEBUG_MAX_BYTES`), the counter's seed (`file.length()`) and the
+ * FileWriter's encoder are all byte-denominated; the only thing that used to
+ * speak UTF-16 characters was the per-line increment, so the nominal 5 MB cap
+ * was only reached at 12-15 MB of real bytes for CJK/tool-output workloads.
+ *
+ * Hand-rolled rather than `line.toByteArray(Charsets.UTF_8).size`: this runs
+ * once per delivered line on the drain thread (tens of thousands of lines in
+ * a streaming session) and that array would be pure garbage. Semantics match
+ * the JDK encoder exactly, including `'?'` (1 byte) for an unpaired surrogate.
+ */
+internal fun utf8ByteLength(line: String): Long {
+    var bytes = 0L
+    var i = 0
+    val n = line.length
+    while (i < n) {
+        val c = line[i]
+        val code = c.code
+        if (code < 0x80) {
+            bytes += 1
+        } else if (code < 0x800) {
+            bytes += 2
+        } else if (Character.isHighSurrogate(c) && i + 1 < n && Character.isLowSurrogate(line[i + 1])) {
+            bytes += 4
+            i++
+        } else if (code in 0xD800..0xDFFF) {
+            bytes += 1
+        } else {
+            bytes += 3
+        }
+        i++
+    }
+    return bytes
+}
+
+/**
+ * [FIX-R4-T F-14] Upper bound for a single `debug.logs.read` segment — the
+ * same 4 MiB `handleReadFile` clamps to. Kept next to the reader (not in the
+ * RPC layer) so every caller of [AppLogger.readLogSegment] inherits the
+ * bound: the RPC handler reads raw `params.optInt` and would otherwise hand
+ * an unbounded value straight to the allocation.
+ */
+internal const val MAX_LOG_SEGMENT_BYTES = 4 * 1024 * 1024
+
+/** Resolved byte window of a segment read: [length] bytes starting at [start]. */
+internal data class SegmentBounds(val start: Long, val length: Int)
+
+/**
+ * [FIX-R4-T F-14] Clamp an untrusted `(fileSize, offset, limit)` triple to a
+ * readable window. Pure and total: negative or absurd inputs collapse to an
+ * empty read at a valid offset instead of throwing — a bad RPC request must
+ * not become an exception on the handler thread.
+ */
+internal fun segmentBounds(fileSize: Long, offset: Long, limit: Int): SegmentBounds {
+    val size = fileSize.coerceAtLeast(0L)
+    val start = offset.coerceIn(0L, size)
+    val capped = limit.coerceIn(0, MAX_LOG_SEGMENT_BYTES)
+    val length = (size - start).coerceAtMost(capped.toLong()).toInt()
+    return SegmentBounds(start, length)
 }
