@@ -220,6 +220,8 @@ for (part in wireTurnParts) { ... }        // 既有的 Text / ImageData 序列�
 
 ⇒ 本支的「先证后修」不止对生产成立，对**我自己的补丁**也成立：run 1 证明第一版实现越过了既有形状契约。
 
+**绿后收口**：报告提交（`c2fc4ad8` + `f7fa80a6`，后者补 R7）在绿之后，`git diff --name-only 03e4459e..HEAD` = 仅 `fix-reports/FIX-R5-E1.md`，**非报告差异 0**。停止节点 = 分支 CI 绿，**未合并 main**（起手权在用户）。
+
 ---
 
 ## 6. 残留（每条带触发条件 + 方案）
