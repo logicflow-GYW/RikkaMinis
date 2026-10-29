@@ -1824,6 +1824,12 @@ class BrowserUseManager(
 
     private suspend fun executeJS(script: String?): BrowserActionResult {
         if (script.isNullOrEmpty()) return BrowserActionResult.error("execute_js requires 'script'")
+        // [r5-F F-F-01] Decided BEFORE beginAsyncJsRequest(): a slot armed on an
+        // inert tab has no completer (onRendererGone fired at most once; the
+        // bridge lives in the dead renderer), so the request would sit out the
+        // whole 30s timeout and report a phantom "JavaScript execution timed
+        // out" for a tab that is gone. Same one-liner as navigate()'s.
+        if (webViewInert()) return webViewGoneResult()
         // Wrap in an async IIFE so `await` works in user scripts.
         // Android WebView doesn't resolve Promises from evaluateJavascript,
         // so we use a JS bridge callback (__minis__.resolve / __minis__.reject).
@@ -1999,6 +2005,13 @@ class BrowserUseManager(
      * pattern used by [executeJS].
      */
     private suspend fun awaitPromiseJs(js: String): String? {
+        // [r5-F F-F-01] Same decision as executeJS, one level lower: fetch's
+        // only entry here. `onRendererGone` fires at most once and cannot wake
+        // a slot armed after it, so registering on an inert tab means the full
+        // 60s timeout and a "fetch timed out" for a tab that is gone. The
+        // reject shape carries webViewGoneResult()'s wording (deadTabGoneMessage),
+        // which `fetch` already parses into "Fetch failed: …".
+        deadTabAsyncJsAnswer(destroyed, rendererDead)?.let { return it }
         val (deferred, token) = beginAsyncJsRequest()
         val wrapped = """
             (async function(){
@@ -2181,6 +2194,17 @@ class BrowserUseManager(
      * viewport-change callers still get a deterministic page refresh.
      */
     suspend fun reloadAndWait() {
+        // [r5-F F-F-01] Best-effort refresh (set_viewport / UA switch). On an
+        // inert tab `onPageFinished` can never fire, so installing
+        // navigationDeferred here would burn the whole navigation timeout and
+        // hand the caller a fake TIMED_OUT. Early-exit instead — and NOT by
+        // completing the deferred: "the reload happened" is exactly the claim
+        // this path cannot make (the next read, e.g. get_page_info, answers the
+        // dead-tab error through the evaluateJavascript guard).
+        if (webViewInert()) {
+            Log.w(TAG, "reloadAndWait skipped: the WebView is gone")
+            return
+        }
         // [audit-0916b] Typed like navigate()'s. These two are internal
         // best-effort refreshes (viewport change / fresh-tab init) and
         // deliberately ignore the outcome — a failed reload must not break
@@ -2229,6 +2253,14 @@ class BrowserUseManager(
      * `document.body` populated. Must be called on the main thread.
      */
     suspend fun loadBlankPage() {
+        // [r5-F F-F-01] Same early-exit as reloadAndWait(): this is the
+        // fresh-tab init refresh, also best-effort. A renderer-killed tab never
+        // reports onPageFinished, so arming navigationDeferred would stall the
+        // caller (createTab / tab switch) for the whole navigation timeout.
+        if (webViewInert()) {
+            Log.w(TAG, "loadBlankPage skipped: the WebView is gone")
+            return
+        }
         // [audit-0916b] Typed like navigate()'s. These two are internal
         // best-effort refreshes (viewport change / fresh-tab init) and
         // deliberately ignore the outcome — a failed reload must not break
@@ -2788,16 +2820,13 @@ class BrowserUseManager(
      * different messages: a torn-down tab means "pick another tab", a killed
      * renderer means "this tab is done, open a new one". Both used to surface as
      * a network-flavoured timeout.
+     *
+     * [r5-F F-F-01] The wording now lives in [deadTabGoneMessage] so the
+     * async-JS reject shape (`deadTabAsyncJsAnswer`, what `executeJS`/`fetch`
+     * answer with) cannot drift from this one — one dead tab, one story.
      */
-    private fun webViewGoneResult(): BrowserActionResult = BrowserActionResult.error(
-        if (destroyed) {
-            "This tab's WebView was already destroyed (the tab was closed or evicted) — " +
-                "pick another tab or open a new one."
-        } else {
-            "This tab's WebView renderer was killed by the system; this tab can no longer " +
-                "load pages — open a new tab."
-        },
-    )
+    private fun webViewGoneResult(): BrowserActionResult =
+        BrowserActionResult.error(deadTabGoneMessage(destroyed))
 
     // ── [feat/browser-console-network-upload] diagnostics + file upload ──────
 
@@ -3292,3 +3321,43 @@ internal fun jsDispatchFor(destroyed: Boolean, onMainThread: Boolean): JsDispatc
     onMainThread -> JsDispatch.INLINE
     else -> JsDispatch.HOP_TO_MAIN
 }
+
+/**
+ * [r5-F F-F-01] The message a tab with no live WebView answers with, in one
+ * place. `destroyed` and `rendererDead` need different advice (pick another
+ * tab / this tab is done, open a new one), and the two consumers —
+ * [BrowserUseManager]'s `webViewGoneResult()` and [deadTabAsyncJsAnswer]'s
+ * async-JS reject shape — must not drift apart: the same dead tab used to
+ * report "timed out" to `fetch` and "renderer was killed" to `navigate`.
+ *
+ * Pure (and top level, like [fetchHttpFailure]) so the JVM can pin both
+ * branches with literals.
+ */
+internal fun deadTabGoneMessage(destroyed: Boolean): String =
+    if (destroyed) {
+        "This tab's WebView was already destroyed (the tab was closed or evicted) — " +
+            "pick another tab or open a new one."
+    } else {
+        "This tab's WebView renderer was killed by the system; this tab can no longer " +
+            "load pages — open a new tab."
+    }
+
+/**
+ * [r5-F F-F-01] The async-JS answer for an inert tab: null when the tab is
+ * live (proceed), else the bridge's own reject shape — `{"error":…}`, the form
+ * `fetch` parses into "Fetch failed: …" and the teardown paths
+ * (`onRendererGone` / `destroy`) complete an in-flight waiter with.
+ *
+ * Why this must be decided BEFORE `beginAsyncJsRequest()`: `onRendererGone`
+ * fires at most once. A request registered after it has no completer at all —
+ * the bridge lives in the dead renderer and no second death will come — so it
+ * sits on the slot until `withTimeoutOrNull` gives up (30s for `executeJS`,
+ * 60s for `awaitPromiseJs`). The two booleans are the same disjunction as
+ * `webViewInert()`, spelled out so the decision is testable off-device.
+ */
+internal fun deadTabAsyncJsAnswer(destroyed: Boolean, rendererDead: Boolean): String? =
+    if (destroyed || rendererDead) {
+        "{\"error\":${JSONObject.quote(deadTabGoneMessage(destroyed))}}"
+    } else {
+        null
+    }
