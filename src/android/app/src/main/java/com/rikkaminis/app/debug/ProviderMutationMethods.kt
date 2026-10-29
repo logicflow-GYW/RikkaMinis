@@ -649,11 +649,11 @@ internal object ProviderMutationMethods {
     private fun readGroupMemberIds(
         params: JSONObject,
         isKnownEntryId: (String) -> Boolean,
-    ): List<String> {
-        if (!params.has("memberEntryIds") || params.isNull("memberEntryIds")) return emptyList()
+    ): MutableList<String> {
+        if (!params.has("memberEntryIds") || params.isNull("memberEntryIds")) return mutableListOf()
         val arr = params.optJSONArray("memberEntryIds")
             ?: throw RPCException(-32602, "memberEntryIds must be an array of entry ids")
-        val out = ArrayList<String>(arr.length())
+        val out = ArrayList<String>(arr.length())  // ArrayList is a MutableList
         for (i in 0 until arr.length()) {
             val id = (arr.opt(i) as? String)?.trim()
                 ?: throw RPCException(-32602, "memberEntryIds[$i] must be a string entry id")
