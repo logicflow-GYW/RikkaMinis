@@ -1381,13 +1381,24 @@ internal fun utf8CompletePrefixLength(bytes: ByteArray): Int {
  * no NUL bytes (the whitelist's own "no null bytes" intent) and a decode with
  * `CodingErrorAction.REPORT` that answers `false` on any malformed sequence.
  * An empty slice is text, exactly as `bytes.all { … }` answered before.
+ *
+ * The decode starts at the first character boundary: [utf8CompletePrefixLength]
+ * only guarantees the page does not END mid-character, while a caller-supplied
+ * `offset` can land inside one — a leading continuation byte is a fragment of
+ * a character the caller asked to skip past, not evidence of binary content.
+ * The content still decodes it to the replacement character (baseline
+ * behaviour); only the classification looks past it.
  */
 internal fun looksLikeUtf8Text(bytes: ByteArray): Boolean {
     if (bytes.any { it == 0.toByte() }) return false
+    var head = 0
+    while (head < bytes.size && head < 3 && (bytes[head].toInt() and 0xC0) == 0x80) head++
     val decoder = Charsets.UTF_8.newDecoder()
         .onMalformedInput(CodingErrorAction.REPORT)
         .onUnmappableCharacter(CodingErrorAction.REPORT)
-    return runCatching { decoder.decode(ByteBuffer.wrap(bytes)) }.isSuccess
+    return runCatching {
+        decoder.decode(ByteBuffer.wrap(bytes, head, bytes.size - head))
+    }.isSuccess
 }
 
 
