@@ -8,6 +8,7 @@ import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.net.URI
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -43,11 +44,15 @@ object AnthropicModelsApi {
             AnthropicModelsCache.load(context, cacheKey)?.let { return@withContext it }
         }
 
-        // Anthropic-compatible custom endpoints (e.g. DashScope/Bailian) often don't
-        // expose `/v1/models`. On any failure for a custom endpoint, return empty so
-        // the caller can fall through to the models.dev registry; only the official
-        // api.anthropic.com is given the hardcoded fallback as a network-failure net.
-        val isCustomEndpoint = baseURL != null
+        // [R5-E F-07 / C-06①] Official-ness is a HOST property, not "the user typed
+        // something into the base-URL field". `effectiveBaseURL` appends `/v1` when
+        // `appendV1Suffix` is on (the default), so a user who pastes the public
+        // endpoint hands us `https://api.anthropic.com/v1` — the old `baseURL != null`
+        // test called that a relay: the models fetch then sent `Authorization: Bearer`
+        // instead of `x-api-key` (401 from the real endpoint), and the 401/empty
+        // split below answered a revoked-looking key with an empty list. Mirrors
+        // `isOfficialGeminiBase` (GeminiModelsApi.kt) / OpenAI's `isOfficialOpenAI`.
+        val isCustomEndpoint = !isOfficialAnthropicHost(baseURL)
 
         // Build candidate bases: start with the user-supplied base, then climb the
         // path up to 3 levels. Lets vendor-specific bases like
@@ -79,11 +84,12 @@ object AnthropicModelsApi {
                 // [T-provider-custom-user-agent] models-list UA override.
                 .applyUserAgentOverride(customUserAgent)
 
-            if (candidate != null) {
-                // Custom endpoint: Bearer auth
+            if (candidate != null && !isOfficialAnthropicHost(candidate)) {
+                // Relay: Bearer auth
                 requestBuilder.header("Authorization", "Bearer $apiKey")
             } else {
-                // Standard Anthropic API key
+                // Official Anthropic host (user default or pasted into the
+                // custom-base field): the endpoint only honours x-api-key.
                 requestBuilder.header("x-api-key", apiKey)
             }
 
@@ -146,6 +152,15 @@ object AnthropicModelsApi {
         }
     }
 
+    /**
+     * [R5-E C-06①] HTTP 200 but a body that is not a usable model list is NOT a
+     * network failure — it is a wrong-endpoint answer. Whether that means "keep
+     * the user's rows" (relay) or "stand in the builtin catalog" (official) is
+     * decided by the SAME host judgement as the auth header: gating this fallback
+     * through [isOfficialAnthropicHost] keeps a relay's 200-HTML/login-page
+     * answer from being read as `{"data":[]}` → builtin catalog, and keeps the
+     * official instance's malformed-JSON answer on the builtin net.
+     */
     private suspend fun parseAndCache(
         body: String,
         isCustomEndpoint: Boolean,
@@ -253,3 +268,32 @@ object AnthropicModelsApi {
  */
 internal fun usesBuiltinCatalogOnFailure(isCustomEndpoint: Boolean, lastFailureCode: Int): Boolean =
     !isCustomEndpoint && lastFailureCode != 401 && lastFailureCode != 403
+
+/**
+ * [R5-E F-07] Whether [url] points at the official Anthropic endpoint.
+ *
+ * Host-based rather than "null = official" so a user who pastes the public
+ * endpoint into the custom-base field is still treated as official:
+ * `ProviderInstance.effectiveBaseURL` appends `/v1` by default, so the value
+ * that reaches the provider is `https://api.anthropic.com/v1`, not the bare
+ * constant the old `basePath != "https://api.anthropic.com"` test compared
+ * against. Tolerated shapes: no scheme (`api.anthropic.com`), trailing slash,
+ * `/v1` suffix, any case; null/blank = official default. Anything whose
+ * parsed HOST is not exactly `api.anthropic.com` (ports, paths, look-alike
+ * domains like `api.anthropic.com.evil.com`, userinfo tricks) is a relay.
+ *
+ * Pure + top-level for direct JVM testing (see AnthropicOfficialHostTest).
+ */
+internal fun isOfficialAnthropicHost(url: String?): Boolean {
+    val trimmed = url?.trim()
+    if (trimmed.isNullOrEmpty()) return true
+    val withScheme = if ("://" in trimmed) trimmed else "https://$trimmed"
+    val host = try {
+        URI(withScheme).host
+    } catch (_: Exception) {
+        return false
+    }
+    return host != null && host.equals(OFFICIAL_ANTHROPIC_HOST, ignoreCase = true)
+}
+
+private const val OFFICIAL_ANTHROPIC_HOST = "api.anthropic.com"
