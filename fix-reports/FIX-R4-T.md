@@ -164,9 +164,26 @@
 本地复验（真实生产文件 + JUnit）：`ErrorSnapshotOrderingTest` 4/4 + 新增 11 条 = `OK (15 tests)`；
 探针 96/96；变异臂 M7/M10/M11/M15/M16 5/5 MATCH（新增 M15「删掉内联分支」、M16「门改 `if (false)`」）。
 
-**第二轮**：`346c0dcd` 的 push 与 dispatch 因出口代理故障（`SSL routines::unexpected eof`，
-同一时刻 `example.com` / `repo1.maven.org` 同样失败，代理端口本身可连）未能完成，
-待网络恢复后补推、补 dispatch 并回填读数。
+**第二轮：绿** —— run `40801511984` @ `9629ca05726a114cb0a1d49ede3256fa17518bc3`
+（与本地 `git rev-parse HEAD` **逐字符一致**），`conclusion=success`，01:37:17 → 01:59:03
+（21.7 min）；**27 步 0 个非 success**，唯二 `skipped` 是 `Move the rolling tag android-latest`
+与 `Publish to Releases`（`if: main` 门控，分支上按设计跳过）。
+
+日志判读（1,576,799 B，**NUL 0**）：
+
+| 判据 | 读数 |
+|---|---|
+| 门集 | `Summary: 113 passed, 0 failed` ×1；`[N/113]` 块编号 113 个互异 |
+| 单测分片 | 6 条分片 `Summary: {16,18,19,25,30,44} passed, 0 failed` |
+| 夹具 | `ALL 349 CASES PASS` ×1 |
+| 编译错误 | `e: ` 行 **0** |
+| 失败用例 | 含 `FAILED` 且不含 `PASSED` 的行 **0** |
+| 新增测试 | `LogByteAccountingR4Test` 5 条 + `InMemoryPrefsContractR4Test` 6 条全 PASSED |
+| 首轮红的三条 | `ErrorSnapshotOrderingTest` 4 条全 PASSED（含 `trigger line is the newest entry` / `contains its own trigger line` / `not duplicated when the drain already delivered it`） |
+
+中途一次出口代理故障（`SSL routines::unexpected eof`，同一时刻 `example.com` /
+`repo1.maven.org` 同样失败，代理端口本身可连）导致一次 push + dispatch 失败，网络恢复后
+补推成功，未损失提交。
 
 ## 6 残留（R 条目，每条带触发条件 + 触发后方案）
 
