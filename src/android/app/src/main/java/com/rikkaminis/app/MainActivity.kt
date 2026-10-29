@@ -54,11 +54,10 @@ import com.rikkaminis.app.ui.settings.keepScreenAwakeEnabled
 import com.rikkaminis.app.ui.theme.MinisTheme
 
 private const val KEY_CURRENT_CHAT_SESSION_ID = "minis.current_chat_session_id"
-/** [P3-crash-recovery] 进程级持久化的 lastSessionId（独立 prefs 文件，非 savedInstanceState）。
- * native SIGABRT 不经过 Activity 生命周期，saved state 会丢；这个文件
- * 在每次进入 chat 路由时同步写入，作为崩溃后「重进即回到崩溃前会话」的可靠来源。 */
-private const val PREF_CRASH_RECOVERY = "minis_crash_recovery"
-private const val KEY_LAST_CHAT_SESSION_ID = "last_chat_session_id"
+// [P3-crash-recovery] 进程级持久化的 lastSessionId 现在住在 CrashRecoveryStore
+// （独立 prefs 文件 + 写入时间戳）。native SIGABRT 不经过 Activity 生命周期，
+// saved state 会丢；那个文件在每次进入 chat 路由时写入，作为崩溃后「重进即回到
+// 崩溃前会话」的可靠来源。
 
 class MainActivity : ComponentActivity() {
 
@@ -287,13 +286,21 @@ class MainActivity : ComponentActivity() {
             // can still be honoured. Auto / Last Session keep the restore; every
             // other mode hands the decision back to the dispatcher.
             ?: if (savedInstanceState == null) {
+                // [R4-U F-02] The restore is a synthesized OpenSession deep link,
+                // and AppNavigation's dispatcher returns early on `hasDeepLink` —
+                // so AUTO's fresh-within-15-minutes rule never ran on a cold
+                // start: a record from three days ago reopened the old chat, and
+                // a deleted session opened a dead chat. The dispatcher's rules
+                // are re-applied here (pure core, see [ChatRoutePresence]), and a
+                // stale / absent / draft-shaped record hands the decision back to
+                // the dispatcher.
                 val launchMode = getAppearancePrefs(this).getInt(KEY_LAUNCH_SESSION, 0)
-                if (coldStartRestoreAllowed(launchMode)) {
-                    getSharedPreferences(PREF_CRASH_RECOVERY, MODE_PRIVATE)
-                        .getString(KEY_LAST_CHAT_SESSION_ID, null)
-                } else {
-                    null
-                }
+                ChatRoutePresence.decideColdStartRestore(
+                    launchMode = launchMode,
+                    storedSessionId = CrashRecoveryStore.sessionId(this),
+                    storedAtMs = CrashRecoveryStore.writtenAtMs(this),
+                    nowMs = System.currentTimeMillis(),
+                )
             } else {
                 null
             }
