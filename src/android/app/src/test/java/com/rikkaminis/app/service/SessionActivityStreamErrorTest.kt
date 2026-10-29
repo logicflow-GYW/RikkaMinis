@@ -258,7 +258,13 @@ class SessionActivityStreamErrorTest {
         // surviving direct three are the two "persist an empty row first"
         // branches plus the tail flush.
         assertTrue("expected at least 3 direct funnel sites, found $inline", inline >= 3)
-        assertTrue("expected at least 5 deferred banner sites, found $deferred", deferred >= 5)
+        // [FIX-R4-Q F-01] Floor 5 -> 6: the EOF give-up banner became a
+        // deferred site (its row is now persisted by the turn tail below it),
+        // and `normalize` collapses that multi-line assignment onto one line,
+        // so the live count is 6. The floor has to move with the live count —
+        // at 5 the negative control below ("remove one deferred site") stayed
+        // green, i.e. the funnel could lose a site unnoticed.
+        assertTrue("expected at least 6 deferred banner sites, found $deferred", deferred >= 6)
     }
 
     /**
@@ -559,7 +565,9 @@ class SessionActivityStreamErrorTest {
         // the drain and the no-second-channel rule below are unchanged).
         if (inline < 3) return "the engine lost direct funnel sites: found $inline, expected at least 3"
         val deferred = occurrences(body, "loopState.pendingInlineError = host.string(")
-        if (deferred < 5) return "the engine lost deferred banner sites: found $deferred, expected at least 5"
+        // [FIX-R4-Q F-01] 6, not 5 — see the note in the test above (the EOF
+        // give-up banner is now a deferred site, so a removed site must go red).
+        if (deferred < 6) return "the engine lost deferred banner sites: found $deferred, expected at least 6"
         // The deferred slot must actually drain: the tail hands BOTH the
         // banner and the persist result to TerminalErrorPlacement and puts
         // what comes back onto the same funnel. A slot nobody drains would
