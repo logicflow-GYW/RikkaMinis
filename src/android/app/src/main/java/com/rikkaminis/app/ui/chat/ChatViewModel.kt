@@ -3236,6 +3236,19 @@ class ChatViewModel(
                     // + all later turns while keeping (then overwriting) this one.
                     chatRepository.deleteMessagesAfter(sid, row.sortOrder + 1)
                     chatRepository.updateMessageParts(row.id, keptArr.toString())
+                    // [R5-C C-C-04①] Sub-message cut: the row SURVIVES (rewritten
+                    // in place), so its primary key stays in agentHistory and
+                    // `dropCompactMarkerIfRewound` — "no anchor among the live
+                    // ids" — reads this rewind as intact. But if the compaction
+                    // marker folded the history up to and INCLUDING this row
+                    // (`lastCompactedMessageId`, the v2 authoritative anchor),
+                    // its summary now describes the tool call and turns this cut
+                    // just dropped. Drop it explicitly here; the deleted-row case
+                    // below is still covered by dropCompactMarkerIfRewound. The
+                    // predicate-level fix ("this row's content was truncated")
+                    // belongs to ChatSessionLifecycle (C1) — see the fix report's
+                    // division-of-labour note.
+                    dropCompactMarkerIfAnchoredOnRow(sid, row.id)
                     Log.i(TAG, "rerunFromToolBlock sub-message cut tuId=${targetToolUseId.take(12)} keepCount=${row.sortOrder + 1} partIdx=$cutPartIdx trimmedRow=${row.id.take(8)}")
                 }
 
@@ -3774,7 +3787,31 @@ class ChatViewModel(
         // to start a new session / clear chat / cancel (iOS 'Context Full'
         // alert parity) instead of leaving them stranded behind an inline
         // "Send blocked" notice.
-        if (!checkContextBeforeSend()) {
+        //
+        // [R5-C C-C-05] An edit send REWRITES the transcript tail, so the
+        // pressure these gates read (`_lastTurnContextTokens` from the last
+        // turn of the FULL history) describes turns this send is about to
+        // delete. Running them first blocked a shortening edit behind the
+        // context-full dialog — and the dialog's Cancel left
+        // `_editingMessageId` alive, so the NEXT plain send consumed it and
+        // ran truncateBeforeEdit against a message the user was no longer
+        // editing (visible history silently deleted). And at NEEDS_COMPACT it
+        // fired a full compaction over the very history the edit discards.
+        // The edit path truncates first and calls resetContextPressureState()
+        // inside the shell, so pressure re-derives from the post-edit
+        // transcript on the next send — skip all three gates for edits.
+        val editingSend = _editingMessageId.value != null
+        if (!editingSend && !checkContextBeforeSend()) {
+            // [R5-C C-C-05] Structural invariant for this stash path: a refused
+            // send must never leave edit state owned by a send that never
+            // happened. With the edit-skip above this branch cannot see an edit
+            // today; the clear keeps the invariant if the gate order is ever
+            // re-tightened (the stale-edit chain it guards against is the
+            // data-loss arm of this finding).
+            if (_editingMessageId.value != null) {
+                _editingMessageId.value = null
+                _preEditAttachments.value = null
+            }
             pendingExhaustedText = trimmed
             pendingExhaustedHasAttachments = _attachments.value.isNotEmpty()
             _showContextExhaustedDialog.value = true
@@ -3786,7 +3823,8 @@ class ChatViewModel(
         // happen BEFORE `_isStreaming` flips true below, or compactAll aborts
         // on the in-stream guard; the send coroutine awaits completion before
         // persisting the user message (see awaitAutoCompactIfNeeded).
-        maybeTriggerAutoCompact()
+        // [R5-C C-C-05] Skipped for edit sends — see the block above.
+        if (!editingSend) maybeTriggerAutoCompact()
         // [fix/compact-exhausted-rescue-1005] A real user send re-arms the
         // EXHAUSTED rescue gate: this message is about to be persisted, so
         // this is the "new user message" reset per the 2026-10-05 design
@@ -3892,7 +3930,11 @@ class ChatViewModel(
             // above, wait for it to finish so the persisted user message is
             // appended AFTER the compacted range. The outgoing request then
             // sees: summary + recent tail + the new user message.
-            awaitAutoCompactIfNeeded()
+            // [R5-C C-C-05] Skipped for edit sends: an edit never fired a
+            // compact (gate skipped above), so awaiting one here would either
+            // no-op or — if a compact was queued from elsewhere — run it over
+            // the pre-edit transcript the shell is about to truncate.
+            if (!editingSend) awaitAutoCompactIfNeeded()
             // Ensure session exists in DB (creates on first message for draft sessions)
             val activeSessionId = ensureSession()
 
@@ -4319,49 +4361,22 @@ class ChatViewModel(
                     return@launch
                 }
 
-                // [FIX-R4-P F-07] Continue reminder — Case 2 only: history ends
-                // with an ASSISTANT (a text-cancel committed a partial turn), so
-                // the next request needs a user turn to answer. Case 1 (the tail
-                // is a tool_result user turn) is already a valid starting point.
-                //
-                // It MUST be written here, inside the claim window. The previous
-                // placement (synchronously in resume(), before this shell) made
-                // it un-cancellable: a Stop during the prompt build left a
-                // persisted reminder sitting at the tail of the transcript with
-                // no answer behind it. handleUserCancelledCleanup then saw
-                // "history does NOT end with assistant", took the persist arm,
-                // and appended the already-committed partial text a SECOND time
-                // (plus another reminder) — a new duplicate pair on every
-                // stop-during-resume. Keeping the write behind the revocation
-                // check makes the reminder exactly as cancellable as the turn it
-                // belongs to, and lets the stop cleanup see the true tail shape
-                // (so _canResume is restored by planStopCleanup instead of being
-                // left false by this method's entry reset).
-                if (agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT) {
-                    val reminder =
-                        "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
-                    val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
-                    // Capture the row id: the reminder is a real transcript row,
-                    // so the in-memory entry must know its dbMessageId or compact
-                    // boundary resolution (which is id-based) cannot see it.
-                    val reminderRow = runCatching {
-                        chatRepository.appendMessage(
-                            activeSessionId,
-                            "user",
-                            """[{"type":"text","value":${escapeJson(reminder)}}]""",
-                        )
-                    }.onFailure {
-                        AppLogger.warning(TAG, "resume: continue-reminder persist failed: ${it.message}")
-                    }.getOrNull()
-                    agentHistory.add(
-                        LLMMessage(
-                            role = LLMMessage.Role.USER,
-                            content = reminder,
-                            contentParts = parts,
-                            dbMessageId = reminderRow?.id,
-                        )
-                    )
-                }
+                // [FIX-R4-P F-07 → R5-C C-C-06] The continuation reminder moved
+                // INTO the streamJob, after the concurrency slot is acquired
+                // (see the reminder block inside the inner try). It is a real
+                // persisted USER row: writing it before the slot wait still left
+                // two stop-windows with a broken tail — a Stop while this job
+                // queued on the slot saw historyEndsWithAssistant=false (the
+                // reminder, not the run), so handleUserCancelledCleanup took the
+                // persist arm and appended the PREVIOUS turn's committed text a
+                // second time (duplicate pair); a Stop after the placeholder
+                // insert but before the first packet dropped the placeholder and
+                // left the reminder orphaned with _canResume=false. Keeping the
+                // write inside the claim window AND behind the slot wait makes
+                // the reminder exactly as cancellable as the turn it belongs to
+                // (same invariant as F-07, one window later), and the stop
+                // cleanup's reminder-tail probe (planStopCleanup) now self-heals
+                // the remaining pre-first-packet window.
 
                 streamLaunched = true
                 streamJob = launch(Dispatchers.IO) {
@@ -4378,6 +4393,54 @@ class ChatViewModel(
                             // the try that owns the releaseSlot finally, or a
                             // non-CE throw from any of them leaks the concurrency
                             // slot and escapes the coroutine.
+
+                            // [R5-C C-C-06] Continue reminder — written HERE,
+                            // after the slot is acquired, Case 2 only (history
+                            // ends with an ASSISTANT: a text-cancel committed a
+                            // partial turn, so the next request needs a user turn
+                            // to answer; a tool_result tail is already a valid
+                            // starting point). A Stop before this point cancels
+                            // the job while it is still queued on the slot, so no
+                            // reminder row exists and the stop cleanup sees the
+                            // true tail shape; a Stop after this point is handled
+                            // by the reminder-tail arm in planStopCleanup.
+                            // Capture the row id: the reminder is a real
+                            // transcript row, so the in-memory entry must know
+                            // its dbMessageId or compact boundary resolution
+                            // (which is id-based) cannot see it. Text is
+                            // single-sourced as CONTINUATION_REMINDER_TEXT
+                            // (StopCleanupPlan.kt) so the tail matcher agrees
+                            // verbatim with the writer.
+                            if (!isActive ||
+                                !_isStreaming.value ||
+                                sendEpoch != streamingClaimEpoch ||
+                                claimToken !== streamingClaimToken
+                            ) {
+                                AppLogger.info(TAG_STREAM, "resume streamJob aborted after slot (claim revoked; sid=$activeSessionId)")
+                                return@launch
+                            }
+                            if (agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT) {
+                                val reminder = CONTINUATION_REMINDER_TEXT
+                                val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
+                                val reminderRow = runCatching {
+                                    chatRepository.appendMessage(
+                                        activeSessionId,
+                                        "user",
+                                        """[{"type":"text","value":${escapeJson(reminder)}}]""",
+                                    )
+                                }.onFailure {
+                                    AppLogger.warning(TAG, "resume: continue-reminder persist failed: ${it.message}")
+                                }.getOrNull()
+                                agentHistory.add(
+                                    LLMMessage(
+                                        role = LLMMessage.Role.USER,
+                                        content = reminder,
+                                        contentParts = parts,
+                                        dbMessageId = reminderRow?.id,
+                                    )
+                                )
+                            }
+
                             SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
                             val activeFallbackStrategy = run {
                                 val groupId = _selectedGroupId.value
@@ -4638,6 +4701,49 @@ internal fun sanitizeAgentHistoryMessages(messages: MutableList<LLMMessage>) {
  *
  * Pure + JVM-testable (no ViewModel dependencies).
  */
+
+/**
+ * [R5-C C-C-04①] Pure anchor test for sub-message truncation: does the live
+ * compaction marker fold the history up to and INCLUDING [rowId]? The v2
+ * marker's `lastCompactedMessageId` is the authoritative "everything to this
+ * id is in the summary" anchor, so a sub-message cut that rewrites that row IN
+ * PLACE (`updateMessageParts` keeps the primary key) leaves the summary
+ * describing tool calls and turns that no longer exist.
+ *
+ * Pure + JVM-testable (no ViewModel dependencies).
+ */
+internal fun compactMarkerAnchoredOnRow(marker: CompactMarkerEntity?, rowId: String): Boolean =
+    marker?.lastCompactedMessageId?.takeIf { it.isNotEmpty() } == rowId
+
+/**
+ * [R5-C C-C-04①] Drop the live compaction marker when the row it is anchored
+ * on was just truncated IN PLACE by a sub-message tool rerun.
+ *
+ * Why a caller-side trigger: `dropCompactMarkerIfRewound` (ChatSessionLifecycle)
+ * classifies a rewind as "no marker anchor among the live ids" — a sub-message
+ * cut keeps the truncated row's primary key alive, so that predicate reads the
+ * rewind as intact while the summary describes dropped content. The
+ * predicate-level fix belongs to ChatSessionLifecycle (C1's file); until that
+ * lands, the rerun call site triggers the drop explicitly here, scoped to the
+ * ONE anchor whose content this cut actually invalidated
+ * (`lastCompactedMessageId`). Anchors on earlier rows keep their summaries
+ * (those turns were untouched by the cut); anchors on deleted rows are already
+ * handled by `dropCompactMarkerIfRewound`.
+ */
+internal suspend fun ChatViewModel.dropCompactMarkerIfAnchoredOnRow(sid: String, truncatedRowId: String) {
+    if (!compactMarkerAnchoredOnRow(_cachedLatestMarker, truncatedRowId)) return
+    val deleted = runCatching { chatRepository.dao.deleteCompactMarkers(sid) }
+        .onFailure {
+            Log.w(TAG, "[Compact] anchor-row marker drop failed (sid=${sid.take(8)}): ${it.message}")
+        }
+        .isSuccess
+    _cachedLatestMarker = null
+    _compactSummary.value = null
+    Log.i(
+        TAG,
+        "[Compact] rerun truncated the marker's anchored row (row=${truncatedRowId.take(8)}, deleted=$deleted) — summary cleared [R5-C C-C-04①]",
+    )
+}
 
 /**
  * RC3: Roll the current turn's assistant blocks back to [turnStartBlockIndex],

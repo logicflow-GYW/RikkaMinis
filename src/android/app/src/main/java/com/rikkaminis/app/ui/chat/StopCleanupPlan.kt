@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.chat
 
+import com.rikkaminis.app.data.model.LLMMessage
+
 // [meta-audit-1028 C2] Pure decision core for `handleUserCancelledCleanup`
 // (ChatQueueInterruption.kt) — the "user pressed Stop, no tool is in flight"
 // tail. Extracted so the two defects this file fixes are directly
@@ -78,7 +80,39 @@ internal data class StopCleanupPlan(
     val persistText: String?,
     /** Offer Resume (`_canResume`). True for every bubble that is kept. */
     val canResume: Boolean,
+    /**
+     * [R5-C C-C-06] Also remove the orphaned `resume()` continuation reminder
+     * row from the tail of the transcript (agentHistory + DB). Only ever set
+     * together with [dropPlaceholder]: the reminder exists solely as the
+     * anchor for a turn that produced nothing.
+     */
+    val dropContinuationReminder: Boolean = false,
 )
+
+/**
+ * [R5-C C-C-06] The exact text `resume()` persists as its continuation
+ * reminder — a REAL user transcript row (not a system-only message), which is
+ * why a stop in the pre-first-packet window leaves it behind.
+ *
+ * Single-sourced here because three places must agree on it verbatim: the
+ * writer (`ChatViewModel.resume`), the plan arm below, and the tail matcher
+ * used by the stop cleanup. A drifting copy would silently stop matching and
+ * the orphan would survive again.
+ */
+internal const val CONTINUATION_REMINDER_TEXT =
+    "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
+
+/**
+ * [R5-C C-C-06] True when the transcript's tail IS the continuation reminder
+ * `resume()` wrote for the turn now being stopped.
+ *
+ * Shape-only on purpose: an assistant turn committed after the reminder always
+ * sets [historyEndsWithAssistant], so reaching the reminder-tail arm implies
+ * the run never persisted anything — the reminder is the only row after the
+ * last committed turn.
+ */
+internal fun isContinuationReminderTail(role: LLMMessage.Role?, content: String?): Boolean =
+    role == LLMMessage.Role.USER && content == CONTINUATION_REMINDER_TEXT
 
 /**
  * Exhaustive decision for the stopped bubble. Every cell of
@@ -101,12 +135,32 @@ internal data class StopCleanupPlan(
 internal fun planStopCleanup(
     blocks: List<AssistantBlock>,
     historyEndsWithAssistant: Boolean,
+    historyEndsWithContinuationReminder: Boolean = false,
 ): StopCleanupPlan {
     val text = unpersistedTurnText(blocks)
     val hasAnyToolUse = blocks.any { it.kind == "tool_use" }
     return when {
-        text.isEmpty() && !hasAnyToolUse && !historyEndsWithAssistant ->
-            StopCleanupPlan(dropPlaceholder = true, persistText = null, canResume = false)
+        text.isEmpty() && !hasAnyToolUse && !historyEndsWithAssistant -> {
+            if (historyEndsWithContinuationReminder) {
+                // [R5-C C-C-06] resume() persisted its continuation reminder as
+                // a real USER row before the loop produced anything, and the
+                // user stopped in that window. Dropping only the placeholder
+                // left the reminder orphaned at the tail — a USER turn with no
+                // answer behind it, re-read as "not resumable" — while
+                // `historyEndsWithAssistant` was false SOLELY because of that
+                // reminder. Removing it returns the transcript to its exact
+                // pre-resume shape (history ends with ASSISTANT again), so the
+                // bubble state stays resumable instead of the banner dying.
+                StopCleanupPlan(
+                    dropPlaceholder = true,
+                    persistText = null,
+                    canResume = true,
+                    dropContinuationReminder = true,
+                )
+            } else {
+                StopCleanupPlan(dropPlaceholder = true, persistText = null, canResume = false)
+            }
+        }
         text.isNotEmpty() && !historyEndsWithAssistant ->
             StopCleanupPlan(dropPlaceholder = false, persistText = text, canResume = true)
         else ->

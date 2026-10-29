@@ -101,7 +101,20 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
         // 1. unknown_tool_repeat — most specific signal, runs first.
         val unknownStreak = countUnknownStreakFromTail(toolName)
         if (unknownStreak >= config.unknownToolThreshold) {
-            val msg = "[LOOP BLOCKED] CRITICAL: attempted unavailable tool '$toolName' " +
+            // [R5-C C-C-09] The engine feeds THIS string back into record() as
+            // `errorMessage` when it refuses the call (AgentLoopEngine's
+            // blocked-call arm passes `precheck.message`). record() classifies
+            // the attempt through extractUnknownToolName, so the wording is a
+            // parser contract, not prose: "attempted unavailable tool 'x'"
+            // matched neither regex, the blocked attempt entered history with
+            // `unknownToolName = null`, countUnknownStreakFromTail() broke on
+            // its own tail entry, and every block therefore reset the streak —
+            // of every threshold+1 hallucinated calls exactly one was ever
+            // refused. Keep an "unknown tool '<name>'" phrase that
+            // UNKNOWN_TOOL_RE_1 captures (the parser test in
+            // ToolLoopDetectorTest pins the round trip through the REAL check()
+            // output, not a hand-written string).
+            val msg = "[LOOP BLOCKED] CRITICAL: unknown tool '$toolName' attempted " +
                 "$unknownStreak times. Stop retrying that missing tool and answer without it."
             AppLogger.warning("ToolLoopDetector",
                 "CRITICAL unknown_tool_repeat tool=$toolName streak=$unknownStreak")
