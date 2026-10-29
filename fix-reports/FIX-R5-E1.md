@@ -232,6 +232,7 @@ for (part in wireTurnParts) { ... }        // 既有的 Text / ImageData 序列�
 | R4 | **F-06 的 Anthropic / Gemini 臂未修** | 调用方在 `contentParts` 非空时给这两家传顶层 `imageParts`（当前无此路径） | 复用 `TurnImageCarry.missingIndices`（判据与协议无关），各自套自己的图片编码器；本支受任务书文件面限制未动 |
 | R5 | **Responses API 的 `response.reasoning_*` 计数未动** | —（确认无需改） | 它按事件类型累加字符串 `delta`，不存在「数组型 content」同款失真，记录备查 |
 | R6 | **真机未验** | — | 本支证据 = JVM 纯判据 16 例 + 形状 10 判据 + 14 臂 + CI 编译/单测 + 12 道门；真机面建议在 E/F 波次合并后按「生图 → 断网/改 base 使下载 404」走一次 |
+| R7 | **`android.util.Base64` 在 JVM 单测里返回 `null`**：既有内联写法（`val b64 = Base64.encodeToString(...)`）不会崩，但会把 `null` 拼进 `data:…;base64,null`；任何「真的跑图片序列化」的单测都拿不到真实字节（本支不新开调用点之后就绕开了，但既有 6 处仍如此） | 有人写第二个真跑生产图片路径的 JVM 测试时 | 把该文件 6 处换成 `java.util.Base64.getEncoder()`（同字母表、同 NO_WRAP），或抽一个 `internal fun encodeBase64NoWrap`。**需要一次全量 CI 复核**（6 处都属既有路径，半径纪律下本支不动） |
 
 ---
 
