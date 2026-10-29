@@ -68,8 +68,25 @@ internal fun decideMemoryRestore(
     localExists: Boolean,
     localLastModified: Long,
     backupCreatedAt: Long,
+    // [FIX-R3-D / F-05] An empty payload entry is not "restore an empty file":
+    // [memoryBackupEntries]'s reader folds "the file is not there / cannot be
+    // read" into `""` (MemoryRepository.readFile never returns null), so a
+    // device that never created GLOBAL.md exported `{"name":"GLOBAL.md",
+    // "content":""}` — and restoring that backup onto a device WITH a GLOBAL.md
+    // truncated it to zero bytes (newer-mtime ordering does not help: the
+    // export stamp is newer than the local file).
+    backupContentBlank: Boolean = false,
+    /** Whether the local copy has anything in it. Unknown reads fail CLOSED
+     *  ("assume it has content"): refusing to overwrite is always recoverable,
+     *  a wiped GLOBAL.md is not. */
+    localHasContent: Boolean = false,
 ): MemoryRestoreDecision {
     if (!localExists) return MemoryRestoreDecision.Restore
+    if (backupContentBlank && localHasContent) {
+        return MemoryRestoreDecision.KeepLocal(
+            "memory file \"$name\": the backup's copy is empty, local copy kept"
+        )
+    }
     if (localLastModified <= 0L) {
         return MemoryRestoreDecision.KeepLocal(
             "memory file \"$name\": local copy's write time is unreadable, kept"
@@ -86,6 +103,24 @@ internal fun decideMemoryRestore(
     return MemoryRestoreDecision.KeepLocal(
         "memory file \"$name\": local copy is newer than the backup, kept"
     )
+}
+
+/**
+ * [FIX-R3-D / F-05] Does the local copy actually hold anything?
+ *
+ * Fail-closed in both directions of "cannot tell": an unreadable file, a
+ * directory in its place, or a vanished path all answer `true` ("assume there
+ * is content worth protecting"), because the only decision this feeds is
+ * "may an EMPTY payload overwrite it?" — and answering `false` there would
+ * mean "yes, wipe it".
+ */
+internal fun localHasContent(local: File?, localExists: Boolean): Boolean {
+    if (!localExists || local == null) return false
+    return try {
+        local.readText().isNotEmpty()
+    } catch (_: Throwable) {
+        true
+    }
 }
 
 /**
@@ -141,6 +176,11 @@ internal fun restoreMemoryFiles(
             localExists = localExists,
             localLastModified = localLastModified,
             backupCreatedAt = backupCreatedAt,
+            // [FIX-R3-D / F-05] "empty" and "could not be read" are the same
+            // string on the wire (see decideMemoryRestore); the local side is
+            // read here so an empty payload can never wipe real content.
+            backupContentBlank = content.isBlank(),
+            localHasContent = localHasContent(local, localExists),
         )
         if (decision is MemoryRestoreDecision.KeepLocal) {
             skipped.add(decision.reason)

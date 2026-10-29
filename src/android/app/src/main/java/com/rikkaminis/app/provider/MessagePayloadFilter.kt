@@ -1,5 +1,6 @@
 package com.rikkaminis.app.provider
 
+import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
 
 /**
@@ -30,8 +31,38 @@ internal fun LLMMessage.hasWirePayload(
     isLastUserTurn: Boolean,
     turnImageCount: Int,
 ): Boolean =
-    contentParts.isNotEmpty() ||
+    // [r3-b08 F-09] "has parts" is not "has payload": a list holding nothing but
+    // `Text("")` is non-empty and used to pass, so the orphan-tool-pairing
+    // sanitizer could strip a tool_use block and leave a message that still went
+    // on the wire as `{"type":"text","text":""}` — a 400 on the Anthropic
+    // Messages API (`text content blocks must be non-empty`) on EVERY later turn
+    // of that conversation. The persisted empty assistant bubble
+    // (AgentLoopState.TerminalErrorPlacement writes exactly `listOf(Text(""))`)
+    // is the consumer-side producer of that shape.
+    contentParts.any { it !is AgentContentPart.Text || it.text.isNotEmpty() } ||
         content.isNotEmpty() ||
         audioParts.isNotEmpty() ||
         imageParts.isNotEmpty() ||
         (isLastUserTurn && turnImageCount > 0)
+
+/**
+ * [r3-b08 F-13] The payload of one SSE `data:` line, or null when the line is
+ * not a data line at all.
+ *
+ * The HTML5 SSE spec allows `data:{…}` — the single space after the colon is
+ * OPTIONAL and, if present, is the only thing a parser may strip. All three
+ * stream parsers used to require `data: ` (space included), so a gateway that
+ * omits it — a legal, common Go/Nginx-relay output — had EVERY frame dropped:
+ * the stream then looked like a silent upstream failure (empty response) or, if
+ * it outlived the first-data watchdog, like a connect timeout. OpenAIProvider
+ * was fixed for this one-gateway-at-a-time; the other two kept the strict
+ * prefix, so the third relay hit the same wall again.
+ *
+ * Pure + top-level so the boundary is unit-testable once instead of three times
+ * (see SseDataPayloadTest), and so a fourth parser has one function to call.
+ */
+internal fun sseDataPayload(line: String): String? {
+    if (!line.startsWith("data:")) return null
+    val rest = line.removePrefix("data:")
+    return if (rest.startsWith(" ")) rest.removePrefix(" ") else rest
+}

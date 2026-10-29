@@ -159,9 +159,100 @@ fun stripPinnedSection(summary: String?): String? {
 }
 
 /**
+ * A carried-vs-fresh payload pair that fits [PINNED_USER_MESSAGES_TOKEN_LIMIT].
+ * See [fitPinnedPayload].
+ */
+internal data class FittedPinnedPayload(val carriedInner: String?, val pinned: List<String>)
+
+/**
+ * Split an opaque carried payload into its header chunk (only when the block
+ * still starts with [PINNED_HEADER]) and its blank-line-separated entries.
+ *
+ * The block format is `header\n\nentry\n\nentry…` (see
+ * [appendPinnedSection]); splitting on the "\n\n" separator is a *trimming
+ * granularity* heuristic, not a parse: an entry that itself contains a blank
+ * line (a pasted log, a markdown list) shows up as several chunks. That is
+ * deliberate and safe — every chunk is a contiguous slice of the original
+ * text, so dropping leading chunks can shorten the OLDEST kept message but
+ * can never reorder, duplicate or mangle anything.
+ */
+internal fun splitCarriedInner(inner: String?): Pair<String?, List<String>> {
+    if (inner.isNullOrBlank()) return null to emptyList()
+    val chunks = inner.trim('\n').split("\n\n").filter { it.isNotBlank() }
+    if (chunks.isEmpty()) return null to emptyList()
+    return if (chunks.first() == PINNED_HEADER) chunks.first() to chunks.drop(1) else null to chunks
+}
+
+/**
+ * Enforce [PINNED_USER_MESSAGES_TOKEN_LIMIT] over carried + fresh pins
+ * **combined**.
+ *
+ * [fix/r3-b11-compact-F03] The budget used to exist only on the fresh side
+ * ([extractPinnedUserMessages]) while [appendPinnedSection] glued
+ * `carriedInner + pinned` together with no cap at all. Every compact round
+ * therefore grew the block by up to another full budget — `N × 8_000` tokens
+ * after N rounds, plus the single-oversized-message exemption — and the block
+ * rides EVERY request inside `<context-summary>`, so a long session marched
+ * itself into `PressureLevel.EXHAUSTED` with the pinned payload alone.
+ *
+ * Allocation is newest-first over the merged chronological list (fresh pins
+ * are newer than anything carried), which is the same rule
+ * [extractPinnedUserMessages] already applies within one fold: recency wins,
+ * the oldest pins are the growth that gets dropped. One entry that alone
+ * exceeds the budget is still kept when it is the newest one — dropping it
+ * would delete the user's actual last paste — so the hard ceiling is
+ * `max(tokenLimit, newest entry)` rather than `tokenLimit`.
+ *
+ * Under budget the inputs are returned byte-identical (today's behaviour, and
+ * the reason the multi-round "carried survives verbatim" tests keep passing).
+ * [PINNED_HEADER] is re-attached when any carried entry survives, and dropped
+ * with the whole carried payload otherwise ([appendPinnedSection] re-adds it).
+ */
+internal fun fitPinnedPayload(
+    carriedInner: String?,
+    pinned: List<String>,
+    tokenLimit: Long = PINNED_USER_MESSAGES_TOKEN_LIMIT,
+): FittedPinnedPayload {
+    if (tokenLimit <= 0) return FittedPinnedPayload(null, emptyList())
+    val fresh = pinned.filter { it.isNotBlank() }
+    val (header, carriedEntries) = splitCarriedInner(carriedInner)
+    if (carriedEntries.isEmpty() && fresh.isEmpty()) {
+        return FittedPinnedPayload(carriedInner, pinned)
+    }
+    val entries = carriedEntries + fresh
+    val costs = entries.map { ContextCompactor.estimateTokens(it) }
+    if (costs.sum() <= tokenLimit) {
+        // Under budget — hand back exactly what we were given so a no-pin or
+        // small-pin session keeps producing byte-identical summaries.
+        return FittedPinnedPayload(carriedInner, pinned)
+    }
+    val keep = BooleanArray(entries.size)
+    var used = 0L
+    var keptAny = false
+    for (i in entries.indices.reversed()) {
+        if (keptAny && used + costs[i] > tokenLimit) break
+        keep[i] = true
+        keptAny = true
+        used += costs[i]
+    }
+    val keptCarried = carriedEntries.filterIndexed { idx, _ -> keep[idx] }
+    val keptFresh = fresh.filterIndexed { idx, _ -> keep[carriedEntries.size + idx] }
+    val newCarried = if (keptCarried.isEmpty()) {
+        null
+    } else {
+        (listOfNotNull(header) + keptCarried).joinToString("\n\n")
+    }
+    return FittedPinnedPayload(newCarried, keptFresh)
+}
+
+/**
  * Append a `<pinned-user-messages>` block carrying [pinned] (this fold's
  * verbatim user text) plus [carriedInner] (the previous round's payload,
  * opaque). Order: carried first (oldest first), then the new messages.
+ *
+ * The merged payload is fitted to [PINNED_USER_MESSAGES_TOKEN_LIMIT] by
+ * [fitPinnedPayload] BEFORE it is written, so the block cannot grow without
+ * bound across rounds (see that function for the allocation rule).
  *
  * Idempotent: appending the exact block that is already present is a
  * no-op, and a defensive [stripPinnedSection] guarantees a summary can
@@ -173,9 +264,10 @@ fun appendPinnedSection(
     pinned: List<String>,
     carriedInner: String? = null,
 ): String {
+    val fitted = fitPinnedPayload(carriedInner, pinned)
     val parts = ArrayList<String>()
-    if (!carriedInner.isNullOrBlank()) parts.add(carriedInner)
-    for (p in pinned) {
+    if (!fitted.carriedInner.isNullOrBlank()) parts.add(fitted.carriedInner)
+    for (p in fitted.pinned) {
         if (p.isNotBlank()) parts.add(p)
     }
     if (parts.isEmpty()) return summary
@@ -184,7 +276,11 @@ fun appendPinnedSection(
     // header line — prepend the header ONLY when there is no carried text,
     // so multi-round cycles never duplicate it and the carried payload
     // always stays at the top of the block.
-    val inner = if (carriedInner.isNullOrBlank()) {
+    // The header decision must follow the FITTED payload, not the raw
+    // argument: when the budget drops the whole carried payload, the block
+    // still needs its header line back or the model sees bare quoted text
+    // with no idea where it came from.
+    val inner = if (fitted.carriedInner.isNullOrBlank()) {
         (listOf(PINNED_HEADER) + parts).joinToString("\n\n")
     } else {
         parts.joinToString("\n\n")

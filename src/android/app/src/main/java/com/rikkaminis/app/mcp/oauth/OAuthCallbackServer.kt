@@ -146,15 +146,42 @@ class OAuthCallbackServer(
 
                             val code = params["code"]
                             val state = params["state"]
+                            // [r3-B11-F08] RFC 6749 §4.1.2.1: a refused
+                            // authorization redirects with `error=...` and NO
+                            // code. The old code answered "Authorization
+                            // complete" to the browser and then neither fired a
+                            // callback nor stopped the server, so the in-flight
+                            // wait hung for its full 5-minute timeout with no
+                            // way for the user to retry.
+                            val error = params["error"]
+                            val denied = code == null && !error.isNullOrBlank()
 
-                            // Send response
-                            val html = "<html><body><h1>Authorization complete</h1><p>You can close this tab.</p><script>window.close()</script></body></html>"
+                            // Send response — the denial branch tests `error`
+                            // directly (not through `denied`) so the compiler
+                            // can see `error` is non-null for htmlEscape.
+                            val html = if (code == null && error != null) {
+                                "<html><body><h1>Authorization was not completed</h1>" +
+                                    "<p>The authorization server reported: ${htmlEscape(error)}. " +
+                                    "You can close this tab and try again from the app.</p>" +
+                                    "<script>window.close()</script></body></html>"
+                            } else {
+                                "<html><body><h1>Authorization complete</h1><p>You can close this tab.</p><script>window.close()</script></body></html>"
+                            }
                             val response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${html.length}\r\nConnection: close\r\n\r\n$html"
                             socket.getOutputStream().write(response.toByteArray())
                             // Release the FD before invoking the callback below,
                             // which may block while resuming the OAuth wait; the
                             // finally is the backstop for every other path.
                             socket.close()
+
+                            if (denied) {
+                                Log.w(TAG, "authorization denied by the server: error=$error")
+                                // Leave onExternalCancel armed: stop() fires it,
+                                // which resumes the caller's wait with null
+                                // (Result.Cancelled) instead of hanging.
+                                stop()
+                                return@Thread
+                            }
 
                             if (code != null) {
                                 // [sweep1014-D5b] Consume onExternalCancel before
@@ -201,6 +228,29 @@ class OAuthCallbackServer(
             try { cancel?.invoke() } catch (e: Exception) {
                 Log.w(TAG, "onExternalCancel threw: ${e.message}")
             }
+        }
+    }
+}
+
+/**
+ * [r3-B11-F08] Escape a server-supplied value before it is written into the
+ * HTML page this listener hands back to the browser. The `error` /
+ * `error_description` of an OAuth redirect are text the caller controls (any
+ * party that can answer the redirect URI), and the denial page quotes them --
+ * unescaped that is markup injected into a page served from a loopback origin
+ * the Custom Tab still trusts.
+ *
+ * Pure string work (no Android types) so the JVM test can pin it directly.
+ */
+internal fun htmlEscape(value: String): String = buildString(value.length) {
+    for (c in value) {
+        when (c) {
+            '&' -> append("&amp;")
+            '<' -> append("&lt;")
+            '>' -> append("&gt;")
+            '"' -> append("&quot;")
+            '\'' -> append("&#39;")
+            else -> append(c)
         }
     }
 }

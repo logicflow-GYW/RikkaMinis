@@ -1111,6 +1111,7 @@
     <string name="sysmsg_compact_failed">압축 실패: %1$s</string>
     <string name="sysmsg_context_full_hint">컨텍스트가 곧 가득 찹니다(%1$d / %2$d tokens). /compact를 실행하여 이전 대화를 요약으로 접을 수 있습니다.</string>
     <string name="sysmsg_wait_compact">보내기 전에 현재 압축이 완료될 때까지 기다려 주세요.</string>
+    <string name="sysmsg_edit_wait_stream">메시지를 편집 중입니다. 먼저 현재 응답을 중지하세요 — 편집은 기존 메시지를 대체하므로 대기열에 넣을 수 없습니다.</string>
     <string name="sysmsg_context_trimmed">컨텍스트가 %1$d 한도에 도달하여 가장 오래된 메시지 %2$d개를 잘라내고 작업을 계속했습니다.</string>
     <string name="sysmsg_compact_no_provider">공급자가 구성되지 않았습니다. 압축할 수 없습니다.</string>
     <string name="sysmsg_compact_empty_session">압축할 내용이 없습니다 — 세션이 비어 있습니다.</string>
@@ -1681,4 +1682,12 @@
     <string name="perm_runtime_batch_sub">캘린더, 연락처, 위치, 사진, 마이크, 카메라, 알림</string>
     <string name="perm_runtime_batch_all_granted">모든 시스템 권한이 이미 허용되었습니다.</string>
     <string name="perm_runtime_batch_partial">아직 %1$d개의 권한이 허용되지 않았습니다 — Android가 거부했거나 건너뛰었습니다.</string>
+    <string name="mirror_section_title">외부 사본</string>
+    <string name="mirror_section_footer">앱 저장 공간 밖에 있는 지속적으로 갱신되는 사본입니다. 앱 데이터를 지워도 남아 있으며 어떤 파일 관리자로도 열 수 있습니다.</string>
+    <string name="mirror_enable">외부 미러</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup — 자동 갱신</string>
+    <string name="mirror_sync_now">지금 동기화</string>
+    <string name="mirror_last_sync">마지막 동기화: %1$s</string>
+    <string name="mirror_never">아직 동기화하지 않음</string>
+    <string name="mirror_pending_count">동기화 대기 중인 파일 %1$d개</string>
 </resources>

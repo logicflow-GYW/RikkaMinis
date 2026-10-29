@@ -29,10 +29,21 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Cost discipline (this repo has a precedent of per-frame logging becoming
  * the jank — see the isNearBottom `if (false)` log block): Q1's hot path is
- * a few array increments with no allocation and no lock; Q2/Q3 emit at most
+ * a few array increments with no allocation; Q2/Q3 emit at most
  * one line per second per channel and are silent outside that window. All
  * human-readable strings are built after the throttle window admits the
  * event.
+ *
+ * [fix/r4-s F-15] Q1 now takes the object monitor (`@Synchronized`). It has
+ * to: `emitComposeCensus`, `resetForTest` and `countSnapshotForTest` already
+ * read/clear those same counters under the monitor, so an unsynchronised
+ * `typeCount[i]++` silently loses increments when two composers record
+ * concurrently (measured on the base tree: 8 threads x 500 events -> 100+
+ * events never counted) and lets the census read a half-applied update. The
+ * lock is uncontended on the single-UI-thread production path, and the
+ * recursive entry from `emitComposeCensus` is reentrant - one uncontended
+ * lock/unlock per compose event, the same order of cost as the writes it
+ * guards.
  *
  * ponytail: per-type buckets are a fixed-size IntArray indexed by a
  * caller-supplied [ItemType] ordinal rather than a map keyed by class name |
@@ -106,7 +117,12 @@ object RenderAttributionDiag {
      * Q1 hot path, called from the newest-row compose SideEffect. Returns
      * the elapsed-ms it charged to the aggregate so tests can assert the
      * charge; production callers ignore it. Zero allocation.
+     *
+     * [fix/r4-s F-15] Shares the object monitor with the census flush and the
+     * test seams so concurrent records can't lose increments — see the cost
+     * discipline note in the file header for why that trade is cheap here.
      */
+    @Synchronized
     fun recordNewestCompose(
         sessionId: String,
         type: ItemType,

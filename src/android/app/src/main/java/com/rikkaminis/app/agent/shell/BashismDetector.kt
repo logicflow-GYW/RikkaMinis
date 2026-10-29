@@ -49,11 +49,14 @@ object BashismDetector {
     // B15: `(?<!<)` / `(?!<)` exclude the here-string operator `<<<` — matching
     // from its second `<` used to fabricate a delimiter out of the payload word
     // and null out the rest of the script (every bashism after it silently
-    // missed). `[A-Za-z_]\w*` excludes pure-digit delimiters like the `<< 16`
-    // in `$((1 << 16))` — real ash heredoc delimiters start with a letter or
-    // underscore, and a digit "delimiter" never matches any line, which used to
-    // null out the whole remainder of the script the same way.
-    private val heredocOpen = Pattern.compile("(?<!<)<<(?!<)-?\\s*[\"']?([A-Za-z_]\\w*)[\"']?")
+    // missed). `[A-Za-z_][\w.\-]*` excludes pure-digit delimiters like the
+    // `<< 16` in `$((1 << 16))` — real ash heredoc delimiters start with a
+    // letter or underscore — while still accepting the legitimate non-word
+    // delimiters (`<<'EOF-1'`, `<<EOF.json`): the old `[A-Za-z_]\w*` stopped at
+    // the hyphen, captured `EOF`, and then never matched the real closing line,
+    // so the whole remainder of the script was blanked.
+    private val heredocOpen =
+        Pattern.compile("(?<!<)<<(?!<)-?\\s*[\"']?([A-Za-z_][\\w.\\-]*)[\"']?")
 
     @Volatile private var rules: List<Rule> = emptyList()
     @Volatile private var loaded = false
@@ -130,17 +133,32 @@ object BashismDetector {
             val line = lines[i]
             out.add((i + 1) to line) // opening line IS shell-layer
             val delims = ArrayList<String>()
-            val m = heredocOpen.matcher(line)
-            while (m.find()) {
-                // B15: a `<<` inside `$(( … ))` is an arithmetic shift
-                // (`$(( x << y ))`), not a heredoc — treating it as one used to
-                // null out the rest of the script. Skip matches that sit inside
-                // an unclosed arithmetic expansion.
-                if (inArithmeticContext(line, m.start())) continue
-                delims.add(m.group(1)!!)
+            // [r3-B11-F12] A `#` comment line is not shell syntax — but the old
+            // code still matched `<<EOF` inside one (a comment MENTIONING a
+            // heredoc is enough), consuming every following line as heredoc
+            // body and silently hiding all bashisms after it.
+            if (!line.trimStart().startsWith("#")) {
+                val m = heredocOpen.matcher(line)
+                while (m.find()) {
+                    // B15: a `<<` inside `$(( … ))` is an arithmetic shift
+                    // (`$(( x << y ))`), not a heredoc — treating it as one used to
+                    // null out the rest of the script. Skip matches that sit inside
+                    // an unclosed arithmetic expansion.
+                    if (inArithmeticContext(line, m.start())) continue
+                    delims.add(m.group(1)!!)
+                }
             }
             i++
             for (delim in delims) {
+                // [r3-B11-F12] Only consume the body when the delimiter actually
+                // closes somewhere below. The old unconditional consume turned a
+                // non-heredoc match (e.g. `cat <<EOF.json` capturing "EOF", or
+                // any delimiter line that never appears) into "everything after
+                // this line is heredoc body", which is a bashism scan fail-OPEN:
+                // the script then ran under ash with unflagged bash syntax.
+                // Shell rejects the unclosed heredoc at runtime anyway; keeping
+                // the lines scannable fails closed towards bash.
+                if (!hasClosingDelimiter(lines, i, delim)) continue
                 while (i < lines.size && lines[i].trim() != delim) {
                     out.add((i + 1) to null) // body line — do not scan
                     i++
@@ -152,6 +170,14 @@ object BashismDetector {
             }
         }
         return out
+    }
+
+    /** True when a line equal to [delim] exists at or after [from]. */
+    private fun hasClosingDelimiter(lines: List<String>, from: Int, delim: String): Boolean {
+        for (j in from until lines.size) {
+            if (lines[j].trim() == delim) return true
+        }
+        return false
     }
 
     /** True if [index] sits inside an unclosed `$(( … ))` arithmetic expansion on [line]. */

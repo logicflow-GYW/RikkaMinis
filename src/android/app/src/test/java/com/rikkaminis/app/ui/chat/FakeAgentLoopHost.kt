@@ -96,6 +96,8 @@ internal class FakeAgentLoopHost(
     val previewUpdates = mutableListOf<String>()
     val activeEntryValues = mutableListOf<String>()
     val modelUpdates = mutableListOf<String>()
+    /** [FIX-R4-Q F-06] The published model OBJECTS (enrichment assertions). */
+    val currentModels = mutableListOf<LLMModel>()
     val streamRequests = mutableListOf<StreamRequest>()
     val lastTurnContextTokensValues = mutableListOf<Int>()
     /** offloadContextIfNeeded args: contextWindow to lastContextTokens to force. */
@@ -360,6 +362,9 @@ internal class FakeAgentLoopHost(
     override fun setEnhancedCache(enabled: Boolean) { record("setEnhancedCache($enabled)") }
     override fun updateCurrentModel(model: LLMModel) {
         modelUpdates.add(model.id)
+        // [FIX-R4-Q F-06] Keep the OBJECT too: assertions about enrichment
+        // (contextWindow / maxOutputTokens) cannot be made from the id alone.
+        currentModels.add(model)
         record("updateCurrentModel(${model.id})")
     }
     override fun setCurrentProvider(provider: LLMProvider) {

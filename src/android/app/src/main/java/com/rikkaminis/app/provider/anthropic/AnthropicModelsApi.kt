@@ -134,7 +134,16 @@ object AnthropicModelsApi {
 
         // All candidate bases failed.
         android.util.Log.e("AnthropicModels", "All ${candidateBases.size} fallback levels failed; lastCode=$lastFailureCode")
-        return@withContext if (isCustomEndpoint) emptyList() else LLMModel.allAnthropic
+        // [r3-b08 F-06] An auth answer is not "this endpoint has no model list".
+        // The builtin catalog stays the NETWORK-failure net for the official
+        // instance; a 401/403 means the credential was rejected, and answering
+        // it with the static list made `refreshModels` report SUCCESS_API and
+        // replace the rows (Gemini reaches the same verdict via [FIX-1 / F-196]).
+        return@withContext if (usesBuiltinCatalogOnFailure(isCustomEndpoint, lastFailureCode)) {
+            LLMModel.allAnthropic
+        } else {
+            emptyList()
+        }
     }
 
     private suspend fun parseAndCache(
@@ -229,3 +238,18 @@ object AnthropicModelsApi {
         return builder.build().toString().trimEnd('/')
     }
 }
+
+/**
+ * [r3-b08 F-06] Whether the builtin Anthropic catalog may stand in for a failed
+ * model-list fetch.
+ *
+ * Custom endpoint: never — the caller preserves the existing rows, and a
+ * DashScope-style relay often has no `/v1/models` at all. Official: yes as a
+ * network-failure net, but a 401/403 is an AUTH answer — answering it with the
+ * static list hid a revoked key behind `ModelRefreshResult.SUCCESS_API`
+ * (Gemini's `[FIX-1 / F-196]` reaches the same verdict).
+ *
+ * Pure + top-level for direct JVM testing (see ModelsApiFallbackTest).
+ */
+internal fun usesBuiltinCatalogOnFailure(isCustomEndpoint: Boolean, lastFailureCode: Int): Boolean =
+    !isCustomEndpoint && lastFailureCode != 401 && lastFailureCode != 403

@@ -2,6 +2,7 @@ package com.rikkaminis.app.data.repository
 
 import com.rikkaminis.app.backup.ROLLUP_BACKUP_FILE
 import com.rikkaminis.app.backup.memoryBackupEntries
+import com.rikkaminis.app.backup.readMemoryFileForBackup
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -96,6 +97,29 @@ class BackupMemoryRollupTest {
             "## Rollup 2026-10-15\n### rules\n- 蒸馏条目\n",
             out.first { it.first == "MEMORY-ROLLUP.md" }.second,
         )
+    }
+
+    @Test
+    fun readMemoryFileForBackup_distinguishesAbsentFromEmpty() {
+        // [FIX-R3-D / F-05] listAllFiles() lists GLOBAL.md even when the device
+        // never created it. The backup reader must answer "not there" (null ⇒
+        // no entry) rather than readFile's folded "" (which the restore side's
+        // guard would have to treat as "the backup knows nothing"). A file that
+        // exists but is empty still rides as "" — its emptiness is the truth.
+        val dir = File(tempDir, "read-for-backup").apply { mkdirs() }
+        assertEquals(null, readMemoryFileForBackup(dir, "GLOBAL.md"))
+
+        File(dir, "GLOBAL.md").writeText("## global\nreal content\n")
+        assertEquals("## global\nreal content\n", readMemoryFileForBackup(dir, "GLOBAL.md"))
+
+        File(dir, "EMPTY.md").writeText("")
+        assertEquals("", readMemoryFileForBackup(dir, "EMPTY.md"))
+
+        // No directory at all (memoryDirectory() failed): nothing is claimed.
+        assertEquals(null, readMemoryFileForBackup(null, "GLOBAL.md"))
+        // A directory in the file's place: not a file ⇒ null.
+        File(dir, "weird.md").mkdirs()
+        assertEquals(null, readMemoryFileForBackup(dir, "weird.md"))
     }
 
     @Test

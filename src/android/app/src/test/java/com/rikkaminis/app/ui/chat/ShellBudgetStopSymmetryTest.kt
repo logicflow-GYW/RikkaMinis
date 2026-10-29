@@ -173,8 +173,17 @@ internal data class BudgetGate(
 )
 
 /**
- * Finds every `t7ConsumeAndTrace(DIMENSION_…)` budget gate in [toolsSrc] and
- * reports the terminating signals present in its `if (!…) { … }` body.
+ * Finds every RUN-LEVEL `t7ConsumeAndTrace(DIMENSION_…)` budget gate in
+ * [toolsSrc] and reports the terminating signals present in its `if (!…) { … }`
+ * body.
+ *
+ * [FIX-R4-Q F-14] Dispatch-level refusals are excluded: the sub-agent dispatch
+ * gates its provider requests on the host run's budget and throws
+ * `SubagentBudgetExhaustedException` when refused, so the dispatch fails as a
+ * tool result while the RUN keeps going (setting `t7BudgetStopReason` there
+ * would end the parent run because a sub-agent ran out of attempts). That gate
+ * is pinned by `SubagentBudgetGateTest`; this collector is about the gates that
+ * terminate the run, and only those may — indeed must — set a stop reason.
  */
 internal fun collectBudgetGates(toolsSrc: String): List<BudgetGate> {
     val lines = toolsSrc.split("\n")
@@ -195,6 +204,9 @@ internal fun collectBudgetGates(toolsSrc: String): List<BudgetGate> {
             j++
         }
         val text = body.toString()
+        // Not a run-level gate when its refusal is a dispatch failure — see the
+        // KDoc above ([FIX-R4-Q F-14]).
+        if (text.contains("SubagentBudgetExhaustedException")) return@forEachIndexed
         out += BudgetGate(
             dimension = dimension,
             line = i + 1,

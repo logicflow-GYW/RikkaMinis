@@ -74,4 +74,41 @@ class MessagePayloadFilterTest {
     fun `a truly empty message is dropped`() {
         assertFalse(user().hasWirePayload(false, 0))
     }
+
+    // -- [r3-b08 F-09] "has parts" is not "has payload" ----------------------
+
+    @Test
+    fun `a message whose only part is empty text is dropped`() {
+        // This is the persisted empty assistant bubble
+        // (AgentLoopState.TerminalErrorPlacement writes exactly listOf(Text(""))).
+        // Passing it on the wire emits {"type":"text","text":""}, which the
+        // Anthropic Messages API rejects with a 400 on every later turn.
+        val parts = listOf<AgentContentPart>(AgentContentPart.Text(""))
+        assertFalse(user(contentParts = parts).hasWirePayload(false, 0))
+    }
+
+    @Test
+    fun `empty text next to a tool use still counts as payload`() {
+        val parts = listOf<AgentContentPart>(
+            AgentContentPart.Text(""),
+            AgentContentPart.ToolUse(id = "t1", name = "read_file", input = org.json.JSONObject()),
+        )
+        assertTrue(user(contentParts = parts).hasWirePayload(false, 0))
+    }
+
+    @Test
+    fun `empty text next to an image part still counts as payload`() {
+        val parts = listOf<AgentContentPart>(
+            AgentContentPart.Text(""),
+            AgentContentPart.ImageData(data = byteArrayOf(1, 2), mimeType = "image/png"),
+        )
+        assertTrue(user(contentParts = parts).hasWirePayload(false, 0))
+    }
+
+    @Test
+    fun `a blank-but-not-empty text part still counts`() {
+        // Deliberate: only a literally empty string is rejected by the API; a
+        // single space is a valid block and some prompts rely on it.
+        assertTrue(user(contentParts = listOf(AgentContentPart.Text(" "))).hasWirePayload(false, 0))
+    }
 }

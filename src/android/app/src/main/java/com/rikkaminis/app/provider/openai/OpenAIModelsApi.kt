@@ -74,7 +74,7 @@ object OpenAIModelsApi {
                 )
             }
         }
-        val url = buildURL(baseURL)
+        val url = buildModelsURL(baseURL, azureMode)
         val request = buildModelsRequest(url, apiKey, azureMode, customUserAgent)
 
         // [fix/audit0917-b8] Call cancellation is now wired into the request:
@@ -110,7 +110,18 @@ object OpenAIModelsApi {
                 if (context != null && (response.code == 401 || response.code == 403)) {
                     cache.invalidate(context, cacheKey)
                 }
-                return@withContext fallback
+                // [r3-b08 F-06] An AUTH answer is not "this endpoint does not do
+                // model lists". Gemini already refuses to answer 401/403 with
+                // its builtin catalog ([FIX-1 / F-196]); the two other official
+                // instances still did, which made a revoked key look like a
+                // successful refresh whose result happened to be the static
+                // list (ProviderRepository.refreshModels then replaces the
+                // user's rows and reports SUCCESS_API).
+                return@withContext if (usesBuiltinCatalogOnFailure(isCustomBase, response.code)) {
+                    LLMModel.allOpenAI
+                } else {
+                    emptyList()
+                }
             }
 
             val models = try {
@@ -284,13 +295,63 @@ object OpenAIModelsApi {
      */
     internal fun modelsCacheKey(baseURL: String?, apiKey: String, azureMode: Boolean): String =
         (baseURL ?: "") + "|" + apiKey + "|" + if (azureMode) "azure" else "bearer"
-
-    private fun buildURL(baseURL: String?): String {
-        if (baseURL == null) return "https://api.openai.com/v1/models"
-        // baseURL is ProviderConfig.effectiveBaseURL — it already has /v1 iff the
-        // appendV1Suffix toggle is on. Only append /models; never force /v1, or the
-        // toggle is overridden and services without /v1 return 404.
-        val base = baseURL.trimEnd('/')
-        return "$base/models"
-    }
 }
+
+private const val OFFICIAL_MODELS_URL = "https://api.openai.com/v1/models"
+
+/**
+ * [r3-b08 F-07] The models-list URL, Azure-aware.
+ *
+ * [baseURL] is `ProviderConfig.effectiveBaseURL` for every non-Azure
+ * instance — it already carries `/v1` iff the appendV1Suffix toggle is on, so
+ * only `/models` is appended. Azure is different in TWO ways and both used
+ * to be handled on the chat path only:
+ *
+ *  1. its base is `https://{res}.openai.azure.com[/openai]?api-version=…`,
+ *     and the data-plane list endpoint is `{root}/openai/models` — a path
+ *     segment that must go BEFORE the query string. Appending `/models` to
+ *     the whole string produced
+ *     `…azure.com?api-version=2024-10-21/v1/models`, i.e. `/v1/models`
+ *     inside the api-version VALUE (and the request 400s/404s every time);
+ *  2. `effectiveBaseURL` appends `/v1` to that query-carrying string, so the
+ *     Azure branch must receive the RAW `customBaseURL` (see
+ *     ModelListProviderAdapters) and strip a stray `/v1`/`/models` here.
+ *
+ * Same split-then-rejoin shape as `OpenAIProvider.azureUrl`, which is what
+ * the chat path already does.
+ */
+internal fun buildModelsURL(baseURL: String?, azureMode: Boolean): String {
+    if (baseURL.isNullOrBlank()) return OFFICIAL_MODELS_URL
+    if (azureMode) {
+        val raw = baseURL.trim()
+        val qIdx = raw.indexOf('?')
+        val query = if (qIdx >= 0) raw.substring(qIdx) else ""
+        var path = (if (qIdx >= 0) raw.substring(0, qIdx) else raw).trimEnd('/')
+        if (path.endsWith("/v1")) path = path.dropLast(3).trimEnd('/')
+        if (path.endsWith("/models")) path = path.dropLast(7).trimEnd('/')
+        if (!path.endsWith("/openai")) path = "$path/openai"
+        return "$path/models$query"
+    }
+    // Non-Azure: baseURL is ProviderConfig.effectiveBaseURL — it already has
+    // /v1 iff the appendV1Suffix toggle is on. Only append /models; never
+    // force /v1, or the toggle is overridden and services without /v1 404.
+    return "${baseURL.trimEnd('/')}/models"
+}
+
+/**
+ * [r3-b08 F-06] Whether a non-2xx models answer may be swapped for the
+ * builtin catalog.
+ *
+ * Custom bases: never (the caller preserves the existing rows — a vLLM/Ollama
+ * endpoint failing is not a licence to relabel its models as OpenAI's).
+ * Official instance: only for non-auth failures, where the builtin list is
+ * the historical network-failure net. A 401/403 means the credential was
+ * REJECTED, and answering it with the static list is what made
+ * `ProviderRepository.refreshModels` report `SUCCESS_API` for a revoked key
+ * (Gemini reaches the same verdict through `[FIX-1 / F-196]`).
+ *
+ * Boolean rather than "return the list" so the table is unit-testable
+ * without constructing a provider catalog (see ModelsApiFallbackTest).
+ */
+internal fun usesBuiltinCatalogOnFailure(isCustomBase: Boolean, statusCode: Int): Boolean =
+    !isCustomBase && statusCode != 401 && statusCode != 403

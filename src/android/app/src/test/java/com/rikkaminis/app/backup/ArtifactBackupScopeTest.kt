@@ -111,6 +111,94 @@ class ArtifactBackupScopeTest {
         }
     }
 
+    // ── [FIX-R3-D / F-06] symlinks are resolved before they are trusted ──
+
+    private fun symlinkOrSkip(target: File, link: File) {
+        try {
+            java.nio.file.Files.createSymbolicLink(link.toPath(), target.toPath())
+        } catch (e: Exception) {
+            org.junit.Assume.assumeNoException("symlinks unavailable here", e)
+        }
+    }
+
+    @Test
+    fun symlinkEscapingTheSharedRootIsNotArchived() {
+        // The reported shape: `shared/bridge_bak -> <minis-global>/mcp-servers/oauth`
+        // — a *relative* escape that never touches the link's own name, so both
+        // DENIED_DIRS and the restore-side `mcp/oauth/` filter missed it and
+        // plaintext OAuth tokens rode every automatic backup.
+        val base = File.createTempFile("scope-link", "").apply { delete(); mkdirs() }
+        try {
+            val root = File(base, "shared").apply { mkdirs() }
+            val outside = File(base, "mcp-servers/oauth").apply { mkdirs() }
+            writeFile(outside, "linear.json", 10)
+            writeFile(root, "keep.md", 10)
+            symlinkOrSkip(outside, File(root, "bridge_bak"))
+
+            val sel = ArtifactBackupScope.select(root)
+            assertEquals(listOf("keep.md"), sel.files.map { it.relPath })
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun symlinkedFileEscapingTheSharedRootIsNotArchived() {
+        val base = File.createTempFile("scope-link-file", "").apply { delete(); mkdirs() }
+        try {
+            val root = File(base, "shared").apply { mkdirs() }
+            val secret = writeFile(base, "outside/credentials.json", 10)
+            writeFile(root, "keep.md", 10)
+            symlinkOrSkip(secret, File(root, "innocent.json"))
+
+            val sel = ArtifactBackupScope.select(root)
+            assertEquals(listOf("keep.md"), sel.files.map { it.relPath })
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun symlinkToADeniedDirectoryInsideTheRootIsStillDenied() {
+        // Inside the root but renamed: the LINK is called `archive`, the bytes
+        // are `oauth/` — the old name-only check walked it.
+        val base = File.createTempFile("scope-link-denied", "").apply { delete(); mkdirs() }
+        try {
+            val root = File(base, "shared").apply { mkdirs() }
+            val oauth = File(root, "mcp/oauth").apply { mkdirs() }
+            writeFile(oauth, "linear.json", 10)
+            writeFile(root, "keep.md", 10)
+            symlinkOrSkip(oauth, File(root, "archive"))
+
+            val sel = ArtifactBackupScope.select(root)
+            assertEquals(listOf("keep.md"), sel.files.map { it.relPath })
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun symlinkInsideTheRootIsStillFollowed() {
+        // Fail-closed must not become "no symlinks at all": a link to a real
+        // sibling artifact is a legitimate layout. Because the cycle guard is
+        // keyed on the canonical path, the first name visited wins and the
+        // other one is skipped — one copy of the content, never two.
+        val base = File.createTempFile("scope-link-inside", "").apply { delete(); mkdirs() }
+        try {
+            val root = File(base, "shared").apply { mkdirs() }
+            writeFile(root, "real/report.md", 10)
+            symlinkOrSkip(File(root, "real"), File(root, "alias"))
+
+            val sel = ArtifactBackupScope.select(root)
+            assertEquals(1, sel.files.size)
+            assertTrue(
+                sel.files.single().relPath in setOf("alias/report.md", "real/report.md"),
+            )
+        } finally {
+            base.deleteRecursively()
+        }
+    }
+
     // ── Archive round trip with prefix routing ───────────────────────────
 
     @Test

@@ -1119,6 +1119,7 @@
     <string name="sysmsg_compact_failed">圧縮に失敗しました：%1$s</string>
     <string name="sysmsg_context_full_hint">コンテキストが間もなく満杯になります（%1$d / %2$d tokens）。/compact を実行して古い会話を要約に畳み込めます。</string>
     <string name="sysmsg_wait_compact">送信前に現在の圧縮が完了するまでお待ちください。</string>
+    <string name="sysmsg_edit_wait_stream">メッセージを編集中です。先に現在の応答を停止してください — 編集は元のメッセージを置き換えるため、キューには入れられません。</string>
     <string name="sysmsg_context_trimmed">コンテキストが %1$d の制限に達したため、最も古い %2$d 件のメッセージを切り捨ててタスクを続行しました。</string>
     <string name="sysmsg_compact_no_provider">プロバイダーが設定されていません。圧縮できません。</string>
     <string name="sysmsg_compact_empty_session">圧縮するものはありません — セッションは空です。</string>
@@ -1680,4 +1681,12 @@
     <string name="perm_runtime_batch_sub">カレンダー、連絡先、位置情報、写真、マイク、カメラ、通知</string>
     <string name="perm_runtime_batch_all_granted">すべてのシステム権限は既に許可されています。</string>
     <string name="perm_runtime_batch_partial">まだ %1$d 件の権限が許可されていません — Android が拒否したか、スキップしました。</string>
+    <string name="mirror_section_title">外部コピー</string>
+    <string name="mirror_section_footer">アプリの保存領域の外に置かれる、継続的に更新されるコピーです。アプリのデータを消去しても残り、任意のファイルマネージャーで開けます。</string>
+    <string name="mirror_enable">外部ミラー</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup — 自動更新</string>
+    <string name="mirror_sync_now">今すぐ同期</string>
+    <string name="mirror_last_sync">最終同期：%1$s</string>
+    <string name="mirror_never">まだ同期していません</string>
+    <string name="mirror_pending_count">同期待ち %1$d 件</string>
 </resources>

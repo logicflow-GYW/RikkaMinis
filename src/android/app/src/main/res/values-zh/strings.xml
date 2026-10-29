@@ -550,6 +550,7 @@
     <string name="webpreview_close">关闭</string>
     <string name="webpreview_stop">停止加载</string>
     <string name="webpreview_reload">重新加载</string>
+    <string name="webpreview_renderer_gone">页面渲染进程已被系统终止，预览无法继续显示。</string>
     <string name="webpreview_open_external">在外部浏览器中打开</string>
     <string name="webpreview_open_fullscreen">全屏打开</string>
     <string name="webpreview_more">更多</string>
@@ -1411,6 +1412,7 @@
     <string name="sysmsg_compact_failed">压缩失败：%1$s</string>
     <string name="sysmsg_context_full_hint">上下文即将占满（%1$d / %2$d tokens），可运行 /compact 将较早的对话折叠为摘要。</string>
     <string name="sysmsg_wait_compact">请等待当前压缩完成后再发送。</string>
+    <string name="sysmsg_edit_wait_stream">正在编辑消息。请先停止当前回复——编辑会替换原消息，不能排队发送。</string>
     <string name="sysmsg_context_trimmed">上下文已达 %1$d 限制，已自动裁剪 %2$d 条最老的对话以继续任务。</string>
     <string name="sysmsg_compact_no_provider">未配置模型提供商，无法压缩。</string>
     <string name="sysmsg_compact_empty_session">没有可压缩的内容——会话为空。</string>
@@ -1708,4 +1710,12 @@
     <string name="perm_runtime_batch_sub">日历、联系人、位置、照片、麦克风、相机、通知</string>
     <string name="perm_runtime_batch_all_granted">全部系统权限均已授予。</string>
     <string name="perm_runtime_batch_partial">仍有 %1$d 项权限未授予 —— Android 拒绝或你跳过了。</string>
+    <string name="mirror_section_title">外部冗余副本</string>
+    <string name="mirror_section_footer">应用存储之外的一份持续更新的副本。清空应用数据不会影响它，任意文件管理器都能直接读取。</string>
+    <string name="mirror_enable">外部冗余副本</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup —— 自动更新</string>
+    <string name="mirror_sync_now">立即同步</string>
+    <string name="mirror_last_sync">上次同步：%1$s</string>
+    <string name="mirror_never">尚未同步</string>
+    <string name="mirror_pending_count">待同步 %1$d 个文件</string>
 </resources>

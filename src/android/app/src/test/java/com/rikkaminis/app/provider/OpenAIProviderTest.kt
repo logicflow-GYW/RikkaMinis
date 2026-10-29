@@ -134,7 +134,7 @@ class OpenAIProviderTest {
     fun `sendMessage includes Bearer auth header`() = runBlocking {
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -149,7 +149,7 @@ class OpenAIProviderTest {
     fun `sendMessage includes system prompt as system message`() = runBlocking {
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -172,7 +172,7 @@ class OpenAIProviderTest {
     fun `sendMessage omits system message when null`() = runBlocking {
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -189,7 +189,7 @@ class OpenAIProviderTest {
     fun `sendMessage includes temperature when set`() = runBlocking {
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -204,7 +204,7 @@ class OpenAIProviderTest {
     fun `sendMessage omits temperature when null`() = runBlocking {
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -232,7 +232,7 @@ class OpenAIProviderTest {
         )
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -256,7 +256,7 @@ class OpenAIProviderTest {
         // "some relay we have no reason to whitelist".
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -272,7 +272,7 @@ class OpenAIProviderTest {
     fun `sendMessage issues a streaming request internally`() = runBlocking {
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -366,7 +366,7 @@ class OpenAIProviderTest {
     @Test
     fun `streamMessage parses cached tokens in usage`() = runBlocking {
         val streamBody = buildString {
-            appendLine("""data: {"choices":[{"delta":{"content":"ok"}}]}""")
+            appendLine("""data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}""")
             appendLine()
             appendLine("""data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":50}}}""")
             appendLine()
@@ -441,7 +441,7 @@ class OpenAIProviderTest {
         provider.model = LLMModel("qwen3.8-max", "Qwen3.8 Max", "OpenAI", supportsReasoning = true)
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 
@@ -462,7 +462,7 @@ class OpenAIProviderTest {
         provider.model = LLMModel("gpt-4o-mini", "GPT-4o Mini", "OpenAI")
         server.enqueue(
             MockResponse()
-                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"}}]}"""))
+                .setBody(sseBody("""{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}"""))
                 .setHeader("Content-Type", "text/event-stream")
         )
 

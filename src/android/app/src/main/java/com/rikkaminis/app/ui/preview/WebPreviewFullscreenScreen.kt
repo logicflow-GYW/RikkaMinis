@@ -188,7 +188,7 @@ fun WebPreviewFullscreenScreen(
             // `AndroidView` only runs `factory` on first composition (or when
             // the enclosing `key` changes), so a holder swap left this screen
             // showing the destroyed WebView of the previous holder.
-            key(holder) {
+            key(holder, holder.webView) {
             AndroidView(
                 factory = {
                     val wv = holder.webView
@@ -204,6 +204,14 @@ fun WebPreviewFullscreenScreen(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+            }
+
+            // [r3-c / B09 F-08, P1] Same dead-wire as the bottom sheet: nothing
+            // read `rendererGone`, so a killed renderer left a black rectangle
+            // and the toolbar's Reload talked to the corpse. The floating menu is
+            // drawn AFTER this overlay on purpose — closing must stay reachable.
+            if (holder.rendererGone) {
+                WebPreviewRendererGone(onRetry = { holder.rebuildAfterRendererGone() })
             }
 
             val navInset = WindowInsets.navigationBars.asPaddingValues()

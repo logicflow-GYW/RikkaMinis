@@ -1249,6 +1249,7 @@
     <string name="sysmsg_compact_failed">Ошибка сжатия: %1$s</string>
     <string name="sysmsg_context_full_hint">Контекст почти заполнен (%1$d / %2$d токенов). Выполните /compact, чтобы свернуть ранние витки в сводку.</string>
     <string name="sysmsg_wait_compact">Подождите завершения текущего сжатия перед отправкой.</string>
+    <string name="sysmsg_edit_wait_stream">Вы редактируете сообщение. Сначала остановите текущий ответ — правка заменяет старое сообщение и не может быть поставлена в очередь.</string>
     <string name="sysmsg_context_trimmed">Контекст достиг лимита %1$d; обрезаны самые старые %2$d сообщений для продолжения задачи.</string>
     <string name="sysmsg_compact_no_provider">Провайдер не настроен. Невозможно сжать.</string>
     <string name="sysmsg_compact_empty_session">Нечего сжимать — сессия пуста.</string>
@@ -1635,4 +1636,12 @@
     <string name="perm_runtime_batch_sub">Календарь, контакты, местоположение, фото, микрофон, камера, уведомления</string>
     <string name="perm_runtime_batch_all_granted">Все системные разрешения уже выданы.</string>
     <string name="perm_runtime_batch_partial">Ещё %1$d разрешений не выдано — Android отклонил или вы пропустили.</string>
+    <string name="mirror_section_title">Внешняя копия</string>
+    <string name="mirror_section_footer">Постоянно обновляемая копия вне хранилища приложения. Она сохраняется при очистке данных приложения и открывается любым файловым менеджером.</string>
+    <string name="mirror_enable">Внешнее зеркало</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup — обновляется автоматически</string>
+    <string name="mirror_sync_now">Синхронизировать сейчас</string>
+    <string name="mirror_last_sync">Последняя синхронизация: %1$s</string>
+    <string name="mirror_never">Ещё не синхронизировано</string>
+    <string name="mirror_pending_count">Ожидают синхронизации: %1$d</string>
 </resources>

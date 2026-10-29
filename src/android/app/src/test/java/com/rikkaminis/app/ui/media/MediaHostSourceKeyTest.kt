@@ -154,7 +154,15 @@ class MediaHostSourceKeyTest {
         // helper's own definition or its KDoc mentions: both renderers now run
         // image + video + audio through it (3 each) -- MarkdownText's image
         // block was the last one handing Coil a bare host path (dv20-B03 B-05).
-        for ((rel, blocks) in listOf(STREAM to 3, MARKDOWN to 3)) {
+        // [r3-c / B09 F-12] MarkdownText's audio block gained `prepareFailed`
+        // as a fifth member of the resolved-file-keyed family (player +
+        // prepared + isPlaying + positionMs + prepareFailed) so the dead
+        // "prepare threw" state can't outlive a file swap. StreamingMarkdownText
+        // is outside that wave's radius and keeps the original four.
+        for ((rel, blocks, fileKeyed) in listOf(
+            Triple(STREAM, 3, 4),
+            Triple(MARKDOWN, 3, 5),
+        )) {
             val src = stripComments(readRepoFile(rel))
             assertEquals(
                 "$rel: every media block must resolve via rememberMdMediaFile " +
@@ -164,8 +172,9 @@ class MediaHostSourceKeyTest {
             )
             assertEquals(
                 "$rel: the audio player instance plus prepared / isPlaying / " +
-                    "positionMs must share the resolved-file key (dead literal: 4)",
-                4,
+                    "positionMs / prepareFailed must share the resolved-file key " +
+                    "(dead literal: $fileKeyed)",
+                fileKeyed,
                 Regex("""remember\(resolvedMediaSourceKey\(file\)\)""").findAll(src).count(),
             )
         }

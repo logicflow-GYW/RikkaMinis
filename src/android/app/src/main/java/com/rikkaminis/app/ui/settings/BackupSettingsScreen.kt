@@ -201,6 +201,16 @@ fun BackupSettingsScreen(
     // utility, not a primary surface. Tap the toggle row to expand the list.
     var autoBackupsExpanded by remember { mutableStateOf(false) }
     var autoBackupLastRun by remember { mutableStateOf<String?>(null) }
+    // [feat/auto-backup-external-mirror] External mirror state. Same IO
+    // rule as the row above: both values read SharedPreferences, so they
+    // start at the defaults and are filled by the entry LaunchedEffect.
+    var mirrorEnabled by remember { mutableStateOf(false) }
+    var mirrorRunning by remember { mutableStateOf(false) }
+    var mirrorLastSync by remember { mutableStateOf<String?>(null) }
+    // §5 of the behaviour spec: the operator's liveness signal is freshness
+    // PLUS the pending count. A stale timestamp alone cannot distinguish
+    // "nothing changed" from "the trigger stopped firing".
+    var mirrorPending by remember { mutableStateOf<Int?>(null) }
     // [T-auto-backup-remote-dir] Remote automatic-backup management state:
     // the WebDAV `auto/` subdirectory listing (plus legacy root stragglers),
     // managed from a dedicated dialog inside the auto-backup section so the
@@ -254,6 +264,25 @@ fun BackupSettingsScreen(
         }
         autoBackupEnabled = autoRow.first
         autoBackupLastRun = autoRow.second
+        // [feat/auto-backup-external-mirror] Same off-composition load for the
+        // external mirror row (SharedPreferences: enabled flag + last label).
+        val mirrorRow = withContext(Dispatchers.IO) {
+            com.rikkaminis.app.backup.MirrorStore.isEnabled(context) to
+                com.rikkaminis.app.backup.MirrorStore.lastSyncLabel(context)
+        }
+        mirrorEnabled = mirrorRow.first
+        mirrorLastSync = mirrorRow.second
+    }
+    // Independent IO pass: pendingCount walks the source tree (1810 stats) and
+    // reads the remote manifest, so it must not delay the prefs-backed rows.
+    LaunchedEffect(mirrorEnabled) {
+        mirrorPending = if (mirrorEnabled) {
+            withContext(Dispatchers.IO) {
+                com.rikkaminis.app.backup.MirrorStore.pendingCount(context)
+            }
+        } else {
+            null
+        }
     }
 
     val refreshSnapshots: () -> Unit = {
@@ -879,6 +908,75 @@ fun BackupSettingsScreen(
                 }
             }
         }
+        // [feat/auto-backup-external-mirror] The second copy, outside the app's
+        // own storage: `Download/RikkaMinis/backup/` via MediaStore. The
+        // 2026-10-29 incident rebuilt filesDir and took both the working copy
+        // and its only (in-filesDir) backup with it, so the daily snapshot
+        // above is not redundancy on its own. This block is a continuously
+        // updated mirror of the documents that cannot be regenerated —
+        // MirrorScope holds the exact selection, MirrorPlan the throttle and
+        // the `previous/` rotation.
+        SettingsSection(
+            header = stringResource(R.string.mirror_section_title),
+            footer = stringResource(R.string.mirror_section_footer),
+        ) {
+            SettingsRow(
+                title = stringResource(R.string.mirror_enable),
+                subtitle = stringResource(R.string.mirror_enable_sub),
+                trailing = {
+                    Switch(
+                        checked = mirrorEnabled,
+                        onCheckedChange = { on ->
+                            mirrorEnabled = on
+                            com.rikkaminis.app.backup.MirrorStore.setEnabled(context, on)
+                        },
+                    )
+                },
+                // Switch only, same double-fire reasoning as the daily row.
+                showDivider = true,
+            )
+            SettingsRow(
+                title = stringResource(R.string.mirror_sync_now),
+                subtitle = run {
+                    val last = mirrorLastSync
+                    val pending = mirrorPending
+                    when {
+                        mirrorRunning -> stringResource(R.string.backup_progress_title)
+                        last == null -> stringResource(R.string.mirror_never)
+                        pending != null && pending > 0 ->
+                            stringResource(R.string.mirror_last_sync, last) + " · " +
+                                stringResource(R.string.mirror_pending_count, pending)
+                        else -> stringResource(R.string.mirror_last_sync, last)
+                    }
+                },
+                icon = Icons.Filled.Refresh,
+                onClick = if (operationBusy || mirrorRunning) null else ({
+                    mirrorRunning = true
+                    operationBusy = true
+                    application.applicationScope.launch {
+                        try {
+                            val manager = com.rikkaminis.app.backup.MirrorStore
+                            withContext(Dispatchers.IO) { manager.syncNow(context) }
+                            val refreshed = withContext(Dispatchers.IO) { manager.lastSyncLabel(context) }
+                            val pendingNow = withContext(Dispatchers.IO) { manager.pendingCount(context) }
+                            withContext(Dispatchers.Main) {
+                                mirrorLastSync = refreshed
+                                mirrorPending = pendingNow
+                            }
+                        } catch (t: Throwable) {
+                            withContext(Dispatchers.Main) { errorMessage = t.message ?: errUnknown }
+                        } finally {
+                            withContext(Dispatchers.Main) {
+                                mirrorRunning = false
+                                operationBusy = false
+                            }
+                        }
+                    }
+                }),
+                showDivider = false,
+            )
+        }
+
         SettingsSection(
             header = stringResource(R.string.backup_section_local),
             footer = stringResource(R.string.backup_section_footer),
@@ -1356,8 +1454,17 @@ fun BackupSettingsScreen(
                                 // as the nightly writes — before this, every
                                 // fetch added an unbounded local copy with no
                                 // AUTO_BACKUP_KEEP cap applied.
+                                //
+                                // [FIX-R3-D / F-01] …and the fetched copy is
+                                // protected: a copy fetched from an OLDER date
+                                // sorts as the oldest by name, so the rotation
+                                // deleted it in the same breath as writing it
+                                // (the Toast said "fetched", the list showed
+                                // nothing new).
                                 withContext(Dispatchers.IO) {
-                                    com.rikkaminis.app.backup.AutoBackupManager.rotateLocalAutoBackups(context)
+                                    com.rikkaminis.app.backup.AutoBackupManager.withFreshlyWritten(local) {
+                                        com.rikkaminis.app.backup.AutoBackupManager.rotateLocalAutoBackups(context)
+                                    }
                                 }
                                 // Refresh the local auto-backup list so the
                                 // fetched copy shows up immediately (state

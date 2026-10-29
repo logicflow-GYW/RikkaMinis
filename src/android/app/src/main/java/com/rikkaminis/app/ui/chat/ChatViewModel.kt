@@ -2636,16 +2636,34 @@ class ChatViewModel(
         // session never shows one.
         viewModelScope.launch {
             canResume.collect { interrupted ->
+                // [FIX-R4-P F-10] Key the badge by the id the session LIST
+                // renders. A draft session (`__new__<uuid>`) has no row there,
+                // so pushing under `sessionId` wrote a PAUSED entry nothing ever
+                // reads — a chat started from "new" never showed the badge after
+                // a Stop / turn-limit stop — and the stale key also survived
+                // promotion. `activeSessionId` is the real id once ensureSession()
+                // has promoted the draft, and equals `sessionId` for every VM
+                // that was loaded from history (so no behaviour change there).
+                val badgeKey = activeSessionId
                 if (interrupted) {
                     com.rikkaminis.app.service.SessionBadgeStore.push(
-                        sessionId,
+                        badgeKey,
                         com.rikkaminis.app.service.SessionBadgeStore.SessionBadgeState.PAUSED,
                     )
                 } else {
                     com.rikkaminis.app.service.SessionBadgeStore.remove(
-                        sessionId,
+                        badgeKey,
                         com.rikkaminis.app.service.SessionBadgeStore.SessionBadgeState.PAUSED,
                     )
+                    // Also clear a badge that was pushed under the pre-promotion
+                    // draft key, otherwise that stale entry lingers in the
+                    // persisted map for the life of the install.
+                    if (sessionId != badgeKey) {
+                        com.rikkaminis.app.service.SessionBadgeStore.remove(
+                            sessionId,
+                            com.rikkaminis.app.service.SessionBadgeStore.SessionBadgeState.PAUSED,
+                        )
+                    }
                 }
             }
         }
@@ -2923,6 +2941,11 @@ class ChatViewModel(
         // both; the next turn re-evaluates pressure from live state.
         _compactSummary.value = null
         toolLoopDetector.reset()
+        // [FIX-R4-P F-02] The wiped transcript's pressure reading must not
+        // survive the wipe: `contextPressure()` re-derives EXHAUSTED from a
+        // stale `_lastTurnContextTokens`, so the Context-Full dialog the user
+        // just cleared came straight back on the new chat's first send.
+        resetContextPressureState()
         _canResume.value = false
         _attachments.value = emptyList()
         // [sweep-p1] Editing state must go too (backlog §72): a mid-edit
@@ -3281,6 +3304,12 @@ class ChatViewModel(
                 for (entity in chatRepository.loadMessages(sid)) {
                     agentHistory.add(entity.toLLMMessage())
                 }
+                // [FIX-R4-P F-05/F-02] Block-boundary rerun is a rewind too:
+                // everything from the target block onward was deleted, so a
+                // marker anchored there summarizes removed turns, and the
+                // pressure reading describes the pre-rewind transcript.
+                dropCompactMarkerIfRewound(sid)
+                resetContextPressureState()
 
                 streamLaunched = runRerunStreamTail(initialProvider, "rerunFromToolBlock", sendEpoch, claimToken)
             } finally {
@@ -3456,6 +3485,16 @@ class ChatViewModel(
             for (entity in remaining) {
                 agentHistory.add(entity.toLLMMessage())
             }
+            // [FIX-R4-P F-05] The retry deleted everything after the message
+            // we are re-answering. A compaction marker anchored inside the
+            // deleted range is now a summary of turns the user just removed —
+            // and `loadSession()`'s createdAt heal would even re-anchor it to
+            // the truncated tail and PERSIST that, so the deleted content keeps
+            // coming back as context. Drop it here instead of at load time.
+            // [FIX-R4-P F-02] Same rewind: the pressure reading described the
+            // longer transcript that no longer exists.
+            dropCompactMarkerIfRewound(sid)
+            resetContextPressureState()
 
             streamLaunched = runRerunStreamTail(provider, "retryFromMessage", sendEpoch, claimToken)
             } finally {
@@ -3676,6 +3715,25 @@ class ChatViewModel(
         val trimmed = text.trim()
         // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
         if (_isStreaming.value) {
+            // [FIX-R4-P F-13] An edit is a REWRITE of the transcript, not a new
+            // turn. Queueing it — the branch below — appends the edited text as
+            // a fresh message at the tail, never runs the truncation the edit
+            // implies, and never consumes `_editingMessageId` (that happens far
+            // below, past this early return), so the "Editing message" banner
+            // sticks until the user cancels it manually. The state IS reachable
+            // even though editMessage() refuses to start editing mid-stream: a
+            // queued drain / resume can start a turn while the user is already
+            // editing. Refuse to queue in that case, keep the edit state intact
+            // and put the text back in the composer (ChatInputArea clears the
+            // field before calling us), so nothing is lost.
+            if (_editingMessageId.value != null) {
+                appendSystemInfo(
+                    text = context.getString(R.string.sysmsg_edit_wait_stream),
+                    iconKind = "info",
+                )
+                setInputText(text)
+                return
+            }
             enqueuePrompt(text)
             // [T-user-message-preempts-agent] User messages win over the
             // running agent task: immediately cancel the in-flight stream so
@@ -3840,6 +3898,14 @@ class ChatViewModel(
 
             if (editingId != null) {
                 truncateBeforeEdit(editingId)
+                // [FIX-R4-P F-05] Editing an old message truncates everything
+                // after it — markers anchored in the deleted range summarize
+                // content the user just removed, and `loadSession()`'s created-
+                // at heal would re-anchor + persist them over the short tail.
+                // [FIX-R4-P F-02] And the context-pressure reading belongs to
+                // the pre-edit transcript.
+                dropCompactMarkerIfRewound(activeSessionId)
+                resetContextPressureState()
             }
 
             val prepared = prepareUserAttachments(currentAttachments, activeSessionId)
@@ -4222,28 +4288,12 @@ class ChatViewModel(
         val sendEpoch = streamingClaimEpoch
         val claimToken = streamingClaimToken
 
-        // If history ends with assistant (Case 2: text-cancel committed a
-        // partial assistant turn), append a continue reminder as a user
-        // message. If it ends with user tool_result (Case 1), it's already
-        // a valid starting point for the next API call — no reminder needed.
-        val historyEndsWithAssistant =
-            agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT
-        if (historyEndsWithAssistant) {
-            val reminder =
-                "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
-            val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
-            agentHistory.add(
-                LLMMessage(
-                    role = LLMMessage.Role.USER,
-                    content = reminder,
-                    contentParts = parts,
-                )
-            )
-            viewModelScope.launch(Dispatchers.IO) {
-                val partsJson = """[{"type":"text","value":${escapeJson(reminder)}}]"""
-                chatRepository.appendMessage(activeSessionId, "user", partsJson)
-            }
-        }
+        // [FIX-R4-P F-07] The continue reminder used to be appended HERE, before
+        // the setup shell ran. It is a real persisted user turn, so writing it
+        // outside the claim window meant a Stop during the prompt build left a
+        // reminder pinned to the tail with no answer behind it (see the block
+        // inside the shell below for the full consequences). It now lives
+        // inside the shell, after the claim-revocation check.
 
         // [B-08 deep-audit-1048] Hold the setup shell in sendShellJob so
         // cancelStream() can kill the whole turn (same rationale + shape as the
@@ -4267,6 +4317,50 @@ class ChatViewModel(
                 ) {
                     AppLogger.info(TAG_STREAM, "resume shell aborted before stream (claim revoked; sid=$activeSessionId)")
                     return@launch
+                }
+
+                // [FIX-R4-P F-07] Continue reminder — Case 2 only: history ends
+                // with an ASSISTANT (a text-cancel committed a partial turn), so
+                // the next request needs a user turn to answer. Case 1 (the tail
+                // is a tool_result user turn) is already a valid starting point.
+                //
+                // It MUST be written here, inside the claim window. The previous
+                // placement (synchronously in resume(), before this shell) made
+                // it un-cancellable: a Stop during the prompt build left a
+                // persisted reminder sitting at the tail of the transcript with
+                // no answer behind it. handleUserCancelledCleanup then saw
+                // "history does NOT end with assistant", took the persist arm,
+                // and appended the already-committed partial text a SECOND time
+                // (plus another reminder) — a new duplicate pair on every
+                // stop-during-resume. Keeping the write behind the revocation
+                // check makes the reminder exactly as cancellable as the turn it
+                // belongs to, and lets the stop cleanup see the true tail shape
+                // (so _canResume is restored by planStopCleanup instead of being
+                // left false by this method's entry reset).
+                if (agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT) {
+                    val reminder =
+                        "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
+                    val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
+                    // Capture the row id: the reminder is a real transcript row,
+                    // so the in-memory entry must know its dbMessageId or compact
+                    // boundary resolution (which is id-based) cannot see it.
+                    val reminderRow = runCatching {
+                        chatRepository.appendMessage(
+                            activeSessionId,
+                            "user",
+                            """[{"type":"text","value":${escapeJson(reminder)}}]""",
+                        )
+                    }.onFailure {
+                        AppLogger.warning(TAG, "resume: continue-reminder persist failed: ${it.message}")
+                    }.getOrNull()
+                    agentHistory.add(
+                        LLMMessage(
+                            role = LLMMessage.Role.USER,
+                            content = reminder,
+                            contentParts = parts,
+                            dbMessageId = reminderRow?.id,
+                        )
+                    )
                 }
 
                 streamLaunched = true

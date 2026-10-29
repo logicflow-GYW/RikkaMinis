@@ -153,6 +153,14 @@ object SpeechRecognitionManager {
         _selectedEngineId.value = id
         prefs.edit().putString(KEY_ENGINE_ID, id).apply()
         refreshAvailability()
+        // [r3-B11-F06] The locale list belongs to the ENGINE, not to the app:
+        // it was only ever populated from init()/selectLocale(), so switching
+        // engines left _supportedLocales showing the previous engine's list
+        // (and re-validating the saved locale against a list it does not
+        // belong to could silently switch the user's language). The waveform
+        // is cleared for the same reason — it was the cancelled session's.
+        refreshSupportedLocales()
+        resetLevels()
     }
 
     fun selectLocale(locale: Locale) {

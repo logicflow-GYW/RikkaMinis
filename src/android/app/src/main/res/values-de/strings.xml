@@ -1112,6 +1112,7 @@
     <string name="sysmsg_compact_failed">Komprimierung fehlgeschlagen: %1$s</string>
     <string name="sysmsg_context_full_hint">Der Kontext wird voll (%1$d / %2$d Tokens). Führen Sie /compact aus, um ältere Turns in eine Zusammenfassung zu falten.</string>
     <string name="sysmsg_wait_compact">Warten Sie, bis die aktuelle Komprimierung abgeschlossen ist, bevor Sie senden.</string>
+    <string name="sysmsg_edit_wait_stream">Sie bearbeiten gerade eine Nachricht. Beenden Sie zuerst die laufende Antwort - eine Bearbeitung ersetzt die alte Nachricht und kann nicht in die Warteschlange.</string>
     <string name="sysmsg_context_trimmed">Kontext hat das Limit %1$d erreicht; die ältesten %2$d Nachrichten wurden entfernt, um fortzufahren.</string>
     <string name="sysmsg_compact_no_provider">Kein Provider konfiguriert. Komprimierung nicht möglich.</string>
     <string name="sysmsg_compact_empty_session">Nichts zu komprimieren — die Sitzung ist leer.</string>
@@ -1682,4 +1683,12 @@
     <string name="perm_runtime_batch_sub">Kalender, Kontakte, Standort, Fotos, Mikrofon, Kamera, Benachrichtigungen</string>
     <string name="perm_runtime_batch_all_granted">Alle Systemberechtigungen sind bereits gewährt.</string>
     <string name="perm_runtime_batch_partial">%1$d Berechtigung(en) noch nicht gewährt — Android hat abgelehnt oder du hast übersprungen.</string>
+    <string name="mirror_section_title">Externe Kopie</string>
+    <string name="mirror_section_footer">Eine fortlaufend aktualisierte Kopie außerhalb des App-Speichers. Beim Löschen der App-Daten bleibt sie erhalten und ist mit jedem Dateimanager lesbar.</string>
+    <string name="mirror_enable">Externer Spiegel</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup – automatisch aktualisiert</string>
+    <string name="mirror_sync_now">Jetzt synchronisieren</string>
+    <string name="mirror_last_sync">Letzte Synchronisierung: %1$s</string>
+    <string name="mirror_never">Noch nicht synchronisiert</string>
+    <string name="mirror_pending_count">%1$d Datei(en) warten auf Sync</string>
 </resources>
