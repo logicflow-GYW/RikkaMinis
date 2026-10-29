@@ -154,11 +154,16 @@ grep/, →  数字开头 + 无运算符 ⇒ looksLikeMath 的数字守卫 if (co
 - 臂 B/C 证明两个从句各自有用且都不够宽；
 - **臂 D 是“拒绝更宽松写法”的对照**：一个图省事的正则会当场吃掉既有测试钉住的真公式，所以必须拆成 4 段形状而不是一把抓。
 
-### 5.3 CI
+### 5.3 CI（绿 = 已核）
 
-- run **`40885982453`** @ **`f4a9554b`**
-- `head_sha` 与本地 HEAD **逐字符一致**（三项核查第 2 项）
-- 停止节点 = 分支 CI 绿，**未合 main**（起手权在用户）
+- run **`40885982453`**，attempt 1，`success`，21.8 min（13:52:33Z → 14:14:46Z）
+- 云端 `head_sha` = **`f4a9554b7cec72584b7b7d7b624248465e6f96e4`**，与本地 `git rev-parse f4a9554b` **逐字符一致**（三项核查第 2 项）
+- 日志实测（1,657,176 B，NUL 0）：
+  - 门：`Summary: 113 passed, 0 failed`，`GATE=GREEN file_uri_parse_guard`（本文件唯一相关门）
+  - 夹具：`✅ ALL 349 CASES PASS`
+  - 单测：`MarkdownCurrencyRangeTest` **24/24 PASSED**、`MarkdownCurrencyMathTest` **15/15 PASSED**（逐条 PASSED 行在日志里可数）
+  - `e: file` 编译错 **0**、真 `FAILED` 结尾行 **0**
+- **停止节点达成**：分支 CI 绿，**未合 main**（起手权在用户）
 
 ---
 
