@@ -478,9 +478,12 @@ object MirrorStore {
         // into a permanent, invisible hole in the mirror.
         val skipped = LinkedHashSet<String>()
         for (e in diff.toWrite) {
-            val src = byRel[e.relPath]?.file ?: run { skipped += e.relPath; continue }
-            val bytes = runCatching { src.readBytes() }.getOrNull()
-            if (bytes == null) {
+            // No `continue` inside an inline lambda (`?: run { … }`): the project
+            // compiles with a language version below 2.2, where that is a hard
+            // error (`break continue in inline lambdas`).
+            val src = byRel[e.relPath]?.file
+            val bytes = src?.let { runCatching { it.readBytes() }.getOrNull() }
+            if (src == null || bytes == null) {
                 skipped += e.relPath
                 continue
             }
