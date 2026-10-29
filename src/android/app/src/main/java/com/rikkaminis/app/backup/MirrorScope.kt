@@ -80,15 +80,52 @@ internal object MirrorScope {
      * legitimately discusses credentials (backlog entries, daily logs,
      * sanitiser scripts), so a regex over every mirrored file would both cost
      * and misfire — that gap is the logged residual of this decision.
+     *
+     * [FIX-R5-A2 / A-F-04] The first cut matched case-sensitively, so `API_KEYS.md`,
+     * `Secrets.json` and `.ENV` — the spellings a person actually types — all
+     * went through, and the `apiKey`/`auth`/`cookie`/`bearer` families were
+     * missing entirely. Both patterns are now IGNORE_CASE and cover those
+     * roots. The rule stays BOUNDARY-anchored (`[\\-_.]` or the ends of the
+     * name), which is what keeps ordinary documents out: `monkeys.md`,
+     * `keyboard-notes.md`, `author-notes.md` and `cookiecutter.md` must never
+     * match — a red line that swallows the documents the mirror exists for
+     * has "fixed" the leak by breaking the feature.
      */
     val DENY_NAME_PATTERNS: List<Regex> = listOf(
-        Regex("(^|[\\-_.])(keys?|secrets?|credentials?|passwords?|passwds?|tokens?|oauth)([\\-_.]|$)"),
-        Regex("^\\.env"),
+        Regex(
+            "(^|[\\-_.])(keys?|secrets?|credentials?|passwords?|passwds?|tokens?|oauth" +
+                "|auth|cookies?|bearer|apikeys?)([\\-_.]|$)",
+            RegexOption.IGNORE_CASE,
+        ),
+        Regex("^\\.env", RegexOption.IGNORE_CASE),
+    )
+
+    /**
+     * Directory names whose CONTENTS are credentials regardless of what the
+     * leaves are called: `oauth/linear.json` and `secrets/config.json` carry
+     * tokens under entirely ordinary file names, so a name check on the file
+     * can never see them. Matched as a WHOLE name (case-insensitive).
+     *
+     * [FIX-R5-A2 / A-F-04] Deliberately a separate, much narrower rule than
+     * [DENY_NAME_PATTERNS], and that is the whole point: reusing the file rule
+     * here would drop `skills/tierflow-key-harvest/` — its name matches
+     * `-key-` — i.e. the user's most-used skill would silently leave the
+     * mirror. Whole-name matching against a container vocabulary cannot
+     * false-positive on a compound name like that. Verified against the real
+     * trees on 2026-10-29: no live directory matches these names.
+     */
+    val DENY_DIR_NAMES: Set<String> = setOf(
+        "oauth", "secrets", "credentials", "keys", "apikeys",
+        ".ssh", ".aws", ".gnupg", ".docker", ".kube", "keychain",
     )
 
     /** Pure and public so the deny rule is testable in isolation. */
     fun isDeniedName(name: String): Boolean =
         DENY_NAME_PATTERNS.any { it.containsMatchIn(name) }
+
+    /** Directory counterpart of [isDeniedName] — see [DENY_DIR_NAMES] for why
+     *  the two vocabularies differ in width. */
+    fun isDeniedDir(name: String): Boolean = name.lowercase() in DENY_DIR_NAMES
 
     /** One file selected for mirroring. [relPath] is relative to the mirror
      *  root and already carries the source prefix (`memory/…`, `shared/…`).
@@ -180,6 +217,13 @@ internal object MirrorScope {
                     .getOrDefault(true)
                 if (isLink) continue
                 if (child.isDirectory) {
+                    // [FIX-R5-A2 / A-F-04] A directory can BE the credential
+                    // holder (`oauth/linear.json`, `secrets/config.json`): no
+                    // name check on the leaf can see that, so the walk must not
+                    // descend. Denying the directory also keeps its files out
+                    // of the manifest entirely, which is what makes the leak
+                    // unrepresentable rather than merely unreached.
+                    if (isDeniedDir(name)) continue
                     if (includeAllDirs(rel, name)) walk(child, childRel)
                     continue
                 }
