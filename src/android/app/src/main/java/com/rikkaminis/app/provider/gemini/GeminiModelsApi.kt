@@ -127,7 +127,14 @@ object GeminiModelsApi {
                 // that case and let an api-key 401/403 surface as a failure.
                 if (response.code == 401 || response.code == 403) {
                     if (context != null) cache.invalidate(context, cacheKey)
-                    if (oauthCredential) {
+                    // [R5-E2 E-C-05①] The Cloud Code Assist fallback is a fact about
+                    // GOOGLE's endpoint, not about the credential: a relay in front of
+                    // the API answers 401/403 for its OWN reasons (disabled key, WAF,
+                    // quota) and has no "generative-language scope" to lack, so
+                    // answering it with the static Google catalog replaced the relay's
+                    // rows with five models it may not serve — and reported success.
+                    // Only an OAuth credential pointed AT Google keeps the fallback.
+                    if (oauthCredential && isOfficialGeminiBase(baseUrl)) {
                         // The documented case: OAuth without the
                         // generative-language scope. Builtin list is the best
                         // available answer, matching iOS.
@@ -135,7 +142,8 @@ object GeminiModelsApi {
                     }
                     android.util.Log.w(
                         TAG,
-                        "models fetch auth failure code=${response.code} — not falling back to builtin list: ${body.take(300)}",
+                        "models fetch auth failure code=${response.code} oauth=$oauthCredential " +
+                            "official=${isOfficialGeminiBase(baseUrl)} — not falling back to builtin list: ${body.take(300)}",
                     )
                     return@withContext emptyList()
                 }
@@ -185,17 +193,51 @@ object GeminiModelsApi {
  * Host-based rather than `customBaseURL != null` so a user who pasted the
  * public endpoint into the custom-base field is still treated as official.
  *
+ * [R5-E2 E-C-05②] The test is the parsed HOSTNAME, not a substring of the whole
+ * URL. The old `contains("generativelanguage.googleapis.com")` said "official"
+ * for `https://relay.internal/generativelanguage.googleapis.com/v1beta`, i.e.
+ * for exactly the relay shape this helper exists to reject, and the two callers
+ * above then answered a relay failure with Google's static catalog (rows
+ * replaced, success reported). A base that cannot be parsed is NOT official:
+ * fail towards "preserve the user's rows".
+ *
  * Callers branch on this because an official instance keeps the builtin Google
  * list as its network-failure net, while a relay gets EMPTY: `ProviderRepository
  * .refreshModels` then takes its `models.isEmpty()` path and PRESERVES the rows
  * the user already has instead of replacing them with five Google models. (The
  * `oauthCredential` 403 case is handled separately and deliberately keeps the
  * builtin list — the documented Cloud Code Assist scope fallback,
- * `[FIX-1 / F-196]`.)
+ * `[FIX-1 / F-196]`, now also gated on this predicate: only Google has that
+ * scope to lack.)
  */
 internal fun isOfficialGeminiBase(baseUrl: String?): Boolean {
-    val lower = baseUrl?.trim()?.lowercase()
-    if (lower.isNullOrEmpty()) return true
-    return lower.contains("generativelanguage.googleapis.com") ||
-        lower.contains("cloudcode-pa.googleapis.com")
+    val raw = baseUrl?.trim().orEmpty()
+    if (raw.isEmpty()) return true
+    val host = geminiBaseHost(raw) ?: return false
+    return host in OFFICIAL_GEMINI_HOSTS
+}
+
+/** Hostnames served by Google itself (the two the old substring test covered). */
+private val OFFICIAL_GEMINI_HOSTS = setOf(
+    "generativelanguage.googleapis.com",
+    "cloudcode-pa.googleapis.com",
+)
+
+/**
+ * [R5-E2 E-C-05②] Hostname of a user-typed base, or null when it cannot be
+ * parsed. Tolerates a missing scheme (`generativelanguage.googleapis.com/v1beta`
+ * is a shape users paste) by assuming https; a trailing DNS dot is stripped so
+ * `generativelanguage.googleapis.com.` still matches. Pure, no Android types.
+ */
+internal fun geminiBaseHost(baseUrl: String): String? {
+    val raw = baseUrl.trim()
+    if (raw.isEmpty()) return null
+    val withScheme = if (raw.contains("://")) raw else "https://$raw"
+    val parsed = try {
+        java.net.URI(withScheme)
+    } catch (_: Exception) {
+        return null
+    }
+    val host = parsed.host ?: return null
+    return host.trimEnd('.').lowercase().ifEmpty { null }
 }
