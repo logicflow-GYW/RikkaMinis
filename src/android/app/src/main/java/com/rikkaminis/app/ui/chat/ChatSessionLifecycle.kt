@@ -239,6 +239,7 @@ internal fun ChatViewModel.effectiveAgentHistory(): List<LLMMessage> {
         // the full agentHistory each loop iteration — the slice is the
         // gap that previously escaped it.
         sanitizeAgentHistoryMessages(result)
+        normalizeSliceRoleAlternation(result)
         return result
     }
 
@@ -257,6 +258,7 @@ internal fun ChatViewModel.effectiveAgentHistory(): List<LLMMessage> {
             result1.add(summaryHead)
             result1.addAll(agentHistory.subList(keepStart, agentHistory.size))
             sanitizeAgentHistoryMessages(result1)
+            normalizeSliceRoleAlternation(result1)
             return result1
         }
         // Fall through to safety net.
@@ -272,11 +274,163 @@ internal fun ChatViewModel.effectiveAgentHistory(): List<LLMMessage> {
             result2.addAll(agentHistory.subList(postCompactStart, agentHistory.size))
         }
         sanitizeAgentHistoryMessages(result2)
+        normalizeSliceRoleAlternation(result2)
         return result2
     }
 
     Log.w(ChatViewModel.TAG, "[Compact] effectiveAgentHistory: marker ${marker.id.take(8)} unresolvable in agentHistory (size=${agentHistory.size}); returning full history")
     return agentHistory.toList()
+}
+
+/**
+ * [FIX-R4-P F-04] Repair the two illegal role shapes the compacted slice can
+ * still produce AFTER [sanitizeAgentHistoryMessages] has run. Sanitize alone
+ * cannot fix them, because the slice guards themselves create the damage:
+ *
+ * 1. **Leading ASSISTANT** — the pre-anchor peel loop strips non-USER heads to
+ *    restore role alternation, but the boundary guard deliberately extends
+ *    `priorIdx` BACK to include the paired `tool_use` assistant (so the
+ *    tool_result keeps its parent). The peel then removes that assistant,
+ *    leaving an orphaned `tool_result` USER at the head, which sanitize drops
+ *    (no matching `tool_use` in the slice) — so the head becomes whatever came
+ *    next, typically an ASSISTANT. Strict gateways (Anthropic, and OpenAI
+ *    gateways that validate alternation) reject a conversation whose first
+ *    message is not USER with a 400.
+ * 2. **Consecutive USER** — when no plain-text USER exists post-anchor, the
+ *    summary is appended as a standalone USER turn; if the last post-anchor
+ *    entry is itself a USER (tool_result-only), that yields USER,USER. Same
+ *    for the v1 path when `agentHistory[keepStart]` is a USER.
+ *
+ * The repair MERGES same-role neighbors instead of dropping either one. That is
+ * what strict providers do implicitly (OpenAI) or accept via multi-part content
+ * (Anthropic) — and appending keeps `tool_result` blocks at the head of their
+ * USER message, which is where Anthropic requires them.
+ *
+ * Peel first (it can create a same-role pair by removing the middle message),
+ * then merge left-to-right.
+ */
+internal fun normalizeSliceRoleAlternation(messages: MutableList<LLMMessage>) {
+    // (1) First message must be USER.
+    while (messages.isNotEmpty() && messages.first().role != LLMMessage.Role.USER) {
+        messages.removeAt(0)
+    }
+    // (2) Merge same-role neighbors.
+    var i = 1
+    while (i < messages.size) {
+        val prev = messages[i - 1]
+        val cur = messages[i]
+        if (prev.role == cur.role) {
+            messages[i - 1] = mergeSameRoleNeighbors(prev, cur)
+            messages.removeAt(i)
+        } else {
+            i++
+        }
+    }
+}
+
+/**
+ * Serialization reads [LLMMessage.contentParts] when present and ignores
+ * [LLMMessage.content] — lift a content-only message into a Text part, or a
+ * merge would silently swallow its text.
+ */
+private fun slicePartsOf(m: LLMMessage): List<AgentContentPart> =
+    if (m.contentParts.isNotEmpty()) {
+        m.contentParts
+    } else if (m.content.isNotEmpty()) {
+        listOf(AgentContentPart.Text(m.content))
+    } else {
+        emptyList()
+    }
+
+private fun mergeSameRoleNeighbors(a: LLMMessage, b: LLMMessage): LLMMessage {
+    val parts = slicePartsOf(a) + slicePartsOf(b)
+    val content = listOf(a.content, b.content).filter { it.isNotEmpty() }.joinToString("\n")
+    return a.copy(
+        content = content,
+        contentParts = parts,
+        reasoningContent = a.reasoningContent ?: b.reasoningContent,
+    )
+}
+
+/**
+ * [FIX-R4-P F-05] True when a cached compaction marker no longer has any
+ * anchor among the live transcript — i.e. the user rewound (Retry / Edit /
+ * Rerun) past the message the marker was pinned to.
+ *
+ * Refuses to answer for a marker with no anchor ids at all (legacy/unknown
+ * shape): "I cannot tell where this marker sits" must not be read as "it is
+ * orphaned" and silently throw away a live summary.
+ */
+internal fun compactMarkerIsOrphaned(
+    anchorIds: List<String>,
+    liveDbIds: Set<String>,
+): Boolean = anchorIds.isNotEmpty() && anchorIds.none { it in liveDbIds }
+
+/**
+ * [FIX-R4-P F-05] Drop the cached (and persisted) compaction markers when the
+ * live transcript has been rewound past their anchor.
+ *
+ * Why this is needed even though `effectiveAgentHistory()` degrades safely for
+ * the CURRENT process (an unresolvable anchor falls back to the full history):
+ * `loadSession()` runs `applyCompactMarkerGraying`, whose `createdAt` fallback
+ * RE-ANCHORS an orphaned marker to the newest surviving message and PERSISTS
+ * the rewrite (`version = 2`, fresh `lcmId`). A retry that deleted the anchored
+ * turn therefore resurrects the summary — now describing turns the user just
+ * deleted — and pins it in front of the truncated transcript from then on.
+ *
+ * Deleting the markers instead is honest: after a rewind the recap of the old
+ * history is no longer trustworthy, and the next auto-compact builds a fresh
+ * one from what actually remains.
+ */
+internal suspend fun ChatViewModel.dropCompactMarkerIfRewound(sid: String) {
+    val marker = _cachedLatestMarker ?: return
+    val anchors = listOfNotNull(
+        marker.lastCompactedMessageId?.takeIf { it.isNotEmpty() },
+        marker.firstKeptMessageId?.takeIf { it.isNotEmpty() },
+        marker.boundaryMessageId?.takeIf { it.isNotEmpty() },
+    )
+    val liveIds = agentHistory.mapNotNullTo(mutableSetOf()) {
+        it.dbMessageId?.takeIf(String::isNotEmpty)
+    }
+    if (!compactMarkerIsOrphaned(anchors, liveIds)) return
+    val deleted = runCatching { chatRepository.dao.deleteCompactMarkers(sid) }
+        .onFailure { Log.w(ChatViewModel.TAG, "[Compact] marker drop failed: ${it.message}") }
+        .isSuccess
+    _cachedLatestMarker = null
+    _compactSummary.value = null
+    Log.w(
+        ChatViewModel.TAG,
+        "[Compact] history rewound past marker anchor (anchors=$anchors, live=${liveIds.size}, deleted=$deleted) — " +
+            "marker cleared so its summary cannot be re-injected (or re-anchored by the createdAt heal)",
+    )
+}
+
+/**
+ * [FIX-R4-P F-02] Reset every context-pressure reading that was derived from
+ * the PREVIOUS transcript. They are per-conversation state, but three entry
+ * points rewrite or replace the transcript without resetting them:
+ *
+ * - `clearChat()` (the Context-Full dialog's "Clear Chat", and the drawer's
+ *   clear action): the transcript is gone, yet `_lastTurnContextTokens` still
+ *   holds the last turn's usage, so `contextPressure()` re-derives EXHAUSTED on
+ *   the very next send and the dialog comes straight back for the new,
+ *   three-message-long conversation.
+ * - `loadSession()` when switching to a different session (or re-entering one
+ *   after a clear): the reading belongs to the session we just left. A big
+ *   session can therefore block sending in a small one.
+ * - `retryFromMessage()` / `rerunFromToolBlock()` / edit-truncate: the
+ *   transcript shrank, so the old reading is an overestimate that can trigger a
+ *   pointless auto-compact of a now-short history.
+ *
+ * `rescueAttemptedForCompact` is part of the same cluster (it is the "this
+ * transcript already burned its one rescue" latch) and is reset here for the
+ * same reason: a rewound/cleared transcript deserves a fresh rescue budget.
+ */
+internal fun ChatViewModel.resetContextPressureState() {
+    _lastTurnContextTokens.value = 0
+    contextGrowthTracker.reset()
+    lastAutoCompactAtMs = Long.MIN_VALUE
+    rescueAttemptedForCompact = false
 }
 
 internal fun ChatViewModel.loadSession() {
@@ -306,7 +460,12 @@ internal fun ChatViewModel.loadSession() {
     // hard ceiling. Placed AFTER the safe-mode early return above: that path
     // skips session restore entirely (crash-recovery loop) — the user never
     // actually entered a session there, so it must not re-arm the gate.
-    rescueAttemptedForCompact = false
+    // [FIX-R4-P F-02] The reset is no longer the rescue latch alone: the
+    // whole context-pressure cluster (_lastTurnContextTokens / growth tracker /
+    // last-auto-compact timestamp) belongs to the transcript we just LEFT.
+    // Keeping it across a session switch let a big session's reading block the
+    // small one we just opened (and vice versa after clearChat).
+    resetContextPressureState()
     viewModelScope.launch {
         // [T-HANG-DIAG] timing markers to localise where session entry
         // stalls. Sentinel-tagged so a single grep -v can strip them

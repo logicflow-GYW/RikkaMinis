@@ -238,7 +238,13 @@ class CompactExhaustedRescueTest {
         // Reset #3 — session open.
         val lifecycle = readRepoFile("app/src/main/java/com/rikkaminis/app/ui/chat/ChatSessionLifecycle.kt")
         val load = lifecycle.substringAfter("internal fun ChatViewModel.loadSession()")
-        val atLoadReset = load.indexOf("rescueAttemptedForCompact = false")
+        // [FIX-R4-P F-02] The rescue latch is no longer assigned inline here: the
+        // reset moved into the shared `resetContextPressureState()`, which resets
+        // the whole context-pressure cluster (a stale `_lastTurnContextTokens`
+        // survived a session switch and re-derived EXHAUSTED for the session just
+        // opened). The helper is asserted to still re-arm THIS gate below, so the
+        // reset cannot be "fixed" by dropping the latch.
+        val atLoadReset = load.indexOf("resetContextPressureState()")
         val atSafeMode = load.indexOf("if (com.rikkaminis.app.crash.CrashFrequencyDetector.isSafeMode())")
         assertTrue("loadSession reset missing", atLoadReset >= 0)
         // Placement: AFTER the safe-mode early return — that path skips
@@ -246,6 +252,18 @@ class CompactExhaustedRescueTest {
         // not re-arm the gate.
         assertTrue("safe-mode block missing", atSafeMode >= 0)
         assertTrue("reset must come after the safe-mode early return", atLoadReset > atSafeMode)
+        // The shared helper must still reset the rescue latch.
+        val helper = lifecycle
+            .substringAfter("internal fun ChatViewModel.resetContextPressureState()")
+            .substringBefore("\n}")
+        assertTrue(
+            "resetContextPressureState must re-arm the rescue gate",
+            helper.contains("rescueAttemptedForCompact = false"),
+        )
+        assertTrue(
+            "resetContextPressureState must clear the stale turn-token reading",
+            helper.contains("_lastTurnContextTokens.value = 0"),
+        )
     }
 
     private fun readRepoFile(relative: String): String {
