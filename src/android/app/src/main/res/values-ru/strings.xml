@@ -1249,6 +1249,7 @@
     <string name="sysmsg_compact_failed">Ошибка сжатия: %1$s</string>
     <string name="sysmsg_context_full_hint">Контекст почти заполнен (%1$d / %2$d токенов). Выполните /compact, чтобы свернуть ранние витки в сводку.</string>
     <string name="sysmsg_wait_compact">Подождите завершения текущего сжатия перед отправкой.</string>
+    <string name="sysmsg_edit_wait_stream">Вы редактируете сообщение. Сначала остановите текущий ответ — правка заменяет старое сообщение и не может быть поставлена в очередь.</string>
     <string name="sysmsg_context_trimmed">Контекст достиг лимита %1$d; обрезаны самые старые %2$d сообщений для продолжения задачи.</string>
     <string name="sysmsg_compact_no_provider">Провайдер не настроен. Невозможно сжать.</string>
     <string name="sysmsg_compact_empty_session">Нечего сжимать — сессия пуста.</string>

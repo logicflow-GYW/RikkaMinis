@@ -1119,6 +1119,7 @@
     <string name="sysmsg_compact_failed">圧縮に失敗しました：%1$s</string>
     <string name="sysmsg_context_full_hint">コンテキストが間もなく満杯になります（%1$d / %2$d tokens）。/compact を実行して古い会話を要約に畳み込めます。</string>
     <string name="sysmsg_wait_compact">送信前に現在の圧縮が完了するまでお待ちください。</string>
+    <string name="sysmsg_edit_wait_stream">メッセージを編集中です。先に現在の応答を停止してください — 編集は元のメッセージを置き換えるため、キューには入れられません。</string>
     <string name="sysmsg_context_trimmed">コンテキストが %1$d の制限に達したため、最も古い %2$d 件のメッセージを切り捨ててタスクを続行しました。</string>
     <string name="sysmsg_compact_no_provider">プロバイダーが設定されていません。圧縮できません。</string>
     <string name="sysmsg_compact_empty_session">圧縮するものはありません — セッションは空です。</string>

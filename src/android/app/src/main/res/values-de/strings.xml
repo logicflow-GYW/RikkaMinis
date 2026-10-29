@@ -1112,6 +1112,7 @@
     <string name="sysmsg_compact_failed">Komprimierung fehlgeschlagen: %1$s</string>
     <string name="sysmsg_context_full_hint">Der Kontext wird voll (%1$d / %2$d Tokens). Führen Sie /compact aus, um ältere Turns in eine Zusammenfassung zu falten.</string>
     <string name="sysmsg_wait_compact">Warten Sie, bis die aktuelle Komprimierung abgeschlossen ist, bevor Sie senden.</string>
+    <string name="sysmsg_edit_wait_stream">Sie bearbeiten gerade eine Nachricht. Beenden Sie zuerst die laufende Antwort - eine Bearbeitung ersetzt die alte Nachricht und kann nicht in die Warteschlange.</string>
     <string name="sysmsg_context_trimmed">Kontext hat das Limit %1$d erreicht; die ältesten %2$d Nachrichten wurden entfernt, um fortzufahren.</string>
     <string name="sysmsg_compact_no_provider">Kein Provider konfiguriert. Komprimierung nicht möglich.</string>
     <string name="sysmsg_compact_empty_session">Nichts zu komprimieren — die Sitzung ist leer.</string>
