@@ -100,18 +100,16 @@ class ProgrammaticJumpFollowTest {
         "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt",
     ).readText()
 
-    /** Both jump entry points must route through the shared verdict helper. */
+    /** Both jump entry points must route through the shared verdict helper.
+     *  Pinned INDENT-SCOPED (same reasoning as OpenCatchUpGuardTest's [R5-C4]
+     *  rewrite: a char window is a proxy, "nearest marking before" is toothless —
+     *  an earlier code path satisfies it — while "in the block that scrolls" is
+     *  the actual contract). */
     @Test
     fun bothJumpEntryPoints_dispatchTheJumpVerdict() {
         val src = chatScreenSrc()
         for (marker in listOf("FOCUS-MESSAGE", "FAB-UP")) {
-            val at = src.indexOf("tracedScrollToItem(\"$marker\"")
-            assertTrue("jump entry $marker not found in ChatScreen.kt", at >= 0)
-            val window = src.substring(maxOf(0, at - 1500), at)
-            assertTrue(
-                "jump entry $marker no longer dispatches followEventForProgrammaticJump before scrolling",
-                window.contains("followEventForProgrammaticJump("),
-            )
+            assertInScrollingBlock(src, marker, "followEventForProgrammaticJump(")
         }
     }
 
@@ -127,6 +125,30 @@ class ProgrammaticJumpFollowTest {
                 dispatchAt in 0 until scrollAt,
             )
         }
+    }
+
+    /**
+     * Walk up from the scroll line to the first line with a SMALLER indent (the
+     * lambda that owns the call) and require [needle] inside that window.
+     */
+    private fun assertInScrollingBlock(src: String, marker: String, needle: String) {
+        val at = src.indexOf("tracedScrollToItem(\"$marker\"")
+        assertTrue("jump entry $marker not found in ChatScreen.kt", at >= 0)
+        val lines = src.lines()
+        val scrollLine = src.substring(0, at).count { it == '\n' }
+        val indent = lines[scrollLine].takeWhile { it == ' ' }.length
+        var i = scrollLine - 1
+        val block = StringBuilder()
+        while (i >= 0) {
+            val line = lines[i]
+            if (line.isNotBlank() && line.takeWhile { it == ' ' }.length < indent) break
+            block.append(line).append('\n')
+            i--
+        }
+        assertTrue(
+            "jump entry $marker does not dispatch `$needle` inside its scrolling block",
+            block.contains(needle),
+        )
     }
 
     /** Exactly one helper definition; the entry points must not grow their own copies. */
