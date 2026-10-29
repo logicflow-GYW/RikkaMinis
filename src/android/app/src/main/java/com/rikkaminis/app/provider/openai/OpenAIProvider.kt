@@ -2284,11 +2284,20 @@ class OpenAIProvider constructor(
                         if (hasImages || textParts.isNotEmpty() || extraRequestImages.isNotEmpty()) {
                             if (hasImages || extraRequestImages.isNotEmpty()) {
                                 val contentArray = JSONArray()
+                                // [R5-E1 E-F-06] The request-level images ride this
+                                // SAME walk as the turn's own parts (no second
+                                // serializer, no extra helper call site — the
+                                // tool-result wiring test pins those counts).
+                                val wireTurnParts =
+                                    if (extraRequestImages.isEmpty()) msg.contentParts
+                                    else msg.contentParts + extraRequestImages.map {
+                                        AgentContentPart.ImageData(it.data, it.mimeType)
+                                    }
                                 // Walk contentParts in original order so the
                                 // [attached image: …] text caption that
                                 // precedes each ImageData part stays adjacent
                                 // to the right image, matching iOS.
-                                for (part in msg.contentParts) {
+                                for (part in wireTurnParts) {
                                     when (part) {
                                         is AgentContentPart.Text -> {
                                             if (part.text.isNotEmpty()) {
@@ -2322,22 +2331,6 @@ class OpenAIProvider constructor(
                                         }
                                         else -> Unit  // ToolUse/ToolResult never appear on user role here
                                     }
-                                }
-                                // [R5-E1 E-F-06] Append the request-level images this
-                                // turn did not already carry, through the shared
-                                // encoder (no second serialization): images, then the
-                                // text parts above, is the order the legacy branch
-                                // and iOS both use for the top-level arm.
-                                if (extraRequestImages.isNotEmpty()) {
-                                    val extra = OpenAIToolResultImages.chatUserContent(
-                                        entries = extraRequestImages.map {
-                                            OpenAIToolResultImages.Entry("", it.data, it.mimeType)
-                                        },
-                                        supportsImages = supportsImages,
-                                        compress = { com.rikkaminis.app.provider.ImageBudget.compressUnderBudget(it) },
-                                        encodeBase64 = { Base64.encodeToString(it, Base64.NO_WRAP) },
-                                    )
-                                    for (i in 0 until extra.length()) contentArray.put(extra.get(i))
                                 }
                                 messagesArray.put(JSONObject().apply {
                                     put("role", "user")
@@ -3280,7 +3273,16 @@ class OpenAIProvider constructor(
                             }
                         if (imgParts.isNotEmpty() || extraRequestImages.isNotEmpty()) {
                             val contentArray = JSONArray()
-                            for (part in msg.contentParts) {
+                            // [R5-E1 E-F-06] Request-level images ride this SAME
+                            // walk as the turn's own parts — same branch, same
+                            // encoder, no extra helper call site (the wiring test
+                            // pins responsesUserContent at two call sites).
+                            val wireTurnParts =
+                                if (extraRequestImages.isEmpty()) msg.contentParts
+                                else msg.contentParts + extraRequestImages.map {
+                                    AgentContentPart.ImageData(it.data, it.mimeType)
+                                }
+                            for (part in wireTurnParts) {
                                 when (part) {
                                     is AgentContentPart.Text -> {
                                         if (part.text.isNotEmpty()) {
@@ -3318,20 +3320,6 @@ class OpenAIProvider constructor(
                                     }
                                     else -> Unit
                                 }
-                            }
-                            // [R5-E1 E-F-06] Request-level images this turn does not
-                            // already carry, through the shared Responses encoder
-                            // (input_image with the flattened `image_url` string).
-                            if (extraRequestImages.isNotEmpty()) {
-                                val extra = OpenAIToolResultImages.responsesUserContent(
-                                    entries = extraRequestImages.map {
-                                        OpenAIToolResultImages.Entry("", it.data, it.mimeType)
-                                    },
-                                    supportsImages = supportsImages,
-                                    compress = { com.rikkaminis.app.provider.ImageBudget.compressUnderBudget(it) },
-                                    encodeBase64 = { Base64.encodeToString(it, Base64.NO_WRAP) },
-                                )
-                                for (i in 0 until extra.length()) contentArray.put(extra.get(i))
                             }
                             input.put(JSONObject().apply {
                                 put("role", "user")
