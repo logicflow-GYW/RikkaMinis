@@ -321,23 +321,19 @@ internal object ContinuationHistoryMerge {
     }
 
     /**
-     * [R5-C2] The stacking guard for the ERROR-SHAPED continuation branch, which
-     * may follow either family: [EofStubReminderStackGuard] alone misses a
-     * length-wall reminder (its marker is deliberately distinct), so a segment
-     * that continued a `finish_reason="length"` turn left the *previous*
-     * reminder in place and the request carried two rival "keep going"
-     * instructions.
+     * [R5-C2] The OTHER half of the stacking guard for the error-shaped
+     * continuation branch: that branch can equally follow a length-wall
+     * segment, and [EofStubReminderStackGuard] deliberately does not
+     * cross-match its family (a "cut off mid-sentence" reminder is not an
+     * "cut off by a network error" one — `EofStubStackingGuardTest` pins that
+     * separation). The injection site therefore ORs the two family predicates:
+     * one source per family, no composed predicate that would become a third
+     * copy to drift.
      *
-     * One predicate per family, one source per predicate: the EOF side stays
-     * with the shared guard the two EOF injection sites already use, the
-     * length-wall side uses this object's own marker via [isLengthWallReminder].
+     * The length-wall reminder's shape: a USER turn with one Text part carrying
+     * [LENGTH_WALL_REMINDER_MARKER]. Shape-only, mirroring the EOF predicate.
      */
-    fun isStaleContinuationReminder(message: LLMMessage?): Boolean =
-        EofStubReminderStackGuard.isStaleEofStubReminder(message) || isLengthWallReminder(message)
-
-    /** The length-wall reminder's shape: a USER turn with one Text part carrying
-     *  [LENGTH_WALL_REMINDER_MARKER]. Shape-only, mirroring the EOF predicate. */
-    private fun isLengthWallReminder(message: LLMMessage?): Boolean {
+    fun isLengthWallReminder(message: LLMMessage?): Boolean {
         if (message == null || message.role != LLMMessage.Role.USER) return false
         if (message.contentParts.size != 1) return false
         val text = (message.contentParts.first() as? AgentContentPart.Text)?.text ?: return false
@@ -2567,10 +2563,14 @@ internal class AgentLoopEngine(
                             // segment, and the EOF-only check left that reminder
                             // in place (a folded continuation has already dropped
                             // it through the merge, so this guard only matters
-                            // when the merge declined).
+                            // when the merge declined). One family predicate per
+                            // source — the shared EOF guard, and the length-wall
+                            // marker on [ContinuationHistoryMerge].
                             val errPrevTailIdx = host.agentHistory.size - 2
                             val errPrevTail = host.agentHistory.getOrNull(errPrevTailIdx)
-                            if (ContinuationHistoryMerge.isStaleContinuationReminder(errPrevTail)) {
+                            if (EofStubReminderStackGuard.isStaleEofStubReminder(errPrevTail) ||
+                                ContinuationHistoryMerge.isLengthWallReminder(errPrevTail)
+                            ) {
                                 host.agentHistory.removeAt(errPrevTailIdx)
                             }
                         }

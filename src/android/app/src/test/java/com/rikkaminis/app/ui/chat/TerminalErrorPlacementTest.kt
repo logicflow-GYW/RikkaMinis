@@ -205,7 +205,18 @@ class TerminalErrorPlacementTest {
      * Returns each banner's line index plus whether it was the deferred kind.
      */
     private fun assertBannersFollowTheirPersist(lines: List<String>): List<Pair<Int, Boolean>> {
-        val persists = lines.withIndex().filter { (_, l) -> l.contains("host.persistAssistantTurn(") }.map { it.index }
+        // [R5-C2] The two empty-reply terminals now write their row through the
+        // shared `flushUnpersistedTurnRow(` helper instead of calling
+        // `persistAssistantTurn` inline — the helper's body is that same call,
+        // plus the un-persisted continuation slice those terminals used to
+        // drop. Counting it as a persist keeps this probe measuring what it
+        // was written to measure ("does a row for THIS turn exist before the
+        // banner?"), not the spelling of the call.
+        val persists = lines.withIndex()
+            .filter { (_, l) ->
+                l.contains("host.persistAssistantTurn(") || l.contains("flushUnpersistedTurnRow(")
+            }
+            .map { it.index }
         val banners = lines.withIndex().filter { (_, l) -> l.contains("host.setInlineError(") }.map { it.index }
         assertTrue("probe found no banner sites — it is not looking at the engine", banners.isNotEmpty())
 

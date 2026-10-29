@@ -296,8 +296,14 @@ class R5ContinuationPersistTest {
 
         data class Case(val name: String, val message: LLMMessage?, val expected: Boolean)
 
+        // The injection site's guard is the OR of the two family predicates —
+        // each family keeps exactly one source (see the shape test below).
+        fun injectionSiteGuard(message: LLMMessage?): Boolean =
+            EofStubReminderStackGuard.isStaleEofStubReminder(message) ||
+                ContinuationHistoryMerge.isLengthWallReminder(message)
+
         listOf(
-            Case("EOF-stub reminder (shared predicate)", eofStub, true),
+            Case("EOF-stub reminder (its own family)", eofStub, true),
             Case("length-wall reminder (this branch used to miss it)", lengthWall, true),
             Case("the user's real question", user("please write the report"), false),
             Case("a tool_result turn (two parts)", LLMMessage(
@@ -310,7 +316,7 @@ class R5ContinuationPersistTest {
             ), false),
             Case("no previous turn", null, false),
         ).forEach { case ->
-            assertEquals(case.name, case.expected, ContinuationHistoryMerge.isStaleContinuationReminder(case.message))
+            assertEquals(case.name, case.expected, injectionSiteGuard(case.message))
         }
     }
 
@@ -436,8 +442,9 @@ class R5ContinuationPersistTest {
             code.contains("mergeIntoPreviousAssistant(\n                                host.agentHistory,\n                                errContinuationMessage,"),
         )
         assertTrue(
-            "…and its stacking guard must cover both reminder families",
-            code.contains("ContinuationHistoryMerge.isStaleContinuationReminder(errPrevTail)"),
+            "…and its stacking guard must cover both reminder families, one source per family",
+            code.contains("EofStubReminderStackGuard.isStaleEofStubReminder(errPrevTail) ||") &&
+                code.contains("ContinuationHistoryMerge.isLengthWallReminder(errPrevTail)"),
         )
         assertEquals(
             "the append is the fallback branch, never the only path",
