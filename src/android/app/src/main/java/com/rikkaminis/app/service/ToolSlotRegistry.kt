@@ -30,6 +30,16 @@ package com.rikkaminis.app.service
  *
  * Plain Kotlin on purpose (no Android imports): the whole rule set below is
  * table-testable in the JVM suite.
+ *
+ * ## Threading (R5-D F-01③)
+ *
+ * Every entry point is `@Synchronized` on the instance. The callers are not
+ * one thread: `start`/`finish` arrive from the agent-loop IO coroutines of
+ * several sessions, while `representative` is read from the notification /
+ * overlay path — an unsynchronised `LinkedHashMap` gets its bucket chain
+ * corrupted by that mix (and `seqCounter` loses increments, silently breaking
+ * the recency ordering). Coarse serialisation is fine here: the critical
+ * sections are map operations on a handful of entries.
  */
 internal class ToolSlotRegistry {
 
@@ -83,7 +93,7 @@ internal class ToolSlotRegistry {
         toolTitle: String?,
         status: String,
         isRunning: Boolean,
-    ): Slot {
+    ): Slot = synchronized(this) {
         val previous = entries[sessionId]
         val next = Slot(
             sessionId = sessionId,
@@ -94,7 +104,7 @@ internal class ToolSlotRegistry {
             seq = ++seqCounter,
         )
         entries[sessionId] = next
-        return next
+        next
     }
 
     /**
@@ -104,18 +114,51 @@ internal class ToolSlotRegistry {
      * pre-snapshot already taken by the caller (it needs name/title/status for
      * the completion capsule), so the drop loses nothing.
      *
+     * ## Fallback for a missed key (R5-D F-01①)
+     *
+     * The tracker derives the finish key from the LIVE active-session set
+     * (`toolSlotKey()`): a tool started while session A streamed alone is
+     * keyed `"A"`, but by the time it finishes the set may have grown to two,
+     * and the derived key becomes [UNATTRIBUTED] — the exact pair that leaves
+     * `depth` pinned above zero and the notification spinning forever. When
+     * [sessionId] has no entry (or already sits at depth 0) and exactly ONE
+     * entry is still running, that entry is finished in its place. The
+     * uniqueness requirement is the safety rail: with two tools demonstrably in
+     * flight the fallback cannot know which one the caller meant, and
+     * decrementing the wrong session's live tool is worse than leaving the
+     * phantom for the run-boundary reset ([drop]) to clear.
+     *
      * @return the entry that remains after this finish (null = nothing left).
      */
-    fun finish(sessionId: String): Slot? {
-        val previous = entries[sessionId] ?: return null
-        val depth = previous.depth - 1
-        if (depth <= 0) {
-            entries.remove(sessionId)
-            return null
+    fun finish(sessionId: String): Slot? = synchronized(this) {
+        val previous = entries[sessionId]
+        if (previous != null && previous.depth > 0) {
+            val depth = previous.depth - 1
+            if (depth <= 0) {
+                entries.remove(sessionId)
+                return@synchronized null
+            }
+            val next = previous.copy(depth = depth, seq = ++seqCounter)
+            entries[sessionId] = next
+            return@synchronized next
         }
-        val next = previous.copy(depth = depth, seq = ++seqCounter)
-        entries[sessionId] = next
-        return next
+        // Missed key (drift / preflight leak): finish the ONLY running entry so
+        // the display cannot stay "running" on a phantom depth. Two or more
+        // running entries = ambiguous, no fallback (see KDoc).
+        val running = entries.values.filter { it.isRunning }
+        val owner = when {
+            running.size == 1 -> running.first()
+            previous != null -> previous
+            else -> return@synchronized null
+        }
+        val depth = owner.depth - 1
+        if (depth <= 0) {
+            entries.remove(owner.sessionId)
+            return@synchronized null
+        }
+        val next = owner.copy(depth = depth, seq = ++seqCounter)
+        entries[owner.sessionId] = next
+        next
     }
 
     /**
@@ -125,14 +168,16 @@ internal class ToolSlotRegistry {
      * status nobody is producing any more.
      */
     fun drop(sessionId: String) {
-        entries.remove(sessionId)
+        synchronized(this) { entries.remove(sessionId) }
     }
 
-    fun slot(sessionId: String): Slot? = entries[sessionId]
+    fun slot(sessionId: String): Slot? = synchronized(this) { entries[sessionId] }
 
     fun clear() {
-        entries.clear()
-        seqCounter = 0L
+        synchronized(this) {
+            entries.clear()
+            seqCounter = 0L
+        }
     }
 
     /**
@@ -152,11 +197,11 @@ internal class ToolSlotRegistry {
      *     unattributed bucket visible for sessions the tracker has not seen
      *     through `setActive` (offload handlers, a search-index run).
      */
-    fun representative(activeSessionIds: Set<String>): Slot? {
-        if (entries.isEmpty()) return null
+    fun representative(activeSessionIds: Set<String>): Slot? = synchronized(this) {
+        if (entries.isEmpty()) return@synchronized null
         val active = entries.values.filter { it.sessionId in activeSessionIds }
         val pool = active.ifEmpty { entries.values.toList() }
-        return pool.sortedWith(
+        pool.sortedWith(
             compareByDescending<Slot> { it.isRunning }.thenByDescending { it.seq },
         ).firstOrNull()
     }
