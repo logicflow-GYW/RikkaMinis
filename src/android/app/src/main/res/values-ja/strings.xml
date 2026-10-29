@@ -1685,8 +1685,11 @@
     <string name="mirror_section_footer">アプリの保存領域の外に置かれる、継続的に更新されるコピーです。アプリのデータを消去しても残り、任意のファイルマネージャーで開けます。</string>
     <string name="mirror_enable">外部ミラー</string>
     <string name="mirror_enable_sub">Download/RikkaMinis/backup — 自動更新</string>
-    <string name="mirror_sync_now">今すぐ同期</string>
     <string name="mirror_last_sync">最終同期：%1$s</string>
     <string name="mirror_never">まだ同期していません</string>
     <string name="mirror_pending_count">同期待ち %1$d 件</string>
+    <string name="mirror_diag_stale">同期が遅れています：未書き込み %1$d 件（最終書き込みから %2$d 分）</string>
+    <string name="mirror_diag_failed">前回の同期に失敗しました</string>
+    <string name="mirror_diag_unavailable">利用可能なストレージがありません</string>
+    <string name="mirror_retry">再試行</string>
 </resources>

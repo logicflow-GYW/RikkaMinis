@@ -1086,6 +1086,14 @@ class MinisApp : Application(), ImageLoaderFactory {
                     // while a config-confirm dialog may still be showing — nudge
                     // them so they can come back before the 120s timeout.
                     com.rikkaminis.app.config.confirm.ConfigConfirmationGate.notifyPending()
+                    // [feat/auto-backup-external-mirror] The foreground→background
+                    // beat is the third mirror trigger (2026-10-29 silent-mirror
+                    // revision: the settings row lost its manual sync button — the
+                    // mirror must flush on its own, and switching away is the one
+                    // moment after the last edit where the process is still alive).
+                    // Self-gates on enabled + single-flight + the coalescing
+                    // window inside MirrorStore.
+                    com.rikkaminis.app.backup.MirrorStore.runAsync(this@MinisApp)
                 }
             }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}

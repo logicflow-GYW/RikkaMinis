@@ -151,7 +151,7 @@ object MirrorStore {
         /** Nothing changed since the last written manifest. */
         object NoChanges : Outcome()
 
-        /** Changed, but inside [MirrorPlan.MIN_INTERVAL_MS]. */
+        /** Changed, but inside [MirrorPlan.WRITE_COALESCE_MS]. */
         object Throttled : Outcome()
 
         /** No usable target (no external volume, API guard failed). */
@@ -350,14 +350,24 @@ object MirrorStore {
     /**
      * One mirror sync (IO thread). Single-flight; records its outcome in prefs
      * so the settings row can show freshness without another walk.
+     *
+     * [force] skips the coalescing window and nothing else — never the enabled
+     * check, never the single-flight guard. Its only caller is the status row's
+     * retry action, which exists only for unhealthy states: waiting out another
+     * coalescing window is the wrong answer for a mirror that is already behind
+     * (2026-10-29 silent-mirror revision — the human-initiated "sync now"
+     * button is gone because a mirror of app-generated documents needs no
+     * human-initiated sync; the retry is an anomaly action, not a control).
+     * It does NOT bypass the `previous/` point spacing: rollback history
+     * density is a property of time, not of who asked.
      */
-    suspend fun syncNow(context: Context): Outcome = withContext(Dispatchers.IO) {
+    suspend fun syncNow(context: Context, force: Boolean = false): Outcome = withContext(Dispatchers.IO) {
         val app = context.applicationContext
         if (!isEnabled(app)) return@withContext Outcome.Disabled
         if (!inFlight.compareAndSet(false, true)) return@withContext Outcome.Busy
         try {
             val target = openTarget(app) ?: return@withContext Outcome.Unavailable.also { record(app, "unavailable") }
-            val outcome = runLocked(app, target)
+            val outcome = runLocked(app, target, force)
             record(app, outcomeText(outcome))
             outcome
         } catch (t: Throwable) {
@@ -370,7 +380,7 @@ object MirrorStore {
         }
     }
 
-    private suspend fun runLocked(app: Context, target: MirrorTarget): Outcome {
+    private suspend fun runLocked(app: Context, target: MirrorTarget, force: Boolean): Outcome {
         val now = System.currentTimeMillis()
         val manifestRel = "$MIRROR_REL/${MirrorPlan.MANIFEST_NAME}"
         val manifest = MirrorPlan.decodeManifest(target.read(manifestRel)?.toString(Charsets.UTF_8))
@@ -381,7 +391,7 @@ object MirrorStore {
         }
         val currentEntries = selection.map { MirrorPlan.Entry(it.relPath, it.size, it.modifiedMs) }
         val diff = MirrorPlan.diff(manifest?.entries ?: emptyList(), currentEntries)
-        if (!MirrorPlan.shouldWrite(manifest?.syncedAtMs, now, diff.hasChanges)) {
+        if (!force && !MirrorPlan.shouldWrite(manifest?.syncedAtMs, now, diff.hasChanges)) {
             return if (diff.hasChanges) Outcome.Throttled else Outcome.NoChanges
         }
 
@@ -389,7 +399,15 @@ object MirrorStore {
         // overwritten or deleted — a pure addition (first run, new file) has no
         // old bytes to preserve, and minting an empty point would consume a
         // rotation slot for nothing.
-        val point = if (diff.changed.isNotEmpty() || diff.removed.isNotEmpty()) {
+        //
+        // Spacing is independent of the write window (2026-10-29): writes
+        // coalesce at 60 s, points at 10 minutes, so 3 points still span >= 30
+        // minutes of rollback history. An overwrite inside the spacing window
+        // therefore does NOT archive its old bytes — accepted trade, the
+        // selected trees are app-generated documents (see MirrorPlan).
+        val point = if ((diff.changed.isNotEmpty() || diff.removed.isNotEmpty()) &&
+            MirrorPlan.shouldMintPoint(manifest?.previousPoints ?: emptyList(), now)
+        ) {
             BackupRotation.stamp(now)
         } else null
 

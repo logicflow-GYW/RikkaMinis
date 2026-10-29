@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.AlertDialog
@@ -69,6 +70,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -211,6 +213,11 @@ fun BackupSettingsScreen(
     // PLUS the pending count. A stale timestamp alone cannot distinguish
     // "nothing changed" from "the trigger stopped firing".
     var mirrorPending by remember { mutableStateOf<Int?>(null) }
+    // [silent-mirror] Raw inputs for the status row's verdict. The formatted
+    // label cannot drive MirrorPlan.classifyHealth — it needs the epoch and the
+    // last recorded outcome text (kind + diagnostic reason).
+    var mirrorLastMs by remember { mutableStateOf(0L) }
+    var mirrorOutcomeRaw by remember { mutableStateOf<String?>(null) }
     // [T-auto-backup-remote-dir] Remote automatic-backup management state:
     // the WebDAV `auto/` subdirectory listing (plus legacy root stragglers),
     // managed from a dedicated dialog inside the auto-backup section so the
@@ -266,22 +273,35 @@ fun BackupSettingsScreen(
         autoBackupLastRun = autoRow.second
         // [feat/auto-backup-external-mirror] Same off-composition load for the
         // external mirror row (SharedPreferences: enabled flag + last label).
+        // [silent-mirror] Plus the two inputs the status row's verdict needs.
         val mirrorRow = withContext(Dispatchers.IO) {
             com.rikkaminis.app.backup.MirrorStore.isEnabled(context) to
                 com.rikkaminis.app.backup.MirrorStore.lastSyncLabel(context)
         }
         mirrorEnabled = mirrorRow.first
         mirrorLastSync = mirrorRow.second
+        mirrorLastMs = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastSyncMs(context) }
+        mirrorOutcomeRaw = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastResult(context) }
     }
-    // Independent IO pass: pendingCount walks the source tree (1810 stats) and
-    // reads the remote manifest, so it must not delay the prefs-backed rows.
+    // [silent-mirror] The row is passive by design (the "sync now" button is
+    // gone — 2026-10-29), so it has to keep itself current or it stops being
+    // the aliveness signal: refresh pending count + freshness + last outcome
+    // once a minute while this screen is open. pendingCount walks the source
+    // tree (~1810 stats) on IO — one walk a minute is the price of a row that
+    // answers "is it alive" without being asked.
     LaunchedEffect(mirrorEnabled) {
-        mirrorPending = if (mirrorEnabled) {
-            withContext(Dispatchers.IO) {
+        if (!mirrorEnabled) {
+            mirrorPending = null
+            return@LaunchedEffect
+        }
+        while (true) {
+            mirrorPending = withContext(Dispatchers.IO) {
                 com.rikkaminis.app.backup.MirrorStore.pendingCount(context)
             }
-        } else {
-            null
+            mirrorLastMs = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastSyncMs(context) }
+            mirrorLastSync = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastSyncLabel(context) }
+            mirrorOutcomeRaw = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastResult(context) }
+            delay(60_000L)
         }
     }
 
@@ -935,46 +955,126 @@ fun BackupSettingsScreen(
                 // Switch only, same double-fire reasoning as the daily row.
                 showDivider = true,
             )
-            SettingsRow(
-                title = stringResource(R.string.mirror_sync_now),
-                subtitle = run {
-                    val last = mirrorLastSync
-                    val pending = mirrorPending
-                    when {
-                        mirrorRunning -> stringResource(R.string.backup_progress_title)
-                        last == null -> stringResource(R.string.mirror_never)
-                        pending != null && pending > 0 ->
-                            stringResource(R.string.mirror_last_sync, last) + " · " +
-                                stringResource(R.string.mirror_pending_count, pending)
-                        else -> stringResource(R.string.mirror_last_sync, last)
-                    }
-                },
-                icon = Icons.Filled.Refresh,
-                onClick = if (operationBusy || mirrorRunning) null else ({
-                    mirrorRunning = true
-                    operationBusy = true
-                    application.applicationScope.launch {
-                        try {
-                            val manager = com.rikkaminis.app.backup.MirrorStore
-                            withContext(Dispatchers.IO) { manager.syncNow(context) }
-                            val refreshed = withContext(Dispatchers.IO) { manager.lastSyncLabel(context) }
-                            val pendingNow = withContext(Dispatchers.IO) { manager.pendingCount(context) }
-                            withContext(Dispatchers.Main) {
-                                mirrorLastSync = refreshed
-                                mirrorPending = pendingNow
-                            }
-                        } catch (t: Throwable) {
-                            withContext(Dispatchers.Main) { errorMessage = t.message ?: errUnknown }
-                        } finally {
-                            withContext(Dispatchers.Main) {
-                                mirrorRunning = false
-                                operationBusy = false
-                            }
-                        }
-                    }
-                }),
-                showDivider = false,
+            // [silent-mirror] Status row, passive by design (2026-10-29): the
+            // "sync now" row is gone. A mirror of app-generated documents has
+            // no human-initiated use case (the user cannot edit these trees by
+            // hand), and a button the coalescing window sometimes swallows
+            // silently trains distrust of the whole feature — the pending
+            // count is real, the button just does not answer it. The row
+            // instead answers "is it alive" by itself and turns into a
+            // warning with a retry ONLY on an unhealthy verdict, where the
+            // retry is a forced sync (bypasses the 60 s window; force is the
+            // right answer for a mirror that is already behind).
+            val mirrorHealth = com.rikkaminis.app.backup.MirrorPlan.classifyHealth(
+                enabled = mirrorEnabled,
+                lastSyncMs = mirrorLastMs,
+                pending = mirrorPending,
+                lastOutcome = mirrorOutcomeRaw,
+                nowMs = System.currentTimeMillis(),
             )
+            val mirrorTitle: String
+            val mirrorSubtitle: String?
+            var mirrorUnhealthy = false
+            when (val h = mirrorHealth) {
+                is com.rikkaminis.app.backup.MirrorPlan.Health.Failed -> {
+                    mirrorTitle = stringResource(R.string.mirror_diag_failed)
+                    mirrorSubtitle = h.reason ?: stringResource(R.string.mirror_diag_unavailable)
+                    mirrorUnhealthy = true
+                }
+                is com.rikkaminis.app.backup.MirrorPlan.Health.Stale -> {
+                    mirrorTitle = stringResource(
+                        R.string.mirror_diag_stale,
+                        h.pending ?: 0,
+                        h.minutes,
+                    )
+                    mirrorSubtitle = null
+                    mirrorUnhealthy = true
+                }
+                is com.rikkaminis.app.backup.MirrorPlan.Health.Never -> {
+                    mirrorTitle = stringResource(R.string.mirror_never)
+                    val waiting = h.pending ?: 0
+                    mirrorSubtitle = if (waiting > 0) {
+                        stringResource(R.string.mirror_pending_count, waiting)
+                    } else null
+                    mirrorUnhealthy = waiting > 0
+                }
+                is com.rikkaminis.app.backup.MirrorPlan.Health.Healthy -> {
+                    val last = mirrorLastSync
+                    val waiting = h.pending ?: 0
+                    mirrorTitle = if (last != null) {
+                        stringResource(R.string.mirror_last_sync, last)
+                    } else {
+                        stringResource(R.string.mirror_never)
+                    }
+                    mirrorSubtitle = if (waiting > 0) {
+                        stringResource(R.string.mirror_pending_count, waiting)
+                    } else null
+                    mirrorUnhealthy = false
+                }
+                com.rikkaminis.app.backup.MirrorPlan.Health.Disabled -> {
+                    mirrorTitle = ""
+                    mirrorSubtitle = null
+                    mirrorUnhealthy = false
+                }
+            }
+            if (mirrorHealth != com.rikkaminis.app.backup.MirrorPlan.Health.Disabled) {
+                SettingsRow(
+                    title = mirrorTitle,
+                    subtitle = if (mirrorRunning) {
+                        stringResource(R.string.backup_progress_title)
+                    } else {
+                        mirrorSubtitle
+                    },
+                    icon = if (mirrorUnhealthy) Icons.Filled.Warning else null,
+                    iconColor = MaterialTheme.colorScheme.error,
+                    titleColor = if (mirrorUnhealthy) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    trailing = if (mirrorUnhealthy) {
+                        {
+                            TextButton(
+                                onClick = {
+                                    mirrorRunning = true
+                                    application.applicationScope.launch {
+                                        try {
+                                            withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore
+                                                    .syncNow(context, force = true)
+                                            }
+                                            val ms = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.lastSyncMs(context)
+                                            }
+                                            val label = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.lastSyncLabel(context)
+                                            }
+                                            val raw = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.lastResult(context)
+                                            }
+                                            val pendingNow = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.pendingCount(context)
+                                            }
+                                            withContext(Dispatchers.Main) {
+                                                mirrorLastMs = ms
+                                                mirrorLastSync = label
+                                                mirrorOutcomeRaw = raw
+                                                mirrorPending = pendingNow
+                                            }
+                                        } catch (t: Throwable) {
+                                            withContext(Dispatchers.Main) { errorMessage = t.message ?: errUnknown }
+                                        } finally {
+                                            withContext(Dispatchers.Main) { mirrorRunning = false }
+                                        }
+                                    }
+                                },
+                                enabled = !mirrorRunning && !operationBusy,
+                            ) { Text(stringResource(R.string.mirror_retry)) }
+                        }
+                    } else null,
+                    showDivider = false,
+                )
+            }
         }
 
         SettingsSection(

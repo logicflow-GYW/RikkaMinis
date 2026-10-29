@@ -1691,8 +1691,11 @@
     <string name="mirror_section_footer">應用程式儲存空間之外的一份持續更新的副本。清除應用程式資料不會影響它，任何檔案管理器都能直接讀取。</string>
     <string name="mirror_enable">外部冗餘副本</string>
     <string name="mirror_enable_sub">Download/RikkaMinis/backup —— 自動更新</string>
-    <string name="mirror_sync_now">立即同步</string>
     <string name="mirror_last_sync">上次同步：%1$s</string>
     <string name="mirror_never">尚未同步</string>
     <string name="mirror_pending_count">待同步 %1$d 個檔案</string>
+    <string name="mirror_diag_stale">同步已逾期：%1$d 個檔案待寫入（距上次寫入已 %2$d 分鐘）</string>
+    <string name="mirror_diag_failed">上次同步失敗</string>
+    <string name="mirror_diag_unavailable">沒有可用的儲存目標</string>
+    <string name="mirror_retry">重試</string>
 </resources>

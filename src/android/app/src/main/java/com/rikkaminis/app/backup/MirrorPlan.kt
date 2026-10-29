@@ -19,15 +19,43 @@ package com.rikkaminis.app.backup
  *
  * Why a minimum interval at all: a sync costs one stat per selected file
  * (~1810 measured 2026-10-29) plus the bytes that actually changed. Re-running
- * on every stream settlement is cheap; the interval exists so a burst of
- * settlements (tool-heavy turns ending seconds apart) does not pay the walk
- * over and over for a few hundred bytes. Ten minutes is the user-approved
- * value: below it, the recovery value of a newer copy does not cover the cost.
+ * on every stream settlement is cheap; the coalescing window exists so a burst
+ * of settlements (tool-heavy turns ending seconds apart) does not pay the walk
+ * over and over for a few hundred bytes.
+ *
+ * 2026-10-29 silent-mirror revision: the old single 10-minute constant gated
+ * FRESHNESS, not cost — `shouldWrite` requires `hasChanges`, so it was only
+ * ever hit when real work was piling up, i.e. it precisely blocked the
+ * productive case (and the walk it was thought to save still ran: the walk
+ * precedes the check in `MirrorStore.runLocked`). The two jobs it was
+ * conflating are now separate: a 60 s write-coalescing window (cost of one
+ * MediaStore copy per change burst) and a 10-minute `previous/` point spacing
+ * (rollback history density). The settings row lost its "sync now" button —
+ * the mirror runs silently, and the row is passive: healthy is one line of
+ * text, only an unhealthy verdict gets a retry action.
  */
 internal object MirrorPlan {
 
-    /** User-approved throttle (2026-10-29): a sync at most every 10 minutes. */
-    const val MIN_INTERVAL_MS = 10L * 60 * 1000
+    /** Write coalescing window: with changes, a write at most every 60 s.
+     *  Saves the MediaStore copy of a settlement burst; never gates freshness
+     *  beyond one minute, and never applies to a forced sync. */
+    const val WRITE_COALESCE_MS = 60L * 1000
+
+    /** Minimum spacing between `previous/` points. With [PREVIOUS_KEEP] = 3,
+     *  points spaced 10 minutes apart span at least 30 minutes of rollback
+     *  history even though writes now coalesce at 60 s. The trade: an
+     *  overwrite inside the window does not archive its old bytes — the
+     *  selected trees are app-generated documents, so a 10-minute-old
+     *  intermediate is acceptable to lose; what must not shrink is the
+     *  horizon (the pre-existing R2 risk: a bad edit synced 4 times being
+     *  unrecoverable). */
+    const val POINT_SPACING_MS = 10L * 60 * 1000
+
+    /** Status row: "pending > 0 and this much time since the last write" is
+     *  stale, not coalescing. Below it, a non-zero pending count is the normal
+     *  state of an actively used mirror. Above it, the only explanation is
+     *  that the trigger chain is not firing — that is the warning. */
+    const val STALE_AFTER_MS = 30L * 60 * 1000
 
     /** How many `previous/` points to keep. Three independent moments of
      *  "before the edit" — enough to notice a bad edit and step back without
@@ -90,23 +118,133 @@ internal object MirrorPlan {
     }
 
     /**
-     * Whether to actually write now.
+     * Whether to write now (the coalescing window, not freshness).
      *
      * [hasChanges] false always means no: rewriting an identical tree would
      * move `syncedAt` forward and make a broken pipeline look healthy. When
      * there ARE changes, the first sync after a fresh install (no
-     * `lastSyncMs`) runs immediately; afterwards the interval applies.
+     * `lastSyncMs`) runs immediately; afterwards the 60 s window applies.
+     *
+     * A caller with human intent (the status row's retry) passes a forced sync
+     * instead of a shorter interval — see `MirrorStore.syncNow`.
      */
     fun shouldWrite(
         lastSyncMs: Long?,
         nowMs: Long,
         hasChanges: Boolean,
-        minIntervalMs: Long = MIN_INTERVAL_MS,
+        minIntervalMs: Long = WRITE_COALESCE_MS,
     ): Boolean {
         if (!hasChanges) return false
         if (lastSyncMs == null) return true
         if (nowMs < lastSyncMs) return true // clock rolled back: "unknown age" is not "too recent"
         return nowMs - lastSyncMs >= minIntervalMs
+    }
+
+    /**
+     * Whether this sync may mint a new `previous/` point.
+     *
+     * Independent of [shouldWrite] on purpose: writes coalesce at 60 s, points
+     * at 10 minutes. Points are the rollback history, and history density must
+     * not follow write frequency — three points minted in three minutes cover
+     * three minutes. Yes when there are no points yet, when the newest is at
+     * least [spacingMs] old, and when the clock rolled back (unknown age is
+     * not "recent enough" — same polarity as [shouldWrite]). Names that do not
+     * parse carry no age and must not block minting, same rule as
+     * [previousVictims] uses for deletion.
+     */
+    fun shouldMintPoint(
+        previousPoints: List<String>,
+        nowMs: Long,
+        spacingMs: Long = POINT_SPACING_MS,
+    ): Boolean {
+        val newest = previousPoints.asSequence()
+            .filter { BackupRotation.hasStamp(it, "", "") }
+            .mapNotNull { BackupRotation.stampMillis(it, "", "") }
+            .maxOrNull() ?: return true
+        if (nowMs < newest) return true
+        return nowMs - newest >= spacingMs
+    }
+
+    // ---------------------------------------------------------------- health
+
+    /**
+     * Kind of a recorded outcome line — the text [MirrorStore.record] stores in
+     * `KEY_RESULT`. Pure so the status row branches on a value the JVM harness
+     * pins, instead of parsing strings in Compose. Unrecognised text answers
+     * "unknown", which every caller treats as "not a failure".
+     */
+    fun outcomeKind(text: String?): String = when {
+        text == null -> "none"
+        text.startsWith("ok ") -> "ok"
+        text == "no-changes" -> "no-changes"
+        text == "throttled" -> "throttled"
+        text == "busy" -> "busy"
+        text == "unavailable" -> "unavailable"
+        text == "disabled" -> "disabled"
+        text.startsWith("failed") -> "failed"
+        else -> "unknown"
+    }
+
+    /**
+     * The settings row's verdict. 2026-10-29 silent-mirror revision: the "sync
+     * now" row is gone — the mirror runs silently, so this row must answer "is
+     * it alive" by itself and turn into a warning ONLY when something is
+     * actually wrong. Otherwise a passive row that can be wrong silently is
+     * the same failure the button had, minus the button.
+     *
+     * Precedence:
+     *  - [Health.Disabled] — the toggle is off;
+     *  - [Health.Failed] — the last run failed or found no usable target. It
+     *    outranks staleness because it explains it;
+     *  - [Health.Never] — enabled, nothing written yet ([pending] > 0 is its
+     *    warning form: the first trigger writes immediately, so "never" plus
+     *    waiting files means the chain is not firing);
+     *  - [Health.Stale] — files waiting AND the last write is [staleAfterMs]
+     *    old. A 60 s coalescing window never looks like this;
+     *  - [Health.Healthy] — the default reading. `pending > 0` alone is NOT
+     *    unhealthy: it is the normal state of an actively used mirror.
+     *
+     * [pending] null means the target could not be read at all — the row shows
+     * no count rather than claiming zero.
+     */
+    sealed class Health {
+        /** Mirror switched off; the row is not rendered. */
+        object Disabled : Health()
+
+        /** Enabled, nothing written yet. `pending > 0` is the warning form. */
+        data class Never(val pending: Int?) : Health()
+
+        /** Normal. `pending > 0` is coalescing, not staleness. */
+        data class Healthy(val pending: Int?) : Health()
+
+        /** Waiting files plus a stale last write: the trigger chain is dead.
+         *  [minutes] is the idle time in whole minutes. */
+        data class Stale(val pending: Int?, val minutes: Long) : Health()
+
+        /** The last run failed (or found no target). [reason] is the recorded
+         *  diagnostic, null for "no usable target". */
+        data class Failed(val reason: String?) : Health()
+    }
+
+    fun classifyHealth(
+        enabled: Boolean,
+        lastSyncMs: Long,
+        pending: Int?,
+        lastOutcome: String?,
+        nowMs: Long,
+        staleAfterMs: Long = STALE_AFTER_MS,
+    ): Health {
+        if (!enabled) return Health.Disabled
+        when (outcomeKind(lastOutcome)) {
+            "failed" -> return Health.Failed(lastOutcome?.removePrefix("failed: "))
+            "unavailable" -> return Health.Failed(null)
+        }
+        if (lastSyncMs <= 0L) return Health.Never(pending)
+        val idle = nowMs - lastSyncMs
+        if (pending != null && pending > 0 && idle >= staleAfterMs) {
+            return Health.Stale(pending, idle / 60_000L)
+        }
+        return Health.Healthy(pending)
     }
 
     /**
