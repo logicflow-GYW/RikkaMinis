@@ -186,6 +186,35 @@ internal object MirrorPlan {
     }
 
     /**
+     * [R5-A / C-01④ + C-03②] What to KEEP in `KEY_RESULT` when [next] is about
+     * to be recorded.
+     *
+     * A recorded failure must not be cleared by an outcome that attempted
+     * nothing. `throttled` (still inside the coalescing window) and `busy`
+     * (another run holds the single-flight lock) both mean "no work happened",
+     * so letting them overwrite `failed: …` / `unavailable` turns the settings
+     * row's only failure channel back to Healthy without anything having been
+     * fixed — the row that is on screen when the user opens Backup settings
+     * stops warning while the mirror is still broken, and the retry that hangs
+     * off that verdict disappears with it.
+     *
+     * A completed pass clears it: `ok …` wrote the bytes, and `no-changes`
+     * finished a read+diff against a readable target — i.e. the pipeline
+     * demonstrably works and there is nothing left to fix (without that, a
+     * failure whose cause disappeared could leave the row warning forever,
+     * since a quit install never produces another `ok`).
+     */
+    fun nextRecordedOutcome(previous: String?, next: String): String {
+        return when (outcomeKind(previous)) {
+            "failed", "unavailable" -> when (outcomeKind(next)) {
+                "throttled", "busy" -> previous ?: next
+                else -> next
+            }
+            else -> next
+        }
+    }
+
+    /**
      * The settings row's verdict. 2026-10-29 silent-mirror revision: the "sync
      * now" row is gone — the mirror runs silently, so this row must answer "is
      * it alive" by itself and turn into a warning ONLY when something is
@@ -241,6 +270,16 @@ internal object MirrorPlan {
         }
         if (lastSyncMs <= 0L) return Health.Never(pending)
         val idle = nowMs - lastSyncMs
+        // [R5-A / F-03] Clock rolled back (now < last): `idle` is negative, so the
+        // staleness test below can never fire and a dead trigger chain reads as
+        // Healthy FOREVER — the one verdict this row exists to produce. "Age
+        // unknown" must not be read as "just wrote", the same polarity
+        // [shouldWrite] and [shouldMintPoint] already use. The reported age is 0
+        // minutes because the wall clock cannot bound it; the warning (icon +
+        // retry) is the payload, not the number.
+        if (idle < 0L) {
+            return if (pending != null && pending > 0) Health.Stale(pending, 0L) else Health.Healthy(pending)
+        }
         if (pending != null && pending > 0 && idle >= staleAfterMs) {
             return Health.Stale(pending, idle / 60_000L)
         }
@@ -260,6 +299,64 @@ internal object MirrorPlan {
                 if (ka != kb) kb.compareTo(ka) else b.compareTo(a)
             })
         return if (keep <= 0) stamped else stamped.drop(keep)
+    }
+
+    /** One point rotation's result: what stays listed in the manifest and what
+     *  gets deleted from `previous/`. */
+    data class PointRotation(val kept: List<String>, val victims: List<String>)
+
+    /**
+     * [R5-A / F-03] Rotate the `previous/` point list for a sync that may have
+     * minted [newPoint].
+     *
+     * A point name is second-precision, so a rolled-back clock — or two syncs
+     * inside the same second — can reproduce a name that already exists.
+     * Deduplicate BEFORE rotating: the survivors are computed with
+     * `filterNot { it in victims }`, which removes EVERY equal element, so a
+     * duplicate made the kept list one short (the F-03 verdict: a manifest
+     * listing two names for a keep of three) — and `deleteTree` would have
+     * removed a point that the manifest still listed.
+     *
+     * The ONE implementation of this rule: [MirrorStore.runLocked] deletes with
+     * [victims] and lists with [kept], and [nextManifest] below lists with the
+     * same [kept]. Before this there were two hand-rolled copies of the same
+     * arithmetic (one here, one in the I/O shell) — exactly how a fix applied to
+     * one half goes missing from the other.
+     */
+    fun rotatePoints(existing: List<String>, newPoint: String?, keep: Int = PREVIOUS_KEEP): PointRotation {
+        val points = (if (newPoint.isNullOrEmpty()) existing else existing + newPoint).distinct()
+        val victims = previousVictims(points, keep)
+        // `keep <= 0` = "no point history": the manifest lists none, while the
+        // victims still come from the stamped-only rule, so a directory whose
+        // name carries no stamp is never deleted.
+        val kept = if (keep <= 0) emptyList() else points.filterNot { it in victims }.sortedDescending()
+        return PointRotation(kept, victims)
+    }
+
+    /**
+     * [R5-A / F-05] `auto/` rotation: which daily snapshots to delete.
+     *
+     * [snapshots] are (name, stampMs) pairs — the caller already filtered to
+     * names whose stamp parses, and this re-sorts so the function does not
+     * depend on the caller's ordering. [freshName] is the copy this run just
+     * wrote, and it owns a slot unconditionally: a rolled-back clock gives that
+     * copy an OLD-looking name, so "drop everything past the newest [keep]"
+     * made it the FIRST victim — the run logged "mirrored" while the file it
+     * had just written was gone (the same defect R3-D F-01 fixed for the local
+     * rotation).
+     *
+     * Reserving its slot ([keep] - 1 others) keeps the quota exact; merely
+     * protecting it ([BackupRotation.rotationVictims]'s `protect`) would leave
+     * [keep] + 1 files behind and grow by one file per rolled-back day. [keep]
+     * <= 1 means the fresh copy is the only history: everything else goes.
+     */
+    fun autoSnapshotVictims(
+        snapshots: List<Pair<String, Long>>,
+        freshName: String,
+        keep: Int,
+    ): List<String> {
+        val others = snapshots.filterNot { it.first == freshName }.sortedByDescending { it.second }
+        return if (keep <= 1) others.map { it.first } else others.drop(keep - 1).map { it.first }
     }
 
     // ---------------------------------------------------------------- manifest
@@ -346,6 +443,31 @@ internal object MirrorPlan {
         return Manifest(syncedAt, entries, points)
     }
 
+    /**
+     * [R5-A / F-02] Entries to record as synced.
+     *
+     * A file whose source read failed was NOT written into `current/`, so
+     * recording its fresh (size, modifiedMs) makes the next diff call it
+     * `unchanged` — the mirror would be missing that file forever while
+     * `pendingCount` reads 0 and the settings row says healthy. That is the
+     * exact shape of the defect: no error, no count, nothing to notice.
+     *
+     * [skipped] therefore keeps the OLD record. The next diff sees a size/mtime
+     * mismatch and retries the write; a skipped file the old manifest never had
+     * is dropped so it comes back as `added`. Either way the pending count tells
+     * the truth in the meantime.
+     */
+    fun manifestEntries(
+        current: List<Entry>,
+        previous: List<Entry>,
+        skipped: Set<String>,
+    ): List<Entry> {
+        if (skipped.isEmpty()) return current
+        val before = HashMap<String, Entry>(previous.size * 2)
+        for (e in previous) before[e.relPath] = e
+        return current.mapNotNull { e -> if (e.relPath in skipped) before[e.relPath] else e }
+    }
+
     /** A manifest that describes [entries] written at [nowMs], keeping at most
      *  [keep] previous points (newest kept). */
     fun nextManifest(
@@ -354,12 +476,5 @@ internal object MirrorPlan {
         existingPoints: List<String>,
         newPointName: String?,
         keep: Int = PREVIOUS_KEEP,
-    ): Manifest {
-        val points = if (newPointName.isNullOrEmpty()) existingPoints else existingPoints + newPointName
-        val kept = (if (keep <= 0) emptyList() else {
-            val victims = previousVictims(points, keep)
-            points.filterNot { it in victims }
-        }).sortedDescending()
-        return Manifest(nowMs, entries, kept)
-    }
+    ): Manifest = Manifest(nowMs, entries, rotatePoints(existingPoints, newPointName, keep).kept)
 }
