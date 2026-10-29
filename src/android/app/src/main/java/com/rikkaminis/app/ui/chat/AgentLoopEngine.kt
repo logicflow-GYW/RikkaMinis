@@ -2115,7 +2115,15 @@ internal class AgentLoopEngine(
                         }
                         if (newEntry != null) {
                             host.setActiveEntryId(newEntry.id)
-                            host.updateCurrentModel(newEntry.model)
+                            // [FIX-R4-Q F-06] Publish the ENRICHED model, not the
+                            // raw entry model: `next.provider` was built with
+                            // `providerModelFor(entry)` (= ModelsDevApi.effectiveModel),
+                            // while `ModelEntry.model` carries only what the user
+                            // stored — no contextWindow / maxOutputTokens. Writing the
+                            // raw model here left `currentModel.contextWindow` null on
+                            // the fallback target, so CompactOrchestration's window
+                            // math silently lost the real ceiling after any fallback.
+                            host.updateCurrentModel(next.provider.model)
                             val newLabel = host.providerInstanceLabel(newEntry.providerInstanceId)
                             if (newLabel != null) {
                                 host.setProviderName(newLabel.ifEmpty { newEntry.model.provider })
@@ -2547,7 +2555,10 @@ internal class AgentLoopEngine(
                     // different instances).
                     host.activeConfigModelEntries.find { it.id == next.entryId }?.let { newEntry ->
                         host.setActiveEntryId(newEntry.id)
-                        host.updateCurrentModel(newEntry.model)
+                        // [FIX-R4-Q F-06] Enriched model, same reason as the
+                        // error-path fallback above: `next.provider.model` came
+                        // from `providerModelFor(entry)`, `newEntry.model` did not.
+                        host.updateCurrentModel(next.provider.model)
                         val newLabel = host.providerInstanceLabel(newEntry.providerInstanceId)
                         if (newLabel != null) {
                             host.setProviderName(newLabel.ifEmpty { newEntry.model.provider })
