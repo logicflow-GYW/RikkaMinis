@@ -231,6 +231,7 @@ class AgentLoopContinuationChainTest {
         )
         val toolResult = LLMMessage(
             role = LLMMessage.Role.USER,
+            content = "",
             contentParts = listOf(AgentContentPart.ToolResult(id = "t1", name = "shell", content = "ok")),
         )
 
