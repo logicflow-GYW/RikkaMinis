@@ -3427,8 +3427,6 @@ fun ChatScreen(
                         pendingFocusId = null
                         return@LaunchedEffect
                     }
-                    tracedScrollToItem("FOCUS-MESSAGE", idx, 0)
-                    highlightedMessageId = originalMessageId(target)
                     // [FIX-R4-Q F-12] A focus jump scrolls AWAY from the bottom
                     // — mark the user as engaged or the OPEN-CATCHUP collector
                     // (armed while the session has been open <2.5s, e.g. a
@@ -3437,6 +3435,8 @@ fun ChatScreen(
                     // jump the user just asked for. Same marking the
                     // InputHistorySheet jump already does.
                     openCatchUpUserEngaged = true
+                    tracedScrollToItem("FOCUS-MESSAGE", idx, 0)
+                    highlightedMessageId = originalMessageId(target)
                     // Clearing pendingFocusId cancels THIS coroutine (it is a
                     // key of the enclosing LaunchedEffect), so the highlight
                     // fade-out must not live here — it gets its own effect

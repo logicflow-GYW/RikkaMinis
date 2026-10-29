@@ -556,10 +556,13 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
                     "run deadline reached — sub-agent request refused"
                 )
             }
-            if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS) {
-                    it.consumeProviderAttempt()
-                }
-            ) {
+            // Same single-line gate shape as the main loop (AgentLoopEngine
+            // :1226): the lambda and the `if` body open on the line that names
+            // the dimension, so source-shape probes see the refusal (the
+            // throw) inside this gate's body — a multi-line lambda makes the
+            // brace matcher close the body at `}) {` and read the gate as
+            // non-terminal.
+            if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS) { it.consumeProviderAttempt() }) {
                 throw SubagentBudgetExhaustedException(
                     "provider-attempt budget exhausted — sub-agent request refused"
                 )

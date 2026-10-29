@@ -214,7 +214,11 @@ class AgentLoopContinuationChainTest {
             val history: List<LLMMessage>,
             val incoming: LLMMessage,
             val expectFolded: Boolean,
-            val expectedContent: String,
+            // Exact assistant contents after the call. mergeIntoPreviousAssistant
+            // NEVER appends the incoming entry on a false verdict (the caller
+            // does — see the wiring in runAgentLoop), so a not-folded case
+            // expects the history's original assistant texts, unchanged.
+            val expectedAssistantContents: List<String>,
             val expectedSize: Int,
         )
 
@@ -236,20 +240,20 @@ class AgentLoopContinuationChainTest {
         )
 
         val cases = listOf(
-            Case("plain continuation (prefill: no reminder)", listOf(head), assistant("+tail"), true, "head+tail", 1),
-            Case("continuation behind a length-wall reminder", listOf(head, wallReminder), assistant("+tail"), true, "head+tail", 1),
-            Case("continuation behind an EOF stub reminder", listOf(head, eofReminder), assistant("+tail"), true, "head+tail", 1),
-            Case("empty restarted turn is NOT folded", listOf(head, wallReminder), assistant(""), false, "", 2),
-            Case("tool_result tail is not a continuation", listOf(head, toolResult), assistant("+tail"), false, "+tail", 2),
+            Case("plain continuation (prefill: no reminder)", listOf(head), assistant("+tail"), true, listOf("head+tail"), 1),
+            Case("continuation behind a length-wall reminder", listOf(head, wallReminder), assistant("+tail"), true, listOf("head+tail"), 1),
+            Case("continuation behind an EOF stub reminder", listOf(head, eofReminder), assistant("+tail"), true, listOf("head+tail"), 1),
+            Case("empty restarted turn is NOT folded", listOf(head, wallReminder), assistant(""), false, listOf("head"), 2),
+            Case("tool_result tail is not a continuation", listOf(head, toolResult), assistant("+tail"), false, listOf("head"), 2),
             Case(
                 "already-persisted previous row is not folded into",
                 listOf(head.copy(dbMessageId = "db-1"), eofReminder),
                 assistant("+tail"),
                 false,
-                "+tail",
-                3,
+                listOf("head"),
+                2,
             ),
-            Case("no previous assistant at all", emptyList(), assistant("+tail"), false, "+tail", 1),
+            Case("no previous assistant at all", emptyList(), assistant("+tail"), false, emptyList(), 0),
         )
 
         cases.forEach { case ->
@@ -258,10 +262,10 @@ class AgentLoopContinuationChainTest {
             assertEquals("[${case.name}] fold decision", case.expectFolded, folded)
             assertEquals("[${case.name}] history size", case.expectedSize, history.size)
             val assistantTexts = history.filter { it.role == LLMMessage.Role.ASSISTANT }.map { it.content }
-            assertTrue(
-                "[${case.name}] expected content ${case.expectedContent} in $assistantTexts",
-                assistantTexts.contains(case.expectedContent) ||
-                    (case.expectFolded && assistantTexts.singleOrNull() == case.expectedContent),
+            assertEquals(
+                "[${case.name}] assistant contents after the call",
+                case.expectedAssistantContents,
+                assistantTexts,
             )
         }
     }
@@ -290,7 +294,15 @@ class AgentLoopContinuationChainTest {
         val secondary = ScriptedProvider(name = "p-secondary", model = enriched)
         // What the user STORED for that entry: no registry fields.
         h.configEntries = listOf(
-            ModelEntry(providerInstanceId = "inst-secondary", baseModel = model("m-secondary")),
+            // uuid IS the entry id (ModelEntry.id derives from it) and the
+            // fallback publish path resolves the candidate's entryId against
+            // this list — without the match newEntry is null and nothing is
+            // published.
+            ModelEntry(
+                providerInstanceId = "inst-secondary",
+                baseModel = model("m-secondary"),
+                uuid = "entry-secondary",
+            ),
         )
         h.scripts.add(TurnScript(throwBefore = rateLimited()))
         h.scripts.add(segment("from secondary", "stop"))

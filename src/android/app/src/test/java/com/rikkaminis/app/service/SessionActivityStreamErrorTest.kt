@@ -248,7 +248,16 @@ class SessionActivityStreamErrorTest {
         val body = normalize(engineSource())
         val inline = occurrences(body, "host.setInlineError(")
         val deferred = occurrences(body, "loopState.pendingInlineError = host.string(")
-        assertTrue("expected at least 5 direct funnel sites, found $inline", inline >= 5)
+        // [FIX-R4-Q F-01] Floor 5 -> 3: the empty-response hint and the
+        // EOF give-up banner are fall-through branches whose row is persisted
+        // by the turn tail BELOW them, so an inline write there would stamp
+        // the banner onto the PREVIOUS turn's row (the shape
+        // TerminalErrorPlacementTest rejects). They park in the deferred slot
+        // instead — the second shape this very KDoc endorses. Site total is
+        // unchanged (10 before, 10 now: 2 moved direct -> deferred); the
+        // surviving direct three are the two "persist an empty row first"
+        // branches plus the tail flush.
+        assertTrue("expected at least 3 direct funnel sites, found $inline", inline >= 3)
         assertTrue("expected at least 5 deferred banner sites, found $deferred", deferred >= 5)
     }
 
@@ -545,7 +554,10 @@ class SessionActivityStreamErrorTest {
         // the invariant did not: every banner must still land in
         // host.setInlineError, and no second error channel may open.
         val inline = occurrences(body, "host.setInlineError(")
-        if (inline < 5) return "the engine lost direct funnel sites: found $inline, expected at least 5"
+        // [FIX-R4-Q F-01] 3, not 5 — see the note in the test above: two
+        // fall-through sites moved to the deferred shape (the funnel itself,
+        // the drain and the no-second-channel rule below are unchanged).
+        if (inline < 3) return "the engine lost direct funnel sites: found $inline, expected at least 3"
         val deferred = occurrences(body, "loopState.pendingInlineError = host.string(")
         if (deferred < 5) return "the engine lost deferred banner sites: found $deferred, expected at least 5"
         // The deferred slot must actually drain: the tail hands BOTH the

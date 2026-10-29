@@ -136,7 +136,14 @@ class TerminalErrorPlacementTest {
         val spans = assertBannersFollowTheirPersist(lines)
         // Self-check: the probe must really be looking at the engine's banner
         // sites, and at least one of them must be a deferred (post-tail) one.
-        assertTrue("expected the engine's banner sites, found ${spans.size}", spans.size >= 4)
+        // [FIX-R4-Q F-01] Floor 4 -> 3: F-01 moved the turn-tail persist BELOW
+        // the continuation `continue`s, so the two fall-through banners
+        // (empty-response hint, EOF give-up) now reach setInlineError through
+        // the deferred slot this probe's `second` component checks — a direct
+        // write at their branch sites is exactly what the negative control
+        // below rejects. The three remaining direct sites are the two
+        // "persist an empty row first" branches and the tail flush.
+        assertTrue("expected the engine's banner sites, found ${spans.size}", spans.size >= 3)
         assertTrue(
             "expected at least one banner deferred past the turn tail",
             spans.any { it.second },
