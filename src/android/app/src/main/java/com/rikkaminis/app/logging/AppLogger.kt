@@ -514,7 +514,17 @@ object AppLogger {
                 LogChannel.DEBUG -> synchronized(writerLock) {
                     val w = getDebugWriter(date)
                     w.println(line)
-                    debugBytesWritten += line.length + 1
+                    // [FIX-R4-T F-07] Count the bytes that actually land on
+                    // disk, not UTF-16 chars. The threshold
+                    // ([DEBUG_MAX_BYTES]), the seed (`file.length()` in
+                    // getDebugWriter) and the FileWriter's UTF-8 encoder are
+                    // all byte-denominated; `line.length + 1` counted a CJK
+                    // char as 1 while it occupies 3 bytes, so the counter
+                    // under-read the file by 2-3x and the "5 MB" channel only
+                    // rotated at 12-15 MB of real bytes (4 rolls ⇒ 50-60 MB).
+                    // Costs one branch walk per delivered line on the drain
+                    // thread; no allocation (see [utf8ByteLength]).
+                    debugBytesWritten += utf8ByteLength(line) + 1L
                     if (debugBytesWritten > DEBUG_MAX_BYTES) {
                         rotateDebugFile(date)
                     }
@@ -837,4 +847,43 @@ object AppLogger {
             )
         }
     }
+}
+
+/**
+ * [FIX-R4-T F-07] UTF-8 encoded length of [line] without materialising the
+ * byte array.
+ *
+ * The debug channel's size accounting has to speak ONE unit. The rotation
+ * threshold (`DEBUG_MAX_BYTES`), the counter's seed (`file.length()`) and the
+ * FileWriter's encoder are all byte-denominated; the only thing that used to
+ * speak UTF-16 characters was the per-line increment, so the nominal 5 MB cap
+ * was only reached at 12-15 MB of real bytes for CJK/tool-output workloads.
+ *
+ * Hand-rolled rather than `line.toByteArray(Charsets.UTF_8).size`: this runs
+ * once per delivered line on the drain thread (tens of thousands of lines in
+ * a streaming session) and that array would be pure garbage. Semantics match
+ * the JDK encoder exactly, including `'?'` (1 byte) for an unpaired surrogate.
+ */
+internal fun utf8ByteLength(line: String): Long {
+    var bytes = 0L
+    var i = 0
+    val n = line.length
+    while (i < n) {
+        val c = line[i]
+        val code = c.code
+        if (code < 0x80) {
+            bytes += 1
+        } else if (code < 0x800) {
+            bytes += 2
+        } else if (Character.isHighSurrogate(c) && i + 1 < n && Character.isLowSurrogate(line[i + 1])) {
+            bytes += 4
+            i++
+        } else if (code in 0xD800..0xDFFF) {
+            bytes += 1
+        } else {
+            bytes += 3
+        }
+        i++
+    }
+    return bytes
 }
