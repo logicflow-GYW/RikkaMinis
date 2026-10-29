@@ -193,7 +193,11 @@ class RendererDeadShortCircuitTest {
             assertFalse(
                 "$label: the short-circuit must NOT complete the deferred — 'the reload " +
                     "happened' is exactly the claim this path cannot make:\n$guardBlock",
-                guardBlock.contains("deferred.complete("),
+                // `.complete(` rather than `deferred.complete(`: the field is
+                // `navigationDeferred` and a faked success reads
+                // `navigationDeferred?.complete(…)`, which a narrower needle
+                // missed (arm M5 stayed green on that).
+                guardBlock.contains(".complete("),
             )
         }
     }
