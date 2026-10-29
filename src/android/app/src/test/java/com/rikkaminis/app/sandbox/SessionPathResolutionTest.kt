@@ -158,7 +158,8 @@ class SessionPathResolutionTest {
             assertEquals("$relative migrated call sites", expected, calls)
             migrated += calls
         }
-        assertEquals("total migrated call sites on this branch", 8, migrated)
+        // [R4-V F-11] 9, not 8: FileBrowserViewModel gained the second site above.
+        assertEquals("total migrated call sites on this branch", 9, migrated)
     }
 
     /**
@@ -225,7 +226,11 @@ class SessionPathResolutionTest {
             "src/android/app/src/main/java/com/rikkaminis/app/tools/ReadImageTool.kt" to 1,
             // Textual shape the audit's grep for `?: PRootKernel.resolveHostPath`
             // missed (`?.let { return it }` fall-through, same defect).
-            "src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FileBrowserViewModel.kt" to 1,
+            // [R4-V F-11] 2, not 1: resolving a symlink's absolute target is a
+            // second, legitimately session-scoped site (list entry vs link
+            // target). Neither falls back through the elvis — the assertion
+            // above still guards that.
+            "src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FileBrowserViewModel.kt" to 2,
         )
     }
 }
