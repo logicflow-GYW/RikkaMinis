@@ -772,6 +772,20 @@ class MinisApp : Application(), ImageLoaderFactory {
             Unit
         }
 
+        // [SYMPTOM-A F-A1] 影子水线（800MB anon）：只观测，不驱动任何行为。
+        // 依据：三天 anon 峰值 1032/585/552MB，而 1200 的硬分支三天 0 次触发 ——
+        // "把硬门槛降到 800 会不会天天触发"只能靠这台影子机回答，不能靠猜。
+        // 它走自己的工作线程纪律（1s tick）与独立状态机，不动回收/准入。
+        com.rikkaminis.app.service.shadowTierListener = { from, to, anonMB, rssMB ->
+            runCatching {
+                AppLogger.info(
+                    "MemGateShadow",
+                    "from=$from to=$to anon=${anonMB}MB rss=${rssMB}MB — observe-only, no reclaim/admission change",
+                )
+            }
+            Unit
+        }
+
         // [offload-rss-governance] 把 OffloadRssProbe 的「观测」接到「治理」：
         // 当 offload handler 的累计/单次 VmRSS 增量越过阈值时，回收 idle 的
         // PRoot tracer（释放其 native 足迹）+ 触发 GC 善后。补上之前「只打点

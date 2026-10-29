@@ -50,6 +50,25 @@ object MemoryPressureGate {
     /** 滞回带宽（MB）：只有跌破"本档线 - 该值"才降档，避免边界抖动。 */
     const val HYSTERESIS_ANON_MB = 150L
 
+    /**
+     * 影子硬门槛（MB, RssAnon）—— **只观测，不驱动任何行为**。
+     *
+     * 依据（[SYMPTOM-A F-A1]，2026-10-29 夜对三天全量日志实测）：anon 峰值
+     * **1032 / 585 / 552MB**，而 [CRITICAL_ANON_MB]=1200 的"回收 + 拒绝准入"
+     * 分支 **三天 0 次**触发（`level=CRITICAL` 计数为 0）—— 这条硬分支在生产
+     * 里从未执行过，而进程确实在 500–1032MB 区间被系统侧回收过（worker
+     * `DIED_MID_STREAM`：10-28 11 次 / 64 run）。
+     *
+     * 这台影子机要回答的正是"把硬门槛下调到 800 会不会天天触发"：同一套
+     * [internalNextTier] 推进一台**独立**状态机，只在穿越这条线（含跌回）时
+     * 打一行 `[MemGateShadow]` 日志。它不参与 [level] / [levelFor] /
+     * [shouldRejectAfterReclaim]，也不碰回收与准入。
+     *
+     * **何时读这条日志**：有人要动 [CRITICAL_ANON_MB] 的时候。`grep MemGateShadow`
+     * 的行数 × 时间窗 = 假设水线下的触发频率；在拿到这个数之前不要凭感觉调阈值。
+     */
+    const val OBSERVE_CRITICAL_ANON_MB = 800L
+
     /** 升档需要的连续采样拍数（单次越线不算）。 */
     const val CONFIRM_TICKS = 2
 
@@ -73,11 +92,24 @@ object MemoryPressureGate {
     /** [level] 状态机：连续越线拍数。 */
     private var confirmingTicks: Int = 0
 
+    /**
+     * 影子机状态（[OBSERVE_CRITICAL_ANON_MB]）：**与真档完全独立的两份变量**。
+     * 红线：影子机不得读写 [currentLevel] / [confirmingTicks] —— 一旦共用，
+     * 一次观测就会改变真实分级结果。
+     */
+    @Volatile
+    private var shadowLevel: MemoryPressureLevel = MemoryPressureLevel.NORMAL
+
+    /** 影子机：连续越线拍数（独立于 [confirmingTicks]）。 */
+    private var shadowConfirmingTicks: Int = 0
+
     /** 测试用：把状态机复位（生产不需要——它本来就是全程累积的）。 */
     internal fun resetTierStateForTest() {
         currentLevel = MemoryPressureLevel.NORMAL
         confirmingTicks = 0
         lastNotifiedLevel = MemoryPressureLevel.NORMAL
+        shadowLevel = MemoryPressureLevel.NORMAL
+        shadowConfirmingTicks = 0
     }
 
     /** 上一次上报过的档位（用于档位跃迁事件，含降档）。 */
@@ -119,8 +151,37 @@ object MemoryPressureGate {
      */
     fun sampleAndNotify(): MemoryPressureLevel {
         val sampled = level()
+        observeShadowTier()
         notify(sampled)
         return sampled
+    }
+
+    /**
+     * [SYMPTOM-A F-A1] 影子水线一拍：推进影子机，只在**档位跃迁**时上报一行。
+     *
+     * 两条设计约束：
+     *  - **唯一挂接点 = [sampleAndNotify]**（1s 治理器 tick）。不要挂到 [level] /
+     *    [levelFor] / 准入路径：那些是一次性决策，多入口会把"每秒一拍"的置信
+     *    计数搅成"每次准入一拍"，跃迁事件也就失去了频率含义。
+     *  - `elevatedMb` 与 `criticalMb` **都取 [OBSERVE_CRITICAL_ANON_MB]**，影子机
+     *    因此只有 NORMAL / CRITICAL 两个状态：它测的是"800 这条硬线"，450 那档
+     *    已经由真档的 `tierListener` 记录，重复一遍只是噪声。
+     */
+    private fun observeShadowTier() {
+        val metrics = metricsReader()
+        val step = internalNextTier(
+            current = shadowLevel,
+            confirming = shadowConfirmingTicks,
+            anonMb = metrics.anonMb,
+            elevatedMb = OBSERVE_CRITICAL_ANON_MB,
+            criticalMb = OBSERVE_CRITICAL_ANON_MB,
+        )
+        shadowConfirmingTicks = step.confirming
+        val from = shadowLevel
+        if (step.level != from) {
+            shadowLevel = step.level
+            shadowTierListener(from, step.level, metrics.anonMb, metrics.rssMb)
+        }
     }
 
     /** 瞬时分级（纯函数，无滞回/置信）——准入判定用，行为确定可预期。 */
@@ -191,6 +252,18 @@ object MemoryPressureGate {
 @Volatile
 var tierListener: (from: MemoryPressureLevel, to: MemoryPressureLevel, anonMb: Long) -> Unit =
     { _, _, _ -> }
+
+/**
+ * [SYMPTOM-A F-A1] **影子水线**跃迁（[MemoryPressureGate.OBSERVE_CRITICAL_ANON_MB]，
+ * 800MB anon）——只观测，不驱动任何行为。
+ *
+ * 与 [tierListener] 分开而不是复用它：tierListener 的口径是"生产真档穿越频率"
+ * （450 / 1200 两条线），混进影子机的读数会让那个统计失去意义。
+ * 生产（MinisApp 装配）打到 tag `MemGateShadow`；测试注入计数器。
+ */
+@Volatile
+var shadowTierListener: (from: MemoryPressureLevel, to: MemoryPressureLevel, anonMb: Long, rssMb: Long) -> Unit =
+    { _, _, _, _ -> }
 
 /**
  * 纯函数：带滞回与置信拍的档位推进。
