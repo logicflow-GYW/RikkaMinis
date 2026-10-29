@@ -638,22 +638,32 @@ internal object ProviderMutationMethods {
      * `memberEntryIds: null` keeps the documented meaning "no members" — the
      * update face reads it as the clear, which is what `optJSONArray(…) ?:
      * JSONArray()` already did.
+     *
+     * The *validity* judgement stays at the face ([isKnownEntryId]): the
+     * `SystemVoiceEntries.isKnownGroupMemberId` predicate is single-source and
+     * `provider_rpc_symmetry_check` C16 pins it inside both write faces, so a
+     * refactor must not bury it here. What is shared is the *structure* —
+     * string-typed, non-empty, de-duplicated in place — which is what the two
+     * faces used to spell twice and drift on.
      */
-    private fun readGroupMemberIds(params: JSONObject, repo: ProviderRepository): List<String> {
+    private fun readGroupMemberIds(
+        params: JSONObject,
+        isKnownEntryId: (String) -> Boolean,
+    ): List<String> {
         if (!params.has("memberEntryIds") || params.isNull("memberEntryIds")) return emptyList()
         val arr = params.optJSONArray("memberEntryIds")
             ?: throw RPCException(-32602, "memberEntryIds must be an array of entry ids")
-        val knownEntryIds = repo.config.value.modelEntries.map { it.id }.toSet()
         val out = ArrayList<String>(arr.length())
         for (i in 0 until arr.length()) {
             val id = (arr.opt(i) as? String)?.trim()
                 ?: throw RPCException(-32602, "memberEntryIds[$i] must be a string entry id")
             if (id.isEmpty()) throw RPCException(-32602, "memberEntryIds[$i] must be non-empty")
-            // [dv20-a1 A-02] Shared judgement: the System voice sentinels are
-            // virtual members that never appear in `modelEntries`. The
-            // predicate is single-source, so a truly unknown id is refused
-            // (fail-closed) rather than dropped.
-            if (!SystemVoiceEntries.isKnownGroupMemberId(id, knownEntryIds)) {
+            // [dv20-a1 A-02] The caller's predicate is the shared
+            // `SystemVoiceEntries.isKnownGroupMemberId`: the sentinels are
+            // virtual members that never appear in `modelEntries`, so a face
+            // deriving "known" from that list alone would call them unknown. A
+            // truly unknown id is refused (fail-closed) rather than dropped.
+            if (!isKnownEntryId(id)) {
                 throw RPCException(-32602, "Unknown model entry id: $id")
             }
             if (id !in out) out.add(id)
@@ -666,7 +676,12 @@ internal object ProviderMutationMethods {
         val name = params.optString("name", "").ifEmpty {
             throw RPCException(-32602, "Missing 'name' param")
         }
-        val members = readGroupMemberIds(params, repo)
+        // [dv20-a1 A-02] Known = persisted entries + the virtual System voice
+        // sentinels; the predicate is the ONE shared implementation.
+        val knownEntryIds = repo.config.value.modelEntries.map { it.id }.toSet()
+        val members = readGroupMemberIds(params) { id ->
+            SystemVoiceEntries.isKnownGroupMemberId(id, knownEntryIds)
+        }
         val strategy = parseStrategy(params.optString("strategy", "fallback"))
         val fallback = parseFallback(params.optString("fallbackStrategy", "default"))
         // [da1031-D ISSUE-06] The group faces had a fifth asymmetry: the create
@@ -725,7 +740,13 @@ internal object ProviderMutationMethods {
             updated = updated.copy(name = n)
         }
         if (params.has("memberEntryIds")) {
-            updated = updated.copy(memberEntryIds = readGroupMemberIds(params, repo))
+            // [dv20-a1 A-02] Same shared predicate as the create face.
+            val knownEntryIds = repo.config.value.modelEntries.map { it.id }.toSet()
+            updated = updated.copy(
+                memberEntryIds = readGroupMemberIds(params) { id ->
+                    SystemVoiceEntries.isKnownGroupMemberId(id, knownEntryIds)
+                },
+            )
         }
         if (params.has("strategy")) updated = updated.copy(strategy = parseStrategy(params.optString("strategy")))
         if (params.has("fallbackStrategy")) updated = updated.copy(fallbackStrategy = parseFallback(params.optString("fallbackStrategy")))
