@@ -93,6 +93,12 @@ fun OnboardingModelSelectionScreen(
         }
     }
     val grouped = filteredEntries.groupBy { it.providerInstanceId }
+    // [R4-V F-13] One-shot gate for the confirm button. `selected.isNotEmpty()`
+    // alone is not a guard: addGroup() is not idempotent (a fresh UUID per
+    // call) and the nav transition keeps the button live for the frames before
+    // recomposition, so a double tap persisted TWO identical "Default Models"
+    // groups.
+    var submitted by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -229,21 +235,27 @@ fun OnboardingModelSelectionScreen(
 
             MinisButton(
                 onClick = {
-                    if (selected.isNotEmpty()) {
-                        // [audit-0917] stringResource, not a hardcoded literal:
-                        // this name is PERSISTED as the group title, so every
-                        // non-English user saw an English group name in the
-                        // model-group list forever after onboarding.
-                        val group = ModelGroup(name = defaultGroupName)
-                        group.memberEntryIds.addAll(selected)
-                        providerRepository.addGroup(group)
-                        if (config.defaultPrimaryGroupId == null) {
-                            providerRepository.defaultPrimaryGroupId = group.id
+                    // [R4-V F-13] The flag, not just `enabled`, is the gate:
+                    // the second tap lands before recomposition disables the
+                    // button.
+                    if (!submitted) {
+                        submitted = true
+                        if (selected.isNotEmpty()) {
+                            // [audit-0917] stringResource, not a hardcoded literal:
+                            // this name is PERSISTED as the group title, so every
+                            // non-English user saw an English group name in the
+                            // model-group list forever after onboarding.
+                            val group = ModelGroup(name = defaultGroupName)
+                            group.memberEntryIds.addAll(selected)
+                            providerRepository.addGroup(group)
+                            if (config.defaultPrimaryGroupId == null) {
+                                providerRepository.defaultPrimaryGroupId = group.id
+                            }
                         }
+                        onBack()
                     }
-                    onBack()
                 },
-                enabled = selected.isNotEmpty(),
+                enabled = selected.isNotEmpty() && !submitted,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 16.dp),

@@ -163,21 +163,28 @@ data class FileItem(
         private val weekdayFormatter = SimpleDateFormat("EEEE", Locale.getDefault())
         private val shortDateFormatter = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
 
-        fun from(file: File): FileItem? {
+        fun from(file: File, resolveGuestAbsolute: (String) -> File? = { null }): FileItem? {
             // [sweep1014-B29] Symlink check MUST precede the exists() check:
             // exists() follows the link, so a broken (dangling) symlink reads
             // as nonexistent and was dropped before the isSymlink handling
             // below ever ran. Dangling symlinks are still listable entries.
             val isSymlink = Files.isSymbolicLink(file.toPath())
             if (!isSymlink && !file.exists()) return null
+            // [R4-V F-11] PRoot writes the path the SHELL sees into the link
+            // (`/var/minis/…`, `/usr/bin/…`). The Android host root has no
+            // `/var/minis`, so resolving an absolute target as a host path made
+            // every container-absolute link read as a 0-byte NON-directory —
+            // no folder affordance, unopenable, and it exposed the trash icon.
+            // Absolute targets now go through the browser's own guest→host
+            // mapper; an unmappable target stays "unknown" (the link itself),
+            // never a fabricated file.
             val resolved = if (isSymlink) {
-                try {
-                    Files.readSymbolicLink(file.toPath()).toFile().let { target ->
-                        if (target.isAbsolute) target else File(file.parentFile, target.path)
-                    }
+                val rawTarget = try {
+                    Files.readSymbolicLink(file.toPath()).toString()
                 } catch (_: Exception) {
-                    file
+                    null
                 }
+                resolveListedEntry(file, rawTarget, resolveGuestAbsolute)
             } else file
 
             return FileItem(
@@ -303,6 +310,34 @@ class FileBrowserViewModel(
             scoped?.let { return it }
         }
         return if (relativePath.isEmpty()) rootPath else File(rootPath, relativePath)
+    }
+
+    /**
+     * [R4-V F-11] Map a symlink's ABSOLUTE target — a GUEST path, because that
+     * is what PRoot stores when the shell creates the link — onto the host file
+     * the listing should describe.
+     *
+     * Same resolver the listing itself uses ([resolvePathForSession] when the
+     * screen knows its session, the global [PRootKernel.resolveHostPath]
+     * otherwise), so a link into `/var/minis/workspace` reads as THIS session's
+     * workspace rather than whichever session booted last.
+     *
+     * A host-absolute link (not written by PRoot) has no guest meaning: the
+     * guest mapping lands inside the rootfs, so when the mapped path does not
+     * exist we fall back to the raw path. When neither exists the answer is
+     * `null` — [resolveListedEntry] then keeps the entry as "unknown" and the
+     * UI treats it as a plain non-directory, which is the refuse-instead-of-
+     * guess shape this defect needs.
+     */
+    private fun resolveGuestAbsoluteTarget(rawTarget: String): File? {
+        val ctx = appContext
+        val mapped = if (ctx != null) {
+            com.rikkaminis.app.sandbox.PRootKernel.resolvePathForSession(sessionId, rawTarget, ctx)
+        } else {
+            com.rikkaminis.app.sandbox.PRootKernel.resolveHostPath(rawTarget)
+        }
+        if (mapped != null && mapped.exists()) return mapped
+        return File(rawTarget).takeIf { it.exists() }
     }
 
     init {
@@ -443,7 +478,13 @@ class FileBrowserViewModel(
                 // of throwing on a read-only mount or missing permission. The
                 // old code ignored the result, so loadItems() re-listed the
                 // still-present file and the user saw nothing happen.
-                val deleted = if (item.isDirectory) {
+                // [R4-V F-11] A SYMLINK is never deleted *through*: Kotlin's
+                // deleteRecursively() walks the RESOLVED tree (FileTreeWalk →
+                // File.listFiles(), which follows the link), so removing a
+                // directory-shaped link wiped the target directory's contents
+                // (measured: 2 files before, 0 after — report §3 arm A) while
+                // leaving the link's target in place. Unlink the name instead.
+                val deleted = if (shouldDeleteRecursively(item.isDirectory, item.isSymlink)) {
                     item.file.deleteRecursively()
                 } else {
                     item.file.delete()
@@ -549,7 +590,10 @@ class FileBrowserViewModel(
                 val showHidden = _uiState.value.showHidden
                 val files = resolvedPath.listFiles()
                     ?.filter { showHidden || !it.name.startsWith(".") }
-                    ?.mapNotNull { FileItem.from(it) }
+                    // [R4-V F-11] Pass the guest→host mapper so absolute link
+                    // targets (a PRoot link stores `/var/minis/…`) describe the
+                    // file the shell meant, not a nonexistent host path.
+                    ?.mapNotNull { FileItem.from(it, ::resolveGuestAbsoluteTarget) }
                     ?: emptyList()
 
                 rawItems = files

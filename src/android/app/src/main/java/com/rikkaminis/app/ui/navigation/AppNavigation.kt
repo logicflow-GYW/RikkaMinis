@@ -381,12 +381,21 @@ fun AppNavigation(
                 // "chat currently on screen" seam, whose getter already resolves
                 // a draft key through the alias table. With no chat composed yet
                 // it is null — i.e. exactly the previous behaviour.
+                // [R4-V F-10] launchSingleTop: after a process-death restore a
+                // TERMINAL entry may already be on the back stack, and pushing a
+                // second one left TWO TerminalScreens alive. The old page's
+                // `onDispose` then flipped MinisOpenUrlBroker.terminalVisible to
+                // false while the new page was on screen (its tap-to-URL
+                // behaviour silently disabled), and the second destination
+                // started its own PTY from the same route args.
                 navController.safeNavigate(
                     Routes.terminal(
                         initialDeepLink.initCommand,
                         sessionId = ChatViewModelStore.activeSessionId,
                     ),
-                )
+                ) {
+                    launchSingleTop = true
+                }
             }
             is DeepLinkAction.OpenSession -> {
                 // T-double-chat-fix: on process-death recreation NavController
@@ -748,9 +757,14 @@ fun AppNavigation(
                 // key after first-send promotion, so a bare pass-through opens
                 // the terminal/files browser under the orphan __new__ session.
                 onOpenTerminal = {
+                    // [R4-V F-10] Single top: a second TERMINAL entry would give
+                    // the stack two live TerminalScreens (see the cold-start
+                    // dispatcher above for what that does to terminalVisible).
                     navController.safeNavigate(
                         Routes.terminal(sessionId = ChatViewModelStore.resolveSessionId(sessionId)),
-                    )
+                    ) {
+                        launchSingleTop = true
+                    }
                 },
                 onOpenTerminalWithCommand = { command ->
                     navController.safeNavigate(
@@ -758,7 +772,12 @@ fun AppNavigation(
                             initCommand = command,
                             sessionId = ChatViewModelStore.resolveSessionId(sessionId),
                         ),
-                    )
+                    ) {
+                        // [R4-V F-10] Single top: the terminal for this session is
+                        // already on screen — a duplicate destination started a
+                        // second PTY and re-sent `command` into it.
+                        launchSingleTop = true
+                    }
                 },
                 onMoveToSession = { targetId ->
                     navController.safeNavigate(Routes.chat(targetId)) {
