@@ -66,6 +66,30 @@ internal object MirrorScope {
      *  scripts, never media or binaries. */
     val TEXT_EXTENSIONS: Set<String> = ArtifactBackupScope.DEFAULT_ALLOWED_EXTENSIONS
 
+    /**
+     * Credential red line (2026-10-29 hardening review, P0): files whose NAME
+     * carries a credential-family marker are never mirrored, wherever they
+     * sit. The tierflow key ledgers (`tierflow-keys-*.md|csv`) carry phone
+     * numbers and passwords in the clear and sit at the `shared/` top level,
+     * i.e. squarely inside this scope; shipping them into a user-visible
+     * `Download/` directory would publish them to every app that can read
+     * shared storage. A name blacklist is the cheapest rule that cannot
+     * false-positive on ordinary documents.
+     *
+     * Content-level scanning is deliberately NOT done: document prose
+     * legitimately discusses credentials (backlog entries, daily logs,
+     * sanitiser scripts), so a regex over every mirrored file would both cost
+     * and misfire — that gap is the logged residual of this decision.
+     */
+    val DENY_NAME_PATTERNS: List<Regex> = listOf(
+        Regex("(^|[\\-_.])(keys?|secrets?|credentials?|passwords?|passwds?|tokens?|oauth)([\\-_.]|$)"),
+        Regex("^\\.env"),
+    )
+
+    /** Pure and public so the deny rule is testable in isolation. */
+    fun isDeniedName(name: String): Boolean =
+        DENY_NAME_PATTERNS.any { it.containsMatchIn(name) }
+
     /** One file selected for mirroring. [relPath] is relative to the mirror
      *  root and already carries the source prefix (`memory/…`, `shared/…`).
      *  [file] is the source the sync reads bytes from — carried so a sync
@@ -160,6 +184,7 @@ internal object MirrorScope {
                     continue
                 }
                 if (!child.isFile) continue
+                if (isDeniedName(name)) continue
                 val ext = name.substringAfterLast('.', "").lowercase()
                 if (ext !in allowedExtensions) continue
                 val size = runCatching { child.length() }.getOrNull() ?: continue

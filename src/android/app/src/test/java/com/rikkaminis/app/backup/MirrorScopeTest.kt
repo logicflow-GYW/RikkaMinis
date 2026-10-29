@@ -168,4 +168,55 @@ class MirrorScopeTest {
             t.list("auto/"),
         )
     }
+
+    // ------------------------------------------------- credential red line (P0)
+
+    @Test
+    fun credentialNamedFilesAreNeverMirroredWhereverTheySit() {
+        // The tierflow ledgers carry phone numbers and passwords in the clear
+        // and live at the shared/ top level — squarely inside this scope.
+        write("shared/tierflow-keys-2026-1015.md", "15000000000----secret")
+        write("shared/tierflow-keys-2026-1015.csv", "15000000000,secret")
+        write("shared/work/deep-audit-1028/reports/oauth-secret.md", "k=v")
+        write("memory/api-tokens.md", "k=v")
+        write("memory/.env.production", "K=v")
+
+        val shared = MirrorScope.selectShared(File(root, "shared"))
+        val memory = MirrorScope.selectMemory(File(root, "memory"))
+
+        assertEquals(emptyList<String>(), shared.map { it.relPath })
+        assertEquals(emptyList<String>(), memory.map { it.relPath })
+    }
+
+    @Test
+    fun ordinaryDocumentsStillMirrorAfterTheDenyRule() {
+        // Negative control for the rule above: the documents the mirror exists
+        // for must keep flowing, otherwise the red line would have "solved" the
+        // leak by disabling the feature.
+        write("shared/backlog.md", "sections")
+        write("shared/sandbox-limits.md", "symptoms")
+        write("memory/2026-10-29.md", "log line")
+
+        val picked = (MirrorScope.selectShared(File(root, "shared")) +
+            MirrorScope.selectMemory(File(root, "memory"))).map { it.relPath }.sorted()
+
+        assertEquals(
+            listOf("memory/2026-10-29.md", "shared/backlog.md", "shared/sandbox-limits.md"),
+            picked,
+        )
+    }
+
+    @Test
+    fun isDeniedName_table() {
+        assertTrue(MirrorScope.isDeniedName("tierflow-keys-2026-1015.md"))
+        assertTrue(MirrorScope.isDeniedName("api-tokens.json"))
+        assertTrue(MirrorScope.isDeniedName("server_credentials.txt"))
+        assertTrue(MirrorScope.isDeniedName(".env"))
+        // Ordinary names must not be caught.
+        assertFalse(MirrorScope.isDeniedName("backlog.md"))
+        assertFalse(MirrorScope.isDeniedName("sandbox-limits.md"))
+        assertFalse(MirrorScope.isDeniedName("SKILL.md"))
+        assertFalse(MirrorScope.isDeniedName("keyboard-notes.md"))
+        assertFalse(MirrorScope.isDeniedName("monkeys.md"))
+    }
 }
