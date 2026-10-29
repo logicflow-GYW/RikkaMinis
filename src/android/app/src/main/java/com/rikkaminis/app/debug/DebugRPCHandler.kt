@@ -1402,29 +1402,15 @@ internal fun utf8CompletePrefixLength(bytes: ByteArray): Int {
  * only guarantees the page does not END mid-character, while a caller-supplied
  * `offset` can land inside one — a leading continuation byte is a fragment of
  * a character the caller asked to skip past, not evidence of binary content.
- * The content still decodes it to the replacement character (baseline
- * behaviour); only the classification looks past it.
+ * [decodeUtf8Page] drops that same fragment from `content` (never from
+ * `bytesRead`), so the bytes this check approved are exactly the bytes the
+ * caller sees.
  */
 internal fun looksLikeUtf8Text(bytes: ByteArray): Boolean {
     if (bytes.any { it == 0.toByte() }) return false
     // [R5-F F-F-08] Skip leading continuation bytes (up to 3 — the tail of a
-    // 4-byte sequence): the boundary at `offset` lands mid-character, and the
-    // decoder must not even see the orphan tail.
-    var head = 0
-    while (head < bytes.size && head < 3 && (bytes[head].toInt() and 0xC0) == 0x80) head++
-    val decoder = Charsets.UTF_8.newDecoder()
-        .onMalformedInput(CodingErrorAction.REPORT)
-        .onUnmappableCharacter(CodingErrorAction.REPORT)
-    return runCatching {
-        decoder.decode(ByteBuffer.wrap(bytes, head, bytes.size - head))
-    }.isSuccess
-}
-
-internal fun looksLikeUtf8Text(bytes: ByteArray): Boolean {
-    if (bytes.any { it == 0.toByte() }) return false
-    // [R5-F F-F-08] Skip leading continuation bytes (up to 3 — the tail of a
     // 4-byte sequence): the window may open mid-character, and the decoder
-    // must not even see the orphan tail.
+    // must not even see the orphan tail. ONE rule shared with [decodeUtf8Page].
     val head = utf8SkipLeadingContinuation(bytes)
     val decoder = Charsets.UTF_8.newDecoder()
         .onMalformedInput(CodingErrorAction.REPORT)
