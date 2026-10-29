@@ -187,7 +187,11 @@ class StopCleanupPlanTest {
         val src = readRepoFile(sourcePath)
         assertTrue(
             "the decision must come from the pure planner",
-            src.contains("val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant)"),
+            // [R5-C C-C-06] The call gained a third input — the reminder-tail
+            // probe — the planner is still the single decision source.
+            src.contains(
+                "val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant, reminderTail)",
+            ),
         )
         assertTrue(
             "the placeholder drop must be the planner's arm",
@@ -216,7 +220,9 @@ class StopCleanupPlanTest {
     fun `an in-flight tool cancel still short-circuits before the planner`() {
         val src = readRepoFile(sourcePath)
         val case1 = src.indexOf("if (hadInflightTools) {")
-        val planner = src.indexOf("val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant)")
+        val planner = src.indexOf(
+            "val stopPlan = planStopCleanup(last.toolBlocks, historyEndsWithAssistant, reminderTail)",
+        )
         assertTrue("Case 1 block not found", case1 > 0)
         assertTrue("planner call not found", planner > 0)
         assertTrue("Case 1 (tool cancel) must return before the text tail", case1 < planner)

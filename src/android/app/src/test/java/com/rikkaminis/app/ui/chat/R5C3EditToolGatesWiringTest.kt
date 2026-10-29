@@ -130,12 +130,30 @@ class R5C3EditToolGatesWiringTest {
         val record = prompt.indexOf("runCatching { skillRepository?.recordSkillUse(skill.id) }")
         assertTrue("sub-agent kind gate missing", gate > 0)
         assertTrue("recordSkillUse must run only after the kind gate ($gate < $record)", record > gate)
-        val loop = prompt.indexOf("return com.rikkaminis.app.ui.chat.runSubagentLoop(")
-        assertTrue("sub-agent loop call missing", loop > 0)
-        val deadline = prompt.indexOf("run deadline reached — sub-agent tool call refused")
-        assertTrue("sub-agent deadline gate must precede the loop ($deadline < $loop)", deadline in 1 until loop)
-        val budget = prompt.indexOf("Error: Agent budget exhausted (tool_calls)")
-        assertTrue("sub-agent budget refusal must precede the loop ($budget < $loop)", budget in 1 until loop)
+        // The gate belongs to the sub-agent's OWN tool executions — the
+        // executeSubTool lambda — NOT to the spawn dispatch (executeTool already
+        // charged that call, so a gate there would double-charge the spawn and
+        // leave every inner call free). Assert inside the lambda: deadline +
+        // TOOL_CALLS consume both precede the executor call, and the refusal
+        // carries the dispatch-level marker that keeps
+        // ShellBudgetStopSymmetryTest's run-level gate list at two entries.
+        val lamStart = prompt.indexOf("executeSubTool = { name, subArgs ->")
+        val exec = prompt.indexOf("executeSubagentTool(name, subArgs", lamStart)
+        assertTrue("sub-agent executor lambda missing", lamStart > 0)
+        assertTrue("executor call missing", exec > lamStart)
+        val lam = prompt.substring(lamStart, exec)
+        assertTrue(
+            "inner executions must honour the run deadline",
+            lam.contains("run deadline reached — sub-agent tool call refused"),
+        )
+        assertTrue(
+            "inner executions must consume a TOOL_CALLS unit",
+            lam.contains("t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS)"),
+        )
+        assertTrue(
+            "a refusal must be a dispatch-level budget failure (not a silent ok)",
+            lam.contains("throw SubagentBudgetExhaustedException"),
+        )
     }
 
     // ── C-C-07②: provider-null fallback obeys the final-failure predicate ───

@@ -67,7 +67,12 @@
 
 ### 2.6 C-C-07① —— 子代理的工具执行逃逸预算
 
-`executeSubagentTool` 在 `runSubagentLoop` 前无 deadline / TOOL_CALLS 门（主 `executeTool` 每个调用都过）；`recordSkillUse` 位于 `isSubagent` 检查之前 ⇒ 被拒的派发也算"最近使用"。修法：`traceObserver.activeRunBudget?.isExpired()` + `t7ConsumeAndTrace(DIMENSION_TOOL_CALLS) { it.consumeToolCall() }` 双门插在 `runSubagentLoop` 之前，拒绝返回显式 `ToolExecutionResult(…, false)`（不冒充执行成功 — 前者带错误信息，后者绕过代理上下文错误分支）；`recordSkillUse` 移到 `isSubagent` gate + 工具集构建之后。
+`executeSubagentTool`（子代理内部**每次**工具执行的执行器）无 deadline / TOOL_CALLS 门（主 `executeTool` 每个调用都过）；`recordSkillUse` 位于 `isSubagent` 检查之前 ⇒ 被拒的派发也算"最近使用"。
+
+**★ 第一版改错了位置（CI 当场抓住，值得记录）**：把双门放在 `executeSpawnAgentTool` 里 `runSubagentLoop` 之前 —— 那是**派发点**，spawn 调用本身已被主 `executeTool` 的 TOOL_CALLS 门扣过，等于重复扣一次，而子代理内部的 N 次执行仍然免费（原缺陷原样保留）。两条既有测试立刻翻红：`ShellBudgetStopSymmetryTest` 的文件级收集器数到 3 个 tool_calls 门（期望 2），`StopCleanupPlanTest` 的两条形状钉因清理调用多了一个参数而失配。
+
+**最终修法**：门放进 `executeSubTool = { name, subArgs -> … }` lambda（`executeSubagentTool` 的**唯一**生产调用点，已核 `grep` 仅 1 处），每次内部执行前：① `activeRunBudget?.isExpired()` → `throw SubagentBudgetExhaustedException("run deadline reached — sub-agent tool call refused")`；② `t7ConsumeAndTrace(DIMENSION_TOOL_CALLS) { it.consumeToolCall() }` 失败 → `throw SubagentBudgetExhaustedException("tool-call budget exhausted — sub-agent tool call refused")`。选 throw 而不返回 `ToolExecutionResult(…, false)` 的理由 = **本文件自己的既有约定**：`ShellBudgetStopSymmetryTest` 的收集器把含 `SubagentBudgetExhaustedException` 的门体排除在「运行级终态门」之外（[FIX-R4-Q F-14] 的 KDoc），派发级拒绝 → `runSubagentLoop` 的 catch 转成可见的失败结果（"encountered an error after N turn(s) … Error: <reason>"），不会让一个已耗尽预算的运行进入"拒绝—重试"空转。同时给 `executeSubagentTool` 的 KDoc 写明"预算门在其唯一调用点，新增调用点必须一并加门"。
+`recordSkillUse` 移到 `isSubagent` gate + 工具集构建之后。
 
 ### 2.7 C-C-07② —— provider 为 null 的 fallback 门控
 
@@ -97,7 +102,9 @@
 |---|---|
 | 真词法配平（仓库 `scripts/scan/_kotlin_lexer.mask_code`） | 7 生产 + 3 测试文件 braces=0 / parens=0 / 无 NUL（rc=0） |
 | 新增用例 | ToolLoopDetectorTest +1（往返阻断文案）· StopCleanupPlanTest +3 · R5C3EditToolGatesWiringTest 8 例 |
-| 变异臂（人工推演） | 旧文案 → 往返用例第二次 check 回 NONE（红）；去掉 `!editingSend` 前缀 → Wiring 断言红；`dropContinuationReminder` 不置位 → StopCleanupPlanTest 红；`recordSkillUse` 回移 → Wiring 顺序断言红 |
+| 本地 JVM（沙箱 kotlinc + JUnit4，stub AppLogger） | `ToolLoopDetectorTest` **24/24 PASS**；变异臂（把 check 文案改回 `attempted unavailable tool …`）→ 恰好新用例 1 条 FAIL（真红，非恒绿） |
+| 形状探针本地复刻（`a_probe_shapes.py`，42 条断言） | 42/42 PASS —— 覆盖 Wiring 全量断言 + `ShellBudgetStopSymmetryTest` 收集器复刻（运行级门恰 2 个、均终态）与它的负控变异（删 shell 门终态两行 → 2 门、1 个非终态） |
+| CI 前两轮 | run `40857735306` failure（`TAG` 限定名，已修）· run `40859378552` failure（4 条形状测试，已修 —— 见 §8） |
 | 分支 CI | run `40857735306`（head_sha 见 §6） |
 
 **未做（按硬约束 ② 禁跑全量）**：本地未跑 `scan.sh` / `test_scan.py` / gradle 全量；纯逻辑用例的 JVM 隔离运行未做（`AppLogger` 依赖 `android.util.Log`，ToolLoopDetector 无法脱离 android.jar 编译，CI 是唯一执行面）。
@@ -107,11 +114,14 @@
 - **R1（负决策，登记）**：`record()` 对未知工具的识别依赖 `errorMessage` 文案 —— 本支修的是"我们的阻断文案保持可解析"，没有把结构化字段（如 `ToolLoopDetector` 显式收 `unknownToolName` 参数）作为契约。理由：那要求改 `record()` 签名 + AgentLoopEngine 调用点（硬约束 ① 禁改 AgentLoopEngine），触发条件 = 下次再因文案漂移导致 streak/计数失效。
 - **R2（已登记，未动）**：C-C-04① 的谓词层修法在 ChatSessionLifecycle（"重写行 = 截断"的通用判据），本支只在 rerunFromToolBlock 调用点补齐；其余原地重写场景（如未来新增的 part 级编辑）需 C1 面统一承接。
 - **R3（观察）**：`dropContinuationReminderTail` 的 DB 删除是"仅当仍是 DB 尾"才动；若 Stop 与另一写并发错序，保留孤儿行 + 警告（拒绝部分删除）。日志 `stop-cleanup: continuation reminder … is not the DB tail — kept` 可作真机观测点。
+- **R5（行为取舍，登记）**：子代理内部一次工具调用被预算拒绝 ⇒ **整个子代理运行中止**（throw → 可见失败结果），而不是"该次调用返回错误、子代理继续"。理由：预算已耗尽时后续每次执行也会被拒，继续只会空转；且与 F-14 的 provider-attempt 门同形。代价 = 一次瞬时拒绝不会给子代理自适应机会（当前无已知触发路径）。
 - **R4（真实机未验）**：C-C-05 的 EXHAUSTED 编辑链、C-C-06 的提醒窗口 Stop、C-C-07① 的子代理预算拒绝文案，均只有 CI 编译级 + JVM 级 + 源码形状证据；真机复现步骤见任务书 §4。
 
 ## 6. CI 判读
 
-- run `40857735306` @ `2026-10-29T10:27:39Z`（dispatch `fix/r5-c3-edit-toolgates`）。
+- run `40857735306` @ `10:27:39Z` **failure**：`e: … ChatViewModel.kt:4737:19 Cannot access 'val TAG: String': it is private in file`（顶层扩展函数里裸用伴生成员）—— 两次出现，改 `ChatViewModel.TAG` 后解决。
+- run `40859378552` @ `10:40:13Z` **failure**：编译通过，单测 4 条红 —— `ShellBudgetStopSymmetryTest` ×2（门收集器数到 3 个 `tool_calls` 门）+ `StopCleanupPlanTest` ×2（形状钉的字面量因调用多一个参数失配）。两处都按测试表达的契约改代码/改钉，不是调数字。
+- run 3 @ `dc7e30b9`（待绿）。
 - 判据：`conclusion == success` 且 `head_sha` 与本地 `2ecacbef` 逐字符一致；日志 `Summary: … 0 failed`、`ALL … CASES PASS`、`^ e: ` 0、NUL 0。
 - 报告提交（本文件）在绿之后 push，收口判据：`git diff --name-only <绿sha>..HEAD -- . ':(exclude)fix-reports'` 为空。
 
@@ -125,4 +135,7 @@
 - **"阻断文案是解析契约"这条值得进规则库**：同族形态 = 写侧产出的人类可读文案被读侧用正则解析，文案与解析器分两个文件、各自有测试 → 两侧单测全绿而链路失效（与 r3-B11-F04 的 `"foobar."` 尾点同族）。判据：凡是 `record()/classify()` 吃 `errorMessage/content` 字符串的地方，测试必须喂**真实生产函数的输出**，不能手写字符串。
 - **纯决策核 + 接线断言的分工再次验证有效**：C-C-06 的决策（3 例纯函数）与接线（2 例顺序断言）分开钉；C-C-05/07 只有接线，用"索引顺序 + guard 原文"而非语义重述。
 - **读侧"看似已修"的陷阱**：`ChatViewModel` 的注释里写着 `[FIX-R4-P F-05/F-07]`，代码也确实做了那两处，但**同一族**的 retryLast / switchModelAndRerun 没跟上（C-C-04②）——"修了共享函数的调用点之一"是 1028 批反复出现的同族复发形态，本支按 `rg -l <函数名>` 全列举才看见。
+- **自家形状测试是最好的门位置探针**：第一版把子代理预算门放在派发点，`ShellBudgetStopSymmetryTest` 的"运行级门恰 2 个"立刻变红 —— 这条测试的 KDoc 已经写明"派发级拒绝用 `SubagentBudgetExhaustedException` 标记排除"，读既有测试的排除规则就等于读到了本仓对这类门的分类法。**改共享网关时先读钉它的测试，比读生产代码更快定位正确形状。**
+- **形状钉的字面量必须随签名同步**：`StopCleanupPlanTest` 两处 `planStopCleanup(last.toolBlocks, historyEndsWithAssistant)` 在我的第三参数落地后失配（CI 抓到，本地探针复刻过）。这类"测试钉字面量"在改签名时是必改项，遗漏就是一轮 CI。
+- **`rg -r` 是 `--replace`，不是 recursive**：`rg -rn "pat"` 会把命中**替换成 `n`** 再打印，输出看起来像"文件被改坏了"（我一度以为 `dropCompactMarkerIfRewound` 被改成 `n`）。诊断这类"文件疑被破坏"必须先 `sed -n`/`cat` 看真文件，再决定要不要 `git checkout`。
 - **两次误编辑**（`rerunFromToolBlock` 头部、isSubagent 段）都靠 `git diff` 复核当场发现并恢复 —— 大批量 sed/编辑后必须逐文件 `git diff` 过一遍，不能只信 apply 成功。

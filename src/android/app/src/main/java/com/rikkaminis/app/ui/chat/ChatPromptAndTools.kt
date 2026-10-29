@@ -538,28 +538,6 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         )
     }
 
-    // [R5-C C-C-07①] The sub-agent's tool EXECUTIONS were invisible to the
-    // parent run's tool budget: the main dispatch consumes one TOOL_CALLS unit
-    // per call (executeTool above), and the sub-agent's own requests consume
-    // PROVIDER_ATTEMPTS (streamProvider below — [FIX-R4-Q F-14]), but every
-    // in-tool execution here was free: a runaway sub-agent (a skill that loops
-    // over files) could make thousands of tool calls the budget never counted
-    // and the deadline never capped. Same gate shape as the main dispatch:
-    // deadline first, then the single-line consume; a refusal is an explicit
-    // tool error the dispatching agent can read, never a silent no-op.
-    if (traceObserver.activeRunBudget?.isExpired() == true) {
-        return ToolExecutionResult(
-            "Error: run deadline reached — sub-agent tool call refused",
-            false, toolTitle = title,
-        )
-    }
-    if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS) { it.consumeToolCall() }) {
-        return ToolExecutionResult(
-            "Error: Agent budget exhausted (tool_calls)",
-            false, toolTitle = title,
-        )
-    }
-
     return com.rikkaminis.app.ui.chat.runSubagentLoop(
         skillName = skillName,
         query = query,
@@ -618,6 +596,36 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         // [audit-0916] The sub-agent's own filtered list is passed in so a
         // rejected name is answered with the names this level may use.
         executeSubTool = { name, subArgs ->
+            // [R5-C C-C-07①] A tool executed INSIDE the sub-agent was invisible
+            // to the parent run's tool budget: the main dispatch consumes one
+            // TOOL_CALLS unit per call (executeTool), and the sub-agent's own
+            // REQUESTS consume PROVIDER_ATTEMPTS (streamProvider below —
+            // [FIX-R4-Q F-14]), but every in-tool execution here was free — a
+            // runaway sub-agent (a skill looping over files) could make
+            // thousands of tool calls the budget never counted and the deadline
+            // never capped. The SPAWN call itself is already charged by the main
+            // dispatch (that is what executeTool's gate pays for), so the unit
+            // belongs here, on each inner execution.
+            //
+            // Refusal shape = the file's own convention for a sub-agent gate:
+            // throw SubagentBudgetExhaustedException, which runSubagentLoop's
+            // catch turns into a VISIBLE failed result for the dispatching agent
+            // ("encountered an error after N turn(s) … Error: <reason>") instead
+            // of a refuse-and-retry loop on a run that is out of budget. The
+            // same marker keeps ShellBudgetStopSymmetryTest's contract intact:
+            // a dispatch-level gate is excluded from the RUN-level terminal
+            // gates (its KDoc), so the run-terminating gates stay exactly
+            // tool_calls + shell_commands.
+            if (traceObserver.activeRunBudget?.isExpired() == true) {
+                throw SubagentBudgetExhaustedException(
+                    "run deadline reached — sub-agent tool call refused",
+                )
+            }
+            if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS) { it.consumeToolCall() }) {
+                throw SubagentBudgetExhaustedException(
+                    "tool-call budget exhausted — sub-agent tool call refused",
+                )
+            }
             executeSubagentTool(name, subArgs, subagentTools.map { it.name })
         },
         // [fix/same-class-cleanup] The residue policy resolves a drifted
@@ -634,6 +642,11 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
  * assistantId, etc.) — the sub-agent produces file/memory results only.
  * Tools that are FORBIDDEN for sub-agents never reach this method
  * because [SubagentSkill.buildFilteredTools] excludes them.
+ *
+ * [R5-C C-C-07①] The parent run's deadline + TOOL_CALLS budget are gated by
+ * this method's ONLY caller (the spawn dispatch's `executeSubTool` lambda).
+ * A second call site must gate too, or inner executions escape the parent
+ * budget again.
  */
 internal suspend fun ChatViewModel.executeSubagentTool(
     name: String,
