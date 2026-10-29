@@ -267,6 +267,18 @@ object OpenMinisBackupCompat {
                 .put("format", "openminis.config.backup")
                 .put("version", 1)
                 .put("exportedAt", now())
+                // [FIX-R5-B1 / F-01] The snapshot moment, under the key
+                // `ConfigBackup.import` actually reads. Without it the
+                // converted document had NO `createdAt`, and Stage 6's memory
+                // guard refused every file this device already had (`<= 0L` ⇒
+                // "no timestamp to order against, kept") — including the
+                // SOUL.md / GLOBAL.md template written at first launch, so a
+                // .minisbak restore could never bring memory across.
+                // `manifest.created_at` is the exporting device's own stamp
+                // (kotlinx-serialization ISO-8601, or epoch millis in older
+                // builds — [isoToMillis] takes both); a manifest without one
+                // falls back to "now", which is the honest answer.
+                .put("createdAt", manifestCreatedAtMillis(manifest, now()))
                 // [FIX-R3-D / F-13] The converted document never declared this,
                 // so `ConfigBackup.import` read `hadSecrets = false` for EVERY
                 // .minisbak — including the ones whose credentials had just
@@ -275,9 +287,12 @@ object OpenMinisBackupCompat {
                 // after restoring" over a package that had them, which is the
                 // one warning that trains a user to ignore warnings. The value
                 // mirrors what this converter actually carries: env values and
-                // provider credentials ride `secrets.json`, so a non-empty
-                // secrets object is exactly "credentials included".
-                .put("includesSecrets", secrets != null && secrets.length() > 0)
+                // provider credentials ride `secrets.json`.
+                // [FIX-R5-B1 / C-08] …and it is measured on the VALUES, not on
+                // the key count: a shell `{"providers":[],"envVars":[]}` has
+                // `length() == 2` and claimed secrets on a package with none
+                // (suppressing the one warning that was actually useful).
+                .put("includesSecrets", secretsCarryCredentials(secrets))
 
             // [FIX-P1B / RT-S1] 缺片清单：分片序号 → 成员名，喂给缺片报告段。
             // [FIX-1028 / A-5] 同一累计器还收「读到但解析失败」的行数。
@@ -1286,8 +1301,14 @@ object OpenMinisBackupCompat {
             o.put("updatedAt", isoToMillis(s.opt("updatedAt")) ?: 0L)
             o.put("category", s.optString("category", ""))
             o.put("lastMessage", s.optString("lastMessage", ""))
+            // [FIX-R5-B1 / C-08] `trim()` BEFORE `ifEmpty`, on both sides: a
+            // wrapper-level `"modelBinding": "   "` is blank but not empty, so
+            // `ifEmpty` kept it and the inner (real) binding never got a look —
+            // the session then carried a whitespace-only binding that the
+            // import side cannot parse and does not treat as absent.
             o.put("modelBinding", convertModelBinding(
-                d.optString("modelBinding", "").ifEmpty { s.optString("modelBinding", "") },
+                d.optString("modelBinding", "").trim()
+                    .ifEmpty { s.optString("modelBinding", "").trim() },
             ))
             o.put("source", s.optString("source", ""))
             // org.json 的 optInt 不做 Boolean→Int 强转：显式转成 0/1
@@ -1366,4 +1387,62 @@ internal fun convertModelBinding(raw: String): String {
         return JSONObject().put("type", "entry").put("entryId", id).toString()
     }
     return raw
+}
+
+/** The provider-credential keys `secrets.json` can carry (see [convertProviders]
+ *  — the same three this converter copies onto the provider object). */
+private val CREDENTIAL_KEYS = listOf("apiKey", "manualOAuthToken", "oauthToken")
+
+/**
+ * [FIX-R5-B1 / F-01] The converted document's `createdAt`: the package's own
+ * `manifest.created_at` when it has a usable one, else [fallback].
+ *
+ * `manifest.created_at` is what OpenMinis stamps at export time
+ * (kotlinx-serialization: ISO-8601 with milliseconds; older builds: epoch
+ * millis), and [OpenMinisBackupCompat.isoToMillis] reads both. `snapshot_at` is
+ * deliberately NOT a second fallback: it describes an intermediate snapshot,
+ * and a package whose own creation stamp is missing is better reported as
+ * "converted now" than ordered against an unrelated moment.
+ */
+internal fun manifestCreatedAtMillis(manifest: JSONObject, fallback: Long): Long =
+    OpenMinisBackupCompat.isoToMillis(manifest.opt("created_at"))
+        ?.takeIf { it > 0L }
+        ?: fallback
+
+/**
+ * [FIX-R5-B1 / C-08] Does `secrets.json` actually carry credentials?
+ *
+ * The old test was `secrets.length() > 0`, i.e. "how many KEYS does this object
+ * have": a package whose secrets.json is the empty shell
+ * `{"providers":[],"envVars":[]}` has two keys and claimed
+ * `includesSecrets: true`, which suppressed `ConfigBackup.import`'s
+ * "this backup carries no API keys" line on a package with no keys at all —
+ * the false-positive direction of the only warning that matters after a
+ * device move.
+ *
+ * Measured on VALUES now, on the two arrays this converter reads:
+ *  - `providers[]` entries carry `apiKey` / `manualOAuthToken` / `oauthToken`
+ *    (the three copied by [convertProviders]);
+ *  - `envVars[]` entries carry `value` (base64, decoded by [convertEnvVars]).
+ * Anything else in the object is not a credential this converter forwards.
+ */
+internal fun secretsCarryCredentials(secrets: JSONObject?): Boolean {
+    if (secrets == null) return false
+    val providers = secrets.optJSONArray("providers")
+    if (providers != null) {
+        for (i in 0 until providers.length()) {
+            val p = providers.optJSONObject(i) ?: continue
+            for (key in CREDENTIAL_KEYS) {
+                if (p.optString(key, "").isNotEmpty()) return true
+            }
+        }
+    }
+    val envVars = secrets.optJSONArray("envVars")
+    if (envVars != null) {
+        for (i in 0 until envVars.length()) {
+            val v = envVars.optJSONObject(i) ?: continue
+            if (v.optString("value", "").isNotEmpty()) return true
+        }
+    }
+    return false
 }

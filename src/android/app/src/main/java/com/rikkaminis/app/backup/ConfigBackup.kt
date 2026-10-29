@@ -744,8 +744,15 @@ object ConfigBackup {
         val artifacts = JSONObject()
         var artifactSkipped = 0
         // [D-C fix/backup-bootstrap-size] `includeArtifacts=false` is the size
-        // ladder's last resort (see [buildWithinCap]); it yields an empty
-        // section, which import already handles as "no archive in backup".
+        // ladder's last resort (see [buildWithinCap]).
+        // [FIX-R5-B1 / F-12] …and it used to leave a bare `{}` — the same shape
+        // as "this device had no artifacts at all" — so the import side had no
+        // way to tell the user that the archive had been thrown away to fit the
+        // cap. Now the section SAYS SO, and Stage 9 turns that claim into a
+        // `skipped` line. Only claimed when there was something to drop.
+        if (!includeArtifacts && artifactRoots != null && artifactRoots.isNotEmpty()) {
+            artifacts.put(ARTIFACTS_DROPPED_FOR_SIZE, true)
+        }
         if (includeArtifacts && artifactRoots != null && artifactRoots.isNotEmpty()) {
             val archiveFile = java.io.File.createTempFile("artifact-backup-", ".zip")
             try {
@@ -1306,6 +1313,11 @@ object ConfigBackup {
         // stage can re-attach rules to the instance that now owns the label
         // (merge and append paths both re-mint or reuse ids).
         val providerKeyToId = HashMap<String, String>()
+        // [FIX-R5-B1 / F-05] The ids that took each (providerType, label), in
+        // arrival order — the order the `providers` array and the
+        // `thinkingRules` groups share. Consumed front-first by Stage 1.5 so a
+        // duplicate label no longer loses one instance's whole rules group.
+        val idsByProviderKey = HashMap<String, MutableList<String>>()
         // [FIX-R3-D / F-08] Instance ids Stage 1 already created or merged into
         // during THIS run. A backup legitimately carries two providers with the
         // same (providerType, label) — e.g. the user duplicated an OpenAI
@@ -1430,9 +1442,25 @@ object ConfigBackup {
                         // ("$label ($suffix)") never appears there. Keying by
                         // resolvedLabel made every renamed import lose its whole
                         // thinking-rules group.
+                        //
+                        // The key expression stays spelled inline here (no local
+                        // val, no helper) because `backup_remap_rollup_check.py`
+                        // pins this exact shape as the Stage-1 registration and
+                        // mutates it to prove the criterion has teeth.
                         providerKeyToId[
                             obj.optString("providerType", "") + "\u0000" + label
                         ] = instId
+                        // [FIX-R5-B1 / F-05] …and keep EVERY id that took this
+                        // key, in arrival order. The single slot above can only
+                        // answer "who owns this key" (last write wins), which
+                        // made Stage 1.5 hand BOTH thinking-rules groups of a
+                        // duplicate-label pair to the SECOND instance — the
+                        // first came out with no rules at all. The rules groups
+                        // are written in provider order, so the i-th group for a
+                        // key belongs to the i-th provider for that key.
+                        idsByProviderKey.getOrPut(
+                            obj.optString("providerType", "") + "\u0000" + label
+                        ) { ArrayList() }.add(instId)
                     }
                 } catch (t: Throwable) {
                     skipped.add("provider \"$label\": ${t.message ?: "import failed"}")
@@ -1453,10 +1481,27 @@ object ConfigBackup {
                 val type = group.optString("providerType", "")
                 val label = group.optString("providerLabel", "")
                 val rules = group.optJSONArray("rules") ?: continue
-                val instId = providerKeyToId["$type\u0000$label"]
+                // [FIX-R5-B1 / F-05] One rules group per provider entry that had
+                // rules, in provider order. Take the next id registered for this
+                // key from the arrival-order list; the single slot (the LAST
+                // instance that took the key) is the fallback for a payload that
+                // carries more groups than providers.
+                val pendingForThisKey = idsByProviderKey["$type\u0000$label"]
+                val nextInOrder = if (pendingForThisKey.isNullOrEmpty()) {
+                    null
+                } else {
+                    pendingForThisKey.removeAt(0)
+                }
+                val instId = nextInOrder ?: providerKeyToId["$type\u0000$label"]
                 if (instId == null) {
                     skipped.add("thinking rules for \"$label\" (provider not restored)")
                     continue
+                }
+                if (nextInOrder == null && pendingForThisKey != null) {
+                    skipped.add(
+                        "thinking rules for \"$label\": more rule groups than restored " +
+                            "providers for this key, applied to its last instance"
+                    )
                 }
                 try {
                     thinkingRulesImported += providerRepo.restoreThinkingRules(instId, rules)
@@ -1469,10 +1514,26 @@ object ConfigBackup {
         // -- Stage 2: model groups (remaps member entry ids, builds group map) --
         val groups = root.optJSONArray("groups")
         if (groups != null) {
-            val existingGroupIds = providerRepo.config.value.modelGroups.map { it.id }.toSet()
-            val existingGroupNames = providerRepo.config.value.modelGroups.map { it.name }.toSet()
+            // [FIX-R5-B1 / F-05] Group ids Stage 2 has already claimed during
+            // THIS run (created, or merged into). Without it the same-name
+            // branch below treats the group the FIRST entry just created as
+            // "an existing local group" and merges the second backup group into
+            // it: members union (fine) but the run-config is written a second
+            // time, so the backup's second group's strategy / thinking level /
+            // context limit silently overwrite the first's, one group is lost,
+            // and `groupsImported == 2`. Stage 1 has the identical guard
+            // ([claimedInstanceIds] + [shouldMergeIntoExisting]); this is its
+            // Stage 2 twin.
+            val claimedGroupIds = HashSet<String>()
             for (i in 0 until groups.length()) {
                 val g = groups.optJSONObject(i) ?: continue
+                // Read the live list per entry: both sets below feed DECISIONS
+                // (which source id is free, which name needs a "(2)" suffix) and
+                // a snapshot taken before the loop made the rename branch dead
+                // code — every same-name entry merged instead.
+                val liveGroups = providerRepo.config.value.modelGroups
+                val existingGroupIds = liveGroups.map { it.id }.toSet()
+                val existingGroupNames = liveGroups.map { it.name }.toSet()
                 val srcId = g.optString("id", "")
                 val name = g.optString("name", "group #${i + 1}")
                 // Remap member entries through the entry map; drop members whose
@@ -1499,7 +1560,7 @@ object ConfigBackup {
                 // creating "name (2)". Local members are kept (union), so a
                 // restore is additive rather than destructive.
                 val existingGroup = providerRepo.config.value.modelGroups
-                    .firstOrNull { it.name == name }
+                    .firstOrNull { it.name == name && it.id !in claimedGroupIds }
                 if (existingGroup != null) {
                     val mergedMembers = existingGroup.memberEntryIds.toMutableList()
                     var addedAny = false
@@ -1530,6 +1591,7 @@ object ConfigBackup {
                         providerRepo.updateGroup(merged)
                     }
                     if (srcId.isNotEmpty()) groupIdMap[srcId] = existingGroup.id
+                    claimedGroupIds.add(existingGroup.id)
                     groupsImported++
                     if (droppedMembers > 0) {
                         skipped.add(
@@ -1571,6 +1633,7 @@ object ConfigBackup {
                     )
                     providerRepo.addGroup(group)
                     if (srcId.isNotEmpty()) groupIdMap[srcId] = newId
+                    claimedGroupIds.add(newId)
                     groupsImported++
                     if (droppedMembers > 0) {
                         skipped.add(
@@ -1857,7 +1920,12 @@ object ConfigBackup {
             val memoryDir = memoryRepo.memoryDirectory()
             memoryFilesImported = restoreMemoryFiles(
                 section = memArr,
-                backupCreatedAt = root.optLong("createdAt", 0L),
+                // [FIX-R5-B1 / F-01] Was `root.optLong("createdAt", 0L)`, which
+                // is `0` for every `.minisbak`-converted document (that
+                // converter wrote only `exportedAt`) ⇒ Stage 6 refused every
+                // memory file this device already had. [documentCreatedAt]
+                // keeps `createdAt` primary and falls back to `exportedAt`.
+                backupCreatedAt = documentCreatedAt(root),
                 localFile = { name -> File(memoryDir, name) },
                 saveFile = { name, content -> memoryRepo.saveFile(name, content) },
                 skipped = skipped,
@@ -1984,6 +2052,17 @@ object ConfigBackup {
             val skippedAtExport = artifactsObj.optInt("skipped", 0)
             if (skippedAtExport > 0) {
                 skipped.add("artifacts: $skippedAtExport file(s) were left out at export")
+            }
+            // [FIX-R5-B1 / F-12] The size ladder dropped the whole archive on
+            // the EXPORTING device. Reported here, before the archive checks,
+            // because there is no `archive` key to inspect: without this line
+            // the restore looked complete while shared/ and mcp/ files were
+            // silently missing.
+            if (artifactsObj.optBoolean(ARTIFACTS_DROPPED_FOR_SIZE, false)) {
+                skipped.add(
+                    "artifacts: the backup dropped its archive to fit the size cap " +
+                        "(shared/ and mcp/ files are not in this package)"
+                )
             }
             if (archive.isNotEmpty() && estimatedBytes <= MAX_ARTIFACT_ARCHIVE_BYTES) {
                 try {
@@ -2369,6 +2448,18 @@ object ConfigBackup {
      *  for hand-edited / future payloads, checked BEFORE the Base64 decode so
      *  an oversized blob can't spike memory. */
     const val MAX_ARTIFACT_ARCHIVE_BYTES = 20L * 1024 * 1024
+
+    /** [FIX-R5-B1 / F-12] Marker the exporter puts in the `artifacts` section
+     *  when the size ladder dropped the archive ENTIRELY — [buildWithinCap]'s
+     *  last resort (`includeArtifacts = false`).
+     *
+     *  The dropped section used to be a bare `{}`, byte-identical to "this
+     *  device had nothing to archive": Stage 9 skipped it silently, so a
+     *  restore of a package whose shared/ + mcp/ files had been thrown away to
+     *  fit the payload cap reported a clean restore. The flag is a claim the
+     *  READER turns into a line in `skipped`; it is never set for a device that
+     *  genuinely had no artifacts, so reporting it is always true. */
+    const val ARTIFACTS_DROPPED_FOR_SIZE = "droppedForSize"
 
     /** [fix-audit-p0-3] Snapshot files live under `filesDir/backup-snapshots`,
      *  named with second precision so two restores in the same minute can't
@@ -2826,7 +2917,11 @@ object ConfigBackup {
         return url.substring(0, qIdx + 1) + redacted + frag
     }
 
-    internal fun sanitizeChatParts(partsJson: String?): String? {
+    internal fun sanitizeChatParts(partsJson: String?, slimText: Boolean = true): String? {
+        // [FIX-R5-B1 / F-15] slimText=false is the IMPORT face: dead media
+        // pointers are still dropped, but text is left at full size because
+        // ChatRepository.capPartsJsonForRow (500 KB, marker + original length)
+        // is the import-side size authority — see sanitizeIncomingParts.
         if (partsJson.isNullOrBlank()) return null
         val arr = try {
             JSONArray(partsJson)
@@ -2867,7 +2962,7 @@ object ConfigBackup {
                 // pasted logs / code dumps previously rode uncapped.
                 el.put(
                     "value",
-                    if (cleaned.length > MAX_BACKUP_TEXT_CHARS) {
+                    if (slimText && cleaned.length > MAX_BACKUP_TEXT_CHARS) {
                         cleaned.take(MAX_BACKUP_TEXT_CHARS) +
                             "\n… [truncated ${cleaned.length - MAX_BACKUP_TEXT_CHARS} chars]"
                     } else cleaned
@@ -2882,7 +2977,7 @@ object ConfigBackup {
                 // lands mid-JSON.
                 val value = el.optJSONObject("value") ?: el
                 val input = value.optString("input")
-                if (input.length > MAX_BACKUP_TOOL_INPUT_CHARS) {
+                if (slimText && input.length > MAX_BACKUP_TOOL_INPUT_CHARS) {
                     value.put(
                         "input",
                         input.take(MAX_BACKUP_TOOL_INPUT_CHARS) +
@@ -2902,7 +2997,7 @@ object ConfigBackup {
                 // pointer goes.
                 value.remove("mediaRef")
                 val output = value.optString("output")
-                if (output.length > MAX_BACKUP_TOOL_OUTPUT_CHARS) {
+                if (slimText && output.length > MAX_BACKUP_TOOL_OUTPUT_CHARS) {
                     value.put(
                         "output",
                         output.take(MAX_BACKUP_TOOL_OUTPUT_CHARS) +
@@ -2913,6 +3008,44 @@ object ConfigBackup {
             kept.put(el)
         }
         return if (kept.length() == 0) null else kept.toString()
+    }
+
+    /**
+     * [FIX-R5-B1 / F-15] The import-side half of [sanitizeChatParts].
+     *
+     * The exporter ran every row through the sanitizer, but the import side
+     * read the payload verbatim, so a row that arrived any other way — the
+     * OpenMinis `.minisbak` converter (which re-attaches the exporting device's
+     * `mediaRef` pointers verbatim), a hand-edited package, an older build's
+     * export — landed dangling media references (and uncapped text) straight
+     * into the message table: a permanently broken attachment tile and a
+     * private path from another device. Sanitize HERE, where the row is about
+     * to be written, so every writer is covered by one definition.
+     *
+     * [sanitizeChatParts] answers `null` for two different worlds and this
+     * keeps them apart:
+     *  - unparseable payload → hand the ORIGINAL string on (the row-size
+     *    ceiling below still applies; the row is not ours to reinterpret);
+     *  - parsed, but nothing survivable (its only parts were media pointers) →
+     *    an empty string, so the row exists without a dead attachment.
+     *
+     * Applied exactly once per row: the sanitizer is NOT idempotent (a second
+     * pass re-truncates an already-"… [truncated N chars]" text), which is why
+     * the `.minisbak` converter does NOT sanitize its own output — everything
+     * passes through [importChatSections] before it reaches the database.
+     *
+     * It also runs with `slimText = false`: media pointers are still dropped,
+     * but text/tool payloads are NOT slimmed to the export caps, because the
+     * writer's byte ceiling ([ChatRepository.capPartsJsonForRow], 500 KB,
+     * "Content truncated at 500 KB — original length N chars") is the
+     * import-side size authority (pinned by PartsJsonFunnelTest). Slimming
+     * here first would leave that ceiling nothing to truncate and silently
+     * shorten a restored row short of the budget it is allowed to use.
+     */
+    internal fun sanitizeIncomingParts(raw: String): String {
+        if (raw.isBlank()) return raw
+        sanitizeChatParts(raw, slimText = false)?.let { return it }
+        return if (runCatching { JSONArray(raw) }.isSuccess) "" else raw
     }
 
     /** [T-backup-chat-slim] Cuts model reasoning content to a sane size.
@@ -3373,7 +3506,13 @@ internal suspend fun importChatSections(
                     id = m.optString("id"),
                     sessionId = m.optString("sessionId"),
                     role = m.optString("role"),
-                    partsJson = ChatRepository.capPartsJsonForRow(m.optString("partsJson")),
+                    // [FIX-R5-B1 / F-15] …and the parts take the same sanitizer
+                    // the export side always applied (drops dangling mediaRef /
+                    // image / video pointers, caps text) — see
+                    // [sanitizeIncomingParts]. Sanitize first, byte-cap second.
+                    partsJson = ChatRepository.capPartsJsonForRow(
+                        ConfigBackup.sanitizeIncomingParts(m.optString("partsJson"))
+                    ),
                     createdAt = m.optLong("createdAt"),
                     sortOrder = m.optInt("sortOrder", i),
                     reasoningContent = if (m.has("reasoningContent")) {

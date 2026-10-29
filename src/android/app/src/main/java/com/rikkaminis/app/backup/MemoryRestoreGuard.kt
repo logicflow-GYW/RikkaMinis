@@ -53,9 +53,10 @@ internal sealed class MemoryRestoreDecision {
  * @param localLastModified `File.lastModified()` of the local copy, in epoch
  *   millis. `0` means "cannot tell" (deleted between exists() and the stat, or
  *   an unreadable inode) and is treated as *not* safe to overwrite.
- * @param backupCreatedAt the payload's document-level `createdAt` (epoch
- *   millis), written by every `export` path. `<= 0` means the payload carries
- *   no usable timestamp, so no ordering can be established.
+ * @param backupCreatedAt the payload's document-level timestamp (epoch millis)
+ *   as resolved by [documentCreatedAt] — `createdAt` when the payload has one,
+ *   else the `.minisbak` converter's `exportedAt`. `<= 0` means the payload
+ *   carries no usable timestamp, so no ordering can be established.
  *
  * Three "cannot decide" outcomes all fall to [MemoryRestoreDecision.KeepLocal]:
  * an unreadable local mtime, a payload without `createdAt`, and (below) a local
@@ -78,8 +79,14 @@ internal fun decideMemoryRestore(
     backupContentBlank: Boolean = false,
     /** Whether the local copy has anything in it. Unknown reads fail CLOSED
      *  ("assume it has content"): refusing to overwrite is always recoverable,
-     *  a wiped GLOBAL.md is not. */
-    localHasContent: Boolean = false,
+     *  a wiped GLOBAL.md is not.
+     *
+     *  [FIX-R5-B1 / F-06] The default is `true`, not `false`: it is the value a
+     *  caller that says nothing gets, and `false` there would license the
+     *  overwrite arm below for every future call site that forgot the
+     *  argument. Only the one production caller ([restoreMemoryFiles]) passes
+     *  it explicitly. */
+    localHasContent: Boolean = true,
 ): MemoryRestoreDecision {
     if (!localExists) return MemoryRestoreDecision.Restore
     if (backupContentBlank && localHasContent) {
@@ -87,6 +94,21 @@ internal fun decideMemoryRestore(
             "memory file \"$name\": the backup's copy is empty, local copy kept"
         )
     }
+    // [FIX-R5-B1 / F-06] The mirror of the rule above, and the reason the two
+    // halves have to be written together: an empty LOCAL copy holds nothing to
+    // protect, so a backup that DOES carry content must be applied even when
+    // its stamp is older than the (blank) local file's. Without this arm the
+    // asymmetry was user-visible: a device whose GLOBAL.md had been created
+    // empty (first launch writes the template, a failed write leaves "") kept
+    // that empty file forever and every restore reported "local copy is newer
+    // than the backup, kept" — the backup's real content was refused by a file
+    // with nothing in it.
+    //
+    // Placed BEFORE the timestamp guards on purpose: "unreadable mtime" and
+    // "no usable backup stamp" only exist to protect content, and there is no
+    // content here. `localHasContent` is fail-closed on unreadable paths, so a
+    // directory or an EACCES file never reaches this arm.
+    if (!localHasContent && !backupContentBlank) return MemoryRestoreDecision.Restore
     if (localLastModified <= 0L) {
         return MemoryRestoreDecision.KeepLocal(
             "memory file \"$name\": local copy's write time is unreadable, kept"
@@ -117,10 +139,55 @@ internal fun decideMemoryRestore(
 internal fun localHasContent(local: File?, localExists: Boolean): Boolean {
     if (!localExists || local == null) return false
     return try {
-        local.readText().isNotEmpty()
+        // [FIX-R5-B1 / F-06] `isNotBlank()` and not `isNotEmpty()`: the payload
+        // side measures "does the backup carry content" with `isBlank()` (see
+        // [restoreMemoryFiles]' `content.isBlank()`), so a local copy holding
+        // only a newline / spaces was content on one side of the comparison and
+        // empty on the other. Whichever way that asymmetry fell, one of the two
+        // rules fired against the user's interest — an all-whitespace daily log
+        // counted as "has content" (so an older backup's real text was refused)
+        // while the same file on the payload side counted as empty. One measure
+        // for both sides now.
+        local.readText().isNotBlank()
     } catch (_: Throwable) {
         true
     }
+}
+
+/**
+ * [FIX-R5-B1 / F-01] The document-level timestamp this payload can order a
+ * restore against, in epoch millis; `0` when it carries none.
+ *
+ * Why a fallback exists: two exporters write the field under different names.
+ * RikkaMinis' own `export` writes `createdAt`; the OpenMinis `.minisbak`
+ * converter only had `exportedAt` (its "document produced at" stamp), so
+ * `import`'s single-key read returned `0` for EVERY converted package and
+ * [decideMemoryRestore] then refused every memory file that already existed on
+ * this device — including the `SOUL.md` / `GLOBAL.md` template a fresh install
+ * writes at first launch. A `.minisbak` restore could therefore never bring
+ * memory over, and the "no timestamp to order against, kept" line was the only
+ * clue.
+ *
+ * `createdAt` stays primary: it is the snapshot moment both sides agree on. The
+ * fallback is deliberately narrow (a positive value only) so a payload with
+ * neither key still fails closed in [decideMemoryRestore].
+ */
+internal fun documentCreatedAt(root: org.json.JSONObject): Long {
+    val primary = positiveEpochMillis(root.opt("createdAt"))
+    if (primary > 0L) return primary
+    return positiveEpochMillis(root.opt("exportedAt"))
+}
+
+/** Numeric epoch millis from a JSON value; `0` for anything unusable. */
+private fun positiveEpochMillis(raw: Any?): Long {
+    val v = when (raw) {
+        null -> return 0L
+        is Number -> raw.toLong()
+        // Hand-written / third-party payloads carry the field as a string.
+        is String -> raw.trim().toLongOrNull() ?: return 0L
+        else -> return 0L
+    }
+    return if (v > 0L) v else 0L
 }
 
 /**
