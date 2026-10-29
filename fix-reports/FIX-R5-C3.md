@@ -121,7 +121,7 @@
 
 - run `40857735306` @ `10:27:39Z` **failure**：`e: … ChatViewModel.kt:4737:19 Cannot access 'val TAG: String': it is private in file`（顶层扩展函数里裸用伴生成员）—— 两次出现，改 `ChatViewModel.TAG` 后解决。
 - run `40859378552` @ `10:40:13Z` **failure**：编译通过，单测 4 条红 —— `ShellBudgetStopSymmetryTest` ×2（门收集器数到 3 个 `tool_calls` 门）+ `StopCleanupPlanTest` ×2（形状钉的字面量因调用多一个参数失配）。两处都按测试表达的契约改代码/改钉，不是调数字。
-- run 3 @ `dc7e30b9`（待绿）。
+- **run 3 = `40862845188` @ `9a633d60e458143cabc8c86f0ac69cc0db1632b1` success**（11:06:49 → 11:28:37，21.8 min），head_sha 与本地 tip 逐字符一致；27 步 0 个非 success（skipped = rolling tag + main 门控的 Publish）；日志 1,628,136 B / NUL 0 —— 7 条 `Summary: N passed, 0 failed`（113/16/18/19/25/30/44）、`ALL 349 CASES PASS` ×1、`^ e: file` 0、真 FAILED 0；12 条新用例逐条在日志里 PASSED。
 - 判据：`conclusion == success` 且 `head_sha` 与本地 `2ecacbef` 逐字符一致；日志 `Summary: … 0 failed`、`ALL … CASES PASS`、`^ e: ` 0、NUL 0。
 - 报告提交（本文件）在绿之后 push，收口判据：`git diff --name-only <绿sha>..HEAD -- . ':(exclude)fix-reports'` 为空。
 
