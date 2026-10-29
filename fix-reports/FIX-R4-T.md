@@ -6,7 +6,7 @@
 |---|---|
 | 基线 main | `2103729f`（worktree `git log -1` 实测一致） |
 | 分支 | `fix/r4-b12-log` |
-| 提交序列 | `86a6b7e9` F-07 · `2c6103c2` F-08 · `d32602f6` F-09 · `d9bc3cd9` F-14 · `6137a76a` 门修复（注释形状）· `59c7b88d` 测试 |
+| 提交序列 | `86a6b7e9` F-07 · `2c6103c2` F-08 · `d32602f6` F-09 · `d9bc3cd9` F-14 · `6137a76a` 门修复（注释形状）· `59c7b88d` 测试 · `346c0dcd` CI 红修复（快照写盘的主线程门） |
 | 改动量 | 3 文件 **+486 / −23**（生产 2 文件 +318/−23；测试 1 文件 +168/−0）；`scripts/scan/**`、`scan.sh`、`test_scan.py` **零触碰** |
 | 影响面 | `logging/AppLogger.kt`、`util/EncryptedPrefsFactory.kt`、新测试 `logging/LogByteAccountingR4Test.kt` |
 | 事故说明 | 首次 worktree 在 2026-10-29T08:0x 的 `/var/minis/shared` 清空中丢失（0 笔 commit）；本条为重建后的全套重放，改动语义与首轮一致 |
@@ -115,8 +115,8 @@
 | 层 | 读数 |
 |---|---|
 | 纯函数 + 契约（JUnit，本地真跑） | `OK (11 tests)` — `LogByteAccountingR4Test`（utf8 编码边界 / 孤立代理项 / 加性 / 限幅 / 折叠）+ `InMemoryPrefsContractR4Test`（null put = remove、同键最后操作赢两向、clear+put、commit 报 false） |
-| 探针（真实生产文件编译 + 真实文件 I/O） | **94 checks / 0 red**（`R4T_PROBE=PASS`）——含 5 MB 真文件读、越界 offset、遍历拒绝、`readAtMost` 在 EOF 返回 0（`readFully` 会抛）、以及全部源码形状断言 |
-| 变异臂 | **14 / 14 MATCH**（分三批跑：M1–M6 / M7–M10 / M11–M14，M14 收紧判据后复跑）——每条修复被回退后，探针必在**点名的断言**上红 |
+| 探针（真实生产文件编译 + 真实文件 I/O） | **96 checks / 0 red**（`R4T_PROBE=PASS`）——含 5 MB 真文件读、越界 offset、遍历拒绝、`readAtMost` 在 EOF 返回 0（`readFully` 会抛）、以及全部源码形状断言 |
+| 变异臂 | **16 / 16 MATCH**（M1–M6 / M7–M10 / M11–M14 / M15–M16，M14 与 M15 判据各收紧过一次）——每条修复被回退后，探针必在**点名的断言**上红 |
 | 门（本地，逐个跑，未跑全量） | 15 道相关门 **15 / 15 rc=0**：`process_logging_gate` · `liveness_static_guard` · `discarded_return_guard` · `log_url_redaction_guard` · `prefs_listener_holder_guard` · `skill_import_offmain_check` · `share_dir_prune_check` · `readonly_mount_write_guard` · `mediaplayer_release_guard` · `mcp_oauth_lifecycle_check` · `loop_counter_reset_guard` · `compact_decision_gate_check` · `anthropic_thinking_budget_check` · `file_provider_paths_coverage_check` · `chat_menu_prefs_listener_check` |
 | 云端 | 见 §5.1 |
 
@@ -138,12 +138,35 @@
 | M12 | `AppLogger.error` 退回 `Log.e` | `F-08 degradation logs through AppLogger` |
 | M13 | 删掉 `markDegraded` | `F-08 markDegraded runs BEFORE the log line` |
 | M14 | `step=keystore_degraded` 改名 | `F-08 log line is greppable` |
+| M15 | 删掉 off-main 内联分支 | `F-09 off-main path keeps the inline write` |
+| M16 | 主线程门改 `if (false)` | `F-09 main-thread gate exists` |
 
 **M14 的一次假绿值得记**：第一版判据是 `contains("step=keystore_degraded")`，而我为门加的注释里正好拼了这个词 ⇒ 探针被注释满足、变异不红。判据收紧成 `"step=keystore_degraded file="`（带参数形状）后才 MATCH。**形状断言必须避开注释污染的裸词。**
 
 ### 5.1 云端 CI
 
-（待填：run id / head_sha / 步数 / 日志判读）
+**首轮：红** —— run `40799335391` @ `59c7b88d`，`conclusion=failure`，15 个步骤后停在
+`Run unit tests (full suite)`：`7836 tests completed, 3 failed`，三条全在**既有**测试
+`ErrorSnapshotOrderingTest`：`error snapshot contains its own trigger line` /
+`trigger line is the newest entry of the snapshot` /
+`trigger line is not duplicated when the drain already delivered it`。
+
+根因不是快照的**内容顺序**变了 —— 拼接仍在调用线程（`contentIncluding` 持环锁并追加触发行），
+那段代码一字未动。变的是**文件何时存在**：该测试的 KDoc 写明设计意图「write queue absent
+(no drain thread, no race)」，它 `error()` 后立刻 `onlySnapshot()` 读目录。把写盘交给 worker，
+等于给它重新引入了这条测试专门用来排除的竞态。
+
+修法（`346c0dcd`）：给写盘加**主线程门**。只有 Android 主线程把写盘交给 worker（这正是 F-09
+要保护的场景 —— UI 侧失败日志）；已经在后台线程的调用者保持**内联写**（那里没有被阻塞的 UI，
+而「即将杀死进程的那个错误」恰恰是最该立刻落盘的一个）。Looper 不可用的环境（纯 JVM /
+非 Android 宿主）fail-closed 到内联路径，即修复前的原行为。
+
+本地复验（真实生产文件 + JUnit）：`ErrorSnapshotOrderingTest` 4/4 + 新增 11 条 = `OK (15 tests)`；
+探针 96/96；变异臂 M7/M10/M11/M15/M16 5/5 MATCH（新增 M15「删掉内联分支」、M16「门改 `if (false)`」）。
+
+**第二轮**：`346c0dcd` 的 push 与 dispatch 因出口代理故障（`SSL routines::unexpected eof`，
+同一时刻 `example.com` / `repo1.maven.org` 同样失败，代理端口本身可连）未能完成，
+待网络恢复后补推、补 dispatch 并回填读数。
 
 ## 6 残留（R 条目，每条带触发条件 + 触发后方案）
 
@@ -154,7 +177,7 @@
 | R3 | `InMemorySharedPreferences.values` 无同步（并发 CME） | 降级 + 多线程读写 prefs | 归 DESIGN-08，已登记；修法是加锁或用 `ConcurrentHashMap` |
 | R4 | `outcome.drops` 把「文件本来不存在」也计一次 destructive step | 首次安装即降级（文件从未存在）时日志报 "2 destructive step(s)" 误导 | 让 `KeystoreRecoveryIo.drop` 返回 Boolean，`drops++` 只在真删时发生（要改 plan + 三处测试） |
 | R5 | `setEnabled(true)` 异步化后，开关打开到 `startCapture` 真正执行之间有毫秒级窗口，期间日志行只到 logcat | 用户在开关后立刻复现某行缺失 | 让 `setEnabled` 返回可等待句柄，或 UI 侧 `awaitIdle()` |
-| R6 | 快照异步化后，进程被硬杀时最后一条快照可能未落地（旧代码也没有 `fsync`，等级相同） | 需要「崩溃现场必达」 | 在 crash handler 里调用同步变体（新增 `dumpErrorSnapshotBlocking()`） |
+| R6 | 快照的异步写只发生在**主线程**调用者上；进程被硬杀时该条可能未落地（旧代码也没有 `fsync`，等级相同）。off-main 调用者仍内联写，不丢 | 需要「主线程触发的崩溃现场必达」 | 加 `dumpErrorSnapshotBlocking()` 并在 crash handler 路径使用 |
 | R7 | 快速连点开关时，`startCapture` 若撞上 control 线程正在 `stopCapture`（含 2s join），主线程会等待 | 用户连点日志开关 | 把 `startCapture` 也全异步（与 init 的同步契约冲突，需重设计） |
 | R8 | F-14 分片按字节对齐 ⇒ 多字节字符可跨分片撕裂成 `U+FFFD` | 客户端按 `offset + bytesRead` 分页读 CJK 日志 | 在 RPC/客户端侧拼完整后再解码，或读侧回退到行边界并同步调整 offset 语义（属 `DebugRPCHandler`，非本支文件集） |
 | R9 | 真机未验（全部证据 = JVM 真跑 + 源码形状 + 云端编译/单测） | 需要真机读数 | Keystore 降级需构造 AEAD 失败，成本高；主线程卡顿量化需 systrace |
