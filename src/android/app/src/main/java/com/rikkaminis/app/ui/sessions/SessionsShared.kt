@@ -112,26 +112,39 @@ internal enum class DatePeriod(val label: String) {
  *   - This Month: within the last 30 days (rolling window, NOT current calendar month)
  *   - Earlier: everything else
  */
-internal fun datePeriod(timestamp: Long): DatePeriod {
-    val now = Calendar.getInstance()
+internal fun datePeriod(timestamp: Long, nowMillis: Long = System.currentTimeMillis()): DatePeriod {
+    // [R4-V F-14] Clock skew / restored future timestamps: `now - timestamp`
+    // is negative, which satisfied every `diff < N` comparison below, so a
+    // session dated in the future landed in "This Week" — a *past* bucket for
+    // the newest row in the list. It belongs at the top, so the future shape
+    // maps to TODAY (the newest non-pinned bucket) instead.
+    if (timestamp > nowMillis) return DatePeriod.TODAY
+
+    val now = Calendar.getInstance().apply { timeInMillis = nowMillis }
     val cal = Calendar.getInstance().apply { time = Date(timestamp) }
 
     if (cal.get(Calendar.YEAR) == now.get(Calendar.YEAR) &&
         cal.get(Calendar.DAY_OF_YEAR) == now.get(Calendar.DAY_OF_YEAR)
     ) return DatePeriod.TODAY
 
-    val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+    val yesterday = Calendar.getInstance().apply {
+        timeInMillis = nowMillis
+        add(Calendar.DAY_OF_YEAR, -1)
+    }
     if (cal.get(Calendar.YEAR) == yesterday.get(Calendar.YEAR) &&
         cal.get(Calendar.DAY_OF_YEAR) == yesterday.get(Calendar.DAY_OF_YEAR)
     ) return DatePeriod.YESTERDAY
 
-    val diffDays = TimeUnit.MILLISECONDS.toDays(now.timeInMillis - timestamp)
+    val diffDays = TimeUnit.MILLISECONDS.toDays(nowMillis - timestamp)
     if (diffDays < 7) return DatePeriod.THIS_WEEK
 
     // iOS uses `monthAgo = now - 1 month` (rolling window). A calendar-month
     // match would push e.g. a March 30 session into "Earlier" on April 2 —
     // iOS still shows it in "This Month" until May 2.
-    val monthAgo = Calendar.getInstance().apply { add(Calendar.MONTH, -1) }.timeInMillis
+    val monthAgo = Calendar.getInstance().apply {
+        timeInMillis = nowMillis
+        add(Calendar.MONTH, -1)
+    }.timeInMillis
     if (timestamp > monthAgo) return DatePeriod.THIS_MONTH
 
     return DatePeriod.EARLIER
@@ -152,35 +165,70 @@ internal fun groupSessionsByDate(sessions: List<ChatSessionEntity>): List<Pair<D
     return result
 }
 
-internal fun relativeDate(context: Context, timestamp: Long): String {
-    val now = System.currentTimeMillis()
-    val diff = now - timestamp
+/**
+ * [R4-V F-14] Which relative-date label a timestamp earns.
+ *
+ * The decision is split out of [relativeDate] so the boundary table can be
+ * pinned on the JVM (the formatter needs a `Context` for `getString`).
+ *
+ * A **future** timestamp (clock skew, a session restored/imported from another
+ * device) used to satisfy `seconds < 60` and render "Just now" — the one label
+ * that is provably wrong, and it also short-circuited the weekday/date arms
+ * (`days < 7` is true for negative days). It now falls straight through to the
+ * absolute date: honest, and it cannot masquerade as the newest row.
+ */
+internal enum class RelativeDateBucket { JUST_NOW, MINUTES_AGO, HOURS_AGO, YESTERDAY, WEEKDAY, ABSOLUTE_DATE }
+
+internal fun relativeDateBucket(nowMillis: Long, timestamp: Long): RelativeDateBucket {
+    if (timestamp > nowMillis) return RelativeDateBucket.ABSOLUTE_DATE
+
+    val diff = nowMillis - timestamp
     val seconds = TimeUnit.MILLISECONDS.toSeconds(diff)
+    if (seconds < 60) return RelativeDateBucket.JUST_NOW
     val minutes = TimeUnit.MILLISECONDS.toMinutes(diff)
+    if (minutes < 60) return RelativeDateBucket.MINUTES_AGO
     val hours = TimeUnit.MILLISECONDS.toHours(diff)
+    if (hours < 24) return RelativeDateBucket.HOURS_AGO
 
-    if (seconds < 60) return context.getString(R.string.time_just_now)
-    if (minutes < 60) return context.getString(R.string.time_minutes_ago, minutes.toInt())
-    if (hours < 24) return context.getString(R.string.time_hours_ago, hours.toInt())
-
-    val dateCal = Calendar.getInstance().apply { time = Date(timestamp) }
-    val yesterdayCal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+    val dateCal = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val yesterdayCal = Calendar.getInstance().apply {
+        timeInMillis = nowMillis
+        add(Calendar.DAY_OF_YEAR, -1)
+    }
     if (dateCal.get(Calendar.YEAR) == yesterdayCal.get(Calendar.YEAR) &&
         dateCal.get(Calendar.DAY_OF_YEAR) == yesterdayCal.get(Calendar.DAY_OF_YEAR)
     ) {
-        return context.getString(R.string.time_yesterday)
+        return RelativeDateBucket.YESTERDAY
     }
 
     val days = TimeUnit.MILLISECONDS.toDays(diff)
-    if (days < 7) {
-        // T172: device-locale weekday names via java.text.DateFormatSymbols.
-        val dayNames = java.text.DateFormatSymbols(java.util.Locale.getDefault()).weekdays
-        return dayNames[dateCal.get(Calendar.DAY_OF_WEEK)]
-    }
+    if (days < 7) return RelativeDateBucket.WEEKDAY
+    return RelativeDateBucket.ABSOLUTE_DATE
+}
 
-    val month = dateCal.get(Calendar.MONTH) + 1
-    val day = dateCal.get(Calendar.DAY_OF_MONTH)
-    return "$month/$day"
+internal fun relativeDate(context: Context, timestamp: Long): String {
+    val now = System.currentTimeMillis()
+    val diff = now - timestamp
+    return when (relativeDateBucket(now, timestamp)) {
+        RelativeDateBucket.JUST_NOW -> context.getString(R.string.time_just_now)
+        RelativeDateBucket.MINUTES_AGO ->
+            context.getString(R.string.time_minutes_ago, TimeUnit.MILLISECONDS.toMinutes(diff).toInt())
+        RelativeDateBucket.HOURS_AGO ->
+            context.getString(R.string.time_hours_ago, TimeUnit.MILLISECONDS.toHours(diff).toInt())
+        RelativeDateBucket.YESTERDAY -> context.getString(R.string.time_yesterday)
+        RelativeDateBucket.WEEKDAY -> {
+            // T172: device-locale weekday names via java.text.DateFormatSymbols.
+            val dateCal = Calendar.getInstance().apply { timeInMillis = timestamp }
+            val dayNames = java.text.DateFormatSymbols(java.util.Locale.getDefault()).weekdays
+            dayNames[dateCal.get(Calendar.DAY_OF_WEEK)]
+        }
+        RelativeDateBucket.ABSOLUTE_DATE -> {
+            val dateCal = Calendar.getInstance().apply { timeInMillis = timestamp }
+            val month = dateCal.get(Calendar.MONTH) + 1
+            val day = dateCal.get(Calendar.DAY_OF_MONTH)
+            "$month/$day"
+        }
+    }
 }
 
 // ─── Edit Title & Category Sheet (matching iOS SessionEditSheet) ──────────
