@@ -1636,4 +1636,11 @@
     <string name="perm_runtime_batch_sub">Календарь, контакты, местоположение, фото, микрофон, камера, уведомления</string>
     <string name="perm_runtime_batch_all_granted">Все системные разрешения уже выданы.</string>
     <string name="perm_runtime_batch_partial">Ещё %1$d разрешений не выдано — Android отклонил или вы пропустили.</string>
+    <string name="mirror_section_title">Внешняя копия</string>
+    <string name="mirror_section_footer">Постоянно обновляемая копия вне хранилища приложения. Она сохраняется при очистке данных приложения и открывается любым файловым менеджером.</string>
+    <string name="mirror_enable">Внешнее зеркало</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup — обновляется автоматически</string>
+    <string name="mirror_sync_now">Синхронизировать сейчас</string>
+    <string name="mirror_last_sync">Последняя синхронизация: %1$s</string>
+    <string name="mirror_never">Ещё не синхронизировано</string>
 </resources>

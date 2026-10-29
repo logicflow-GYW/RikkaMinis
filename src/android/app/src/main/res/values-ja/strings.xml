@@ -1681,4 +1681,11 @@
     <string name="perm_runtime_batch_sub">カレンダー、連絡先、位置情報、写真、マイク、カメラ、通知</string>
     <string name="perm_runtime_batch_all_granted">すべてのシステム権限は既に許可されています。</string>
     <string name="perm_runtime_batch_partial">まだ %1$d 件の権限が許可されていません — Android が拒否したか、スキップしました。</string>
+    <string name="mirror_section_title">外部コピー</string>
+    <string name="mirror_section_footer">アプリの保存領域の外に置かれる、継続的に更新されるコピーです。アプリのデータを消去しても残り、任意のファイルマネージャーで開けます。</string>
+    <string name="mirror_enable">外部ミラー</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup — 自動更新</string>
+    <string name="mirror_sync_now">今すぐ同期</string>
+    <string name="mirror_last_sync">最終同期：%1$s</string>
+    <string name="mirror_never">まだ同期していません</string>
 </resources>

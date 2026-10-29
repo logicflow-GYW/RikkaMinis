@@ -1709,4 +1709,11 @@
     <string name="perm_runtime_batch_sub">日历、联系人、位置、照片、麦克风、相机、通知</string>
     <string name="perm_runtime_batch_all_granted">全部系统权限均已授予。</string>
     <string name="perm_runtime_batch_partial">仍有 %1$d 项权限未授予 —— Android 拒绝或你跳过了。</string>
+    <string name="mirror_section_title">外部冗余副本</string>
+    <string name="mirror_section_footer">应用存储之外的一份持续更新的副本。清空应用数据不会影响它，任意文件管理器都能直接读取。</string>
+    <string name="mirror_enable">外部冗余副本</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup —— 自动更新</string>
+    <string name="mirror_sync_now">立即同步</string>
+    <string name="mirror_last_sync">上次同步：%1$s</string>
+    <string name="mirror_never">尚未同步</string>
 </resources>

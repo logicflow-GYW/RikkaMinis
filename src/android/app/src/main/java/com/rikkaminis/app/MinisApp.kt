@@ -946,6 +946,12 @@ class MinisApp : Application(), ImageLoaderFactory {
                 sessionId,
                 isError,
             )
+            // [feat/auto-backup-external-mirror] A settled session is exactly
+            // when the work documents just changed, so this is the natural
+            // mirror trigger (the throttle inside MirrorStore collapses a
+            // burst of settlements into one stat walk). Same single-listener
+            // chain — appended here, never a second listener.
+            com.rikkaminis.app.backup.MirrorStore.runAsync(this@MinisApp)
         }
 
         // [T-android-config-confirm-timeout] Wire the config-confirm background
@@ -995,6 +1001,13 @@ class MinisApp : Application(), ImageLoaderFactory {
                 // mirrors AutoBackupManager; no alarm, no workmanager, L0).
                 if (wasBackgrounded) {
                     com.rikkaminis.app.scheduled.ScheduledTaskRunner.runIfDue(this@MinisApp)
+                }
+                // [feat/auto-backup-external-mirror] The background→foreground
+                // beat is the second mirror trigger: a user switching away and
+                // back after working in another app is a natural "just edited"
+                // moment. runAsync self-gates on enabled + throttle.
+                if (wasBackgrounded) {
+                    com.rikkaminis.app.backup.MirrorStore.runAsync(this@MinisApp)
                 }
                 // T298: as soon as the app transitions background → foreground,
                 // clear any task-completed notifications still in the tray.

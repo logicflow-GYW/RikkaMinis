@@ -1795,4 +1795,11 @@
     <string name="notif_storage_budget_channel_description">Warns when this app\'s own data (sandbox shell, sessions, media) grows past its budget.</string>
     <string name="notif_storage_budget_title">This app is using a lot of storage</string>
     <string name="notif_storage_budget_body">%1$s used by this app (budget %2$s). Tap to see what is taking the space.</string>
+    <string name="mirror_section_title">External copy</string>
+    <string name="mirror_section_footer">A continuously updated copy outside the app\'s own storage. Clearing app data does not remove it, and any file manager can read it.</string>
+    <string name="mirror_enable">External mirror</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup — updated automatically</string>
+    <string name="mirror_sync_now">Sync now</string>
+    <string name="mirror_last_sync">Last sync: %1$s</string>
+    <string name="mirror_never">Never synced yet</string>
 </resources>

@@ -201,6 +201,12 @@ fun BackupSettingsScreen(
     // utility, not a primary surface. Tap the toggle row to expand the list.
     var autoBackupsExpanded by remember { mutableStateOf(false) }
     var autoBackupLastRun by remember { mutableStateOf<String?>(null) }
+    // [feat/auto-backup-external-mirror] External mirror state. Same IO
+    // rule as the row above: both values read SharedPreferences, so they
+    // start at the defaults and are filled by the entry LaunchedEffect.
+    var mirrorEnabled by remember { mutableStateOf(false) }
+    var mirrorRunning by remember { mutableStateOf(false) }
+    var mirrorLastSync by remember { mutableStateOf<String?>(null) }
     // [T-auto-backup-remote-dir] Remote automatic-backup management state:
     // the WebDAV `auto/` subdirectory listing (plus legacy root stragglers),
     // managed from a dedicated dialog inside the auto-backup section so the
@@ -254,6 +260,14 @@ fun BackupSettingsScreen(
         }
         autoBackupEnabled = autoRow.first
         autoBackupLastRun = autoRow.second
+        // [feat/auto-backup-external-mirror] Same off-composition load for the
+        // external mirror row (SharedPreferences: enabled flag + last label).
+        val mirrorRow = withContext(Dispatchers.IO) {
+            com.rikkaminis.app.backup.MirrorStore.isEnabled(context) to
+                com.rikkaminis.app.backup.MirrorStore.lastSyncLabel(context)
+        }
+        mirrorEnabled = mirrorRow.first
+        mirrorLastSync = mirrorRow.second
     }
 
     val refreshSnapshots: () -> Unit = {
@@ -879,6 +893,65 @@ fun BackupSettingsScreen(
                 }
             }
         }
+        // [feat/auto-backup-external-mirror] The second copy, outside the app's
+        // own storage: `Download/RikkaMinis/backup/` via MediaStore. The
+        // 2026-10-29 incident rebuilt filesDir and took both the working copy
+        // and its only (in-filesDir) backup with it, so the daily snapshot
+        // above is not redundancy on its own. This block is a continuously
+        // updated mirror of the documents that cannot be regenerated —
+        // MirrorScope holds the exact selection, MirrorPlan the throttle and
+        // the `previous/` rotation.
+        SettingsSection(
+            header = stringResource(R.string.mirror_section_title),
+            footer = stringResource(R.string.mirror_section_footer),
+        ) {
+            SettingsRow(
+                title = stringResource(R.string.mirror_enable),
+                subtitle = stringResource(R.string.mirror_enable_sub),
+                trailing = {
+                    Switch(
+                        checked = mirrorEnabled,
+                        onCheckedChange = { on ->
+                            mirrorEnabled = on
+                            com.rikkaminis.app.backup.MirrorStore.setEnabled(context, on)
+                        },
+                    )
+                },
+                // Switch only, same double-fire reasoning as the daily row.
+                showDivider = true,
+            )
+            SettingsRow(
+                title = stringResource(R.string.mirror_sync_now),
+                subtitle = run {
+                    val last = mirrorLastSync
+                    if (mirrorRunning) stringResource(R.string.backup_progress_title)
+                    else if (last != null) stringResource(R.string.mirror_last_sync, last)
+                    else stringResource(R.string.mirror_never)
+                },
+                icon = Icons.Filled.Refresh,
+                onClick = if (operationBusy || mirrorRunning) null else ({
+                    mirrorRunning = true
+                    operationBusy = true
+                    application.applicationScope.launch {
+                        try {
+                            val manager = com.rikkaminis.app.backup.MirrorStore
+                            withContext(Dispatchers.IO) { manager.syncNow(context) }
+                            val refreshed = withContext(Dispatchers.IO) { manager.lastSyncLabel(context) }
+                            withContext(Dispatchers.Main) { mirrorLastSync = refreshed }
+                        } catch (t: Throwable) {
+                            withContext(Dispatchers.Main) { errorMessage = t.message ?: errUnknown }
+                        } finally {
+                            withContext(Dispatchers.Main) {
+                                mirrorRunning = false
+                                operationBusy = false
+                            }
+                        }
+                    }
+                }),
+                showDivider = false,
+            )
+        }
+
         SettingsSection(
             header = stringResource(R.string.backup_section_local),
             footer = stringResource(R.string.backup_section_footer),
