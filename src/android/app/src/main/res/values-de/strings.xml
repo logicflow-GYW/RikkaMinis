@@ -1682,4 +1682,11 @@
     <string name="perm_runtime_batch_sub">Kalender, Kontakte, Standort, Fotos, Mikrofon, Kamera, Benachrichtigungen</string>
     <string name="perm_runtime_batch_all_granted">Alle Systemberechtigungen sind bereits gewährt.</string>
     <string name="perm_runtime_batch_partial">%1$d Berechtigung(en) noch nicht gewährt — Android hat abgelehnt oder du hast übersprungen.</string>
+    <string name="mirror_section_title">Externe Kopie</string>
+    <string name="mirror_section_footer">Eine fortlaufend aktualisierte Kopie außerhalb des App-Speichers. Beim Löschen der App-Daten bleibt sie erhalten und ist mit jedem Dateimanager lesbar.</string>
+    <string name="mirror_enable">Externer Spiegel</string>
+    <string name="mirror_enable_sub">Download/RikkaMinis/backup – automatisch aktualisiert</string>
+    <string name="mirror_sync_now">Jetzt synchronisieren</string>
+    <string name="mirror_last_sync">Letzte Synchronisierung: %1$s</string>
+    <string name="mirror_never">Noch nicht synchronisiert</string>
 </resources>
