@@ -4734,13 +4734,13 @@ internal suspend fun ChatViewModel.dropCompactMarkerIfAnchoredOnRow(sid: String,
     if (!compactMarkerAnchoredOnRow(_cachedLatestMarker, truncatedRowId)) return
     val deleted = runCatching { chatRepository.dao.deleteCompactMarkers(sid) }
         .onFailure {
-            Log.w(TAG, "[Compact] anchor-row marker drop failed (sid=${sid.take(8)}): ${it.message}")
+            Log.w(ChatViewModel.TAG, "[Compact] anchor-row marker drop failed (sid=${sid.take(8)}): ${it.message}")
         }
         .isSuccess
     _cachedLatestMarker = null
     _compactSummary.value = null
     Log.i(
-        TAG,
+        ChatViewModel.TAG,
         "[Compact] rerun truncated the marker's anchored row (row=${truncatedRowId.take(8)}, deleted=$deleted) — summary cleared [R5-C C-C-04①]",
     )
 }
