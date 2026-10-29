@@ -14,6 +14,10 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Daily-rotating file logger that mirrors iOS LoggingManager.
@@ -128,6 +132,27 @@ object AppLogger {
     // bound/drop contract. @Volatile: swapped by startCapture/stopCapture.
     @Volatile private var writeQueue: LogWriteQueue? = null
 
+    // [FIX-R4-T F-09] Three logger entry points were doing disk I/O on their
+    // CALLER's thread, and every caller of them is main-thread reachable:
+    //   * error() → dumpErrorSnapshot() → file.writeText() (snapshot worker,
+    //     below);
+    //   * setEnabled() → stopCapture() → LogWriteQueue.flushAndStop(2_000)
+    //     = Thread.join up to 2 s, called from the Settings → Logs switch;
+    //   * init() → pruneOldLogs() = three full directory walks, called from
+    //     Application.onCreate.
+    // All are now scheduled on their own threads. Ordering contracts kept:
+    //  - capture control is a SINGLE-thread queue, so start/stop/prune can
+    //    never interleave and the prune still runs after startCapture created
+    //    the async writer its deferral WARN needs ([T-log-warn-reach-1012]);
+    //  - snapshots keep their own worker so flushing them from stopCapture
+    //    (which itself runs on the control thread) cannot deadlock on itself.
+    // Deliberately NOT reusing a shared pool: AppLogger is initialised first
+    // thing in Application.onCreate, before any dispatcher exists.
+    private val controlExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor { r -> Thread(r, "AppLogger-Control").apply { isDaemon = true } }
+    private val snapshotExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor { r -> Thread(r, "AppLogger-Snapshot").apply { isDaemon = true } }
+
     /**
      * Initialize the logger with app context. Call once from Application.onCreate().
      * If logging was previously enabled (persisted in SharedPreferences),
@@ -152,7 +177,14 @@ object AppLogger {
         // the deferral notice existed only in logcat, where our own tailer
         // filters AppLogger-tagged lines: effectively silent.
         if (enabled) startCapture()
-        pruneOldLogs()
+        // [FIX-R4-T F-09] init() runs on Application.onCreate's (main) thread
+        // and pruneOldLogs() is three full directory walks plus a stat and a
+        // possible delete per entry — a UI freeze of arbitrary length on a
+        // busy flash. Scheduled on the capture-control queue rather than a
+        // bare thread so it cannot overtake startCapture() above: the prune's
+        // "size prune deferred" WARN only reaches the file when the async
+        // writer already exists.
+        submitControl { pruneOldLogs() }
     }
 
     fun isEnabled(context: Context): Boolean {
@@ -164,7 +196,38 @@ object AppLogger {
         enabled = value
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_ENABLED, value).apply()
-        if (value) startCapture() else stopCapture()
+        // [FIX-R4-T F-09] stopCapture() used to run on the caller (the
+        // Settings → Logs switch callback, main thread) and joined the drain
+        // thread for up to 2 s inside flushAndStop — a UI freeze whenever the
+        // queue was still flushing. The toggle-off is scheduled on the
+        // capture-control queue instead. startCapture() stays synchronous in
+        // init() (its contract: capture is live before onCreate continues)
+        // but the setEnabled path goes through the same single-thread queue,
+        // so on/off can never interleave.
+        //
+        // Intent re-check: several setEnabled() calls can queue up (a switch
+        // flicked twice); only the LAST intent may win. Without the re-check,
+        // [stop → start → queued stop] would run the queued stop last and
+        // silently disable a logger the user just turned on.
+        submitControl {
+            if (enabled == value) {
+                if (value) startCapture() else stopCapture()
+            }
+        }
+    }
+
+    /**
+     * [FIX-R4-T F-09] Hand a control action to the capture-control queue.
+     * Falls back to running it inline if the executor rejects (correctness
+     * beats latency) — the logger must never lose a state change because its
+     * worker thread could not be scheduled.
+     */
+    private fun submitControl(block: () -> Unit) {
+        try {
+            controlExecutor.execute(block)
+        } catch (_: Exception) {
+            runCatching { block() }
+        }
     }
 
     /**
@@ -215,6 +278,11 @@ object AppLogger {
         // were produced while logging was still on.)
         writeQueue?.flushAndStop(2_000)
         writeQueue = null
+        // [FIX-R4-T F-09] Snapshots in flight on their worker must land
+        // before the ring goes away — a toggle-off at the wrong moment would
+        // otherwise lose the last error scene. Bounded wait: the worker is a
+        // different thread (no self-deadlock) and the write is one small file.
+        flushSnapshots(500)
         ring = null
         captureActive = false
         // Close the daily writer so any buffered bytes are flushed; getWriter()
@@ -389,9 +457,53 @@ object AppLogger {
             // stays correct; see listLogFiles / listLogFileMetas /
             // pruneOldLogs / ErrorSnapshotOrderingTest.
             val file = File(dir, "error-snapshot-$stamp-${android.os.Process.myPid()}.log")
-            file.writeText(buffer.contentIncluding(triggerLine).joinToString(separator = "\n") + "\n")
+            // [FIX-R4-T F-09] Compose on the CALLER thread, write on the
+            // snapshot worker. error() is reachable from the main thread
+            // (every UI-side failure log goes through it) and the write is
+            // up to ~500 ring lines — a real, if short, main-thread stall on
+            // busy flash. The composition must stay here: contentIncluding
+            // guarantees the trigger line is appended under the ring's own
+            // lock, and the caller thread is the only place that line is
+            // certainly correct.
+            //
+            // Durability note: the old synchronous writeText never called
+            // fsync either — "synchronous" only bought order within THIS
+            // call, not survival of a hard kill (the kernel may hold dirty
+            // pages for seconds). Moving the write to the worker keeps that
+            // order (single-thread worker, FIFO) and adds a bounded flush in
+            // stopCapture; the remaining window — process killed between
+            // compose and write — is the same one the previous code had
+            // between writeText and the kernel flush.
+            val body = buffer.contentIncluding(triggerLine).joinToString(separator = "\n") + "\n"
+            try {
+                snapshotExecutor.execute {
+                    try {
+                        file.writeText(body)
+                    } catch (_: Exception) {
+                        // Snapshot must never take the logger down.
+                    }
+                }
+            } catch (_: Exception) {
+                // Executor rejected/unavailable: degrade to the old inline
+                // write rather than lose the scene.
+                file.writeText(body)
+            }
         } catch (_: Exception) {
             // Snapshot must never take the logger down.
+        }
+    }
+
+    /**
+     * [FIX-R4-T F-09] Wait up to [timeoutMs] for snapshots already handed to
+     * the worker to reach disk. Runs on the capture-control thread inside
+     * stopCapture (a different thread than the worker — no self-deadlock).
+     */
+    private fun flushSnapshots(timeoutMs: Long) {
+        try {
+            val latch = CountDownLatch(1)
+            snapshotExecutor.execute { latch.countDown() }
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
         }
     }
 
