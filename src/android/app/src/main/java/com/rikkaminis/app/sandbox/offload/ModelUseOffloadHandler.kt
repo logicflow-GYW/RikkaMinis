@@ -896,6 +896,16 @@ class ModelUseOffloadHandler(
         val body = JSONObject().apply {
             put("model", entry.model.id)
             put("text", response.text)
+            // [FIX-FW-NONSTREAM C2] The worker already answers with
+            // `stop_reason` (ModelExecutionService) and this handler already
+            // parses it back into LLMResponse — but the JSON the CALLER sees was
+            // rebuilt from scratch here, so the field died one line before the
+            // only place it could be acted on. Result: a `minis-model-use` run
+            // cut at the output ceiling was indistinguishable from a finished
+            // one (the text just stopped), with no way to tell without guessing
+            // from the character count. Null stays absent (a provider that
+            // reports no stop reason must not be given an invented one).
+            response.stopReason?.let { put("stop_reason", it) }
             response.usage?.let { u ->
                 put("usage", JSONObject().apply {
                     put("input_tokens", u.inputTokens)

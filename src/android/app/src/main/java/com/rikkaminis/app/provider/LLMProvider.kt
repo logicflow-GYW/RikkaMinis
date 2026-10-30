@@ -8,6 +8,7 @@ import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.ThinkingLevel
+import com.rikkaminis.app.ui.chat.TruncatedToolCallPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
@@ -302,3 +303,47 @@ internal fun approxOutputChunkBytes(chunk: LLMStreamChunk): Long = when (chunk) 
     is LLMStreamChunk.MediaAttachment -> chunk.attachment.data.size.toLong()
     else -> 0L
 }
+
+/**
+ * [FIX-FW-NONSTREAM C2] True when a NON-STREAMING response's `stopReason` says
+ * the provider stopped at the output ceiling — i.e. the visible text is a
+ * truncated prefix, not a finished answer.
+ *
+ * ## Why this delegates instead of declaring a second spelling table
+ * The app already owns ONE table of ceiling spellings across every protocol it
+ * speaks: [TruncatedToolCallPolicy.isTruncatedFinish] (`length`,
+ * `max_tokens`, `max_output_tokens`, `max_tokens_exceeded`, relay variants),
+ * which guards the truncated-tool-call contract. Three non-streaming arms had no
+ * signal at all — OpenAI's `sendMessageClamped` only promoted
+ * `Finished.truncated` (an EOF signal, never `finish_reason = length`),
+ * Anthropic passed `max_tokens` through, Gemini passed `MAX_TOKENS` (normalised
+ * to `max_tokens` by `extractFinishReason`) through — so "the reply stopped at
+ * the ceiling" was indistinguishable from "the model finished". Adding a second
+ * table here would let the two drift exactly the way the currency/pricing pair
+ * did (R5-EF F-F-07); the table's only home stays the policy.
+ *
+ * Pure + top-level so the spelling table is JVM-testable.
+ */
+internal fun nonStreamOutputCeilingCut(stopReason: String?): Boolean =
+    TruncatedToolCallPolicy.isTruncatedFinish(stopReason)
+
+/**
+ * [FIX-FW-NONSTREAM C2] The ONE log line every non-streaming arm emits when
+ * [nonStreamOutputCeilingCut] fires.
+ *
+ * Nothing here may identify the conversation: the provider name, the provider's
+ * own stop spelling, the number of output characters and whether the text is
+ * empty. NOT the text, not a prefix of it, not a hash of it — the ceiling
+ * usually cuts mid-sentence in a user's private prompt echo.
+ *
+ * `emptyText=true` is the case worth having a log for: with zero text and a
+ * ceiling stop reason the turn is a *complete* failure (thinking-only or an
+ * immediate cut), and the user sees a blank answer with no error card.
+ */
+internal fun nonStreamCeilingCutLogLine(
+    providerName: String,
+    stopReason: String?,
+    outputChars: Int,
+): String = "non-streaming reply hit the output ceiling:" +
+    " provider=$providerName stopReason=${stopReason ?: "null"}" +
+    " outputChars=$outputChars emptyText=${outputChars <= 0}"

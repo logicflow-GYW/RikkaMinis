@@ -24,6 +24,8 @@ import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
 import com.rikkaminis.app.provider.hasWirePayload
 import com.rikkaminis.app.provider.sseDataPayload
+import com.rikkaminis.app.provider.nonStreamCeilingCutLogLine
+import com.rikkaminis.app.provider.nonStreamOutputCeilingCut
 import com.rikkaminis.app.provider.LegacyMediaPlan
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
@@ -639,7 +641,15 @@ class OpenAIProvider constructor(
                 "Stream ended before completion (no finish_reason): the reply is truncated"
             )
         }
-        LLMResponse(textBuf.toString(), stopReason, usage, media)
+        val text = textBuf.toString()
+        // [FIX-FW-NONSTREAM C2] `finish_reason = length` is not an EOF signal
+        // and does not set [truncated], so this arm returned the cut-off prefix
+        // with no indication that it was cut. Deliberately NOT an exception —
+        // see nonStreamOutputCeilingCut — just a structured log line.
+        if (nonStreamOutputCeilingCut(stopReason)) {
+            android.util.Log.w(name, nonStreamCeilingCutLogLine(name, stopReason, text.length))
+        }
+        LLMResponse(text, stopReason, usage, media)
     }
 
     override fun streamMessageClamped(

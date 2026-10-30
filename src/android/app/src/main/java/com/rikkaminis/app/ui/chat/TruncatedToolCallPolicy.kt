@@ -63,7 +63,12 @@ object TruncatedToolCallPolicy {
      */
     fun isTruncatedFinish(reason: String?): Boolean {
         if (reason.isNullOrBlank()) return false
-        return reason.trim().lowercase() in TRUNCATED_REASONS
+        // [FIX-FW-NONSTREAM C2] `-` is normalised to `_` before the lookup: the
+        // table below already owns the underscore spellings, and a relay that
+        // re-joins the words ("max-tokens", "max-output-tokens") is the same
+        // condition. Widening here — rather than in a second table at the
+        // provider layer — keeps one home for the ceiling vocabulary.
+        return reason.trim().lowercase().replace('-', '_') in TRUNCATED_REASONS
     }
 
     /**
