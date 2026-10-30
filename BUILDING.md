@@ -174,10 +174,13 @@ missing value is actually required.
 `src/android/`, `src/shared/`, `deps/` or the workflow itself, and can be
 triggered manually from the Actions tab. It:
 
-1. Restores the signing keystore from the `DEBUG_KEYSTORE_B64` secret
-2. Runs the pre-build scan gate (`scripts/scan/scan.sh`) — four-way field-sync
-   check, i18n orphan-key check, enum-parse safety, provider process-boundary
-   guard
+1. Restores the release signing keystore from the `RELEASE_KEYSTORE_B64` secret
+   (plus `RELEASE_STORE_PASSWORD` / `RELEASE_KEY_ALIAS` / `RELEASE_KEY_PASSWORD`;
+   missing any of the four fails the job instead of falling back)
+2. Runs the pre-build scan gate — `scripts/scan/scan.sh` (**113 checks** in four
+   families: data/resource contracts, structural guards, behavioural witnesses,
+   primitive self-tests) plus `test_scan.py` (**349 fixtures** proving each gate
+   still goes red when it should)
 3. Installs NDK r28 and builds PRoot from source via `./deps/build_proot.sh clean`
 4. Verifies the build products (`libproot.so`, `libproot-loader.so`) exist
 5. Runs the full unit-test suite (`testReleaseUnitTest`) — red means red
@@ -193,7 +196,7 @@ actually fail on this diff:
 | Diff touches | Channel | Cost |
 |---|---|---|
 | `scripts/scan/**`, `scripts/diag/**`, `fix-reports/**`, `docs/**`, repo-root `*.md` | `scan-gate-push.yml` | ~7 min |
-| anything else (`src/**`, `deps/**`, `*.gradle.kts`, other workflows) | `build-apk.yml` | 18–27 min |
+| anything else (`src/**`, `deps/**`, `*.gradle.kts`, other workflows) | `build-apk.yml` | 14–23 min |
 
 `scan-gate-push.yml` self-guards: dispatched on a branch, it first runs
 `scripts/diag/cheap_gate_guard.py` and goes **red** if the diff is not

@@ -387,8 +387,9 @@ jobs:
             - Version: `${{ steps.stage.outputs.version }}` (versionCode `${{ steps.stage.outputs.versionCode }}`)
             - Commit: ${{ github.sha }}
             - ABI: arm64-v8a
-            - Release build (R8-minified, signed with the fixed debug key so
-              it installs over previous builds)
+            - Release build (R8-minified, signed with this repository's private
+              release key; the keystore lives only in CI secrets, never in the
+              tree, so it installs over previous builds)
 
             Download the `.apk` below and open it on your device to install.
 
@@ -403,8 +404,11 @@ jobs:
               卸载重装（卸载会丢失本地会话/配置/密钥，操作前请先备份）。
             - 若某次更新后核心功能异常，可回退到本页上一条 release 记录下载
               的旧构建。
-            - 此构建使用 debug 签名密钥（公开常量），任何人可重签同名 APK，
-              请**只从本仓库 Releases 页下载**。
+            - 本构建使用本仓库私有的 release 签名密钥（密钥只存在于 CI
+              secrets，不在源码树中），可覆盖升级此前由同一密钥签名的构建。
+              2026-10-27 之前的旧构建用的是公开的 AOSP debug 密钥，任何人
+              都能伪造同名 APK——若你装的还是那时的包，请**只从本仓库
+              Releases 页下载**，并在首次覆盖升级前先卸载旧包。
           files: ${{ steps.stage.outputs.asset }}
           prerelease: false
           make_latest: "true"

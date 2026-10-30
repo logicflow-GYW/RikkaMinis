@@ -37,17 +37,17 @@ OpenMinis 核心把领先的模型——Claude、GPT、Gemini 等——带进原
 时的提交）。**下载 APK 请点页面上的资产**；页面的 *Source code (zip/tar.gz)*
 是那个旧 tag 的快照，不是这一版构建对应的源码——要源码请从 `main` 拉取。
 
-另一个诚实的边界：`scripts/**`（含 112 道静态门）**不在**触发面内——只改门脚本
+另一个诚实的边界：`scripts/**`（含 113 道静态门）**不在**触发面内——只改门脚本
 不会自动构建，需要在 Actions 里 `workflow_dispatch` 手动跑一次。要求：
 
 - **arm64-v8a** 设备（任意现代手机），**Android 8.0+**
 - 设备提示时允许"安装未知来源应用"
 
-构建使用固定密钥签名，因此新 APK 会**覆盖**安装旧版本——你的数据和设置会被保留。
+构建使用固定的私有 release 密钥签名，因此新 APK 会**覆盖**安装旧版本——你的数据和设置会被保留。（2026-10-27 之前发布的构建用的是另一个密钥：从那一版升到当前版需要先卸载一次，此后的版本可互相覆盖。）
 
 ```
-SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
-         1A:3F:6C:79:4A:1A:A7:9F:DB:67:63:8F:C6:B1:61:13
+SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
+         21:16:72:48:D7:D8:BE:F0:B1:75:0B:8F:12:D4:85:14
 ```
 
 用 `python3 scripts/apk_cert_sha256.py <apk>` 校验下载。
@@ -146,8 +146,8 @@ SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
   `libdatastore_shared_counter.so` 按原样提交；`libjieba_jni.so` 与
   `libminis_crash_handler.so` 由 CI 从 `src/main/cpp/` 重新编译——它们的 JNI
   符号内嵌 Kotlin 包名，上游二进制导出的仍是旧包名。
-- **单元测试与门禁夹具在 CI 中运行。** 完整的 JVM 单元测试套件——含备份/恢复（ConfigBackupPayloadTest 等）、终端消毒、Provider 适配器、LLM 错误处理，以及 agent loop 的 JVM 行为基线（上下文压缩触发 / turn 上限 / 预算停止 / 工具执行中取消）——在 APK 构建之前执行；同一步里还跑 `scripts/scan/test_scan.py` 的 **347 条夹具**，逐门验证「门真的会红」（门被掏空成恒过会被夹具抓住）。任何一条失败都会中止构建（无静默跳过）。
-- **构建前静态扫描门禁（112 道）。** 每次 CI 构建在 Gradle 之前跑 `scripts/scan/scan.sh`：112 道检查定义在数据文件 `scripts/scan/scan_blocks.sh`（每块一段自包含 shell），由 `scan_parallel.py` 并行执行（`--jobs N`，默认 `min(8, cpu)`；`MINIS_SCAN_JOBS=1` 强制串行），输出严格保持 1..112 顺序。覆盖四类：
+- **单元测试与门禁夹具在 CI 中运行。** 完整的 JVM 单元测试套件——含备份/恢复（ConfigBackupPayloadTest 等）、终端消毒、Provider 适配器、LLM 错误处理，以及 agent loop 的 JVM 行为基线（上下文压缩触发 / turn 上限 / 预算停止 / 工具执行中取消）——在 APK 构建之前执行；同一步里还跑 `scripts/scan/test_scan.py` 的 **349 条夹具**，逐门验证「门真的会红」（门被掏空成恒过会被夹具抓住）。任何一条失败都会中止构建（无静默跳过）。
+- **构建前静态扫描门禁（113 道）。** 每次 CI 构建在 Gradle 之前跑 `scripts/scan/scan.sh`：113 道检查定义在数据文件 `scripts/scan/scan_blocks.sh`（每块一段自包含 shell），由 `scan_parallel.py` 并行执行（`--jobs N`，默认 `min(8, cpu)`；`MINIS_SCAN_JOBS=1` 强制串行），输出严格保持 1..113 顺序。覆盖四类：
   - **数据与资源契约**——四处同步（数据类字段在 Model→Entity→toSnapshot→toProviderConfig
     四层必须同步，缺一层字段会静默蒸发）、i18n 孤儿键（8 份 strings 的 key 集合与代码
     引用必须一致）、备份流式导出、Room 迁移形状；
@@ -360,8 +360,8 @@ src/android/      Android 应用（Kotlin / Compose）
 src/shared/       跨端共享的规则资源（bashism 规则）
 deps/             proot 源码（子模块）+ build_proot.sh（NDK r28 构建）
 scripts/          二进制同步与开发者工具
-scripts/scan/     112 道静态门（scan_blocks.sh 数据文件 + scan_parallel.py 并行 runner）
-                  + 门自身夹具 test_scan.py（347 例）
+scripts/scan/     113 道静态门（scan_blocks.sh 数据文件 + scan_parallel.py 并行 runner）
+                  + 门自身夹具 test_scan.py（349 例）
 tests/            trace golden 等独立测试资产
 docs/             架构 / 生命周期 / 同步流程 / 稳定性规范 / 开发档案（dev-history/）
 fix-reports/      各批次修复报告（每批一份，含证据、变异负控与残留登记）

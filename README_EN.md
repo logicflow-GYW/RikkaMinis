@@ -44,19 +44,21 @@ stays on the commit that created the release back in 2026-09). **Download the
 asset**, not the page's *Source code (zip/tar.gz)* snapshot — that is the old tag,
 not the tree this build came from. For sources, pull `main`.
 
-Another honest boundary: `scripts/**` (including the 112 static gates) is **not**
+Another honest boundary: `scripts/**` (including the 113 static gates) is **not**
 in the trigger paths — changing only gate scripts builds nothing; run
 `workflow_dispatch` manually to verify such a change. Requirements:
 
 - **arm64-v8a** device (any modern phone), **Android 8.0+**
 - Enable "install from unknown sources" when your device prompts
 
-Builds are signed with a fixed key, so a new APK installs **over** the previous
-one — your data and settings are preserved.
+Builds are signed with this repository's fixed private release key, so a new
+APK installs **over** the previous one — your data and settings are preserved.
+(Builds published before 2026-10-27 used a different key: upgrading from one of
+those needs a one-time uninstall; everything since then overlays cleanly.)
 
 ```
-SHA-256  FC:0C:40:0D:B7:7E:C1:81:A3:35:18:C2:E8:13:6A:AE
-         1A:3F:6C:79:4A:1A:A7:9F:DB:67:63:8F:C6:B1:61:13
+SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
+         21:16:72:48:D7:D8:BE:F0:B1:75:0B:8F:12:D4:85:14
 ```
 
 Verify a download with `python3 scripts/apk_cert_sha256.py <apk>`.
@@ -196,16 +198,16 @@ See [docs/DEVELOPMENT_LIFECYCLE.md](docs/DEVELOPMENT_LIFECYCLE.md).
   backup/restore (ConfigBackupPayloadTest and friends), terminal sanitization,
   provider adapters, LLM error handling, plus the agent loop's JVM behavioural
   baseline (compaction trigger / turn ceiling / budget stop / cancel mid-tool) —
-  runs before the APK build. The same step runs the **347 fixtures** in
+  runs before the APK build. The same step runs the **349 fixtures** in
   `scripts/scan/test_scan.py`, which verify gate by gate that the gates actually
   go red (a gate hollowed out to a constant pass is caught). Any failure aborts
   the build (no silent scoping).
-- **Pre-build static scan gate (112 checks).** Every CI build runs
-  `scripts/scan/scan.sh` before Gradle: the 112 checks live in the data file
+- **Pre-build static scan gate (113 checks).** Every CI build runs
+  `scripts/scan/scan.sh` before Gradle: the 113 checks live in the data file
   `scripts/scan/scan_blocks.sh` (one self-contained shell block each) and are
   executed in parallel by `scan_parallel.py` (`--jobs N`, default
   `min(8, cpu)`; `MINIS_SCAN_JOBS=1` forces serial), with output kept strictly in
-  1..112 order. Four families:
+  1..113 order. Four families:
   - **Data and resource contracts** — four-way field sync (data-class fields must
     be synced across Model → Entity → toSnapshot → toProviderConfig, or fields
     silently evaporate), i18n orphan keys (the key set across the 8 `strings`
@@ -461,8 +463,8 @@ src/android/      Android app (Kotlin / Compose)
 src/shared/       Shared rule assets (bashism rules)
 deps/             proot source (submodule) + build_proot.sh (NDK r28 build)
 scripts/          Binary sync and developer tooling
-scripts/scan/     112 static gates (scan_blocks.sh data file + scan_parallel.py runner)
-                  + the gates' own fixtures, test_scan.py (347 cases)
+scripts/scan/     113 static gates (scan_blocks.sh data file + scan_parallel.py runner)
+                  + the gates' own fixtures, test_scan.py (349 cases)
 tests/            Standalone test assets (trace goldens)
 docs/             Architecture / lifecycle / sync procedure / stability specs / dev archive (dev-history/)
 fix-reports/      One report per batch (evidence, mutation negative controls, leftovers)
