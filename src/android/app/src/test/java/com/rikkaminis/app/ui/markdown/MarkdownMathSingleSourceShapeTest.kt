@@ -89,20 +89,36 @@ class MarkdownMathSingleSourceShapeTest {
         assertTrue("old crude glyph table must stay deleted", oldTable !in s)
     }
 
+    /**
+     * The repo root as [readRepoFile] sees it. In CI, Gradle runs unit tests
+     * with `user.dir` = the `app/` module directory, NOT the repo root, so a
+     * bare `File("src/...")` resolves to nothing (first CI run taught this:
+     * run `40997128602`, `repo layout changed` was a false alarm from the
+     * wrong cwd). Walk up like [readRepoFile] and assert the tree really is
+     * there — if this ever fails for real, the layout genuinely changed.
+     */
+    private val repoRoot: File by lazy {
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
+            if (File(dir, "src/android/app").isDirectory) return@lazy dir
+            dir = dir.parentFile
+        }
+        throw AssertionError("repo root (src/android/app) not found from ${System.getProperty("user.dir")}")
+    }
+
     @Test
     fun `no third implementation exists in production sources`() {
-        val srcRoot = File(root)
+        val srcRoot = File(repoRoot, root)
         assertTrue("repo layout changed: $root missing", srcRoot.isDirectory)
         val declarations = Regex("fun (looksLikeMath|isCurrencyShaped|isCurrencyRangeShaped)\\(")
         val offenders = mutableListOf<String>()
         srcRoot.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { f ->
-            val path = f.invariantSeparatorsPath
             val text = f.readText()
             declarations.findAll(text).forEach { m ->
                 val window = text.substring(m.range.first, minOf(m.range.first + 200, text.length))
                 val delegates = "MarkdownMathHeuristic." in window
-                val inHeuristic = path.endsWith("ui/markdown/MarkdownMathHeuristic.kt")
-                if (!delegates && !inHeuristic) offenders += "$path:${window.take(60)}"
+                val inHeuristic = f.name == "MarkdownMathHeuristic.kt"
+                if (!delegates && !inHeuristic) offenders += "${f.path}:${window.take(60)}"
             }
         }
         assertEquals(
