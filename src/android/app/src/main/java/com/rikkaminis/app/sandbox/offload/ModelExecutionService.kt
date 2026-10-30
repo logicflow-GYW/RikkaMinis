@@ -40,8 +40,11 @@ import java.util.concurrent.atomic.AtomicLong
  * commits results atomically (result.tmp → flush/fsync → rename result.json),
  * waits for client.ack on non-streaming runs before self-reaping, and only
  * calls Process.killProcess (self-reap) after confirming quiescence. The main
- * process never kills us directly (only a shutdown REQUEST file); a worker
- * with in-flight work (active/queued/unacked/unflushed stream) NEVER dies.
+ * process has no way to kill (or ask for a drain of) this process: the former
+ * `shutdown` REQUEST marker was deleted because nothing in the state machine
+ * ever read it [FIX-FW-DEAD-SHUTDOWN-LEVER] — a worker with in-flight work
+ * (active/queued/unacked/unflushed stream) NEVER dies, and a quiescent one
+ * reaps itself.
  *
  * The old model — `stopSelf()` as reclamation proof with a 30s idle-kill —
  * is deliberately gone: stopSelf is not process death, and an idle window can
@@ -551,7 +554,6 @@ class ModelExecutionService : Service() {
             val next = ModelExecutionLifecycle.transition(
                 current = lifecycleState,
                 quiescence = quiescence,
-                shutdownRequested = false,
             )
             lifecycleState = next
             maybeSelfReapLocked(dir, next, quiescence, runId, generation)
@@ -564,11 +566,9 @@ class ModelExecutionService : Service() {
             unackedResponses = pendingAckTokens.size,
             streamFileFlushed = true,
         )
-        val shutdownRequested = shutdownRequested()
         val next = ModelExecutionLifecycle.transition(
             current = lifecycleState,
             quiescence = quiescence,
-            shutdownRequested = shutdownRequested,
         )
         lifecycleState = next
         // TF-H: final state + terminal are written under the lock. terminal is
@@ -587,7 +587,7 @@ class ModelExecutionService : Service() {
                 TAG,
                 "request finished (holding): state $next active=${activeRequests.get()} " +
                     "queued=${queuedRequests.get()} pendingAck=${pendingAckTokens.size} " +
-                    "shutdownRequested=$shutdownRequested pid=${android.os.Process.myPid()}",
+                    "pid=${android.os.Process.myPid()}",
             )
         }
         return next
@@ -647,22 +647,6 @@ class ModelExecutionService : Service() {
      */
     private fun generationMatches(capturedGeneration: Long): Boolean =
         capturedGeneration == requestGeneration.get()
-
-    /**
-     * True when the main process asked us to drain. On reclaim the main
-     * process writes the shutdown marker into the staging root; the worker
-     * checks the sibling marker file so we never kill while a new request
-     * could arrive (main process controls shutdown by the marker, we control
-     * the timing by quiescence).
-     */
-    private fun shutdownRequested(): Boolean {
-        return runCatching {
-            ModelExecutionMailbox.shutdownRequested(stagingRoot())
-        }.getOrElse { false }
-    }
-
-    /** Root staging dir the main process uses for model-exec requests. */
-    private fun stagingRoot(): File = File(cacheDir, "model-exec")
 
     /** Wait until the client wrote client.ack, or the timeout elapsed. */
     private fun waitClientAck(dir: File, timeoutMs: Long) {

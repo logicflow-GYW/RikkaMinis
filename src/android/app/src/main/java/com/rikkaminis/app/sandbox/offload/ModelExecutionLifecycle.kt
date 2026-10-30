@@ -5,9 +5,9 @@ package com.rikkaminis.app.sandbox.offload
  * worker lifecycle, replacing the old "stopSelf == reclamation proof" model
  * and the earlier reverted global 30s idle-kill).
  *
- * The worker owns its own lifecycle. The main process may only REQUEST a
- * shutdown (via [ModelExecutionMailbox]); it can never kill the worker process
- * based on its own counters. The worker only leaves STOPPING (calls
+ * The worker owns its own lifecycle. The main process has NO shutdown lever at
+ * all — it can never kill the worker process, neither directly nor by writing
+ * a marker the worker obeys. The worker only leaves STOPPING (calls
  * Process.killProcess — self-reap) when it has confirmed quiescence via
  * [ModelExecutionQuiescenceInput]: active==0, queue==0, no un-acked response,
  * stream file flushed.
@@ -25,13 +25,17 @@ package com.rikkaminis.app.sandbox.offload
  *   - STOPPING + quiescent → DEAD (killProcess).
  *   - DEAD → terminal, never revived/killed.
  *
- * [shutdownRequested] is the main process's EXPLICIT drain request (memory
- * pressure). It never forces a kill; in the current implementation a fully
- * quiescent worker self-reaps to DEAD regardless (QUIESCE_PENDING/DRAINED are
- * declared for API stability but are not entered — a quiescent worker goes
- * straight ACTIVE/QUIESCE_PENDING/DRAINED → STOPPING → DEAD). The parameter
- * is plumbed through for observability and future drain semantics but does
- * not change the transition outcome today.
+ * [FIX-FW-DEAD-SHUTDOWN-LEVER] There is deliberately no `shutdownRequested`
+ * parameter any more. The old one was plumbed through from a main-process
+ * marker file (`model-exec/shutdown`) but the transition body never read it,
+ * so "main process asks :modelservice to drain under memory pressure" was a
+ * lever that existed only in prose: 3 days of production logs contain zero
+ * `shutdown REQUESTED` lines and the marker had no reader that changed
+ * behaviour. Deleted rather than implemented — a quiescent worker already
+ * self-reaps on its own, which is the only thing the request could have
+ * caused. If real drain semantics are ever wanted (e.g. mid-flight
+ * preemption), add a parameter THIS function reads, plus the state that
+ * consumes it — not a marker nobody consumes.
  *
  * All functions are pure — no Android dependencies, JVM testable.
  */
@@ -84,7 +88,6 @@ object ModelExecutionLifecycle {
     fun transition(
         current: ModelExecutionWorkerState,
         quiescence: ModelExecutionQuiescenceInput,
-        shutdownRequested: Boolean,
     ): ModelExecutionWorkerState {
         if (current == ModelExecutionWorkerState.DEAD) return ModelExecutionWorkerState.DEAD
         // ANY state with un-finished work stays ACTIVE (except DEAD). This

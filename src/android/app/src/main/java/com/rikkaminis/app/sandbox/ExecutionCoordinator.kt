@@ -1,6 +1,5 @@
 package com.rikkaminis.app.sandbox
 
-import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Debug
@@ -16,8 +15,6 @@ import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.data.repository.EnvVarRepository
 import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
 import com.rikkaminis.app.logging.AppLogger
-import com.rikkaminis.app.sandbox.offload.ChatStreamOffloadHandler
-import com.rikkaminis.app.sandbox.offload.ModelExecutionMailbox
 import com.rikkaminis.app.service.MemoryPressureGate
 import com.rikkaminis.app.service.MemoryPressureLevel
 import kotlinx.coroutines.CoroutineScope
@@ -1147,57 +1144,16 @@ object ExecutionCoordinator {
             ))
             Log.w(TAG, "Post-recycle GC: native ${startingNative}→${nativeNow}MB (freed ${startingNative - nativeNow}MB), " +
                 "java ${startingJava}→${javaNow}MB (freed ${startingJava - javaNow}MB), rounds=$roundsUsed")
-            // [direction-A step4] Pressure reclaim: if the app native heap is still
-            // at/above the LOCKED floor after GC, kill the :modelservice process so the
-            // DirectByteBuffer/streaming native held there is returned to the OS. This
-            // keeps offloaded chat streaming from pushing the app to the lock point;
-            // the next offload startService restarts the service fresh.
-            maybeReclaimModelService(nativeNowMb = nativeNow)
+            // [FIX-FW-DEAD-SHUTDOWN-LEVER] A "pressure reclaim" step used to run
+            // here: it wrote a `shutdown` marker into cache/model-exec hoping the
+            // :modelservice worker would drain and die. The worker's state machine
+            // accepted that flag as a parameter and never read it, so the step could
+            // not free a byte — it was deleted rather than kept as a lever that only
+            // looks real. The worker still self-reaps on genuine quiescence (see
+            // ModelExecutionLifecycle), which is the only outcome the marker could
+            // ever have produced anyway.
         } catch (_: Throwable) {
             // Never let memory recovery break the calling flow.
-        }
-    }
-
-    /**
-     * [direction-A step4] Ask the :modelservice process to drain+die when the
-     * app native heap is still above the locked floor after GC. Unlike the old
-     * `stopService` (which killed the process out from under an in-flight
-     * stream and was reverted), TF-B uses a file-based shutdown REQUEST: the
-     * worker checks it via [ModelExecutionMailbox] and only kills itself after
-     * confirming quiescence (active==0, queue==0, no un-acked response, stream
-     * flushed). The request is written into the staging root; the worker
-     * re-checks on each request finish. A new request that arrives after the
-     * request simply revives the worker (onStartCommand → ACTIVE).
-     */
-    @SuppressLint("MissingPermission")
-    private fun maybeReclaimModelService(nativeNowMb: Long) {
-        if (!::appContext.isInitialized) return
-        // Only reclaim when the app is itself in the locked/pressure band; don't
-        // kill the service on every idle GC (level 0/1 are normal operation).
-        val memAvailMb = systemMemAvailableMB()
-        val phase = internalDegradationPhase(nativeNowMb, memAvailMb)
-        if (phase.ordinal < ShellPhase.CRITICAL.ordinal) return // not pressurized enough
-        // [B2] Never sever an in-flight stream. If a chat stream is actively being
-        // offloaded to :modelservice right now, killing the service would leave
-        // stream.jsonl truncated (no DONE, no error) and the UI silently stalled
-        // until the poll timeout. Skip the shutdown request and let the next
-        // non-streaming pressure tick handle it.
-        if (ChatStreamOffloadHandler.activeStreams.get() > 0) {
-            Log.w(TAG, "[direction-A] skipped reclaim: active stream in progress " +
-                "(activeStreams=${ChatStreamOffloadHandler.activeStreams.get()}, native ${nativeNowMb}MB)")
-            return
-        }
-        try {
-            // Write the shutdown REQUEST into the staging root; the worker
-            // drains and kills itself when quiescent. Never stopService — the
-            // worker owns its own death timing.
-            val root = File(appContext.cacheDir, "model-exec")
-            root.mkdirs()
-            ModelExecutionMailbox.writeShutdownRequest(root)
-            Log.w(TAG, "[direction-A] shutdown REQUESTED for :modelservice (native still ${nativeNowMb}MB, phase $phase) — " +
-                "worker self-reaps when quiescent")
-        } catch (e: Throwable) {
-            Log.w(TAG, "[direction-A] shutdown request write failed", e)
         }
     }
 
@@ -1297,51 +1253,7 @@ object ExecutionCoordinator {
                 Log.i(TAG, "orphan model-exec reaper: reclaimed $reaped run dir(s)")
             }
         }
-        // [fix/sweep1014-d2b] Aged shutdown-marker cleanup (same low cadence).
-        cleanupStaleShutdownMarker(ctx)
     }
-
-    /**
-     * [fix/sweep1014-d2b] A `shutdown` marker in the model-exec staging root
-     * is written by [maybeReclaimModelService] and consumed by the
-     * :modelservice worker at each request finish — but nothing ever deleted
-     * it, so once true the worker's `shutdownRequested` observation stayed
-     * true forever: the worker's state dump and logs were permanently
-     * poisoned, and a worker restarted AFTER a previous shutdown would read
-     * the stale marker and self-reap on its first quiescent finish even
-     * though the main process was no longer asking.
-     *
-     * Cleanup is AGE-GATED and conservative: the worker consumes the marker
-     * at every request finish, so a marker that has sat for [SHUTDOWN_MARKER_STALE_MS]
-     * is consumed-or-dead garbage. Deleting an aged marker can only cost a
-     * skipped self-reap this round (the next pressure reclaim re-writes the
-     * marker), never correctness — the worker owns its death timing either way.
-     */
-    private fun cleanupStaleShutdownMarker(ctx: Context) {
-        try {
-            val marker = File(
-                File(ctx.cacheDir, "model-exec"),
-                ModelExecutionMailbox.FILE_SHUTDOWN,
-            )
-            if (!marker.isFile) return
-            val ageMs = System.currentTimeMillis() - marker.lastModified()
-            if (ageMs < SHUTDOWN_MARKER_STALE_MS) return
-            if (marker.delete()) {
-                Log.i(TAG, "cleanupProotTmp: cleared stale model-exec shutdown marker (age ${ageMs / 60_000L}min)")
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "cleanupProotTmp (shutdown marker) failed: ${t.message}")
-        }
-    }
-
-    /**
-     * [fix/sweep1014-d2b] A shutdown marker must sit this long before the
-     * stale-marker sweeper may delete it. WHY 30 min: far longer than any
-     * single model-exec request's timeout + ack window, so a worker that is
-     * still going to consume the marker has had many request finishes to do
-     * so; and far shorter than the "forever" the stale marker used to live.
-     */
-    private const val SHUTDOWN_MARKER_STALE_MS = 30 * 60_000L
 
     /**
      * [P2-guest-tmp-reclaim] Recursive, age-gated sweep of one guest temp dir

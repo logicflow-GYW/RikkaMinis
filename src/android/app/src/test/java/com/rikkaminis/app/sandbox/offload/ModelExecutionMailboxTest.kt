@@ -11,7 +11,6 @@ import java.io.File
 /**
  * JVM tests for the Phase 2 mailbox protocol ([ModelExecutionMailbox]):
  *  - cancel marker + cancel.ack round-trip
- *  - shutdown request marker
  *  - lifecycle state dump round-trip
  *
  * Also tests the stream-failure taxonomy ([ModelExecutionStreamException]):
@@ -58,11 +57,36 @@ class ModelExecutionMailboxTest {
     }
 
     @Test
-    fun `shutdown request marker`() {
-        val d = dir()
-        assertFalse(ModelExecutionMailbox.shutdownRequested(d))
-        ModelExecutionMailbox.writeShutdownRequest(d)
-        assertTrue(ModelExecutionMailbox.shutdownRequested(d))
+    fun `dead shutdown lever stays deleted`() {
+        // [FIX-FW-DEAD-SHUTDOWN-LEVER] The `shutdown` marker was a dead lever:
+        // the main process wrote it, the worker's transition accepted the flag
+        // and never read it, so "ask :modelservice to drain under memory
+        // pressure" freed nothing (0 `shutdown REQUESTED` lines in 3 days of
+        // production logs). The marker + its write/read API were DELETED.
+        //
+        // This pins the deletion, not a behaviour: if anyone re-adds the
+        // half-wired pair (writer + reader but no consumer), they must delete
+        // this test on purpose — which is the moment to answer "who reads it
+        // this time, and which branch does it change?".
+        //
+        // Java reflection (not KClass.members) on purpose: kotlin-reflect is
+        // not guaranteed on the unit-test classpath, and a KotlinReflection-
+        // NotSupportedError would be swallowed by a try/catch into a
+        // permanently-green no-op test.
+        val cls = ModelExecutionMailbox::class.java
+        val methods = cls.declaredMethods.map { it.name }
+        assertFalse(
+            "writeShutdownRequest is back — is there a consumer that acts on it?",
+            methods.contains("writeShutdownRequest"),
+        )
+        assertFalse(
+            "shutdownRequested is back — is there a consumer that acts on it?",
+            methods.contains("shutdownRequested"),
+        )
+        assertFalse(
+            "FILE_SHUTDOWN marker constant is back — who deletes/consumes the file?",
+            cls.declaredFields.map { it.name }.contains("FILE_SHUTDOWN"),
+        )
     }
 
     @Test

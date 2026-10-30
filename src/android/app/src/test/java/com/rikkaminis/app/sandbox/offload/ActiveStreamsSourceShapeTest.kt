@@ -36,20 +36,61 @@ class ActiveStreamsSourceShapeTest {
     }
 
     @Test
-    fun `readers use an atomic get`() {
-        val src = readRepoFile(
-            "app/src/main/java/com/rikkaminis/app/sandbox/ExecutionCoordinator.kt",
-        )
+    fun `any reader of the counter goes through the atomic get`() {
+        // [FIX-FW-DEAD-SHUTDOWN-LEVER] This case used to name the ONE production
+        // reader — the reclaim guard in `ExecutionCoordinator`
+        // (`maybeReclaimModelService` … `activeStreams.get() > 0` plus its log
+        // line) — and require it to read atomically. That guard was deleted with
+        // the dead shutdown lever it protected, so there is no named site left to
+        // pin; re-pinning a specific site would assert that a reader EXISTS, which
+        // is not what this file is about.
+        //
+        // The invariant the audit case (deep-audit-1018 ISSUE-04) was really
+        // protecting survives without a named site: every read of the counter,
+        // wherever it appears, is an atomic `get()` — never a bare field read and
+        // never `++`/`--`. The scan therefore covers the whole production tree
+        // instead of one file, which is strictly more surface than before (it
+        // would also catch a reader added in a third file).
+        val mainDir = File(repoRoot(), "src/android/app/src/main/java")
+        val offenders = mutableListOf<String>()
+        var readers = 0
+        mainDir.walkTopDown()
+            // The declaration + its own atomic ++/-- live here (getAndIncrement /
+            // updateAndGet): that file is the subject of the case above, not a
+            // consumer.
+            .filter { it.isFile && it.extension == "kt" && it.name != "ChatStreamOffloadHandler.kt" }
+            .forEach { f ->
+                val text = f.readText()
+                var at = text.indexOf("activeStreams")
+                while (at >= 0) {
+                    if (text.startsWith("activeStreams.get()", at)) {
+                        readers++
+                    } else {
+                        val from = maxOf(0, at - 60)
+                        val to = minOf(text.length, at + 60)
+                        offenders += "${f.name}: …${text.substring(from, to).replace('\n', ' ')}…"
+                    }
+                    at = text.indexOf("activeStreams", at + 1)
+                }
+            }
         assertTrue(
-            "reclaim guard must read the counter atomically",
-            src.contains("ChatStreamOffloadHandler.activeStreams.get() > 0"),
+            "every activeStreams read must be an atomic get(); offenders: $offenders",
+            offenders.isEmpty(),
         )
-        assertTrue(
-            "reclaim log must read the counter atomically",
-            // NOTE 模板转义：${...} 在 Kotlin 里是字符串模板，不转义会求值成
-            // "activeStreams=0"，断言的就不是源码字面量了。
-            src.contains("activeStreams=\${ChatStreamOffloadHandler.activeStreams.get()}"),
-        )
+        // Today this is 0 — the counter has no production reader since the lever
+        // was deleted (see ChatStreamOffloadHandler KDoc). Logged, not asserted:
+        // asserting "0 readers" would forbid a legitimate future consumer, while
+        // the assertion above is what has teeth the day one comes back.
+        println("[ActiveStreamsSourceShapeTest] atomic readers found: $readers")
+    }
+
+    private fun repoRoot(): File {
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
+            if (File(dir, "src/android/app").isDirectory) return dir
+            dir = dir.parentFile
+        }
+        throw FileNotFoundException("repo root not found from user.dir=${System.getProperty("user.dir")}")
     }
 
     private fun readRepoFile(relative: String): String {
