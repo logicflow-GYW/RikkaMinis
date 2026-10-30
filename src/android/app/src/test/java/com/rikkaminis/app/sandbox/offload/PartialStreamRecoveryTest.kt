@@ -17,6 +17,7 @@ class PartialStreamRecoveryTest {
         streamLen: Long = 100L,
         terminal: Boolean = false,
         cancel: Boolean = false,
+        cancelDeath: Boolean = false,
         recovered: Boolean = false,
         meta: Boolean = true,
         mtimeAgeMs: Long = 60_000L,
@@ -24,6 +25,7 @@ class PartialStreamRecoveryTest {
         streamLen = streamLen,
         terminalPresent = terminal,
         cancelPresent = cancel,
+        cancelDeathPresent = cancelDeath,
         recoveredPresent = recovered,
         hasSessionMeta = meta,
         mtimeAgeMs = mtimeAgeMs,
@@ -42,6 +44,63 @@ class PartialStreamRecoveryTest {
     @Test
     fun cancelledRun_skipped() {
         assertEquals(PartialStreamRecoveryPolicy.Decision.SKIP_CANCELLED, decide(cancel = true))
+    }
+
+    @Test
+    fun deathCancelledRun_withContent_recovers() {
+        // [LOOP-1030 R2 M2] `cancel` + `cancel.death` = the client's death
+        // cleanup (worker died mid-stream with hadChunks=true → no retry, no
+        // fallback, no appendMessage). The stream.jsonl content is real model
+        // output the user never saw finish — it must be recovered, not
+        // skipped as a user discard.
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.RECOVER,
+            decide(cancel = true, cancelDeath = true),
+        )
+    }
+
+    @Test
+    fun deathCancelledRun_stillRespectsGrace() {
+        // A frozen worker that thaws may append more before its own cancel
+        // takes effect — the death marker must not bypass the write grace.
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.SKIP_ACTIVE,
+            decide(cancel = true, cancelDeath = true, mtimeAgeMs = 1_000L),
+        )
+    }
+
+    @Test
+    fun deathCancelledRun_emptyStream_skipped() {
+        // Nothing to append: a death with zero visible text is reclaimed like
+        // any empty dir (SKIP_EMPTY deletes with the beat-alive guard).
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.SKIP_EMPTY,
+            decide(streamLen = 0L, cancel = true, cancelDeath = true),
+        )
+    }
+
+    @Test
+    fun deathCancelledRun_noMeta_skipped() {
+        // Unattributable content cannot be appended to any session.
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.SKIP_NO_META,
+            decide(meta = false, cancel = true, cancelDeath = true),
+        )
+    }
+
+    @Test
+    fun deathMarkerWithoutCancel_doesNotChangeAnything() {
+        // The marker is only meaningful next to the wire cancel; a stray
+        // marker alone must not turn a plain death into a discard or vice
+        // versa (the plain ladder still applies).
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.RECOVER,
+            decide(cancel = false, cancelDeath = true),
+        )
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.SKIP_TERMINAL,
+            decide(terminal = true, cancel = false, cancelDeath = true),
+        )
     }
 
     @Test

@@ -41,7 +41,7 @@ class SessionConcurrencyManagerLockTest {
         // change which thread observes what).
         MemoryPressureGate.metricsReader = { MemoryPressureGate.Metrics(0L, 147L) }
         MemoryPressureGate.reclaimHook = {}
-        MemoryPressureGate.pressureListener = { _, _ -> }
+        MemoryPressureGate.pressureListener = { _, _, _, _ -> }
     }
 
     /**

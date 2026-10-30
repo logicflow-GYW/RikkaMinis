@@ -88,9 +88,14 @@ object SessionConcurrencyManager {
     suspend fun acquireSlot(sessionId: String) {
         // 准入用瞬时纯分级（确定、可预期）：带滞回的状态机 [MemoryPressureGate.level]
         // 需要持续采样才能攒满置信拍，准入是一次性调用，用它只会恒返回 NORMAL。
-        val sampled = MemoryPressureGate.anonMb()
+        // [LOOP-1030 R1-g] 影子机与准入共用同一条读数：准入读数是亚秒突发的唯一
+        // 来源（1s 周期采样四天峰值仅 564MB，准入侧 1032MB），影子必须活在被观测
+        // 决策的同一条读数上。只观测，不驱动行为。
+        val metrics = MemoryPressureGate.metricsReader()
+        val sampled = metrics.anonMb
+        MemoryPressureGate.observeShadowAtAdmission(sampled, metrics.rssMb, src = MemoryPressureGate.SRC_ADMISSION)
         val pressure = MemoryPressureGate.levelFor(sampled)
-        MemoryPressureGate.notify(pressure)
+        MemoryPressureGate.notify(pressure, MemoryPressureGate.SRC_ADMISSION)
         if (pressure == MemoryPressureLevel.CRITICAL) {
             MemoryPressureGate.reclaimAndWait()
         } else if (pressure == MemoryPressureLevel.ELEVATED) {

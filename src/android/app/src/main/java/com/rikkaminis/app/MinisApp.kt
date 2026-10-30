@@ -755,10 +755,18 @@ class MinisApp : Application(), ImageLoaderFactory {
             runCatching { ExecutionCoordinator.recycleIdleShells() }
             runCatching { sharedBrowserTabPool.evictIdleTabs() }
         }
-        MemoryPressureGate.pressureListener = { level, anonMB ->
+        MemoryPressureGate.pressureListener = { level, anonMB, src, crossed ->
+            // [LOOP-1030 R1-b] 1s tick 与准入路径分开记账：旧实现把每一行都标成
+            // "admission delayed 500ms"，四天 3881 行里真实准入 ≤29 行，审计据此
+            // 把「门升到 3875 次」读成事实。`crossed=false` 是滞回带续报
+            // （占 ELEVATED 行 96.2%），不是新的越线事件。
+            val effect = when {
+                src == MemoryPressureGate.SRC_TICK -> "observe-only tick sample (no admission effect)"
+                level == MemoryPressureLevel.CRITICAL -> "admission throttled (reclaim + 2s wait)"
+                else -> "admission delayed 500ms"
+            }
             AppLogger.warning("MemoryPressureGate", "level=$level anon=${anonMB}MB " +
-                "rss=${MemoryPressureGate.rssMb()}MB — " +
-                (if (level == MemoryPressureLevel.CRITICAL) "admission throttled (reclaim + 2s wait)" else "admission delayed 500ms"))
+                "rss=${MemoryPressureGate.rssMb()}MB src=$src crossed=$crossed — $effect")
         }
         // [fix/memory-gate-anon-metric] 档位跃迁落探针日志（含降档）。这是"正常重活
         // 会不会常穿越梯子"的经验依据——阈值 450/1200 后面靠穿越频率复核，不靠拍脑袋。
@@ -767,6 +775,20 @@ class MinisApp : Application(), ImageLoaderFactory {
                 com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent(
                     "gate:${to.name.lowercase()}",
                     "from=$from anon=${anonMB}MB rss=${MemoryPressureGate.rssMb()}MB",
+                )
+            }
+            Unit
+        }
+
+        // [SYMPTOM-A F-A1] 影子水线（800MB anon）：只观测，不驱动任何行为。
+        // 依据：三天 anon 峰值 1032/585/552MB，而 1200 的硬分支三天 0 次触发 ——
+        // "把硬门槛降到 800 会不会天天触发"只能靠这台影子机回答，不能靠猜。
+        // 它走自己的工作线程纪律（1s tick）与独立状态机，不动回收/准入。
+        com.rikkaminis.app.service.shadowTierListener = { src, from, to, anonMB, rssMB ->
+            runCatching {
+                AppLogger.info(
+                    "MemGateShadow",
+                    "src=$src from=$from to=$to anon=${anonMB}MB rss=${rssMB}MB — observe-only, no reclaim/admission change",
                 )
             }
             Unit

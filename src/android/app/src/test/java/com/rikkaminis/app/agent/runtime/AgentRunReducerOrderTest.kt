@@ -9,7 +9,8 @@ import org.junit.Test
 /**
  * TF-G P1-3 JVM tests: the reducer ordering contract that Pin «RunStarted
  * first». They pin the exact bug seen in production ("T7-D reducer REJECTED
- * ... run not started; requires RunStarted first"): if a caller issues
+ * ... run not started; requires RunStarted first"; the line now reads
+ * `T7-D shadow reducer declined … — [SYMPTOM-A F-A2a]`): if a caller issues
  * ProviderAttemptStarted / ToolStarted BEFORE RunStarted, the reducer standing
  * at IDLE rejects them with RUN_NOT_STARTED. ChatViewModel's fix initialises
  * the reducer state machine and emits RunStarted before any provider/phase

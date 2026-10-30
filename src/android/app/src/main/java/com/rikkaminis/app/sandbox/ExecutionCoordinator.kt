@@ -350,14 +350,24 @@ object ExecutionCoordinator {
         // 多少内存」。与准入逻辑完全无关，任何失败静默。
         val spikeCmdClass = classifyCommand(command)
         MemorySpikeRecorder.onCommandStart(sessionId, spikeCmdClass.name, command)
+        // [LOOP-1030 R1-g] 影子水线挂在这里：准入读数就是决策读数（复用这一次
+        // 读，零额外 IO）。1s 周期采样看不到亚秒突发，别把它挪回 tick。
+        MemoryPressureGate.observeShadowAtAdmission(
+            anonBeforeMB, metricsBefore.rssMb, src = "shell-admission",
+        )
         if (MemoryPressureGate.levelFor(anonBeforeMB) == MemoryPressureLevel.CRITICAL) {
             MemoryPressureGate.reclaimAndWait(waitMs = 2_000L)
-            val anonAfterMB = MemoryPressureGate.anonMb()
+            val metricsAfter = MemoryPressureGate.metricsReader()
+            val anonAfterMB = metricsAfter.anonMb
+            // 回收完仍然越线 = 假设水线下的"拒绝准入"，单独一个 src 便于计数。
+            MemoryPressureGate.observeShadowAtAdmission(
+                anonAfterMB, metricsAfter.rssMb, src = "shell-post-reclaim",
+            )
             if (MemoryPressureGate.shouldRejectAfterReclaim(anonAfterMB)) {
-                Log.w(TAG, "[$sessionId] Process anon ${anonAfterMB}MB still critical after reclaim — rejecting command (anonBefore=${anonBeforeMB}MB, rss=${MemoryPressureGate.rssMb()}MB)")
+                Log.w(TAG, "[$sessionId] Process anon ${anonAfterMB}MB still critical after reclaim — rejecting command (anonBefore=${anonBeforeMB}MB, rss=${metricsAfter.rssMb}MB)")
                 MemorySpikeRecorder.onEvent(
                     "reject-anon",
-                    "session=$sessionId anonAfter=${anonAfterMB}MB anonBefore=${anonBeforeMB}MB rss=${MemoryPressureGate.rssMb()}MB :: ${MemorySpikeRecorder.previewOf(command, 60)}"
+                    "session=$sessionId anonAfter=${anonAfterMB}MB anonBefore=${anonBeforeMB}MB rss=${metricsAfter.rssMb}MB :: ${MemorySpikeRecorder.previewOf(command, 60)}"
                 )
                 return CommandResult(
                     "[System busy: process memory is critically high (anon ${anonAfterMB}MB). " +
@@ -766,6 +776,30 @@ object ExecutionCoordinator {
                 memoryRecycled = memoryRecycled,
                 commandDispatched = commandDispatched,
             )
+            // [SYMPTOM-A F-A2b] The verdict's two `outcomeKnown = false` exits live
+            // in the pure function above (`internalDecideShellRetryVerdict`), which
+            // is JVM-tested and Android-free — a log call there would break that and
+            // fire on every retry-policy evaluation. So the trace lands here, at the
+            // CONSUMPTION point, where the verdict becomes a CommandResult.
+            //
+            // Why it matters: without this line an untrustworthy shell result leaves
+            // no trace at all in the log. The only downstream evidence is the
+            // T7-D shadow reducer's "declined" warning (10-28: 11, 10-29: 12 — i.e.
+            // 17%/20% of runs), which reads like a failure and says nothing about
+            // WHICH command became untrustworthy. Metadata only — never the command
+            // text or any output (credentials leak through tool output; see the
+            // redaction rules in this package).
+            if (!verdict.outcomeKnown) {
+                Log.w(
+                    TAG,
+                    "[$sessionId] outcome unknown (reason=" +
+                        (if (memoryRecycled) "memory-recycled" else "outcome-unknown") +
+                        "): exit=${result.exitCode} alive=${shell.isAlive} " +
+                        "truncated=${result.truncated} attempt=$attempt/$MAX_AUTO_RETRIES " +
+                        "safety=${ToolRetrySafetyRegistry.lookup(SHELL_EXECUTE_TOOL_NAME)} " +
+                        "dispatched=$commandDispatched cmdLen=${command.length}",
+                )
+            }
             if (!verdict.retry) {
                 if (memoryRecycled) {
                     // [fix/audit3-cancel-retry-1015 F-06] Our own memory monitor
