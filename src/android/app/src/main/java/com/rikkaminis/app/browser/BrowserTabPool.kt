@@ -1744,6 +1744,85 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
     }
 
     /**
+     * [fw-1030b A / r3-B09 F-05] DISCARD the pool: destroy every tab and forget
+     * the browsing state that would bring it back.
+     *
+     * Deliberately NOT [releaseAllTabs]. That one only retires the agent's
+     * RESERVATION and keeps the live tabs on purpose — the BrowserSheet
+     * takeover path depends on it (`ui/browser/BrowserSheet.kt` hands the user
+     * the tabs the agent opened; releasing is "you own them now", not "throw
+     * them away"). The bug was calling it for a *deletion*: `_tabs` still held
+     * the Tabs, so `releaseAllTabs`' own trailing [saveState] wrote them to
+     * `filesDir/browser_tabs/<sid>.json`, and `ChatViewModel.clearChat`
+     * deleting that file afterwards only won until the next save — the sheet's
+     * "+" (`newTabFromUI`), any `browser_use` action (`runAcquiredAction`),
+     * `onTrimMemory` or `evictIdleTabs` rebuilt it from the still-live list.
+     * The cleared chat's tabs then came back on the next open of the session.
+     *
+     * Teardown goes through [destroyTab] on purpose: it is the single source
+     * for "a tab is gone" (grace job cancelled, per-id `savedURLs`/`tabLocks`
+     * entries dropped, WebView destroyed on Main via [destroyManagerOnMain] —
+     * a non-Main `destroy()` latches `destroyed = true` inside its own catch
+     * and leaks the renderer's 50-100 MB for the life of the process).
+     *
+     * Nothing is persisted here: the caller owns the deletion of the snapshot
+     * file, and the two state halves below are emptied so a save that lands
+     * afterwards can only write an honest empty document.
+     */
+    fun discardAllTabs() {
+        val live = _tabs.value
+        // The whole wipe runs inside the suppression window: destroyTab drives
+        // the WebView teardown, whose close-window callback and action-release
+        // paths re-enter saveState() while the list is half emptied.
+        suppressingTabPersistence {
+            if (live.isNotEmpty()) {
+                val mutable = live.toMutableList()
+                for (tab in live) {
+                    destroyTab(mutable, tab)
+                }
+            }
+            // Settle the published list BEFORE the busy re-derivation (the
+            // derivation reads `_tabs.value`; see C10 in
+            // browser_tabs_lifecycle_check).
+            _tabs.value = emptyList()
+            publishAgentBusy()
+            _selectedTabId.value = 0
+            // saveState() folds `savedURLs` into the document, so an empty live
+            // list alone is not "no tabs to restore": URLs of tabs trimmed or
+            // evicted earlier in this session would be re-persisted and rebuilt
+            // by restoreSavedTabs() on the next open. A discard drops both
+            // halves — it means "this session's browsing state is gone".
+            savedURLs.clear()
+        }
+        Log.i(TAG, "discardAllTabs(): destroyed ${live.size} tab(s)")
+    }
+
+    /**
+     * [fw-1030b A] Run [block] with tab persistence suppressed.
+     *
+     * The latch is a WINDOW, not a "skip the next save" flag: it is cleared in
+     * `finally` when the block returns, so it can never swallow a later
+     * legitimate save (a consumed-once flag that found no save to eat here
+     * would silently drop the user's next tab creation instead — the failure
+     * would be invisible and far from its cause).
+     *
+     * `@Volatile`: [discardAllTabs] may run off Main while an IO-thread
+     * [saveState] reads the latch; the write it would race is the one this
+     * window exists to prevent.
+     */
+    @Volatile
+    private var discardInProgress: Boolean = false
+
+    private fun suppressingTabPersistence(block: () -> Unit) {
+        discardInProgress = true
+        try {
+            block()
+        } finally {
+            discardInProgress = false
+        }
+    }
+
+    /**
      * [T-android-trim-memory] Central tab teardown. Removes the tab from the
      * supplied list and destroys its WebView so the renderer process actually
      * frees memory (50-100 MB/tab).
@@ -2163,6 +2242,11 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         // to re-create that session's <sid>.json. Fail-closed on the latch,
         // before any disk touch.
         if (isDisposed) return
+        // [fw-1030b A] ... and neither may a discard in progress: its teardown
+        // re-enters this function (a Main-posted window.close callback, an
+        // action release) while `_tabs` is half emptied, which is exactly the
+        // pre-wipe list that a cleared session must never get back.
+        if (discardInProgress) return
         // [dv23-B4 B-04] A pool that only BORROWS a session's context (the
         // process-wide shared pool, bound through bindSessionContextOnly) must
         // never persist its tab list into that session's
