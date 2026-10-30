@@ -153,7 +153,12 @@ object ProviderExecutionGateway {
             thinkingLevel = thinkingLevel,
             streaming = false,
         )
-        val raw = ModelExecutionDispatcher.dispatch(context, requestJson)
+        // [T-worker-key-intent-handoff] Resolve the CURRENT key here (the only
+        // layer holding the instance) so a mid-session key replacement reaches
+        // this dispatch instead of the worker's frozen prefs map.
+        val raw = ModelExecutionDispatcher.dispatch(
+            context, requestJson, WorkerKeyHandoff.keyFor(context, instance.id),
+        )
             ?: return SendResult.Unavailable("model service dispatch failed or timed out")
         return parseNonStreamingResult(raw)
     }
@@ -254,7 +259,10 @@ object ProviderExecutionGateway {
             streaming = true,
             enhancedCache = enhancedCache,
         )
-        return ChatStreamOffloadHandler.stream(context, requestJson, thinkingLevel.isEnabled, sessionId)
+        return ChatStreamOffloadHandler.stream(
+            context, requestJson, thinkingLevel.isEnabled, sessionId,
+            WorkerKeyHandoff.keyFor(context, instance.id),
+        )
     }
 
     /**

@@ -74,9 +74,17 @@ OFFLOAD_REL = "src/android/app/src/main/java/com/rikkaminis/app/sandbox/NativeOf
 
 CAPTURE_CALL = "CapturedRequestBody.capture { requestFile.readText() }"
 SITE_PARSE = "JSONObject(requestFile.readText())"
+# [T-worker-key-intent-handoff] The criterion is "the executor takes the PARSED
+# body", not "it takes exactly two parameters": the dispatch Intent now also
+# carries the source-of-truth API key, which the executor receives as a third
+# argument. Widened to a prefix match on the first two parameters — a run
+# function that accepts the raw String instead still trips (see the
+# three-read fixture in --selftest).
 EXEC_SIGS = (
-    "private fun executeRun(req: JSONObject, dir: File): String",
-    "private fun executeStreamingRun(req: JSONObject, dir: File)",
+    ("executeRun",
+     r"private fun executeRun\s*\(\s*req\s*:\s*JSONObject\s*,\s*dir\s*:\s*File\s*[,)]"),
+    ("executeStreamingRun",
+     r"private fun executeStreamingRun\s*\(\s*req\s*:\s*JSONObject\s*,\s*dir\s*:\s*File\s*[,)]"),
 )
 # The two consumers that make a capture meaningful: the queue-frame decision and
 # the formal parse. A captured body that neither of them reads is a body that
@@ -373,11 +381,11 @@ def check_service(src):
             % (code.split("\n").index([l for l in code.split("\n") if SITE_PARSE in l][0]) + 1,
                SITE_PARSE)
         )
-    for sig in EXEC_SIGS:
-        if sig not in code:
+    for fn_name, pat in EXEC_SIGS:
+        if not re.search(pat, code):
             v.append(
                 "ModelExecutionService.kt: executor does not take the parsed "
-                "body — missing '%s'" % sig
+                "body — missing '%s(req: JSONObject, dir: File…)'" % fn_name
             )
     v += check_capture_body(code, lit)
     return v

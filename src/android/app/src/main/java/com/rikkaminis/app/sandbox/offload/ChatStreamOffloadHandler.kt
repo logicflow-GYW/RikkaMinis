@@ -109,6 +109,10 @@ object ChatStreamOffloadHandler {
         // recovered into the right session at cold start. Sub-agent streams
         // have no session — they pass null (default) and stay unattributable.
         sessionId: String? = null,
+        // [T-worker-key-intent-handoff] Current stored key for this instance,
+        // resolved by the caller (see WorkerKeyHandoff.keyFor). Empty ⇒ the
+        // worker keeps its legacy prefs read + freshness abort.
+        apiKey: String = "",
     ): Flow<LLMStreamChunk> = flow {
         // [fix/audit-s2h4] activeStreams was incremented BEFORE the staging try.
         // If root.mkdirs()/d.mkdir() threw ("stream staging failed"), the flow
@@ -196,6 +200,12 @@ object ChatStreamOffloadHandler {
             try {
                 val intent = Intent(context, ModelExecutionService::class.java).apply {
                     putExtra(ModelExecutionService.EXTRA_REQUEST_DIR, dir.absolutePath)
+                    // [T-worker-key-intent-handoff] Streaming sibling of the
+                    // dispatcher's extra: a key replaced mid-session reaches
+                    // this request without waiting for the worker to die, so
+                    // the freshness abort (which only frees an idle worker)
+                    // never has to fire under multi-session load.
+                    WorkerKeyHandoff.attachKey(this, apiKey)
                 }
                 context.startService(intent)
             } catch (e: Exception) {
