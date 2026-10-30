@@ -91,7 +91,13 @@ old kept math for 3/3
 
 ### 4.7 CI
 
-（收口时回填）
+- **run `40998818444`** @ `5fb058095f32` **success 14 min 45 s**（03:41:51Z → 03:56:35Z），attempt 1，`workflow_dispatch`；`head_sha` 与本地 HEAD **逐字符一致**。
+- 27 步 = **25 success + 2 skipped**（`Move the rolling tag` / `Publish to Releases`，均 main 门控，分支上必 skip）。
+- 日志 3,363,987 B / **NUL 0**：`Summary: 113 passed, 0 failed` ×2、`ALL 349 CASES PASS` ×2、`^e: file` **0**、真 ` FAILED$` **0**。
+- 9 条新用例两遍全 PASSED（`MarkdownMathParityTest` 5 + `MarkdownMathSingleSourceShapeTest` 4）。
+- **首轮红（诚实记录）**：`40997128602` failure @8.4 min，唯一失败 = `MarkdownMathSingleSourceShapeTest > no third implementation exists in production sources`（`: Java.lang.AssertionError: repo layout changed`）。根因是**测试自己的 cwd 假设**：Gradle 单测的 `user.dir` 是 `app/` 模块目录而非仓库根，裸 `File("src/...")` 解析不到；同文件另三例走 `readRepoFile` 的向上查找所以是绿的。修 = 该用例改成同一个向上查找（`repoRoot` lazy，断言 `src/android/app` 存在），修完本地用 `cwd=src/android/app` 模拟 CI 复跑，`declarations seen=5, offenders=[]`。
+  ⇒ **可复用**：JVM 里读源码的形状测试一律按 `user.dir` 向上找仓库根，**不要 `File("src/...")` 直接用**——本地从仓库根跑永远绿，CI 从模块目录跑必红，而且只在第一个这么写的用例上暴露。
+
 
 ## 5. 残留（带触发条件）
 
