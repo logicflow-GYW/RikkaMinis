@@ -63,7 +63,12 @@ val folded = _cachedLatestMarker?.lastCompactedMessageId != markerBefore ||
 
 ### 4.1 CI
 
-（收口时回填）
+- **run `40987317395`**（`fix/compact-effect-metric`）**success 17 min 39 s**（01:41:22Z → 01:59:01Z），attempt 1，`workflow_dispatch`。
+- `head_sha 73111f7f987c3db4a737342bc6622c8ed5794dd4` 与本地 HEAD **逐字符一致**（SHA-MATCH）。
+- 27 步 = **25 success + 2 skipped**（`Move the rolling tag android-latest` / `Publish to Releases`，均 main 门控，分支上必 skip）。
+- job 日志 3,351,872 B / **NUL 0**：`Summary: 113 passed, 0 failed` ×2、`ALL 349 CASES PASS` ×2、`^e: file` **0**、真 ` FAILED$` **0**。
+- 本支用例两遍全 PASSED：`CompactEffectTest` **9 例**（含 `the 10-29 net-loss shape ends in FOLDED_NO_GAIN`、`a compact that saves 174 tokens does not unlock the trim skip`、`one token short of the minimum stays closed`）、`CompactEffectWiringTest` **4 例**（含负控 `the boolean-only decision is gone`）。
+- **首轮红（诚实记录）**：`40985475007` failure @2.6 min，`e: file … ChatContextWindowExt.kt:415:9 Conflicting declarations: val verdict … :294:9` —— 同函数里 `policy.check(...)` 的结果已经叫 `verdict`，我的新局部变量重名。修 = 改名 `compactEffect`（`val folded` / `FOLDED_NO_GAIN` / rescue `outcome` 三处引用与接线测试的期望字符串同步改）。**教训：往长函数里插声明前，先扫该函数体已有的 `val/var` 名（`re.finditer(r'^\s*(val|var)\s+(\w+)')` 一行就能出重名表），别等 CI 20 分钟后告诉你。**
 
 ## 5. 残留（带触发条件）
 
