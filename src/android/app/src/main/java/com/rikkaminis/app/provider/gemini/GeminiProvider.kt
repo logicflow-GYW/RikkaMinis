@@ -49,6 +49,8 @@ import com.rikkaminis.app.provider.StreamTimeouts
 import com.rikkaminis.app.provider.StreamCancelBridge
 import com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER
 import com.rikkaminis.app.provider.visionPlaceholder
+import com.rikkaminis.app.provider.nonStreamCeilingCutLogLine
+import com.rikkaminis.app.provider.nonStreamOutputCeilingCut
 
 class GeminiProvider(
     private val apiKey: String,
@@ -160,6 +162,19 @@ class GeminiProvider(
             // Unchanged: a response that DOES carry a candidate but no
             // finishReason (notably a pure functionCall turn, where text is
             // legitimately empty) still defaults to end_turn.
+            //
+            // [FIX-FW-NONSTREAM C2] `finishReason = MAX_TOKENS` is normalised to
+            // `max_tokens` by extractFinishReason and then carried through
+            // untouched — no signal anywhere that the answer is a truncated
+            // prefix. Not an exception (the same max_tokens would hit the same
+            // ceiling on retry); one structured log line instead. See
+            // nonStreamOutputCeilingCut for why nothing new is thrown here.
+            if (nonStreamOutputCeilingCut(finishReason)) {
+                android.util.Log.w(
+                    name,
+                    nonStreamCeilingCutLogLine(name, finishReason, text.length),
+                )
+            }
             LLMResponse(text, finishReason ?: "end_turn", usage, mediaAttachments)
         }
     }
