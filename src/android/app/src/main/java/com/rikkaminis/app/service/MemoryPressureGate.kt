@@ -127,9 +127,24 @@ object MemoryPressureGate {
     /**
      * 可注入的压力通知。生产（MinisApp 装配）接到 AppLogger；
      * 测试注入计数器。只在 ELEVATED / CRITICAL 时触发。
+     *
+     * [LOOP-1030 R1-b] 参数从 (level, anonMb) 扩到四个：
+     * - `src`：采样点（[SRC_TICK] 1s 治理器 / [SRC_ADMISSION] 准入路径）。旧签名让
+     *   两者在日志里完全同形——`MemoryPressureGate` 四天 3881 行里真实准入 ≤29 行，
+     *   其余全是 tick，却被逐行标成 "admission delayed 500ms"，审计据此把
+     *   「门升到 3875 次」读成事实。
+     * - `crossed`：本次是否是**真越线**（档位相对上一次通知发生变化）。滞回带
+     *   （anon 300–450 的 ELEVATED 续报）占 ELEVATED 行的 96.2%，不带这一位就
+     *   无法把「刚越过 450」与「还挂在 380」分开。
      */
     @Volatile
-    var pressureListener: (MemoryPressureLevel, Long) -> Unit = { _, _ -> }
+    var pressureListener: (MemoryPressureLevel, Long, String, Boolean) -> Unit = { _, _, _, _ -> }
+
+    /** 采样点：1s 治理器 tick（只观测，不产生准入/回收动作）。 */
+    const val SRC_TICK = "tick"
+
+    /** 采样点：准入路径（acquireSlot）——这里的延迟/回收才是真的发生在请求上。 */
+    const val SRC_ADMISSION = "agent-admission"
 
     /**
      * 当前压力级别：带滞回 + 置信拍的状态机（每次调用推进一格采样状态）。
@@ -154,7 +169,7 @@ object MemoryPressureGate {
         val sampled = level()
         // 注意：影子机**不在这里**推进（[LOOP-1030 R1-g]）——周期采样看不到亚秒
         // 突发，影子只挂在准入读数上，见 [observeShadowAtAdmission]。
-        notify(sampled)
+        notify(sampled, SRC_TICK)
         return sampled
     }
 
@@ -244,16 +259,21 @@ object MemoryPressureGate {
         delay(waitMs)
     }
 
-    /** 通知压力事件（只对非 NORMAL 级别；NORMAL 静默）。带回 anon 主指标。 */
-    fun notify(level: MemoryPressureLevel) {
+    /**
+     * 通知压力事件（只对非 NORMAL 级别；NORMAL 静默）。带回 anon 主指标。
+     * `src` 必填：调用方必须说明这是周期采样还是准入路径（[LOOP-1030 R1-b]）——
+     * 两种来源在旧签名下不可区分，日志上把 tick 全读成了准入延迟。
+     */
+    fun notify(level: MemoryPressureLevel, src: String) {
         if (level != MemoryPressureLevel.NORMAL) {
             // 档位变化（含降回 NORMAL）也上报，供"正常重活会不会常穿越梯子"统计。
             val anon = anonMb()
-            if (level != lastNotifiedLevel) {
+            val crossed = level != lastNotifiedLevel
+            if (crossed) {
                 tierListener(lastNotifiedLevel, level, anon)
                 lastNotifiedLevel = level
             }
-            pressureListener(level, anon)
+            pressureListener(level, anon, src, crossed)
         } else if (lastNotifiedLevel != MemoryPressureLevel.NORMAL) {
             tierListener(lastNotifiedLevel, MemoryPressureLevel.NORMAL, anonMb())
             lastNotifiedLevel = MemoryPressureLevel.NORMAL

@@ -93,9 +93,9 @@ object SessionConcurrencyManager {
         // 决策的同一条读数上。只观测，不驱动行为。
         val metrics = MemoryPressureGate.metricsReader()
         val sampled = metrics.anonMb
-        MemoryPressureGate.observeShadowAtAdmission(sampled, metrics.rssMb, src = "agent-admission")
+        MemoryPressureGate.observeShadowAtAdmission(sampled, metrics.rssMb, src = MemoryPressureGate.SRC_ADMISSION)
         val pressure = MemoryPressureGate.levelFor(sampled)
-        MemoryPressureGate.notify(pressure)
+        MemoryPressureGate.notify(pressure, MemoryPressureGate.SRC_ADMISSION)
         if (pressure == MemoryPressureLevel.CRITICAL) {
             MemoryPressureGate.reclaimAndWait()
         } else if (pressure == MemoryPressureLevel.ELEVATED) {
