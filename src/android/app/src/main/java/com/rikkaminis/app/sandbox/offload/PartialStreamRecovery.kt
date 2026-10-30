@@ -94,6 +94,10 @@ object PartialStreamRecovery {
                     streamLen = stream.length(),
                     terminalPresent = ModelExecutionRunDir.terminalPresent(dir),
                     cancelPresent = File(dir, ModelExecutionService.CANCEL_FILE).exists(),
+                    // [LOOP-1030 R2 M2] `cancel` + `cancel.death` = the client's
+                    // death cleanup (worker died mid-stream), not a user stop —
+                    // the policy must let such a dir through to RECOVER.
+                    cancelDeathPresent = File(dir, ModelExecutionMailbox.FILE_CANCEL_DEATH).exists(),
                     recoveredPresent = File(dir, RECOVERED_FILE).exists(),
                     hasSessionMeta = metaFile.exists(),
                     mtimeAgeMs = System.currentTimeMillis() - dir.lastModified(),

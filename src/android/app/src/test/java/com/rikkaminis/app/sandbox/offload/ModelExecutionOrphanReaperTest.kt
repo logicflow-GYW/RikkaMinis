@@ -25,11 +25,13 @@ class ModelExecutionOrphanReaperTest {
         beatAlive: Boolean = false,
         procAlive: Boolean = false,
         ageMs: Long = 600_000L, // 10 min literal, NOT derived from ORPHAN_AGE_MS
+        cancelDeath: Boolean = false,
     ) = ModelExecutionOrphanReaper.shouldReapCancelledOrphan(
         cancelPresent = cancel,
         beatAlive = beatAlive,
         workerLivenessAlive = procAlive,
         ageMs = ageMs,
+        cancelDeathPresent = cancelDeath,
     )
 
     @Test
@@ -76,5 +78,20 @@ class ModelExecutionOrphanReaperTest {
         // The pid probe is the only reliable-POSITIVE liveness signal —
         // never delete under a worker it can see and match.
         assertFalse(decide(procAlive = true))
+    }
+
+    @Test
+    fun deathCancelledOrphan_neverReaped() {
+        // [LOOP-1030 R2 M2] `cancel.death` marks the cancel as written by the
+        // client's death cleanup: stream.jsonl holds a recoverable half answer,
+        // not content "discarded by design". Reclaiming it here would delete
+        // the answer ~10 min after the crash, before cold-start recovery runs.
+        // Every other condition satisfied (aged, no beat, no proc) — still no.
+        assertFalse(decide(cancelDeath = true))
+    }
+
+    @Test
+    fun deathCancelledOrphan_recent_skipped() {
+        assertFalse(decide(cancelDeath = true, ageMs = 60_000L))
     }
 }

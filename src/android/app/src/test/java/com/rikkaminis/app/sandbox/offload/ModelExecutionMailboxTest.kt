@@ -38,6 +38,26 @@ class ModelExecutionMailboxTest {
     }
 
     @Test
+    fun `death cancel writes the wire cancel AND the death marker`() {
+        // [LOOP-1030 R2 M2] Two markers, two audiences: the plain `cancel`
+        // stays the wire signal (a thawing frozen worker must still abort),
+        // `cancel.death` is the semantic tag recovery + reaper read.
+        val d = dir()
+        ModelExecutionMailbox.writeCancelDeath(d)
+        assertTrue(File(d, ModelExecutionMailbox.FILE_CANCEL).exists())
+        assertTrue(File(d, ModelExecutionMailbox.FILE_CANCEL_DEATH).exists())
+    }
+
+    @Test
+    fun `plain cancel does not write the death marker`() {
+        // A user stop must keep discard-by-design semantics — no death tag.
+        val d = dir()
+        ModelExecutionMailbox.writeCancel(d)
+        assertTrue(File(d, ModelExecutionMailbox.FILE_CANCEL).exists())
+        assertFalse(File(d, ModelExecutionMailbox.FILE_CANCEL_DEATH).exists())
+    }
+
+    @Test
     fun `shutdown request marker`() {
         val d = dir()
         assertFalse(ModelExecutionMailbox.shutdownRequested(d))

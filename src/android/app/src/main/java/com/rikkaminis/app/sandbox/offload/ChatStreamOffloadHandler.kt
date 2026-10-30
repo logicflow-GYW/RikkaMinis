@@ -140,6 +140,12 @@ object ChatStreamOffloadHandler {
         var lastRead = 0L
         var emittedChunks = false
         var terminalSeen = false
+        // [LOOP-1030 R2 M2] True only when the exit was the worker-DEATH throw.
+        // The terminal finally uses it to write `cancel.death` (recoverable
+        // content) instead of a plain user-stop `cancel` (discard by design).
+        // Declared here for the same reason as the vars above: the finally
+        // reads it, the throw site (inside withTimeoutOrNull) sets it.
+        var deathCleanup = false
         val runId = ModelExecutionDispatcher.runIdOf(dir)
         var lastGrowAtMs = System.currentTimeMillis()
         // [generation-total-timeout] The client-side total-stream ceiling is the
@@ -336,6 +342,14 @@ object ChatStreamOffloadHandler {
                                 TAG,
                                 "worker died (${reason.name}) runId=$runId emittedChunks=$emittedChunks phase=$phase beat_stale_without_terminal dir=${dir.name}",
                             )
+                            // [LOOP-1030 R2 M2] Hopeless: mark the cleanup as
+                            // death-driven BEFORE throwing, so the terminal
+                            // finally writes `cancel.death` — the content in
+                            // stream.jsonl is real model output the client
+                            // never appended (hadChunks=true → no retry, no
+                            // fallback), and cold-start recovery must not skip
+                            // it as a user discard.
+                            deathCleanup = true
                             throw ModelWorkerDiedException(
                                 hadChunks = emittedChunks,
                                 reason = reason,
@@ -368,7 +382,18 @@ object ChatStreamOffloadHandler {
                 // Signal a cancel ONLY if we have not yet seen a terminal state
                 // (normal DONE / error must NOT get a cancel shoved at it).
                 if (!terminalSeen) {
-                    ModelExecutionMailbox.writeCancel(cancelFile.parentFile!!)
+                    if (deathCleanup) {
+                        // [LOOP-1030 R2 M2] This cancel was written by the death
+                        // cleanup, not by the user. `cancel.death` marks it so
+                        // recovery treats stream.jsonl as RECOVERABLE (the
+                        // half answer must survive a restart) and the orphan
+                        // reaper must not reclaim it as "discarded by design".
+                        // The plain `cancel` still goes out first: a frozen
+                        // worker that thaws must abort exactly as before.
+                        ModelExecutionMailbox.writeCancelDeath(cancelFile.parentFile!!)
+                    } else {
+                        ModelExecutionMailbox.writeCancel(cancelFile.parentFile!!)
+                    }
                 }
                 awaitTerminalAndWorkerExitThenDelete(dir, runId)
             } catch (_: Exception) {}
