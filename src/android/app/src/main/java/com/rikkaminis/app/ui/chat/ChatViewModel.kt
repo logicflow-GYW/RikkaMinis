@@ -2960,12 +2960,18 @@ class ChatViewModel(
         // newly cleared chat doesn't briefly flash a stale tool's sheet
         // before the existence-guard catches up.
         _selectedToolDetailId.value = null
-        // Drop any browser tabs the agent spawned for this session, and
+        // Drop the browser tabs the agent spawned for this session, and
         // delete the persisted tab snapshot so a future open starts clean.
         // iOS calls BrowserTabPool.deletePersistedData(for:) +
         // BrowserUseOffloadBridge.releasePool(forSession:); on Android the
-        // pool is per-VM (lazy), so releasing tabs here is sufficient.
-        _browserTabPoolRef?.releaseAllTabs()
+        // pool is per-VM (lazy), so discarding its tabs here is sufficient.
+        // [fw-1030b A / r3-B09 F-05] `discardAllTabs()`, not `releaseAllTabs()`:
+        // release keeps the live Tab objects on purpose (BrowserSheet's
+        // takeover hands them to the user), so the delete below was undone by
+        // the very next save — the pool's own trailing saveState() in release,
+        // then the sheet's "+" (newTabFromUI), any browser_use action, or
+        // trim/evict — and the cleared chat's tabs came back on reopen.
+        _browserTabPoolRef?.discardAllTabs()
         runCatching {
             java.io.File(context.filesDir, "browser_tabs/$sid.json").delete()
         }
