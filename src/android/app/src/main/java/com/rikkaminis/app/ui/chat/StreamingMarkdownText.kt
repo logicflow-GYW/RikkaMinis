@@ -98,6 +98,7 @@ import coil.compose.SubcomposeAsyncImage
 import coil.compose.SubcomposeAsyncImageContent
 import coil.request.ImageRequest
 import com.rikkaminis.app.ui.DisplayBitmapLimits.limitDisplaySize
+import com.rikkaminis.app.ui.markdown.MarkdownMathHeuristic
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.data.ChatTuningPrefs
 import com.rikkaminis.app.ui.theme.ChatColors
@@ -3427,31 +3428,18 @@ internal fun findInlineMathClose(text: String, from: Int): Int {
 }
 
 /**
- * Crude heuristic to skip plain currency like `$5`, `$1,000` and avoid
- * turning prose dollar signs into KaTeX renders. Real LaTeX math nearly
- * always carries a backslash command, a brace, a math operator, or a
- * superscript/subscript marker. iOS uses the same idea
- * (MinisMarkdownParser.looksLikeMath).
+ * [r5-ef / F-F-07, P1] "Is this `$ … $` content a formula or money?" — delegated
+ * to [MarkdownMathHeuristic], the single implementation shared with the settled
+ * parser ([com.rikkaminis.app.ui.markdown.MarkdownParser]).
+ *
+ * This function used to be its own crude copy (glyph scan before the currency
+ * nets), so the streaming renderer and the settled renderer answered differently
+ * for the shapes the static copy had already learned to refuse: `$5-`, `$5k-`,
+ * `$10/mo-`, `$5B+`, `$5k-US` rendered as KaTeX while streaming and snapped back
+ * to dollars on settle. Streaming must be the *same* classifier, never a cheaper
+ * one — a cheaper one shows the user two different documents of one sentence.
  */
-internal fun looksLikeMath(latex: String): Boolean {
-    if (latex.isBlank()) return false
-    if (latex.contains('\\')) return true
-    if (latex.contains('{') || latex.contains('}')) return true
-    if (latex.contains('^') || latex.contains('_')) return true
-    val mathChars = "=+-*/<>≤≥≠∑∫∏√∞αβγθπφλμωΔΩ"
-    if (latex.any { it in mathChars }) return true
-    // [T-latex-inline] Bare short spans like `$x$`, `$pi$`, `$abc$` carry no
-    // LaTeX glyph but ARE math. Mirror iOS MinisMarkdownParser.looksLikeMath,
-    // which accepts `count > 2`, and additionally accept a single alphanumeric
-    // token (`$x$`, `$n$`) — the strict "needs a math char" rule was the drift
-    // that made single-variable inline math leak as literal `$…$`. Currency
-    // (`$5`, `$1,000`) is filtered by the leading-digit guard, and `$$`/space
-    // openers never reach here (gated by the caller).
-    if (latex[0].isDigit()) return false            // currency: `$5`, `$10.99`
-    if (latex.first().isWhitespace() || latex.last().isWhitespace()) return false
-    if (latex.length <= 30 && latex.all { it.isLetterOrDigit() }) return true
-    return latex.length > 2
-}
+internal fun looksLikeMath(latex: String): Boolean = MarkdownMathHeuristic.looksLikeMath(latex)
 
 /**
  * [T-latex-inline] True when a candidate inline-math span is really a markdown
