@@ -75,8 +75,16 @@ object ModelExecutionOrphanReaper {
         beatAlive: Boolean,
         workerLivenessAlive: Boolean,
         ageMs: Long,
+        cancelDeathPresent: Boolean = false,
     ): Boolean {
         if (!cancelPresent) return false // existing skip: no cancel → never reclaim
+        // [LOOP-1030 R2 M2] `cancel.death` = the cancel came from the client's
+        // death cleanup, so stream.jsonl is a RECOVERABLE half answer, not
+        // content "discarded by design". Reclaiming it here would delete the
+        // answer ~10 min after the crash — before cold-start recovery gets a
+        // chance. Such dirs are reclaimed by recovery itself (SKIP_EMPTY /
+        // SKIP_NO_META delete, RECOVER appends then deletes) at next start.
+        if (cancelDeathPresent) return false
         if (beatAlive) return false // worker provably alive for THIS run
         if (workerLivenessAlive) return false // pid probe says alive
         return ageMs >= ORPHAN_AGE_MS
@@ -128,6 +136,9 @@ object ModelExecutionOrphanReaper {
                 // the only thing left to do is reclaim the disk.
                 val eligible = shouldReapCancelledOrphan(
                     cancelPresent = File(child, ModelExecutionMailbox.FILE_CANCEL).isFile,
+                    // [LOOP-1030 R2 M2] death-cancelled dirs hold a recoverable
+                    // half answer — never reclaim them here.
+                    cancelDeathPresent = File(child, ModelExecutionMailbox.FILE_CANCEL_DEATH).isFile,
                     beatAlive = ModelExecutionRunDir.beatAlive(child),
                     workerLivenessAlive = ModelExecutionRunDir.probeLiveness(child, runId) ==
                         ModelExecutionRunDir.WorkerLiveness.ALIVE,

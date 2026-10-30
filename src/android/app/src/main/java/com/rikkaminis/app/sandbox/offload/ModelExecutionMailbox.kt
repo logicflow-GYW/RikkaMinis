@@ -61,6 +61,35 @@ object ModelExecutionMailbox {
         File(dir, FILE_CANCEL).createNewFile()
     }
 
+    /**
+     * Client → observers: the cancel below was written by the DEATH cleanup
+     * ([ModelWorkerDiedException]), not by a user stop.
+     *
+     * [LOOP-1030 R2 M2] Two markers, two audiences:
+     *  - [FILE_CANCEL] stays the WIRE signal, unchanged: a worker that was
+     *    only frozen (not dead) and thaws must still abort the stream and
+     *    self-reap exactly as before.
+     *  - [FILE_CANCEL_DEATH] is the SEMANTIC tag for the cold-start recovery
+     *    ([PartialStreamRecoveryPolicy]) and the orphan reaper: the content
+     *    in stream.jsonl is real model output that the client never appended
+     *    (the turn died mid-stream with hadChunks=true → no retry, no
+     *    fallback, no appendMessage). Treating it as "discarded by design"
+     *    made a worker crash lose the half answer permanently — 11/64
+     *    heavy-day runs on 2026-10-28. A death-cancelled dir is recoverable;
+     *    a user-cancelled dir is not.
+     *
+     * Defensive (never throws): death cleanup must not turn a dead worker
+     * into a client crash.
+     */
+    const val FILE_CANCEL_DEATH = "cancel.death"
+
+    fun writeCancelDeath(dir: File) {
+        runCatching {
+            writeCancel(dir)
+            File(dir, FILE_CANCEL_DEATH).createNewFile()
+        }
+    }
+
     /** Worker → client: acknowledge that the worker saw the cancel.
      *  Defensive (never throws): the run dir may already have been reclaimed
      *  by the client — a cancelled stream must not FATAL the worker. */

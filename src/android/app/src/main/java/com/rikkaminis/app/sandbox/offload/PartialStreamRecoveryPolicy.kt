@@ -40,10 +40,18 @@ internal object PartialStreamRecoveryPolicy {
         recoveredPresent: Boolean,
         hasSessionMeta: Boolean,
         mtimeAgeMs: Long,
+        cancelDeathPresent: Boolean = false,
     ): Decision = when {
         recoveredPresent -> Decision.SKIP_RECOVERED
         terminalPresent -> Decision.SKIP_TERMINAL
-        cancelPresent -> Decision.SKIP_CANCELLED
+        // [LOOP-1030 R2 M2] `cancel` alone = user stop → discard by design.
+        // `cancel` + `cancel.death` = the client's DEATH cleanup
+        // (ModelWorkerDiedException): stream.jsonl holds real model output the
+        // client never appended, so it must not be skipped here — it falls
+        // through to the SAME gates as a silent death (grace → empty → meta).
+        // The grace still matters: a frozen worker that thaws may append more
+        // before its own `cancel` takes effect.
+        cancelPresent && !cancelDeathPresent -> Decision.SKIP_CANCELLED
         mtimeAgeMs < RECENT_WRITE_GRACE_MS -> Decision.SKIP_ACTIVE
         streamLen <= 0L -> Decision.SKIP_EMPTY
         !hasSessionMeta -> Decision.SKIP_NO_META
