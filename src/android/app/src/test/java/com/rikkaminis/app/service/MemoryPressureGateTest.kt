@@ -40,7 +40,7 @@ class MemoryPressureGateTest {
         shadowRssMb = -1L
         MemoryPressureGate.resetTierStateForTest()
         MemoryPressureGate.reclaimHook = { reclaimCalls++ }
-        MemoryPressureGate.pressureListener = { level, _ ->
+        MemoryPressureGate.pressureListener = { level, _, _, _ ->
             notifications++
             lastNotifiedLevel = level
         }
@@ -54,7 +54,7 @@ class MemoryPressureGateTest {
     @After
     fun tearDown() {
         MemoryPressureGate.reclaimHook = {}
-        MemoryPressureGate.pressureListener = { _, _ -> }
+        MemoryPressureGate.pressureListener = { _, _, _, _ -> }
         tierListener = { _, _, _ -> }
         shadowTierListener = { _, _, _, _, _ -> }
         MemoryPressureGate.metricsReader = { MemoryPressureGate.readMetricsFromProc() }
@@ -192,11 +192,39 @@ class MemoryPressureGateTest {
     @Test
     fun `notify fires the pressure listener only for non-normal levels`() {
         val seen = mutableListOf<Pair<MemoryPressureLevel, Long>>()
-        MemoryPressureGate.pressureListener = { level, anon -> seen += level to anon }
+        MemoryPressureGate.pressureListener = { level, anon, _, _ -> seen += level to anon }
         inject(500)
-        MemoryPressureGate.notify(MemoryPressureLevel.NORMAL)
-        MemoryPressureGate.notify(MemoryPressureLevel.ELEVATED)
+        MemoryPressureGate.notify(MemoryPressureLevel.NORMAL, MemoryPressureGate.SRC_TICK)
+        MemoryPressureGate.notify(MemoryPressureLevel.ELEVATED, MemoryPressureGate.SRC_TICK)
         assertEquals(listOf(MemoryPressureLevel.ELEVATED to 500L), seen)
+    }
+
+    @Test
+    fun `notify carries the sampling source and the crossing flag`() {
+        // [LOOP-1030 R1-b] 1s tick 与准入路径必须可分：旧签名让两者在日志里同形，
+        // 3881 行里真实准入 ≤29 行却全被标成 "admission delayed 500ms"。
+        val seen = mutableListOf<Triple<String, Boolean, MemoryPressureLevel>>()
+        MemoryPressureGate.pressureListener = { level, _, src, crossed -> seen += Triple(src, crossed, level) }
+        inject(500)
+        MemoryPressureGate.notify(MemoryPressureLevel.ELEVATED, MemoryPressureGate.SRC_TICK)
+        // 同一档位、滞回带内再来一次：这是续报，不是新的越线。
+        MemoryPressureGate.notify(MemoryPressureLevel.ELEVATED, MemoryPressureGate.SRC_ADMISSION)
+        assertEquals(2, seen.size)
+        assertEquals("tick", seen[0].first)
+        assertEquals(true, seen[0].second)
+        assertEquals("agent-admission", seen[1].first)
+        assertEquals(false, seen[1].second)
+    }
+
+    @Test
+    fun `the governor tick marks itself as a tick sample`() {
+        val srcs = mutableListOf<String>()
+        MemoryPressureGate.pressureListener = { _, _, src, _ -> srcs += src }
+        inject(500)
+        // 1s 状态机需要置信拍才升档，跑几拍确保真的报出一行。
+        repeat(3) { MemoryPressureGate.sampleAndNotify() }
+        assertTrue("governor tick never reported", srcs.isNotEmpty())
+        assertEquals(listOf("tick"), srcs.distinct())
     }
 
     @Test
@@ -204,11 +232,11 @@ class MemoryPressureGateTest {
         val seen = mutableListOf<Triple<MemoryPressureLevel, MemoryPressureLevel, Long>>()
         tierListener = { from, to, anon -> seen += Triple(from, to, anon) }
         inject(500)
-        MemoryPressureGate.notify(MemoryPressureLevel.ELEVATED)
+        MemoryPressureGate.notify(MemoryPressureLevel.ELEVATED, MemoryPressureGate.SRC_TICK)
         inject(1300)
-        MemoryPressureGate.notify(MemoryPressureLevel.CRITICAL)
+        MemoryPressureGate.notify(MemoryPressureLevel.CRITICAL, MemoryPressureGate.SRC_TICK)
         // 降回 NORMAL 也要上报：这是「正常重活会不会常穿越梯子」的统计来源。
-        MemoryPressureGate.notify(MemoryPressureLevel.NORMAL)
+        MemoryPressureGate.notify(MemoryPressureLevel.NORMAL, MemoryPressureGate.SRC_TICK)
         assertEquals(3, seen.size)
         assertEquals(MemoryPressureLevel.NORMAL, seen[0].first)
         assertEquals(MemoryPressureLevel.ELEVATED, seen[0].second)

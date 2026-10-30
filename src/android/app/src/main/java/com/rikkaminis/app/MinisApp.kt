@@ -755,10 +755,18 @@ class MinisApp : Application(), ImageLoaderFactory {
             runCatching { ExecutionCoordinator.recycleIdleShells() }
             runCatching { sharedBrowserTabPool.evictIdleTabs() }
         }
-        MemoryPressureGate.pressureListener = { level, anonMB ->
+        MemoryPressureGate.pressureListener = { level, anonMB, src, crossed ->
+            // [LOOP-1030 R1-b] 1s tick 与准入路径分开记账：旧实现把每一行都标成
+            // "admission delayed 500ms"，四天 3881 行里真实准入 ≤29 行，审计据此
+            // 把「门升到 3875 次」读成事实。`crossed=false` 是滞回带续报
+            // （占 ELEVATED 行 96.2%），不是新的越线事件。
+            val effect = when {
+                src == MemoryPressureGate.SRC_TICK -> "observe-only tick sample (no admission effect)"
+                level == MemoryPressureLevel.CRITICAL -> "admission throttled (reclaim + 2s wait)"
+                else -> "admission delayed 500ms"
+            }
             AppLogger.warning("MemoryPressureGate", "level=$level anon=${anonMB}MB " +
-                "rss=${MemoryPressureGate.rssMb()}MB — " +
-                (if (level == MemoryPressureLevel.CRITICAL) "admission throttled (reclaim + 2s wait)" else "admission delayed 500ms"))
+                "rss=${MemoryPressureGate.rssMb()}MB src=$src crossed=$crossed — $effect")
         }
         // [fix/memory-gate-anon-metric] 档位跃迁落探针日志（含降档）。这是"正常重活
         // 会不会常穿越梯子"的经验依据——阈值 450/1200 后面靠穿越频率复核，不靠拍脑袋。

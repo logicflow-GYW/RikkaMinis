@@ -46,7 +46,7 @@ class SessionConcurrencyManagerTest {
         // (which could exceed the ELEVATED watermark and add real delays).
         MemoryPressureGate.metricsReader = { MemoryPressureGate.Metrics(0L, 147L) }
         MemoryPressureGate.reclaimHook = {}
-        MemoryPressureGate.pressureListener = { _, _ -> }
+        MemoryPressureGate.pressureListener = { _, _, _, _ -> }
     }
 
     // --- 基本准入 ---
