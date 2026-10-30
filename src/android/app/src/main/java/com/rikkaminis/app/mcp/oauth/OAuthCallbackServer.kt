@@ -154,28 +154,43 @@ class OAuthCallbackServer(
                             // wait hung for its full 5-minute timeout with no
                             // way for the user to retry.
                             val error = params["error"]
-                            val denied = code == null && !error.isNullOrBlank()
+                            // [FIX-FW-OAUTH-D2] PRESENCE of `error` is the
+                            // refusal signal (RFC 6749 §4.1.2.1 sends
+                            // `error=...` and no code). The old predicate was
+                            // `!error.isNullOrBlank()` while the page branch
+                            // tested `error != null`, so `?error=` (present,
+                            // empty) rendered "not completed" and then fell
+                            // through BOTH exits: stop() was never called, the
+                            // in-flight wait sat out its full 5-minute timeout
+                            // while the browser already showed a failure page.
+                            // One predicate now drives the page, the log and
+                            // the termination.
+                            val denied = callbackDenied(code, error)
 
-                            // Send response — the denial branch tests `error`
-                            // directly (not through `denied`) so the compiler
-                            // can see `error` is non-null for htmlEscape.
-                            val html = if (code == null && error != null) {
-                                "<html><body><h1>Authorization was not completed</h1>" +
-                                    "<p>The authorization server reported: ${htmlEscape(error)}. " +
-                                    "You can close this tab and try again from the app.</p>" +
-                                    "<script>window.close()</script></body></html>"
-                            } else {
-                                "<html><body><h1>Authorization complete</h1><p>You can close this tab.</p><script>window.close()</script></body></html>"
-                            }
-                            val response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${html.length}\r\nConnection: close\r\n\r\n$html"
-                            socket.getOutputStream().write(response.toByteArray())
+                            // Send response. [FIX-FW-OAUTH-D1] The header used
+                            // to declare `Content-Length: ${html.length}` — a
+                            // UTF-16 code-unit count — while writing UTF-8
+                            // bytes, so any non-ASCII `error` made the body
+                            // longer than declared (the browser truncates at
+                            // the declared length) and the missing `charset`
+                            // mojibaked the rest. One builder now owns both the
+                            // body bytes and the number that describes them.
+                            socket.getOutputStream().write(callbackHttpResponse(callbackPageHtml(code, error)))
                             // Release the FD before invoking the callback below,
                             // which may block while resuming the OAuth wait; the
                             // finally is the backstop for every other path.
                             socket.close()
 
                             if (denied) {
-                                Log.w(TAG, "authorization denied by the server: error=$error")
+                                // [FIX-FW-OAUTH-D2] `error=<empty>` and
+                                // `error=access_denied` are different facts
+                                // (the server refused without a reason vs. with
+                                // one) and must stay distinguishable in the log.
+                                Log.w(
+                                    TAG,
+                                    "authorization denied by the server: " +
+                                        "error=${if (error.isNullOrEmpty()) "<empty>" else error}",
+                                )
                                 // Leave onExternalCancel armed: stop() fires it,
                                 // which resumes the caller's wait with null
                                 // (Result.Cancelled) instead of hanging.
@@ -230,6 +245,79 @@ class OAuthCallbackServer(
             }
         }
     }
+}
+
+/**
+ * [FIX-FW-OAUTH-D2] Single source of truth for "the authorization server
+ * refused this request".
+ *
+ * The redirect carries either a `code` (grant) or an `error` (refusal). The
+ * presence of the `error` parameter is the refusal signal, whatever its value:
+ * `?error=` (present but empty) is still a refusal the user must not be left
+ * waiting on. [parseCallbackQuery] cannot distinguish "absent" from "present
+ * and empty" by value alone — `params["error"] == ""` means present, `null`
+ * means absent — which is exactly why the predicate keys on nullability and
+ * never on `isBlank()`.
+ *
+ * Consumed by all three readers (page, log, termination) so a future edit
+ * cannot re-split them: two predicates for one fact is how the 5-minute hang
+ * happened in the first place.
+ *
+ * Pure string/null work (no Android types) so the JVM test can pin the four
+ * code×error combinations directly.
+ */
+internal fun callbackDenied(code: String?, error: String?): Boolean = code == null && error != null
+
+private const val CALLBACK_SUCCESS_HTML =
+    "<html><body><h1>Authorization complete</h1>" +
+        "<p>You can close this tab.</p><script>window.close()</script></body></html>"
+
+/**
+ * [FIX-FW-OAUTH-D2] The page handed back to the browser for one redirect.
+ *
+ * Keyed on [callbackDenied] — the same fact that terminates the listener — so
+ * the page and the termination can never disagree (that disagreement is what
+ * left `?error=` showing a failure page while the server kept waiting).
+ *
+ * An empty `error` value means "refused, no reason given": rendering
+ * `reported: .` there would be a sentence with a hole in it, so that case gets
+ * its own wording. The page is English hard-coded (it is browser-facing UI, not
+ * app UI) — no i18n keys by design.
+ */
+internal fun callbackPageHtml(code: String?, error: String?): String {
+    if (!callbackDenied(code, error)) return CALLBACK_SUCCESS_HTML
+    val shown = error.orEmpty()
+    val reason = if (shown.isEmpty()) {
+        "<p>The authorization was refused by the server, which gave no reason. " +
+            "You can close this tab and try again from the app.</p>"
+    } else {
+        "<p>The authorization server reported: ${htmlEscape(shown)}. " +
+            "You can close this tab and try again from the app.</p>"
+    }
+    return "<html><body><h1>Authorization was not completed</h1>" + reason +
+        "<script>window.close()</script></body></html>"
+}
+
+/**
+ * [FIX-FW-OAUTH-D1] Serialises one callback response: `head + UTF-8 body`.
+ *
+ * `Content-Length` MUST count bytes, not characters. The previous code
+ * declared `${html.length}` (UTF-16 code units) over UTF-8 bytes, so an
+ * `error` containing CJK made the body longer than the declaration and the
+ * browser cut the page off at the declared length; `Content-Type` also lacked
+ * `charset`, so the surviving bytes were decoded as latin-1.
+ *
+ * Structural fix: the byte array is produced ONCE and the number in the header
+ * is derived from that same array — there is no second encoding step that
+ * could disagree with the declaration. Pure JVM (no Android types).
+ */
+internal fun callbackHttpResponse(html: String): ByteArray {
+    val body = html.toByteArray(Charsets.UTF_8)
+    val head = "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: text/html; charset=utf-8\r\n" +
+        "Content-Length: ${body.size}\r\n" +
+        "Connection: close\r\n\r\n"
+    return head.toByteArray(Charsets.UTF_8) + body
 }
 
 /**
