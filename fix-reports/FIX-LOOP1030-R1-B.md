@@ -52,7 +52,12 @@
 
 ### 4.1 CI
 
-（收口时回填）
+- **run `40987299653`**（`fix/symptom-a-report-source`）**success 22 min 30 s**（01:41:11Z → 02:03:41Z），attempt 1，`workflow_dispatch`。
+- `head_sha 5a0bb8ba2b710bd7f374fdcf91a60e5d410e1b75` 与本地 HEAD **逐字符一致**（SHA-MATCH）。
+- 27 步 = **25 success + 2 skipped**（`Move the rolling tag android-latest` / `Publish to Releases`，均 main 门控，分支上必 skip）。
+- job 日志 3,355,532 B / **NUL 0**：`Summary: 113 passed, 0 failed` ×2、`ALL 349 CASES PASS` ×2、`^e: file` **0**、真 ` FAILED$` **0**（含 FAILED 的行全是 PASSED 用例名子串）。
+- 本支用例两遍全 PASSED：`MemoryPressureGateReportSourceTest` **4 例**（含负控 `the listener no longer decides on level alone`）、`MemoryPressureGateTest` **10 例**（含 `notify carries the sampling source and the crossing flag`）。
+- **首轮红（诚实记录）**：`40985451287` failure @2.4 min，`e: file … SessionConcurrencyManager.kt:98:45 Unresolved reference 'src'` —— `src = "agent-admission"` 里的 `src` 是**命名实参**不是局部变量，我在 notify 处误当变量传。修 = 两侧统一走新常量 `MemoryPressureGate.SRC_ADMISSION`（顺带把影子采样的字面量也收进来，单一事实源）。同轮补修 `SessionConcurrencyManagerLockTest.kt:44` 里漏改的两参监听器桩——**教训：改 lambda 签名后要 `rg -l '<字段名>' src/android/app/src/test` 全 test 树扫，不能只看包内同名文件**。
 
 ## 5. 残留（带触发条件）
 
