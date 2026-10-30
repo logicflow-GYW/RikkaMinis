@@ -9,7 +9,9 @@ import org.junit.Test
  * readable in release builds. The observer used to print
  * `event::class.simpleName`, which R8 renames to a single letter — the 09-15
  * log shows `T7-D reducer REJECTED b: ...` across three different phases, i.e.
- * unreadable exactly where auditing needs it.
+ * unreadable exactly where auditing needs it. (That line has since been
+ * reworded to `T7-D shadow reducer declined …` — [SYMPTOM-A F-A2a] — the quote
+ * above is the historical form.)
  *
  * The exhaustive `when` inside traceName() already binds the mapping to the
  * sealed hierarchy at compile time (a new event cannot be forgotten). What is

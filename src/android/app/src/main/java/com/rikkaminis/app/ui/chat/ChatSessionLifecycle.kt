@@ -519,6 +519,38 @@ internal fun ChatViewModel.resetContextPressureState() {
     rescueAttemptedForCompact = false
 }
 
+/**
+ * [SYMPTOM-A F-A4] `[T-HANG-DIAG] messages-shape` 的"含工具"判据。
+ *
+ * 落盘方言是 **camelCase**：`ContentPart.Tool` 的 `@SerialName("toolUse")` 与
+ * `ContentPart.Result` 的 `@SerialName("toolResult")`（ContentPart.kt:46 / :50），
+ * 同一函数里 oversized 分支（判 `"toolUse"` / `"toolResult"`）本来就是 camel。
+ * 旧判据只查 snake，于是 `toolMessages` **恒 0** —— 10-29 的 52 行
+ * messages-shape 全是 `toolMessages=0`，其中包括 352 条消息 / 538K 字符的会话，
+ * 已经把一次取证带偏（读成"这个会话没有工具调用"）。
+ *
+ * snake 保留为兼容臂：备份**导入**同时接受两种方言
+ * （ConfigBackup.kt:2971 / :2988 的 `type == "toolUse" || type == "tool_use"`），
+ * 所以库里可能有历史/外来行。保留它只会多计不会漏计，丢掉它会把老会话算成
+ * 无工具。
+ */
+internal fun partsJsonHasToolParts(partsJson: String): Boolean =
+    partsJson.contains("\"toolUse\"") || partsJson.contains("\"toolResult\"") ||
+        partsJson.contains("\"tool_use\"") || partsJson.contains("\"tool_result\"")
+
+/**
+ * [SYMPTOM-A F-A4] `messages-shape` 的"含附件"判据。
+ *
+ * 与 [partsJsonHasToolParts] **不是一个病因**，别混着写：旧判据
+ * （`"image"` / `"attachment"`）能命中图片行（`ContentPart` 早已没有 Image
+ * 类型，但历史行与 oversized 分支仍在用 `"image"` / `"image_url"`），却完全
+ * 漏掉 `ContentPart.Media` 的真实键 `@SerialName("mediaRef")`
+ * （ContentPart.kt:42）—— 也就是**所有非图片附件在计数里消失**。
+ */
+internal fun partsJsonHasAttachmentParts(partsJson: String): Boolean =
+    partsJson.contains("\"mediaRef\"") || partsJson.contains("\"image\"") ||
+        partsJson.contains("\"attachment\"")
+
 internal fun ChatViewModel.loadSession() {
     // T-android-crash-detected-halt: when CrashFrequencyDetector
     // tripped (#459, ≥3 crashes in last hour), skip the heavy
@@ -774,10 +806,10 @@ internal fun ChatViewModel.loadSession() {
                 val len = m.partsJson.length
                 totalChars += len
                 if (len > maxChars) maxChars = len
-                if (m.partsJson.contains("\"tool_use\"") || m.partsJson.contains("\"tool_result\"")) {
+                if (partsJsonHasToolParts(m.partsJson)) {
                     withTools++
                 }
-                if (m.partsJson.contains("\"image\"") || m.partsJson.contains("\"attachment\"")) {
+                if (partsJsonHasAttachmentParts(m.partsJson)) {
                     withAttachments++
                 }
             }
@@ -1093,12 +1125,39 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     // ─── Resolve insertIdx ────────────────────────────────────────
     //
     // [fix/silent-auto-compact] This resolution no longer drives any
-    // rendering — graying and the divider row are both gone. What it still
-    // does is decide whether the marker RESOLVED against the loaded rows, and
-    // the branch that fails is the one that runs the createdAt self-heal
-    // (rewriting an orphaned marker as v2 and persisting it). That heal is
-    // what keeps effectiveAgentHistory() working after messages are deleted
-    // or restored from a backup, so the walk stays.
+    // rendering — graying and the divider row are both gone. `insertIdx` is
+    // the field the restore log line below prints, plus the trigger for the
+    // createdAt self-heal.
+    //
+    // [SYMPTOM-A F-A3] The self-heal branch is NOT the load-bearing mechanism
+    // this comment used to describe. Measured reality (2026-10-29 full log,
+    // corroborated in source):
+    //
+    //  - `lastCompactedMessageId` usually anchors on a role=user row that
+    //    carries only tool carriers (toolUse / toolResult parts; no visible
+    //    text, no image, no attachment). `buildChatMessagesTranscript` drops
+    //    exactly those rows — ChatTranscriptRebuild.kt:224 returns
+    //    `@mapNotNull null` through the shared predicate
+    //    `userRowHasVisibleContent` (:36-44) — so `uiIdxForDbId` below answers
+    //    -1 for an anchor that is perfectly valid in agentHistory.
+    //  - the heal candidate must then pass the SAME UI gate (:1123 requires
+    //    `healUiIdx >= 0`) ⇒ `healedMarker` stays null ⇒ nothing is persisted
+    //    ⇒ the next session open repeats the identical attempt (10-29: 12
+    //    marker restores, 9 unresolved, one marker repeated 6x).
+    //  - user-visible consequence: NONE. The summary is injected through
+    //    `effectiveAgentHistory()`, which parses the marker against
+    //    agentHistory independently (3 days: 1726 slices, 0 degradations).
+    //    The price is one WARN per open plus one bounded, wasted heal scan.
+    //
+    // Deliberately NOT relaxing the :1123 acceptance gate: accepting an anchor
+    // that is not in the UI list would turn "one WARN per open" into "one DB
+    // write per open" while the anchor stays invisible — write amplification,
+    // zero user benefit.
+    //
+    // UPGRADE TRIGGER: if any UI artefact starts depending on `insertIdx`
+    // again (divider, graying, an "already folded" marker), fix the :1123 gate
+    // FIRST — accept "present in historyDbIds" instead of "present in the UI
+    // list" — or 9 of 12 tool-heavy sessions will silently misplace it.
     //
     // Special value -1 → "unresolved": no heal candidate either.
     var insertIdx = -1
@@ -1204,10 +1263,15 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     // during the live session) would be a worse surprise than one shown
     // consistently, so the reload path drops it too.
     //
-    // `insertIdx` is still resolved above on purpose: the self-heal branch
-    // repairs an orphaned marker (rewriting it as v2 + persisting), which
-    // keeps effectiveAgentHistory() — the thing that actually matters —
-    // working after messages are deleted or restored from a backup.
+    // `insertIdx` is still resolved above, but not for the reason this comment
+    // used to give. [SYMPTOM-A F-A3] The self-heal does NOT keep
+    // effectiveAgentHistory() working — that path parses the marker against
+    // agentHistory on its own and never reads `insertIdx` (3 days: 1726
+    // slices, 0 degradations). For tool-heavy sessions the anchor row is
+    // invisible in the UI transcript, so the heal cannot resolve and nothing
+    // gets persisted; see the block above ("Resolve insertIdx") for the full
+    // chain and for the upgrade trigger that would make this gate load-bearing
+    // again.
     // "Revert Compact" now lives in the message long-press menu, so it no
     // longer depends on the divider row existing.
     AppLogger.info(

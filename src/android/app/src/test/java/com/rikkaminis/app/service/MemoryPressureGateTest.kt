@@ -20,6 +20,15 @@ class MemoryPressureGateTest {
     private var notifications = 0
     private var lastNotifiedLevel: MemoryPressureLevel? = null
     private val tierChanges = mutableListOf<Pair<MemoryPressureLevel, MemoryPressureLevel>>()
+    private data class ShadowHop(
+        val src: String,
+        val from: MemoryPressureLevel,
+        val to: MemoryPressureLevel,
+        val anonMb: Long,
+    )
+
+    private val shadowChanges = mutableListOf<ShadowHop>()
+    private var shadowRssMb = -1L
 
     @Before
     fun setUp() {
@@ -27,6 +36,8 @@ class MemoryPressureGateTest {
         notifications = 0
         lastNotifiedLevel = null
         tierChanges.clear()
+        shadowChanges.clear()
+        shadowRssMb = -1L
         MemoryPressureGate.resetTierStateForTest()
         MemoryPressureGate.reclaimHook = { reclaimCalls++ }
         MemoryPressureGate.pressureListener = { level, _ ->
@@ -34,6 +45,10 @@ class MemoryPressureGateTest {
             lastNotifiedLevel = level
         }
         tierListener = { from, to, _ -> tierChanges.add(from to to) }
+        shadowTierListener = { src, from, to, anon, rss ->
+            shadowChanges.add(ShadowHop(src, from, to, anon))
+            shadowRssMb = rss
+        }
     }
 
     @After
@@ -41,6 +56,7 @@ class MemoryPressureGateTest {
         MemoryPressureGate.reclaimHook = {}
         MemoryPressureGate.pressureListener = { _, _ -> }
         tierListener = { _, _, _ -> }
+        shadowTierListener = { _, _, _, _, _ -> }
         MemoryPressureGate.metricsReader = { MemoryPressureGate.readMetricsFromProc() }
         MemoryPressureGate.resetTierStateForTest()
     }
@@ -219,6 +235,118 @@ class MemoryPressureGateTest {
         // 除非内核不报 RssAnon —— 那时退回 rss，两者相等）。
         assertTrue("anon=$anon rss=$rss", anon > 0L && rss > 0L)
         assertTrue("anon=$anon rss=$rss", anon <= rss)
+    }
+
+    // ── [SYMPTOM-A F-A1] 影子水线（800MB，只观测） ────────────────────
+    // [LOOP-1030 R1-g] 挂接点从 1s tick 挪到准入采样点：周期采样四天峰值仅
+    // 564MB（memspike 12,111 样本），而 800+ 的读数只出现在准入的亚秒突发里
+    // （10-28 18:57:31 三连读 866/1032/882MB）。探针必须活在被观测决策的
+    // 同一条读数上——挂错位置比没有探针更坏（假阴性喂给调阈值的人）。
+
+    @Test
+    fun `shadow arm reports one hop when an admission read crosses 800`() {
+        // tick 先跑两拍：tick 已退出影子业务，不得产生任何跃迁。
+        inject(100)
+        repeat(2) { MemoryPressureGate.sampleAndNotify() }
+        assertEquals(0, shadowChanges.size)
+        MemoryPressureGate.observeShadowAtAdmission(900L, 1047L, src = "agent-admission")
+        assertEquals(1, shadowChanges.size)
+        assertEquals(MemoryPressureLevel.NORMAL, shadowChanges[0].from)
+        assertEquals(MemoryPressureLevel.CRITICAL, shadowChanges[0].to)
+        assertEquals(900L, shadowChanges[0].anonMb)
+        assertEquals("agent-admission", shadowChanges[0].src)
+        assertEquals(1047L, shadowRssMb)
+    }
+
+    @Test
+    fun `shadow arm stays quiet below the 800 line`() {
+        // 500..799 是"真档的 ELEVATED 带"（450 线已由 tierListener 记录）。影子机
+        // 测的是 800 这条硬线，所以这一段必须一条都不记。
+        for (anon in listOf(500L, 600L, 700L, 799L, 799L, 640L)) {
+            MemoryPressureGate.observeShadowAtAdmission(anon, anon + 147L, src = "shell-admission")
+        }
+        assertEquals(0, shadowChanges.size)
+    }
+
+    @Test
+    fun `shadow arm holds the hop until anon falls below 650`() {
+        MemoryPressureGate.observeShadowAtAdmission(850L, 997L, src = "agent-admission")
+        assertEquals(1, shadowChanges.size)
+        // 800 − 150 = 650：650..799 仍算"穿越中"（滞回），跌破 650 才降档。
+        for (anon in listOf(700L, 650L)) {
+            MemoryPressureGate.observeShadowAtAdmission(anon, anon + 147L, src = "shell-admission")
+        }
+        assertEquals(1, shadowChanges.size)
+        MemoryPressureGate.observeShadowAtAdmission(649L, 796L, src = "shell-admission")
+        assertEquals(2, shadowChanges.size)
+        assertEquals(MemoryPressureLevel.CRITICAL, shadowChanges[1].from)
+        assertEquals(MemoryPressureLevel.NORMAL, shadowChanges[1].to)
+    }
+
+    @Test
+    fun `shadow arm never changes the real tier result`() {
+        // 负控：影子机在跑的同一串读数下，真档结果必须逐位等于改动前的值。
+        // 期望写死字面量，不从常量推导（常量一改，推导出来的期望跟着变，变异就
+        // 伪装成 PASS —— JVM 装置自指陷阱）。
+        val readings = listOf(100L, 500L, 500L, 1300L, 1300L, 1000L, 300L, 299L)
+        val expected = listOf(
+            MemoryPressureLevel.NORMAL,   // 100
+            MemoryPressureLevel.NORMAL,   // 500 — 第 1 拍，置信不足
+            MemoryPressureLevel.ELEVATED, // 500 — 第 2 拍确认（confirming=2）
+            MemoryPressureLevel.CRITICAL, // 1300 — 已带 2 拍置信，升档当场确认
+            MemoryPressureLevel.CRITICAL, // 1300
+            MemoryPressureLevel.ELEVATED, // 1000 — 跌破 1050 回落
+            MemoryPressureLevel.ELEVATED, // 300 — 仍在 450−150 之上
+            MemoryPressureLevel.NORMAL,   // 299
+        )
+        val actual = readings.map { anon ->
+            inject(anon)
+            val tierResult = MemoryPressureGate.sampleAndNotify()
+            // 真档之外，同一个读数同时喂影子（准入路径的真实形态）。
+            MemoryPressureGate.observeShadowAtAdmission(anon, anon + 147L, src = "shell-admission")
+            tierResult
+        }
+        assertEquals(expected, actual)
+        // 影子机自己的轨迹（独立于真档）：1300 一次升、300 一次降（1000 在滞回带内不动）。
+        assertEquals(
+            listOf(
+                ShadowHop("shell-admission", MemoryPressureLevel.NORMAL, MemoryPressureLevel.CRITICAL, 1300L),
+                ShadowHop("shell-admission", MemoryPressureLevel.CRITICAL, MemoryPressureLevel.NORMAL, 300L),
+            ),
+            shadowChanges,
+        )
+        // 只观测：影子机判"穿越 800"不触发回收，也不改硬门槛拒绝线。
+        assertEquals(0, reclaimCalls)
+        assertFalse(MemoryPressureGate.shouldRejectAfterReclaim(900))
+    }
+
+    @Test
+    fun `shadow arm advances only on admission reads, never from the tick`() {
+        // R1-g 回归钉：1s tick（sampleAndNotify）结构性看不到亚秒突发，影子只
+        // 挂准入。谁把影子挪回 tick，这条先红。
+        inject(900)
+        repeat(5) { MemoryPressureGate.level() }
+        repeat(3) { MemoryPressureGate.sampleAndNotify() }
+        assertEquals(0, shadowChanges.size)
+        MemoryPressureGate.observeShadowAtAdmission(900L, 1047L, src = "agent-admission")
+        assertEquals(1, shadowChanges.size)
+    }
+
+    @Test
+    fun `sub-second burst cluster folds into exactly two hops`() {
+        // 10-28 18:57:31 的真实形态：866 → 1032 → 882 三连读 + 回落后收敛。
+        // 无滞回的话每个读数一行（日志噪声）；有滞回 = 一升一降两行。
+        MemoryPressureGate.observeShadowAtAdmission(866L, 1013L, src = "shell-admission")
+        MemoryPressureGate.observeShadowAtAdmission(1032L, 1179L, src = "shell-admission")
+        MemoryPressureGate.observeShadowAtAdmission(882L, 1029L, src = "shell-post-reclaim")
+        assertEquals(1, shadowChanges.size)
+        assertEquals("shell-admission", shadowChanges[0].src)
+        MemoryPressureGate.observeShadowAtAdmission(700L, 847L, src = "shell-admission") // 650..799 滞回带内
+        assertEquals(1, shadowChanges.size)
+        MemoryPressureGate.observeShadowAtAdmission(300L, 447L, src = "shell-admission")
+        assertEquals(2, shadowChanges.size)
+        assertEquals(MemoryPressureLevel.CRITICAL, shadowChanges[1].from)
+        assertEquals(MemoryPressureLevel.NORMAL, shadowChanges[1].to)
     }
 
     private fun inject(anonMb: Long) = inject(anonMb = anonMb, rssMb = anonMb + 147L)
