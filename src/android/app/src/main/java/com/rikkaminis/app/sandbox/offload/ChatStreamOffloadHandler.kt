@@ -74,16 +74,23 @@ object ChatStreamOffloadHandler {
 
     /**
      * [direction-A / B2] Global count of in-flight streaming runs (this process).
-     * Incremented at the start of [stream], decremented in its finally. Read by
-     * [com.rikkaminis.app.sandbox.ExecutionCoordinator.maybeReclaimModelService]
-     * to skip stopService(:modelservice) while a stream is active — otherwise the
-     * app process kill would sever the stream mid-answer (stream.jsonl left without
-     * DONE/error, leaving the UI silently stalled until the poll timeout).
+     * Incremented at the start of [stream], decremented in its finally.
+     *
+     * [FIX-FW-DEAD-SHUTDOWN-LEVER] Its only production reader was
+     * `ExecutionCoordinator.maybeReclaimModelService`, which skipped a
+     * :modelservice shutdown while a stream was active — and that whole lever
+     * was a no-op (the worker's state machine never read the marker it wrote),
+     * so it was deleted. This counter now has NO production reader: it is kept
+     * as a process-wide gauge only. Deleting it outright would touch every
+     * stream entry/exit path for zero behavioural gain, so that is a separate
+     * P2, not part of the lever removal. Anything that starts reading it again
+     * must answer "which branch does the value change?" first.
+     *
      * [deep-audit-1018 ISSUE-04] Atomicity is enforced by the TYPE: the counter is
      * an AtomicInteger, so concurrent stream coroutines can no longer lose an
      * increment (the previous read-modify-write pair could — and a lost increment
-     * either skipped or blocked model-service reclamation). The reclaim path reads
-     * it from a different execution context, so every reader goes through get().
+     * either skipped or blocked model-service reclamation). Any future reader in
+     * another execution context must go through get().
      */
     val activeStreams = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -109,15 +116,20 @@ object ChatStreamOffloadHandler {
         // recovered into the right session at cold start. Sub-agent streams
         // have no session — they pass null (default) and stay unattributable.
         sessionId: String? = null,
+        // [T-worker-key-intent-handoff] Current stored key for this instance,
+        // resolved by the caller (see WorkerKeyHandoff.keyFor). Empty ⇒ the
+        // worker keeps its legacy prefs read + freshness abort.
+        apiKey: String = "",
     ): Flow<LLMStreamChunk> = flow {
         // [fix/audit-s2h4] activeStreams was incremented BEFORE the staging try.
         // If root.mkdirs()/d.mkdir() threw ("stream staging failed"), the flow
         // failed without ever reaching the terminal finally's activeStreams--,
-        // so the counter leaked +1 forever. maybeReclaimModelService skips the
-        // :modelservice shutdown while activeStreams > 0 — a few staging
-        // failures under cache-dir pressure permanently disabled model-service
-        // reclamation. Track incrementing with its own try/finally so EVERY
-        // exit path pairs ++ with --.
+        // so the counter leaked +1 forever (its reader back then skipped the
+        // :modelservice shutdown while activeStreams > 0, so a few staging
+        // failures permanently disabled model-service reclamation). That reader
+        // is gone [FIX-FW-DEAD-SHUTDOWN-LEVER], but a gauge that silently drifts
+        // +1 per failure is still wrong: keep incrementing tracked with its own
+        // try/finally so EVERY exit path pairs ++ with --.
         activeStreams.getAndIncrement()
         try {
         val dir = try {
@@ -196,6 +208,12 @@ object ChatStreamOffloadHandler {
             try {
                 val intent = Intent(context, ModelExecutionService::class.java).apply {
                     putExtra(ModelExecutionService.EXTRA_REQUEST_DIR, dir.absolutePath)
+                    // [T-worker-key-intent-handoff] Streaming sibling of the
+                    // dispatcher's extra: a key replaced mid-session reaches
+                    // this request without waiting for the worker to die, so
+                    // the freshness abort (which only frees an idle worker)
+                    // never has to fire under multi-session load.
+                    WorkerKeyHandoff.attachKey(this, apiKey)
                 }
                 context.startService(intent)
             } catch (e: Exception) {

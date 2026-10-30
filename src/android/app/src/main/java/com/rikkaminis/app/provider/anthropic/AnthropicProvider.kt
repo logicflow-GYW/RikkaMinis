@@ -47,6 +47,8 @@ import com.rikkaminis.app.sandbox.offload.FirstChunkTimeoutPolicy
 import java.util.concurrent.TimeUnit
 import com.rikkaminis.app.provider.causeChainSummary
 import com.rikkaminis.app.provider.failOnSilentEmptyCompletion
+import com.rikkaminis.app.provider.nonStreamCeilingCutLogLine
+import com.rikkaminis.app.provider.nonStreamOutputCeilingCut
 import com.rikkaminis.app.provider.asConsumerSideCancellation
 import com.rikkaminis.app.provider.StreamTimeouts
 import com.rikkaminis.app.provider.StreamCancelBridge
@@ -145,7 +147,43 @@ class AnthropicProvider(
             }
 
             val json = JSONObject(responseBody)
-            parseResponse(json)
+            // [FIX-FW-NONSTREAM C1] A 2xx is not the same thing as a successful
+            // Messages call: relays and edge hops answer `200 {"type":"error",
+            // "error":{…}}`, and a body with neither `content` nor a
+            // `stop_reason` (truncated relay payload, empty object) carries no
+            // answer at all. Both used to fall through parseResponse — which
+            // only ever reads `content[].text` — into `LLMResponse("", null)`,
+            // i.e. an EMPTY ANSWER REPORTED AS A CLEAN SUCCESS: the caller
+            // persisted a fabricated empty turn and never retried. Verdict is
+            // pure and unit-tested (AnthropicNonStreamVerdictTest +
+            // AnthropicNonStreamingWireTest); see anthropicNonStreamVerdict for
+            // why "no message" throws instead of returning a stop reason the
+            // app cannot interpret.
+            when (val verdict = anthropicNonStreamVerdict(json)) {
+                AnthropicNonStreamVerdict.Ok -> Unit
+                is AnthropicNonStreamVerdict.HttpError ->
+                    // Same mapping the streaming arm uses for a mid-stream
+                    // error frame (anthropicStreamErrorStatus + mapHttpError),
+                    // so a rate limit is RateLimited and a revoked key is
+                    // InvalidApiKey on both paths.
+                    throw mapHttpError(verdict.status, responseBody)
+                is AnthropicNonStreamVerdict.EmptyMessage ->
+                    throw LLMError.ProviderError(verdict.describe())
+            }
+            val parsed = parseResponse(json)
+            // [FIX-FW-NONSTREAM C2] The turn was cut at the output ceiling.
+            // Deliberately NOT an exception: retrying with the same max_tokens
+            // hits the same ceiling, so a throw would only produce a pointless
+            // retry loop. The signal is a structured log line (no body text, no
+            // credentials) so a "why is the answer half a sentence" report is
+            // answerable from the log.
+            if (nonStreamOutputCeilingCut(parsed.stopReason)) {
+                android.util.Log.w(
+                    name,
+                    nonStreamCeilingCutLogLine(name, parsed.stopReason, parsed.text.length),
+                )
+            }
+            parsed
         }
     }
 
@@ -1526,4 +1564,82 @@ internal fun anthropicStreamErrorStatus(errType: String?): Int = when (errType) 
     "request_too_large" -> 413
     "invalid_request_error" -> 400
     else -> 400
+}
+
+/**
+ * [FIX-FW-NONSTREAM C1] Verdict for a NON-STREAMING Messages body that arrived
+ * with a 2xx status.
+ *
+ * ## The defect it closes
+ * [parseResponse] reads `content[].text` and nothing else, so two shapes reached
+ * the callers as `LLMResponse("", null)` — an empty answer reported as a clean
+ * success, persisted as an assistant turn and never retried:
+ *  • `200 {"type":"error","error":{"type":"overloaded_error",…}}` — the error
+ *    object arrives in-band (relays do this, and the streaming arm already maps
+ *    it: see the `"error" ->` SSE branch + [anthropicStreamErrorStatus]);
+ *  • a body with no `content` array and no `stop_reason` — relay truncation,
+ *    `{}`, or a proxy page that still happened to parse as JSON.
+ *
+ * ## Why "no message" THROWS instead of returning `stopReason = "error"`
+ * Mirrors [geminiGenerateContentVerdict]: nothing in the app gives an "error"
+ * stop reason any meaning (the one literal anyone compares against is the
+ * output-ceiling family — see TruncatedToolCallPolicy), and the text stays
+ * empty, so an "error" response would still be persisted as an assistant answer
+ * that says nothing. Throwing is the one classification path the callers already
+ * handle (typed [LLMError] → error card + retry), and it is where the streaming
+ * arm lands too (`mapHttpError` on an inline error frame,
+ * `failOnSilentEmptyCompletion` on a fully empty stream).
+ *
+ * A body that DOES carry content is left alone even when every block is
+ * non-text: a pure `tool_use` turn, and a thinking-only turn, are legitimately
+ * empty-text — what they mean downstream is the caller's business.
+ */
+internal sealed class AnthropicNonStreamVerdict {
+    /** A message body is present: parse it exactly as this arm always has. */
+    data object Ok : AnthropicNonStreamVerdict()
+
+    /** The body carries an error object; [status] is its HTTP class. */
+    data class HttpError(val status: Int) : AnthropicNonStreamVerdict()
+
+    /** No message at all — no `content`, no `stop_reason`. */
+    data class EmptyMessage(val errorType: String?, val detail: String?) : AnthropicNonStreamVerdict() {
+        fun describe(): String = buildString {
+            append("Anthropic returned no message content")
+            if (!errorType.isNullOrEmpty()) append(" (type: $errorType)")
+            if (!detail.isNullOrEmpty()) append(": ${detail.take(500)}")
+            append(" — refusing to report an empty answer as a completed turn")
+        }
+    }
+}
+
+internal fun anthropicNonStreamVerdict(json: JSONObject): AnthropicNonStreamVerdict {
+    // `error` may be an object (the protocol shape) or a bare string (relay
+    // shorthand). A JSON null means the same thing as an absent key.
+    when (val raw = json.opt("error")) {
+        null, JSONObject.NULL -> Unit
+        is JSONObject -> return AnthropicNonStreamVerdict.HttpError(anthropicNonStreamErrorStatus(raw))
+        else -> return AnthropicNonStreamVerdict.EmptyMessage(errorType = null, detail = raw.toString())
+    }
+    val content = json.optJSONArray("content")
+    if (content == null || content.length() == 0) {
+        // A declared stop_reason means the server did finish a message — an
+        // empty content array there is unusual but not this verdict's call.
+        if (json.safeOptString("stop_reason", "").isNotBlank()) return AnthropicNonStreamVerdict.Ok
+        return AnthropicNonStreamVerdict.EmptyMessage(
+            errorType = json.safeOptString("type", "").ifEmpty { null },
+            detail = json.safeOptString("message", "").ifEmpty { null },
+        )
+    }
+    return AnthropicNonStreamVerdict.Ok
+}
+
+/**
+ * [FIX-FW-NONSTREAM C1] HTTP class of a non-streaming Anthropic `error` object:
+ * a numeric `code` when a relay supplies one, otherwise the documented `type`
+ * table the streaming arm already uses — one classification for both paths.
+ */
+internal fun anthropicNonStreamErrorStatus(err: JSONObject): Int {
+    val code = err.optInt("code", 0)
+    if (code in 400..599) return code
+    return anthropicStreamErrorStatus(err.safeOptString("type", "").ifEmpty { null })
 }

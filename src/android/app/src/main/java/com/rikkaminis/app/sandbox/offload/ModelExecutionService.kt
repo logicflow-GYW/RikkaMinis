@@ -40,8 +40,11 @@ import java.util.concurrent.atomic.AtomicLong
  * commits results atomically (result.tmp → flush/fsync → rename result.json),
  * waits for client.ack on non-streaming runs before self-reaping, and only
  * calls Process.killProcess (self-reap) after confirming quiescence. The main
- * process never kills us directly (only a shutdown REQUEST file); a worker
- * with in-flight work (active/queued/unacked/unflushed stream) NEVER dies.
+ * process has no way to kill (or ask for a drain of) this process: the former
+ * `shutdown` REQUEST marker was deleted because nothing in the state machine
+ * ever read it [FIX-FW-DEAD-SHUTDOWN-LEVER] — a worker with in-flight work
+ * (active/queued/unacked/unflushed stream) NEVER dies, and a quiescent one
+ * reaps itself.
  *
  * The old model — `stopSelf()` as reclamation proof with a 30s idle-kill —
  * is deliberately gone: stopSelf is not process death, and an idle window can
@@ -224,6 +227,12 @@ class ModelExecutionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val requestDir = intent?.getStringExtra(EXTRA_REQUEST_DIR)
             ?: run { stopSelf(startId); return START_NOT_STICKY }
+        // [T-worker-key-intent-handoff] The key the main process had at dispatch
+        // time. Present ⇒ this request is fresher than our cached prefs map, so
+        // the freshness abort is skipped for it (see WorkerKeyHandoff). Absent
+        // (older main process / callers without an instance_id) ⇒ unchanged
+        // legacy path. Never logged: plaintext secret.
+        val carriedApiKey = intent?.getStringExtra(WorkerKeyHandoff.EXTRA_API_KEY).orEmpty()
 
         val dir = File(requestDir)
         val requestFile = File(dir, "request.json")
@@ -253,7 +262,13 @@ class ModelExecutionService : Service() {
         val queuedNow = synchronized(lifecycleLock) {
             queuedRequests.get()
         }
-        val poisoned = keyCachePoisoned
+        // [T-worker-key-intent-handoff] A poisoned process is still usable for a
+        // request that carries its own key: the poison invalidates the CACHED
+        // prefs map, and such a request never consults it. Letting the poison
+        // reject those too would let one legacy (keyless) dispatch — e.g. a
+        // `minis-model-use` call without an instance_id — starve every pooled
+        // sibling that does supply a key.
+        val poisoned = keyCachePoisoned && !WorkerKeyHandoff.carriesKey(carriedApiKey)
         // [feat/runtime-limits-panel] 准入上限读 prefs 真值（每请求读，改完对
         // 存活 worker 立即生效——比槽位数更轻量，不需要换进程）。
         if (queuedNow >= ProviderExecSlotPolicy.liveQueueAdmission() || poisoned) {
@@ -408,7 +423,7 @@ class ModelExecutionService : Service() {
                             // the stream INSIDE the lock (serialized provider
                             // network), but does NOT wait for the client ack —
                             // that barrier runs outside below.
-                            executeStreamingRun(req, dir)
+                            executeStreamingRun(req, dir, carriedApiKey)
                         } else {
                             // TF-J2: non-streaming worker beats liveness too.
                             // start() is idempotent; the beat is stopped in the
@@ -419,7 +434,7 @@ class ModelExecutionService : Service() {
                             // only once the beat goes silent after terminal.
                             heartbeat.start()
                             ModelExecutionRunDir.writeReady(dir)
-                            val result = executeRun(req, dir)
+                            val result = executeRun(req, dir, carriedApiKey)
                             writeResultAtomically(dir, result)
                             Log.i(TAG, "result written ($result.length bytes), pid=${android.os.Process.myPid()}")
                         }
@@ -551,7 +566,6 @@ class ModelExecutionService : Service() {
             val next = ModelExecutionLifecycle.transition(
                 current = lifecycleState,
                 quiescence = quiescence,
-                shutdownRequested = false,
             )
             lifecycleState = next
             maybeSelfReapLocked(dir, next, quiescence, runId, generation)
@@ -564,11 +578,9 @@ class ModelExecutionService : Service() {
             unackedResponses = pendingAckTokens.size,
             streamFileFlushed = true,
         )
-        val shutdownRequested = shutdownRequested()
         val next = ModelExecutionLifecycle.transition(
             current = lifecycleState,
             quiescence = quiescence,
-            shutdownRequested = shutdownRequested,
         )
         lifecycleState = next
         // TF-H: final state + terminal are written under the lock. terminal is
@@ -587,7 +599,7 @@ class ModelExecutionService : Service() {
                 TAG,
                 "request finished (holding): state $next active=${activeRequests.get()} " +
                     "queued=${queuedRequests.get()} pendingAck=${pendingAckTokens.size} " +
-                    "shutdownRequested=$shutdownRequested pid=${android.os.Process.myPid()}",
+                    "pid=${android.os.Process.myPid()}",
             )
         }
         return next
@@ -647,22 +659,6 @@ class ModelExecutionService : Service() {
      */
     private fun generationMatches(capturedGeneration: Long): Boolean =
         capturedGeneration == requestGeneration.get()
-
-    /**
-     * True when the main process asked us to drain. On reclaim the main
-     * process writes the shutdown marker into the staging root; the worker
-     * checks the sibling marker file so we never kill while a new request
-     * could arrive (main process controls shutdown by the marker, we control
-     * the timing by quiescence).
-     */
-    private fun shutdownRequested(): Boolean {
-        return runCatching {
-            ModelExecutionMailbox.shutdownRequested(stagingRoot())
-        }.getOrElse { false }
-    }
-
-    /** Root staging dir the main process uses for model-exec requests. */
-    private fun stagingRoot(): File = File(cacheDir, "model-exec")
 
     /** Wait until the client wrote client.ack, or the timeout elapsed. */
     private fun waitClientAck(dir: File, timeoutMs: Long) {
@@ -751,6 +747,23 @@ class ModelExecutionService : Service() {
     @Volatile
     private var keyCachePoisoned = false
 
+    /**
+     * [T-worker-key-intent-handoff] True when this request must fall back to the
+     * legacy freshness handoff: it arrived WITHOUT its own key, and the main
+     * process has rewritten `provider_secrets` since this process was born.
+     *
+     * A request that CARRIES its key is fresher than our cached map by
+     * construction — aborting (and poisoning the process) for it would only
+     * punish its siblings, which is the multi-session failure this handoff
+     * exists to remove. Keep the fallback for callers that cannot supply a key
+     * (older main process, `minis-model-use` bundles without `instance_id`).
+     */
+    private fun staleKeyAbortNeeded(carriedApiKey: String): Boolean {
+        if (WorkerKeyHandoff.carriesKey(carriedApiKey)) return false
+        WorkerKeyFreshness.captureBaseline(getDataDir())
+        return WorkerKeyFreshness.isStaleNow(getDataDir())
+    }
+
     private fun abortOnStaleKeyCache(runId: String?, dir: File?) {
         val pid = android.os.Process.myPid()
         keyCachePoisoned = true
@@ -800,7 +813,7 @@ class ModelExecutionService : Service() {
         }
     }
 
-    private fun executeRun(req: JSONObject, dir: File): String {
+    private fun executeRun(req: JSONObject, dir: File, carriedApiKey: String = ""): String {
         // [ISSUE-12a] `req` is pre-parsed by the caller (CapturedRequestBody) —
         // the duplicate parse of the multi-MB body is gone.
         // [T-worker-thinking-rules-restore] Restore this instance's custom thinking
@@ -923,15 +936,19 @@ class ModelExecutionService : Service() {
             )
         }
 
-        // ── API key: read from EncryptedSharedPreferences (same uid) ──
-        // [T-stale-apikey-worker-cache] Detect a mid-lifetime rewrite of the
-        // secrets file BEFORE reading the key: SharedPreferences is a
-        // per-process singleton cache, so a key saved by the main process
-        // after THIS process first loaded the prefs is invisible here and we
-        // would send the OLD (quota-exhausted) key. Abort → client retries →
-        // fresh process reads the new key. See WorkerKeyFreshness.
-        WorkerKeyFreshness.captureBaseline(getDataDir())
-        if (WorkerKeyFreshness.isStaleNow(getDataDir())) {
+        // ── API key: carried on the Intent, else EncryptedSharedPreferences ──
+        // [T-worker-key-intent-handoff] The dispatch Intent carries the key the
+        // main process had AT DISPATCH TIME (Binder/RAM, never disk), so a key
+        // replaced mid-session is used by the very next request — no process
+        // handoff, no poisoned window. Only when it is absent (older main
+        // process, or a bundle with no instance_id) does the legacy path run:
+        // [T-stale-apikey-worker-cache] detect a mid-lifetime rewrite of the
+        // secrets file BEFORE reading the key, because SharedPreferences is a
+        // per-process singleton cache — a key saved by the main process after
+        // THIS process first loaded the prefs is invisible here and we would
+        // send the OLD (quota-exhausted) key. Abort → client retries → fresh
+        // process reads the new key. See WorkerKeyFreshness.
+        if (staleKeyAbortNeeded(carriedApiKey)) {
             abortOnStaleKeyCache(runIdOf(dir), dir)
             // [meta1028-D2 F-01] Same envelope shape as the streaming path's
             // stale-key result (:1362): the code plus a human message, so a
@@ -948,10 +965,12 @@ class ModelExecutionService : Service() {
                 )
             }.toString()
         }
-        val apiKey = try {
-            com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
-                .getString("apikey_${instance.id}", null) ?: ""
-        } catch (_: Exception) { "" }
+        val apiKey = WorkerKeyHandoff.pickKey(carriedApiKey) {
+            try {
+                com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
+                    .getString("apikey_${instance.id}", null)
+            } catch (_: Exception) { null }
+        }
         if (apiKey.isEmpty()) {
             return JSONObject().apply {
                 put("error", "missing_api_key")
@@ -1218,7 +1237,7 @@ class ModelExecutionService : Service() {
      *  - On cancel (main process creates [dir]/[CANCEL_FILE]): aborts the stream, writes an error line so
      *    the client's Flow terminates (hardened-3: cancellation propagation).
      */
-    private fun executeStreamingRun(req: JSONObject, dir: File) {
+    private fun executeStreamingRun(req: JSONObject, dir: File, carriedApiKey: String = "") {
         val streamFile = File(dir, STREAM_FILE)
         val cancelFile = File(dir, CANCEL_FILE)
         val runId = runIdOf(dir)
@@ -1358,8 +1377,10 @@ class ModelExecutionService : Service() {
             // that strict contract is unchanged.
             val thinkingLevel = thinkingLevelFromWire(req.optString("thinking_level", ""))
 
-            // ── API key: read from EncryptedSharedPreferences (same uid) ──
-            // [T-stale-apikey-worker-cache] Same guard as executeRun: if the
+            // ── API key: carried on the Intent, else EncryptedSharedPreferences ──
+            // [T-worker-key-intent-handoff] Same precedence as executeRun: a
+            // carried key wins verbatim and suppresses the freshness abort.
+            // [T-stale-apikey-worker-cache] Fallback guard only: if the
             // main process saved a new key after this worker was born, our
             // cached prefs map is stale — abort so the client's retry spawns a
             // fresh process that reads the new key. See WorkerKeyFreshness.
@@ -1372,8 +1393,7 @@ class ModelExecutionService : Service() {
             // the client classifies it as auto-retryable and re-dispatches
             // (onto a fresh worker that reads the new key), never as a
             // silent worker death.
-            WorkerKeyFreshness.captureBaseline(getDataDir())
-            if (WorkerKeyFreshness.isStaleNow(getDataDir())) {
+            if (staleKeyAbortNeeded(carriedApiKey)) {
                 abortOnStaleKeyCache(runId, dir)
                 appendLine(ChatStreamJsonl.errorLine(WorkerKeyFreshness.STALE_KEY_CACHE, ChatStreamErrorPolicyKind.KIND_TRANSIENT))
                 writeResultAtomically(dir, JSONObject().apply {
@@ -1382,10 +1402,12 @@ class ModelExecutionService : Service() {
                 }.toString())
                 return
             }
-            val apiKey = try {
-                com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
-                    .getString("apikey_${instance.id}", null) ?: ""
-            } catch (_: Exception) { "" }
+            val apiKey = WorkerKeyHandoff.pickKey(carriedApiKey) {
+                try {
+                    com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
+                        .getString("apikey_${instance.id}", null)
+                } catch (_: Exception) { null }
+            }
             ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.REQUEST_PARSED, "streaming=true model=${model.id}", runId = runIdOf(dir))
             if (apiKey.isEmpty()) {
                 appendLine(ChatStreamJsonl.errorLine("missing_api_key", ChatStreamErrorPolicyKind.KIND_INVALID_KEY))

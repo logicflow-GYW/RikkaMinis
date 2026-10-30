@@ -10,8 +10,11 @@ import java.io.File
  * The main process and the worker communicate via marker files inside the
  * per-request staging directory; the worker owns ITS OWN lifecycle via
  * [ModelExecutionLifecycle] (state machine) and a `state.json` dump. The main
- * process can only REQUEST a shutdown; it can never kill the worker on its
- * own counters.
+ * process cannot kill the worker on its own counters, and — since
+ * [FIX-FW-DEAD-SHUTDOWN-LEVER] — it has no shutdown-request marker either:
+ * the former `shutdown` file was written but never read by the transition,
+ * so it was removed instead of being allowed to imply a lever that did not
+ * exist. Worker death is decided purely by its own quiescence.
  *
  * Files per request dir:
  *   - request.json          client → worker: the serialized request
@@ -52,7 +55,6 @@ object ModelExecutionMailbox {
     const val FILE_RESULT = "result.json"
     const val FILE_STATE = "state.json"
     const val FILE_CLIENT_ACK = "client.ack"
-    const val FILE_SHUTDOWN = "shutdown"
 
     /* ── Cancellation ─────────────────────────────────────────────── */
 
@@ -105,22 +107,6 @@ object ModelExecutionMailbox {
     fun writeClientAck(dir: File) {
         File(dir, FILE_CLIENT_ACK).createNewFile()
     }
-
-    /* ── Shutdown (main process → worker) ─────────────────────────── */
-
-    /**
-     * Main process → worker: drain then die. Idempotent. Writes the `shutdown`
-     * marker into the given directory (the staging root, shared by all request
-     * dirs); the worker checks the same marker and only self-reaps once
-     * quiescent — never stopService as proof.
-     */
-    fun writeShutdownRequest(dir: File) {
-        File(dir, FILE_SHUTDOWN).createNewFile()
-    }
-
-    /** Worker: was the main process asking us to drain? */
-    fun shutdownRequested(dir: File): Boolean =
-        File(dir, FILE_SHUTDOWN).exists()
 
     /* ── State dump (worker → main) ───────────────────────────────── */
 

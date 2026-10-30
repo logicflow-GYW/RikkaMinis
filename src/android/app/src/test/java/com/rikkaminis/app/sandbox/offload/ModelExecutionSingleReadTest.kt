@@ -218,10 +218,20 @@ class ModelExecutionSingleReadTest {
         val src = serviceSource()
 
         assertTrue(src.contains("val req = requestBody.jsonOrThrow()"))
-        assertTrue(src.contains("executeStreamingRun(req, dir)"))
-        assertTrue(src.contains("executeRun(req, dir)"))
-        assertTrue(src.contains("private fun executeRun(req: JSONObject, dir: File): String"))
-        assertTrue(src.contains("private fun executeStreamingRun(req: JSONObject, dir: File)"))
+        // [T-worker-key-intent-handoff] The executors take the carried API key as
+        // a third argument. The criterion is unchanged — the FIRST argument is
+        // still the already-parsed body — so the pin is a prefix match rather
+        // than a full signature (a run function that took the raw String would
+        // still fail here and in modelsvc_single_read_check).
+        assertTrue(Regex("executeStreamingRun\\(req, dir[,)]").containsMatchIn(src))
+        assertTrue(Regex("executeRun\\(req, dir[,)]").containsMatchIn(src))
+        assertTrue(
+            Regex("private fun executeRun\\(req: JSONObject, dir: File[,)]").containsMatchIn(src),
+        )
+        assertTrue(
+            Regex("private fun executeStreamingRun\\(req: JSONObject, dir: File[,)]")
+                .containsMatchIn(src),
+        )
         assertEquals(
             "neither executor may re-parse the body",
             0,

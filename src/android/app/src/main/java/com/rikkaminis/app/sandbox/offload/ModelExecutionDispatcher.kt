@@ -324,7 +324,7 @@ object ModelExecutionDispatcher {
      * dispatch failure (timeout / IO / service unavailable) so callers can
      * fall back to the in-process path.
      */
-    suspend fun dispatch(context: Context, requestJson: String): String? {
+    suspend fun dispatch(context: Context, requestJson: String, apiKey: String = ""): String? {
         // [fix/audit-s3l2] A TIMEOUT is never retried: dispatchOnce also returns
         // null on timeout — where the worker may STILL be executing the
         // provider call (slow image/long-text generation). Re-dispatching then
@@ -346,7 +346,7 @@ object ModelExecutionDispatcher {
         // ModelExecutionRetryPolicy, not re-derived here).
         val outcome = dispatchWithRetry(
             attempt = {
-                val one = dispatchOnce(context, requestJson)
+                val one = dispatchOnce(context, requestJson, apiKey)
                 ModelDispatchAttempt(one.result, one.workerDied)
             },
             onRetry = { attemptsMade, errorCode, delayMs ->
@@ -361,7 +361,11 @@ object ModelExecutionDispatcher {
         return outcome.resultJson
     }
 
-    private suspend fun dispatchOnce(context: Context, requestJson: String): DispatchOutcome {
+    private suspend fun dispatchOnce(
+        context: Context,
+        requestJson: String,
+        apiKey: String = "",
+    ): DispatchOutcome {
         val dir = try {
             val root = File(context.cacheDir, STAGING_ROOT)
             root.mkdirs()
@@ -383,6 +387,13 @@ object ModelExecutionDispatcher {
         try {
             val intent = Intent(context, ModelExecutionService::class.java).apply {
                 putExtra(ModelExecutionService.EXTRA_REQUEST_DIR, dir.absolutePath)
+                // [T-worker-key-intent-handoff] The worker's prefs map is frozen
+                // at process birth, so the key it would read there can be the
+                // quota-exhausted one the user just replaced. Carry the current
+                // key on the Intent (Binder/RAM — never disk) so this request
+                // needs no process handoff at all. Resolved by the caller: the
+                // gateway holds the instance, this layer only sees the bundle.
+                WorkerKeyHandoff.attachKey(this, apiKey)
             }
             context.startService(intent)
         } catch (e: Exception) {

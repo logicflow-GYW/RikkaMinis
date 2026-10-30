@@ -34,19 +34,17 @@ class ModelExecutionLifecycleTest {
     )
 
     @Test
-    fun `idle worker proceeds to stopping regardless of shutdown request`() {
-        // Natural completion (no shutdown requested): worker self-reaps anyway.
+    fun `idle worker proceeds to stopping`() {
+        // Natural completion: a fully quiescent worker self-reaps regardless of
+        // anything the main process might have wanted. The old test asserted
+        // this for shutdownRequested=false AND =true — both columns collapsed
+        // into this one when the dead parameter was deleted
+        // [FIX-FW-DEAD-SHUTDOWN-LEVER]; the transition table test pins the
+        // full matrix now.
         assertEquals(
             ModelExecutionWorkerState.STOPPING,
             ModelExecutionLifecycle.transition(
-                ModelExecutionWorkerState.ACTIVE, idle, shutdownRequested = false,
-            ),
-        )
-        // Explicit main-process drain request: same result.
-        assertEquals(
-            ModelExecutionWorkerState.STOPPING,
-            ModelExecutionLifecycle.transition(
-                ModelExecutionWorkerState.ACTIVE, idle, shutdownRequested = true,
+                ModelExecutionWorkerState.ACTIVE, idle,
             ),
         )
     }
@@ -54,10 +52,10 @@ class ModelExecutionLifecycleTest {
     @Test
     fun `busy worker stays active and never kills`() {
         val next = ModelExecutionLifecycle.transition(
-            ModelExecutionWorkerState.ACTIVE, busy(active = 2), shutdownRequested = true,
+            ModelExecutionWorkerState.ACTIVE, busy(active = 2),
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, next)
-        // Even with a shutdown request, an in-flight request blocks the kill.
+        // An in-flight request blocks the kill.
         assertFalse(ModelExecutionLifecycle.shouldKill(next, busy(active = 2)))
     }
 
@@ -70,7 +68,7 @@ class ModelExecutionLifecycleTest {
             streamFileFlushed = true,
         )
         val nextQ = ModelExecutionLifecycle.transition(
-            ModelExecutionWorkerState.ACTIVE, queued, shutdownRequested = true,
+            ModelExecutionWorkerState.ACTIVE, queued,
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, nextQ)
         assertFalse(ModelExecutionLifecycle.shouldKill(nextQ, queued))
@@ -82,7 +80,7 @@ class ModelExecutionLifecycleTest {
             streamFileFlushed = true,
         )
         val nextU = ModelExecutionLifecycle.transition(
-            ModelExecutionWorkerState.ACTIVE, unacked, shutdownRequested = true,
+            ModelExecutionWorkerState.ACTIVE, unacked,
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, nextU)
         assertFalse(ModelExecutionLifecycle.shouldKill(nextU, unacked))
@@ -97,7 +95,7 @@ class ModelExecutionLifecycleTest {
             streamFileFlushed = false,
         )
         val next = ModelExecutionLifecycle.transition(
-            ModelExecutionWorkerState.ACTIVE, unflushed, shutdownRequested = true,
+            ModelExecutionWorkerState.ACTIVE, unflushed,
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, next)
         assertFalse(ModelExecutionLifecycle.shouldKill(next, unflushed))
@@ -106,7 +104,7 @@ class ModelExecutionLifecycleTest {
     @Test
     fun `stopping with no work reaps`() {
         val next = ModelExecutionLifecycle.transition(
-            ModelExecutionWorkerState.QUIESCE_PENDING, idle, shutdownRequested = true,
+            ModelExecutionWorkerState.QUIESCE_PENDING, idle,
         )
         assertEquals(ModelExecutionWorkerState.STOPPING, next)
         assertTrue(ModelExecutionLifecycle.shouldKill(next, idle))
@@ -117,7 +115,7 @@ class ModelExecutionLifecycleTest {
         // A new request arrived right as we were about to die: the worker
         // revived to ACTIVE (onStartCommand), so no kill.
         val next = ModelExecutionLifecycle.transition(
-            ModelExecutionWorkerState.STOPPING, busy(active = 1), shutdownRequested = false,
+            ModelExecutionWorkerState.STOPPING, busy(active = 1),
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, next)
         assertFalse(ModelExecutionLifecycle.shouldKill(next, busy(active = 1)))
@@ -126,7 +124,7 @@ class ModelExecutionLifecycleTest {
     @Test
     fun `dead is terminal`() {
         val next = ModelExecutionLifecycle.transition(
-            ModelExecutionWorkerState.DEAD, busy(active = 1), shutdownRequested = true,
+            ModelExecutionWorkerState.DEAD, busy(active = 1),
         )
         assertEquals(ModelExecutionWorkerState.DEAD, next)
         assertFalse(ModelExecutionLifecycle.shouldKill(next, busy(active = 1)))
@@ -156,7 +154,7 @@ class ModelExecutionLifecycleTest {
         )
         assertFalse(ModelExecutionLifecycle.isQuiescent(awaitingAck))
         val next = ModelExecutionLifecycle.transition(
-            ModelExecutionWorkerState.ACTIVE, awaitingAck, shutdownRequested = false,
+            ModelExecutionWorkerState.ACTIVE, awaitingAck,
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, next)
         assertFalse(ModelExecutionLifecycle.shouldKill(next, awaitingAck))

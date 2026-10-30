@@ -40,7 +40,6 @@ class ProviderExecConcurrencyTest {
         val next = ModelExecutionLifecycle.transition(
             current = ModelExecutionWorkerState.ACTIVE,
             quiescence = q,
-            shutdownRequested = false,
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, next)
         assertFalse(ModelExecutionLifecycle.shouldKill(next, q))
@@ -59,7 +58,6 @@ class ProviderExecConcurrencyTest {
         val next = ModelExecutionLifecycle.transition(
             current = ModelExecutionWorkerState.ACTIVE,
             quiescence = q,
-            shutdownRequested = false,
         )
         assertEquals(ModelExecutionWorkerState.STOPPING, next)
         assertTrue(ModelExecutionLifecycle.shouldKill(next, q))
@@ -80,7 +78,6 @@ class ProviderExecConcurrencyTest {
         val next = ModelExecutionLifecycle.transition(
             current = ModelExecutionWorkerState.ACTIVE,
             quiescence = q,
-            shutdownRequested = false,
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, next)
         assertFalse(ModelExecutionLifecycle.shouldKill(next, q))
@@ -99,7 +96,6 @@ class ProviderExecConcurrencyTest {
         val next = ModelExecutionLifecycle.transition(
             current = ModelExecutionWorkerState.ACTIVE,
             quiescence = q,
-            shutdownRequested = false,
         )
         assertEquals(ModelExecutionWorkerState.ACTIVE, next)
         assertFalse(ModelExecutionLifecycle.shouldKill(next, q))

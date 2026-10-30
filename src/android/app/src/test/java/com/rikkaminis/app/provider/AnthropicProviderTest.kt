@@ -167,7 +167,7 @@ class AnthropicProviderTest {
 
     @Test
     fun `sendMessage includes correct headers`() = runBlocking {
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), "system", 100)
 
@@ -181,7 +181,7 @@ class AnthropicProviderTest {
 
     @Test
     fun `sendMessage includes system prompt in body`() = runBlocking {
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), "You are helpful", 100)
 
@@ -195,7 +195,7 @@ class AnthropicProviderTest {
 
     @Test
     fun `sendMessage omits system when null`() = runBlocking {
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 100)
 
@@ -206,7 +206,7 @@ class AnthropicProviderTest {
 
     @Test
     fun `sendMessage includes temperature when set`() = runBlocking {
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 100, temperature = 0.7)
 
@@ -217,7 +217,7 @@ class AnthropicProviderTest {
 
     @Test
     fun `sendMessage omits temperature when null`() = runBlocking {
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 100, temperature = null)
 
@@ -228,7 +228,7 @@ class AnthropicProviderTest {
 
     @Test
     fun `sendMessage uses correct model and max_tokens`() = runBlocking {
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 2048)
 
@@ -240,7 +240,7 @@ class AnthropicProviderTest {
 
     @Test
     fun `sendMessage maps roles correctly`() = runBlocking {
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(
             listOf(
@@ -514,7 +514,7 @@ class AnthropicProviderTest {
     @Test
     fun `interleaved compat model echoes thinking block first on assistant turn`() = runBlocking {
         provider.model = deepseekCompatModel
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(toolHistory(), null, 1024, thinkingLevel = ThinkingLevel.MEDIUM)
 
@@ -534,7 +534,7 @@ class AnthropicProviderTest {
     @Test
     fun `interleaved compat model injects empty thinking placeholder when reasoning missing`() = runBlocking {
         provider.model = deepseekCompatModel
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         // Assistant turn with NO captured reasoning (e.g. history from before
         // thinking was on). Still must carry a thinking block or the proxy 400s.
@@ -564,7 +564,7 @@ class AnthropicProviderTest {
     @Test
     fun `interleaved compat model echoes thinking on plain-text assistant turn`() = runBlocking {
         provider.model = deepseekCompatModel
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         // Assistant turn with a plain string reply (no structured contentParts).
         val history = listOf(
@@ -598,7 +598,7 @@ class AnthropicProviderTest {
             supportsReasoning = true,
             interleavedReasoningField = null,
         )
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(toolHistory(), null, 1024, thinkingLevel = ThinkingLevel.MEDIUM)
 
@@ -620,7 +620,7 @@ class AnthropicProviderTest {
         // which blanks the thinking block (signature only). We must pin
         // display=summarized so the readable thinking summary comes back.
         provider.model = LLMModel.claudeSonnet5 // major 5 → adaptive thinking
-        server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
+        server.enqueue(MockResponse().setBody("""{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"""))
 
         provider.sendMessage(
             listOf(LLMMessage(LLMMessage.Role.USER, "hi")), null, 4096,

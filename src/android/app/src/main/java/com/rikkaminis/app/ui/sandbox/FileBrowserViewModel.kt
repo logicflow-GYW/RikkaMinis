@@ -16,6 +16,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 /** Mirrors iOS FileSortKey. */
 enum class FileSortKey { NAME, MODIFIED, SIZE, KIND }
@@ -45,6 +46,75 @@ fun formatFileSize(bytes: Long): String {
     }
     val rounded = (value * 10).let { kotlin.math.round(it) } / 10.0
     return if (rounded % 1.0 == 0.0) "${rounded.toLong()} $unitName" else "$rounded $unitName"
+}
+
+/**
+ * [FIX-FW-FILE-DATE] Which label [FileItem.formattedDate] shows for a file's
+ * mtime. Split out of the getter so the day arithmetic can be unit-tested with
+ * an injected `now` and an injected zone (the getter reads the device clock and
+ * the default zone, neither of which a JVM table test can pin).
+ */
+internal enum class FileDateBucket {
+    /** No usable mtime (`lastModified()` answers 0 for an unreadable entry). */
+    EMPTY,
+
+    /** mtime is AHEAD of the reader's clock. */
+    FUTURE,
+
+    SAME_DAY,
+
+    YESTERDAY,
+
+    /** 1–6 whole days back — shown as a weekday name. */
+    WITHIN_WEEK,
+
+    /** 7+ days back — shown as an absolute date. */
+    OLDER,
+}
+
+private const val DAY_MS = 24L * 60L * 60L * 1000L
+
+/**
+ * [FIX-FW-FILE-DATE] Bucket for [modifiedMs] as seen at [nowMs].
+ *
+ * The defect this replaces: `daysAgo in 0..6` was the last "recent" test, and
+ * `daysAgo` came from an integer division that Kotlin truncates TOWARD ZERO —
+ * so a timestamp a minute in the future (clock drift; sandbox / NFS / SMB
+ * mounts hand out the SERVER's mtime) produced `daysAgo == 0`, sailed past
+ * same-day and yesterday, and rendered a WEEKDAY NAME ("Thursday"). A file the
+ * user had just written read as if it were written last Thursday.
+ *
+ * FUTURE is therefore an explicit arm evaluated before any day arithmetic, not
+ * something the sign of `daysAgo` is trusted to catch. Consequently `daysAgo`
+ * here can only be ≥ 1, and [WITHIN_WEEK] starts at 1: a residual 0 (should the
+ * ordering ever change) degrades to an absolute date instead of inventing a
+ * weekday.
+ *
+ * [zone] is a parameter only so tests can pin UTC; production passes the
+ * device default via the caller.
+ */
+internal fun fileDateBucket(
+    modifiedMs: Long,
+    nowMs: Long,
+    zone: TimeZone = TimeZone.getDefault(),
+): FileDateBucket {
+    if (modifiedMs <= 0L) return FileDateBucket.EMPTY
+    if (modifiedMs > nowMs) return FileDateBucket.FUTURE
+    val then = Calendar.getInstance(zone).apply { timeInMillis = modifiedMs }
+    val now = Calendar.getInstance(zone).apply { timeInMillis = nowMs }
+    val sameDay = now.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
+        now.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
+    if (sameDay) return FileDateBucket.SAME_DAY
+    val yesterday = Calendar.getInstance(zone).apply {
+        timeInMillis = nowMs
+        add(Calendar.DAY_OF_YEAR, -1)
+    }
+    val isYesterday = yesterday.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
+        yesterday.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
+    if (isYesterday) return FileDateBucket.YESTERDAY
+    val daysAgo = (nowMs - modifiedMs) / DAY_MS
+    if (daysAgo in 1..6) return FileDateBucket.WITHIN_WEEK
+    return FileDateBucket.OLDER
 }
 
 /**
@@ -217,23 +287,32 @@ data class FileItem(
             "xlsx", "xls", "docx", "doc", "pptx", "ppt", "odt", "ods", "odp",
         )
 
-    /** Mirrors iOS FileItem.formattedDate: today=time, yesterday="Yesterday", <7d=weekday, else short date. */
+    /**
+     * Mirrors iOS FileItem.formattedDate: today=time, yesterday="Yesterday", <7d=weekday, else short date.
+     *
+     * [FIX-FW-FILE-DATE] A timestamp in the FUTURE renders as `"Just now"`:
+     * a future mtime is almost always a clock that runs ahead of this device
+     * (sandbox/PRoot, NFS/SMB mounts stamp the SERVER's clock, a just-written
+     * file from a drifted guest), so "the file is new" is the honest reading.
+     * The alternative — an absolute date — would print tomorrow's (or next
+     * year's) date for a file that appeared a second ago, which is exactly the
+     * misreading this fix removes. `"Just now"` is distinguishable from the
+     * same-day label (`h:mm a`), and collapsing "1 s ago" and "1 s from now"
+     * onto it is intentional: the two are indistinguishable to the user anyway.
+     * Bucketing (and therefore the weekday fallthrough) lives in
+     * [fileDateBucket] where a JVM table test can pin it.
+     */
     val formattedDate: String
         get() {
-            if (modifiedMs <= 0L) return ""
             val date = Date(modifiedMs)
-            val now = Calendar.getInstance()
-            val then = Calendar.getInstance().apply { time = date }
-            val sameDay = now.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
-                now.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
-            if (sameDay) return timeFormatter.format(date)
-            val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
-            val isYesterday = yesterday.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
-                yesterday.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
-            if (isYesterday) return "Yesterday"
-            val daysAgo = (now.timeInMillis - then.timeInMillis) / (24L * 60 * 60 * 1000)
-            if (daysAgo in 0..6) return weekdayFormatter.format(date)
-            return shortDateFormatter.format(date)
+            return when (fileDateBucket(modifiedMs, System.currentTimeMillis())) {
+                FileDateBucket.EMPTY -> ""
+                FileDateBucket.FUTURE -> "Just now"
+                FileDateBucket.SAME_DAY -> timeFormatter.format(date)
+                FileDateBucket.YESTERDAY -> "Yesterday"
+                FileDateBucket.WITHIN_WEEK -> weekdayFormatter.format(date)
+                FileDateBucket.OLDER -> shortDateFormatter.format(date)
+            }
         }
 
     companion object {
