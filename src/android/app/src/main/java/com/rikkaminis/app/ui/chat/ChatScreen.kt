@@ -2916,6 +2916,19 @@ fun ChatScreen(
             // keystroke. [T-android-composer-input-blocked-while-streaming]
             LaunchedEffect(isUserDragging) {
                 if (isUserDragging) {
+                    // [fix/ime-dictation-guard] Not while the IME is dictating:
+                    // hiding the keyboard ends the voice session (Gboard logs
+                    // `stopVoiceInput reason SHUTDOWN` right after our hide),
+                    // and a dictating user scrolls up to look at what they are
+                    // answering. Ported from upstream OpenMinis issue #472 /
+                    // FIX-261022-07; see ImeDictation.
+                    if (ImeDictation.recordingActive(context)) {
+                        AppLogger.debug(
+                            "ScrollFollow",
+                            "drag keeps the keyboard: audio recording active (IME voice typing)",
+                        )
+                        return@LaunchedEffect
+                    }
                     keyboardController?.hide()
                     focusManager.clearFocus()
                 }
