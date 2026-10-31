@@ -1721,4 +1721,9 @@
     <string name="mirror_diag_failed">上次同步失败</string>
     <string name="mirror_diag_unavailable">没有可用的存储目标</string>
     <string name="mirror_retry">重试</string>
+    <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
+    <string name="paste_chip_desc">已折叠的粘贴内容 #%1$d，%2$d 字符。点击预览。</string>
+    <string name="paste_preview_title">粘贴内容 %1$s</string>
+    <string name="paste_folded_summary">已折叠 %1$d 字</string>
+    <string name="paste_unresolved_notice">草稿中含有无法展开的粘贴标记（%1$s），发送已停用。删除该标记后即可发送。</string>
 </resources>

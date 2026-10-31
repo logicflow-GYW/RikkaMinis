@@ -1694,4 +1694,9 @@
     <string name="mirror_diag_failed">Letzte Synchronisierung fehlgeschlagen</string>
     <string name="mirror_diag_unavailable">Kein nutzbarer Speicherort</string>
     <string name="mirror_retry">Erneut versuchen</string>
+    <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
+    <string name="paste_chip_desc">Gefalteter Einfügetext #%1$d, %2$d Zeichen. Tippen zum Ansehen.</string>
+    <string name="paste_preview_title">Eingefügter Text %1$s</string>
+    <string name="paste_folded_summary">Gefaltet: %1$d Zeichen</string>
+    <string name="paste_unresolved_notice">Dieser Entwurf enthält eine Markierung für eingefügten Text, die nicht mehr aufgelöst werden kann (%1$s). Senden ist deaktiviert – lösche die Markierung, um zu senden.</string>
 </resources>

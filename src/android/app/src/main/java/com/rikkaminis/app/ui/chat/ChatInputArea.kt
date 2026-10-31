@@ -155,6 +155,12 @@ internal fun ChatInputArea(
     val context = androidx.compose.ui.platform.LocalContext.current
     val inputText by viewModel.inputText.collectAsState()
     val attachments by viewModel.attachments.collectAsState()
+    // [feat/paste-fold-marker] Long pastes folded out of the field: each one is
+    // a `[Pasted#N]` literal in the text plus a chip in the row below. Chips are
+    // rendered from the buffer but FILTERED by marker presence, so a composer
+    // that no longer holds the literal (sent / cleared) can never leave an
+    // orphan chip behind — the text is the reference, the buffer row is data.
+    val pastedTexts by viewModel.pastedTexts.collectAsState()
     var showMoveSheet by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
     // [fix/ime-overlay-focus-coverage] MoveToSessionSheet owns its own window
@@ -444,8 +450,34 @@ internal fun ChatInputArea(
         inputFieldValue.text.isNotBlank() || attachments.isNotEmpty()
     }
 
+    // [feat/paste-fold-marker] Fail-closed send guard, evaluated per event for
+    // the same reason as `canSwipeSendNow` above: the gesture/send callbacks are
+    // long-lived closures, so the condition has to be read when it matters.
+    //
+    // A local function, deliberately NOT a second `() -> Boolean` predicate:
+    // `canSwipeSendNow` stays the ONE send-eligibility predicate (that is what
+    // ComposerSendSwipeTest pins, because a second per-site re-derivation of
+    // "can we send" is exactly how the dead swipe branch came back). This one
+    // answers a different question — "is this composer's text unsendable?" —
+    // and the eligibility predicate stays untouched, so `showStop` keeps its
+    // meaning (blocked-by-marker is not "no content", and must not turn the
+    // send button into a Stop button mid-stream).
+    //
+    // A restored draft can hold a `[Pasted#N]` whose text died with the process;
+    // sending it verbatim would hand the model a literal marker in place of the
+    // user's paragraphs — silent content loss. Expansion itself stays lenient
+    // (a hand-typed marker is just text), so only "orphan" markers from the
+    // restore point block here.
+    fun pasteSendBlockedNow(): Boolean = viewModel.pasteSendBlockedBy(inputFieldValue.text)
 
     val performSendOrEnqueue: () -> Unit = handler@{
+        // [feat/paste-fold-marker] Fail-closed: a restored draft can still hold
+        // a marker nothing can expand. The button is disabled in that state and
+        // the notice above the field says why, but the swipe gesture and the
+        // Enter key reach this same funnel — refuse here, before anything is
+        // cleared, so nothing is lost and the text stays where the user can fix
+        // it.
+        if (pasteSendBlockedNow()) return@handler
         // [fix/ttfb-thinktag-composer] Cancel the pending IME-burst flush and
         // read the send text from the field's own TextFieldValue — the
         // single-writer truth the user actually sees. History: [T2-M2]
@@ -1242,8 +1274,18 @@ internal fun ChatInputArea(
                         }
                     }
                 }
-                // Attachment thumbnails inside the box (iOS: 64×64 squares)
-                if (attachments.isNotEmpty()) {
+                // Folded long pastes and attachment thumbnails share ONE row
+                // (iOS: 64×64 squares): both are content held outside the field
+                // and both use the same chip geometry, so two rows would read as
+                // two different kinds of thing.
+                // [feat/paste-fold-marker] A paste is listed only while its
+                // marker is still in the field — the buffer row is data, the
+                // literal in the text is the reference. That is what keeps a
+                // sent or cleared composer from leaving a chip behind, without
+                // any extra clearing bookkeeping on the dozens of paths that
+                // rewrite the composer from outside.
+                val visiblePastes = pastedTexts.filter { inputFieldValue.text.contains(it.placeholder) }
+                if (attachments.isNotEmpty() || visiblePastes.isNotEmpty()) {
                     LazyRow(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1256,6 +1298,26 @@ internal fun ChatInputArea(
                         // past the top-right; no extra spacedBy needed.
                         horizontalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
+                        // String keys keep pastes and attachments in one key
+                        // space without relying on the attachment id type.
+                        items(visiblePastes, key = { "paste-${it.id}" }) { pasted ->
+                            PastedTextChip(
+                                pasted = pasted,
+                                onRemove = {
+                                    // Drop the buffer row and strip its marker
+                                    // in the SAME edit (through the composer
+                                    // funnel, which also kills a pending IME
+                                    // burst so the snapshot cannot re-add the
+                                    // literal). Exact-literal strip: removing
+                                    // #2 cannot disturb #20.
+                                    viewModel.removePastedText(pasted.id)
+                                    commitComposerBody(
+                                        removePasteMarker(inputFieldValue.text, pasted.id),
+                                        null,
+                                    )
+                                },
+                            )
+                        }
                         items(attachments, key = { it.id }) { attachment ->
                             // T-pwa-2: long-press menu only appears for
                             // .html / .htm attachments. The menu lives in
@@ -1390,6 +1452,12 @@ internal fun ChatInputArea(
                     Spacer(modifier = Modifier.height(6.dp))
                 }
 
+                // [feat/paste-fold-marker] Fail-closed notice: a restored draft
+                // can hold a `[Pasted#N]` whose text died with the process.
+                // Sending is disabled (button + Enter + swipe) and this says
+                // why, quoting the exact literal so the user can find it.
+                PasteSendBlockedNotice(markers = viewModel.blockingPasteMarkers(inputFieldValue.text))
+
                 // Composer input field. (Voice input mode was removed
                 // with the mic button; the field is now the only path.)
                 run {
@@ -1419,6 +1487,10 @@ internal fun ChatInputArea(
                     // onSend; this lambda is the single source of
                     // truth for what "press Enter to send" means.
                     val performEnterSend: () -> Boolean = handler@{
+                        // [feat/paste-fold-marker] Same fail-closed gate as
+                        // performSendOrEnqueue: the Enter key is the one send
+                        // path that can fire while the button is disabled.
+                        if (pasteSendBlockedNow()) return@handler false
                         // [fix/ttfb-thinktag-composer] Same contract as
                         // performSendOrEnqueue (see the full history there):
                         // cancel the pending burst flush so it cannot
@@ -1480,177 +1552,214 @@ internal fun ChatInputArea(
                             if (tfv.composition != null && now - lastSendTimeMs < 500L && tfv.text.isNotEmpty()) {
                                 return@BasicTextField
                             }
-                            // [T-android-enter-to-send-multiline] Root cause:
-                            // the composer is a multi-line BasicTextField
-                            // (maxLines=6 ⇒ EditorInfo carries
-                            // TYPE_TEXT_FLAG_MULTI_LINE, confirmed inputType
-                            // 0x28001 in dumpsys input_method). In multi-line
-                            // mode soft IMEs (Gboard/LatinIME, Sogou, MIUI)
-                            // render Enter as a newline and IGNORE
-                            // IME_ACTION_SEND — so KeyboardActions.onSend
-                            // never fires and the "Return key sends" pref
-                            // looked inert. The IME commits the Enter as a
-                            // plain '\n' through onValueChange (not through
-                            // onKeyEvent / a KEYCODE_ENTER), so the only
-                            // place to catch it for soft keyboards is here.
+                            // [feat/paste-fold-marker] Fold a long paste into a
+                            // `[Pasted#N]` marker BEFORE anything downstream
+                            // reads the edit. Two properties depend on this
+                            // exact position:
                             //
-                            // Detect a single '\n' freshly inserted into the
-                            // text (one Enter keypress) and convert it to a
-                            // send. Guarded to a single added newline so a
-                            // paste containing newlines is NOT swallowed —
-                            // those increase the count by >1 and fall through
-                            // to the normal multi-line edit. Hardware
-                            // Shift+Enter is the exception: `onKeyEvent` below
-                            // deliberately lets it through so Compose inserts a
-                            // newline, and that insertion is byte-identical to
-                            // the soft-IME shape caught here — so the key
-                            // handler flags it and this block stands down
-                            // ([meta-audit-1028 C3/F-03]; before, Shift+Enter
-                            // sent the message instead of breaking the line).
-                            // A single pasted '\n' is still indistinguishable
-                            // from a soft Enter and still sends (see report §6).
-                            val previousFieldText = inputFieldValue.text
-                            val hardwareShiftEnterNewline = shiftEnterNewlinePending
-                            // Consume unconditionally: one key event, at most
-                            // one insertion. A flag that outlived its insertion
-                            // would swallow the next genuine soft Enter.
-                            shiftEnterNewlinePending = false
-                            if (sendOnEnter && !showMentionMenu && !hardwareShiftEnterNewline &&
-                                isEnterSendEdit(
-                                    oldText = previousFieldText,
-                                    newText = tfv.text,
-                                    caretEnd = tfv.selection.end,
+                            //  1. The burst gate below fires on the INSERTED
+                            //     length. After folding, a 40 KB paste looks
+                            //     like a 10-char insertion, so it commits
+                            //     immediately instead of being held for 150 ms
+                            //     — and, crucially, nothing downstream ever
+                            //     holds the raw block, so the burst flush can
+                            //     never write it back over the marker.
+                            //  2. Every caret/text mirror below
+                            //     (`previousFieldText`, `imeBurstBuffer`,
+                            //     `imeBurstCaret`, `lastTrueCaretEnd`,
+                            //     `publishPendingComposerText`) is computed from
+                            //     the FOLDED value. One of them reading the raw
+                            //     text is exactly how the marker would get
+                            //     overwritten ~150 ms later.
+                            //
+                            // `old` is the field's own TextFieldValue, which
+                            // onValueChange writes on every path, so it is never
+                            // staler than the ViewModel copy.
+                            run {
+                                // The shadowing binding: from here down `tfv` IS the
+                                // folded edit, so every mirror below (previousFieldText,
+                                // imeBurstBuffer, imeBurstCaret, lastTrueCaretEnd,
+                                // publishPendingComposerText) reads the marker, never the
+                                // raw block. The initializer still sees the outer `tfv`
+                                // (the raw edit) because a local is in scope from its
+                                // declaration point onward.
+                                val tfv = foldLongPasteIfNeeded(
+                                    old = inputFieldValue,
+                                    new = tfv,
+                                    stash = { pasted -> viewModel.stashPastedText(pasted) },
                                 )
-                            ) {
-                                performEnterSend()
-                                return@BasicTextField
-                            }
-                            inputFieldValue = tfv
-                            // [Txxx-android-composer-caret] The IME's
-                            // tfv.selection.end is the authoritative user
-                            // caret right now. Persist it so a later
-                            // LaunchedEffect can fall back to it instead of
-                            // an already-stale inputFieldValue.selection.
-                            lastTrueCaretEnd = tfv.selection.end.coerceAtLeast(0)
-                            // [meta-audit-1028 C3/F-05] `|| imeBurstBuffer != null`:
-                            // while a burst is buffered the VM string is stale,
-                            // so "text equals the VM copy" is NOT "nothing
-                            // changed" — the user may have just cut / undone the
-                            // paste back to that very string, and this branch is
-                            // the only place that drops the buffered snapshot
-                            // (and the ViewModel's pending copy) on the way out.
-                            if (inputText != tfv.text || imeBurstBuffer != null) {
-                                // [fix/voice-crash-observability tail] IME
-                                // voice dictation drives onValueChange with
-                                // high-frequency, large text bursts. Each
-                                // burst used to call setInputText
-                                // immediately, re-serializing the draft +
-                                // recomputing slash/mention state + running
-                                // the full ledger reconcile on the main
-                                // thread. A single large increment (>8
-                                // chars — see shouldDebounceImeBurst) is
-                                // debounced: buffer locally and flush once
-                                // 150 ms after the last burst, so a burst
-                                // of N events collapses to one commit.
-                                // Ordinary typing (<=8 chars) and deletes
-                                // go through immediately — instant feedback
-                                // is preserved.
+                                // [T-android-enter-to-send-multiline] Root cause:
+                                // the composer is a multi-line BasicTextField
+                                // (maxLines=6 ⇒ EditorInfo carries
+                                // TYPE_TEXT_FLAG_MULTI_LINE, confirmed inputType
+                                // 0x28001 in dumpsys input_method). In multi-line
+                                // mode soft IMEs (Gboard/LatinIME, Sogou, MIUI)
+                                // render Enter as a newline and IGNORE
+                                // IME_ACTION_SEND — so KeyboardActions.onSend
+                                // never fires and the "Return key sends" pref
+                                // looked inert. The IME commits the Enter as a
+                                // plain '\n' through onValueChange (not through
+                                // onKeyEvent / a KEYCODE_ENTER), so the only
+                                // place to catch it for soft keyboards is here.
                                 //
-                                // [meta-audit-1028 C3/F-05] The delta is
-                                // measured against the PREVIOUS FIELD TEXT, not
-                                // `inputText`. The field is the authority and
-                                // is never more than one edit behind; the VM
-                                // string can be a whole burst behind, so after
-                                // a debounced paste every single-char edit kept
-                                // seeing `new - stale > 8` and was debounced
-                                // again — one 150 ms stall per keystroke.
-                                if (shouldDebounceImeBurst(previousFieldText, tfv.text)) {
-                                    imeBurstBuffer = tfv.text
-                                    imeBurstCaret = tfv.selection.end
-                                    // [dv25-B08] Publish the pending snapshot to the
-                                    // ViewModel: the field's live text is the newest
-                                    // copy of what the user typed, and for 150 ms it
-                                    // exists ONLY here. `promoteDraftIfNeeded` (the
-                                    // "New Chat" path) reads it so a dictated tail is
-                                    // not promoted as the pre-burst string.
-                                    viewModel.publishPendingComposerText(tfv.text)
-                                    imeBurstJob?.cancel()
-                                    imeBurstJob = coroutineScope.launch {
-                                        delay(150)
-                                        val flushed = imeBurstBuffer
-                                        // [fix/ttfb-thinktag-composer] Always
-                                        // clear the buffer so a stale snapshot
-                                        // can never outlive its flush (the old
-                                        // code left it set, and the send path
-                                        // then preferred the stale snapshot
-                                        // over newer edits). Commit only while
-                                        // the snapshot still matches the
-                                        // field's live text — if newer edits
-                                        // landed during the window (they
-                                        // commit immediately), committing the
-                                        // snapshot would overwrite them.
-                                        imeBurstJob = null
-                                        imeBurstBuffer = null
-                                        // [dv25-B08] The pending snapshot is spent:
-                                        // whatever the field commits next is the
-                                        // authoritative text, so the ViewModel's
-                                        // pending copy must not outlive its flush
-                                        // (the `fix/ttfb-thinktag-composer` lesson).
-                                        viewModel.publishPendingComposerText(null)
-                                        if (flushed != null &&
-                                            shouldCommitImeBurst(flushed, inputText, inputFieldValue.text)
-                                        ) {
-                                            viewModel.setInputText(flushed)
-                                            viewModel.updateSlashMenuState(flushed)
-                                            // [fix/voice-ime-mention-scan] Sweep the
-                                            // @-mention scan into the same flush as the
-                                            // slash state. A voice/Pinyin burst arrives as
-                                            // dozens of large, space-less CJK edits; the old
-                                            // unconditional mention scan below was walking back
-                                            // from the caret to the text head (O(n)) on EVERY
-                                            // one of them, re-typing unchanged menu state.
-                                            // Folding it into the 150 ms flush keeps the scan
-                                            // semantics identical while collapsing N scans to 1.
-                                            viewModel.updateMentionMenuState(
-                                                text = flushed,
-                                                caret = imeBurstCaret.coerceIn(0, flushed.length),
-                                            )
+                                // Detect a single '\n' freshly inserted into the
+                                // text (one Enter keypress) and convert it to a
+                                // send. Guarded to a single added newline so a
+                                // paste containing newlines is NOT swallowed —
+                                // those increase the count by >1 and fall through
+                                // to the normal multi-line edit. Hardware
+                                // Shift+Enter is the exception: `onKeyEvent` below
+                                // deliberately lets it through so Compose inserts a
+                                // newline, and that insertion is byte-identical to
+                                // the soft-IME shape caught here — so the key
+                                // handler flags it and this block stands down
+                                // ([meta-audit-1028 C3/F-03]; before, Shift+Enter
+                                // sent the message instead of breaking the line).
+                                // A single pasted '\n' is still indistinguishable
+                                // from a soft Enter and still sends (see report §6).
+                                val previousFieldText = inputFieldValue.text
+                                val hardwareShiftEnterNewline = shiftEnterNewlinePending
+                                // Consume unconditionally: one key event, at most
+                                // one insertion. A flag that outlived its insertion
+                                // would swallow the next genuine soft Enter.
+                                shiftEnterNewlinePending = false
+                                if (sendOnEnter && !showMentionMenu && !hardwareShiftEnterNewline &&
+                                    isEnterSendEdit(
+                                        oldText = previousFieldText,
+                                        newText = tfv.text,
+                                        caretEnd = tfv.selection.end,
+                                    )
+                                ) {
+                                    performEnterSend()
+                                    return@BasicTextField
+                                }
+                                inputFieldValue = tfv
+                                // [Txxx-android-composer-caret] The IME's
+                                // tfv.selection.end is the authoritative user
+                                // caret right now. Persist it so a later
+                                // LaunchedEffect can fall back to it instead of
+                                // an already-stale inputFieldValue.selection.
+                                lastTrueCaretEnd = tfv.selection.end.coerceAtLeast(0)
+                                // [meta-audit-1028 C3/F-05] `|| imeBurstBuffer != null`:
+                                // while a burst is buffered the VM string is stale,
+                                // so "text equals the VM copy" is NOT "nothing
+                                // changed" — the user may have just cut / undone the
+                                // paste back to that very string, and this branch is
+                                // the only place that drops the buffered snapshot
+                                // (and the ViewModel's pending copy) on the way out.
+                                if (inputText != tfv.text || imeBurstBuffer != null) {
+                                    // [fix/voice-crash-observability tail] IME
+                                    // voice dictation drives onValueChange with
+                                    // high-frequency, large text bursts. Each
+                                    // burst used to call setInputText
+                                    // immediately, re-serializing the draft +
+                                    // recomputing slash/mention state + running
+                                    // the full ledger reconcile on the main
+                                    // thread. A single large increment (>8
+                                    // chars — see shouldDebounceImeBurst) is
+                                    // debounced: buffer locally and flush once
+                                    // 150 ms after the last burst, so a burst
+                                    // of N events collapses to one commit.
+                                    // Ordinary typing (<=8 chars) and deletes
+                                    // go through immediately — instant feedback
+                                    // is preserved.
+                                    //
+                                    // [meta-audit-1028 C3/F-05] The delta is
+                                    // measured against the PREVIOUS FIELD TEXT, not
+                                    // `inputText`. The field is the authority and
+                                    // is never more than one edit behind; the VM
+                                    // string can be a whole burst behind, so after
+                                    // a debounced paste every single-char edit kept
+                                    // seeing `new - stale > 8` and was debounced
+                                    // again — one 150 ms stall per keystroke.
+                                    if (shouldDebounceImeBurst(previousFieldText, tfv.text)) {
+                                        imeBurstBuffer = tfv.text
+                                        imeBurstCaret = tfv.selection.end
+                                        // [dv25-B08] Publish the pending snapshot to the
+                                        // ViewModel: the field's live text is the newest
+                                        // copy of what the user typed, and for 150 ms it
+                                        // exists ONLY here. `promoteDraftIfNeeded` (the
+                                        // "New Chat" path) reads it so a dictated tail is
+                                        // not promoted as the pre-burst string.
+                                        viewModel.publishPendingComposerText(tfv.text)
+                                        imeBurstJob?.cancel()
+                                        imeBurstJob = coroutineScope.launch {
+                                            delay(150)
+                                            val flushed = imeBurstBuffer
+                                            // [fix/ttfb-thinktag-composer] Always
+                                            // clear the buffer so a stale snapshot
+                                            // can never outlive its flush (the old
+                                            // code left it set, and the send path
+                                            // then preferred the stale snapshot
+                                            // over newer edits). Commit only while
+                                            // the snapshot still matches the
+                                            // field's live text — if newer edits
+                                            // landed during the window (they
+                                            // commit immediately), committing the
+                                            // snapshot would overwrite them.
+                                            imeBurstJob = null
+                                            imeBurstBuffer = null
+                                            // [dv25-B08] The pending snapshot is spent:
+                                            // whatever the field commits next is the
+                                            // authoritative text, so the ViewModel's
+                                            // pending copy must not outlive its flush
+                                            // (the `fix/ttfb-thinktag-composer` lesson).
+                                            viewModel.publishPendingComposerText(null)
+                                            if (flushed != null &&
+                                                shouldCommitImeBurst(flushed, inputText, inputFieldValue.text)
+                                            ) {
+                                                viewModel.setInputText(flushed)
+                                                viewModel.updateSlashMenuState(flushed)
+                                                // [fix/voice-ime-mention-scan] Sweep the
+                                                // @-mention scan into the same flush as the
+                                                // slash state. A voice/Pinyin burst arrives as
+                                                // dozens of large, space-less CJK edits; the old
+                                                // unconditional mention scan below was walking back
+                                                // from the caret to the text head (O(n)) on EVERY
+                                                // one of them, re-typing unchanged menu state.
+                                                // Folding it into the 150 ms flush keeps the scan
+                                                // semantics identical while collapsing N scans to 1.
+                                                viewModel.updateMentionMenuState(
+                                                    text = flushed,
+                                                    caret = imeBurstCaret.coerceIn(0, flushed.length),
+                                                )
+                                            }
                                         }
+                                    } else {
+                                        // [meta-audit-1028 C3/F-05] A concrete edit
+                                        // supersedes any buffered burst: its
+                                        // snapshot is older than what the user just
+                                        // typed, and its 150 ms flush would either
+                                        // be rejected later or (worse) publish a
+                                        // zombie pending copy that `New Chat` reads.
+                                        cancelPendingImeBurst()
+                                        viewModel.setInputText(tfv.text)
+                                        // [dv25-B08] No burst pending any more — the
+                                        // committed string IS the newest copy.
+                                        viewModel.publishPendingComposerText(null)
+                                        viewModel.updateSlashMenuState(tfv.text)
+                                        viewModel.updateMentionMenuState(
+                                            text = tfv.text,
+                                            caret = tfv.selection.end,
+                                        )
                                     }
                                 } else {
-                                    // [meta-audit-1028 C3/F-05] A concrete edit
-                                    // supersedes any buffered burst: its
-                                    // snapshot is older than what the user just
-                                    // typed, and its 150 ms flush would either
-                                    // be rejected later or (worse) publish a
-                                    // zombie pending copy that `New Chat` reads.
+                                    // [meta-audit-1028 C3/F-05] Reached only with no
+                                    // burst buffered (see the guard above), so the
+                                    // cancel is a no-op there — kept as the funnel's
+                                    // terminal state assertion: "no edit path exits
+                                    // with a live burst job or a pending VM copy".
                                     cancelPendingImeBurst()
-                                    viewModel.setInputText(tfv.text)
-                                    // [dv25-B08] No burst pending any more — the
-                                    // committed string IS the newest copy.
-                                    viewModel.publishPendingComposerText(null)
-                                    viewModel.updateSlashMenuState(tfv.text)
+                                    // Text unchanged, caret may have moved: the @-mention
+                                    // token/filter must still re-scan on a pure selection change
+                                    // (the only case that doesn't go through the branches above).
                                     viewModel.updateMentionMenuState(
                                         text = tfv.text,
                                         caret = tfv.selection.end,
                                     )
                                 }
-                            } else {
-                                // [meta-audit-1028 C3/F-05] Reached only with no
-                                // burst buffered (see the guard above), so the
-                                // cancel is a no-op there — kept as the funnel's
-                                // terminal state assertion: "no edit path exits
-                                // with a live burst job or a pending VM copy".
-                                cancelPendingImeBurst()
-                                // Text unchanged, caret may have moved: the @-mention
-                                // token/filter must still re-scan on a pure selection change
-                                // (the only case that doesn't go through the branches above).
-                                viewModel.updateMentionMenuState(
-                                    text = tfv.text,
-                                    caret = tfv.selection.end,
-                                )
-                            }
-                        },
+                                                    }
+},
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 25.dp)
@@ -2015,7 +2124,10 @@ internal fun ChatInputArea(
                     } else {
                         // Streaming with content → Send-into-queue; Idle with content → Send.
                         // Idle without text or attachments → disabled.
-                        val canActivate = hasContent
+                        // [feat/paste-fold-marker] ...and disabled while the
+                        // composer still holds a marker this session cannot
+                        // expand (the notice above the field explains it).
+                        val canActivate = hasContent && !pasteSendBlockedNow()
                         Box(
                             modifier = Modifier
                                 .size(38.dp)
@@ -2082,9 +2194,14 @@ internal fun ChatInputArea(
                     // and would commit the snapshot into the session the user just
                     // left (inputText is per-ViewModel) after the move cleared it.
                     cancelPendingImeBurst()
+                    // [feat/paste-fold-marker] `expandPastedText`: the paste
+                    // buffer is per-ViewModel, so a marker would arrive in the
+                    // target session with nothing to expand it (that session's
+                    // guard would then refuse to send). The TEXT travels; the
+                    // chips stay behind with the buffer they belong to.
                     ChatViewModelStore.stashPendingTransfer(
                         ChatViewModelStore.PendingTransfer(
-                            inputText = inputFieldValue.text,
+                            inputText = viewModel.expandPastedText(inputFieldValue.text),
                             attachments = viewModel.attachments.value,
                         ),
                     )
