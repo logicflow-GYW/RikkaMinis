@@ -131,18 +131,24 @@ fun expandPastePlaceholders(
 }
 
 /**
- * [feat/paste-fold-marker] Append every detached block to [text], in id order,
- * separated by one blank line (none when the body is empty).
+ * [feat/paste-fold-marker] Append every detached block to [text], in buffer
+ * order, separated by one blank line (none when the body is empty).
  *
- * Id order is paste order: the first block the user pasted into an empty field
- * reads first. The body — whatever the user typed afterwards — always comes
+ * Buffer order is paste order: [PastedText] rows are appended when pasted and
+ * only ever filtered, never reordered, so the first block the user pasted into
+ * an empty field reads first. Do NOT sort by id: [nextFreePasteId] recycles the
+ * smallest free id, so "delete #1, paste again" mints #1 again and an id sort
+ * would move the newest block in front of the older ones (fix/composer-paste-
+ * lifecycle — audit finding P1-A).
+ *
+ * The body — whatever the user typed afterwards — always comes
  * first, matching the "body, then material" shape of a message that carries
  * attachments. This is a fixed rule by design: a detached block has no caret
  * to remember, and inventing one (e.g. "insert at the offset where the paste
  * started") would silently move the user's own words when they edit above it.
  */
 fun appendUnlinkedPastes(text: String, buffer: List<PastedText>): String {
-    val detached = buffer.filter { !it.inlineMarker }.sortedBy { it.id }
+    val detached = buffer.filter { !it.inlineMarker }
     if (detached.isEmpty()) return text
     val out = StringBuilder(text)
     for (entry in detached) {

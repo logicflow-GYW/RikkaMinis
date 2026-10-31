@@ -175,9 +175,13 @@ class ComposerSendSwipeTest {
     @Test
     fun `negative control - a debounced-VM predicate fails the live-value probe`() {
         val original = source(inputFile)
+        // [fix/composer-paste-lifecycle] The predicate is a multi-line expression
+        // now, so aim at the single sub-expression that stays unique regardless
+        // of line wrapping — a whole-literal replace would silently skip this
+        // negative control (assumeTrue) and lose its teeth.
         val mutated = original.replace(
-            "inputFieldValue.text.isNotBlank() || attachments.isNotEmpty()",
-            "inputText.isNotBlank() || attachments.isNotEmpty()",
+            "inputFieldValue.text.isNotBlank() ||",
+            "inputText.isNotBlank() ||",
         )
         Assume.assumeTrue("the predicate body must exist to be rewritten", mutated != original)
         var failed = false
