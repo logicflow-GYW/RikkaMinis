@@ -143,4 +143,39 @@ class StorageBudgetTest {
         assertEquals("900 KB", StorageBudget.fmt(900 * 1024))
         assertEquals("42 B", StorageBudget.fmt(42))
     }
+
+    // ── F-A-03 cold-start restore ────────────────────────────────────────────
+
+    @Test
+    fun persistedSampleRestoresAfterProcessDeath() {
+        val u = StorageBudget.usageFromPersisted(
+            appBytes = 14L * gib,
+            shellBytes = 10L * gib,
+            freeBytes = 2L * gib,
+            totalBytes = 64L * gib,
+            sampledAt = 1_760_000_000_000L,
+        )
+        assertNotNull(u)
+        assertTrue("a 14 GiB app on a 6 GiB floor must read as over budget", u!!.overBudget)
+        assertEquals(10L * gib, u.shellBytes)
+        assertEquals(2L * gib, u.freeBytes)
+    }
+
+    @Test
+    fun aFailedWalkTimestampCarriesNoUsage() {
+        // The failure path stamps only the timestamp; the usage keys stay at
+        // their defaults (0) and must NOT restore a fake zero-cost sample.
+        assertNull(
+            StorageBudget.usageFromPersisted(
+                appBytes = 0L, shellBytes = 0L, freeBytes = 0L, totalBytes = 0L,
+                sampledAt = 1_760_000_000_000L,
+            ),
+        )
+        assertNull(
+            StorageBudget.usageFromPersisted(
+                appBytes = 14L * gib, shellBytes = 10L * gib, freeBytes = 2L * gib,
+                totalBytes = 64L * gib, sampledAt = 0L,
+            ),
+        )
+    }
 }

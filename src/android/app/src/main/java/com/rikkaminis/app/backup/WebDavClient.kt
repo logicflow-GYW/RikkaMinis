@@ -548,7 +548,15 @@ class WebDavClient(
                     when (name) {
                         "response" -> {
                             inResponse = true
-                            statusOk = true
+                            // [fix/composer-paste-lifecycle F-A-02] No reset
+                            // to `true` here. This line predated the
+                            // fail-closed declaration above and silently
+                            // cancelled it: a response with neither
+                            // `<propstat>` nor `<status>` (hand-rolled DAV
+                            // shims, S3 gateways) was read as "200 OK" again
+                            // — exactly the shape the declaration was
+                            // written to reject. Only an explicit
+                            // `<status>` (below) may set it.
                             href = null
                             displayName = null
                             contentLength = 0
