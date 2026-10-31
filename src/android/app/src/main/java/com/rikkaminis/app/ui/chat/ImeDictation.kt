@@ -2,6 +2,7 @@ package com.rikkaminis.app.ui.chat
 
 import android.content.Context
 import android.media.AudioManager
+import android.os.Build
 
 /**
  * [fix/ime-dictation-guard] Whether something is recording audio right now.
@@ -23,8 +24,15 @@ import android.media.AudioManager
  * the keyboard on screen.
  */
 internal object ImeDictation {
-    fun recordingActive(context: Context): Boolean = runCatching {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-        am?.activeRecordingConfigurations?.isNotEmpty() == true
-    }.getOrDefault(false)
+    fun recordingActive(context: Context): Boolean {
+        // Our minSdk is 26 but `activeRecordingConfigurations` only exists from
+        // API 29 — without this gate every drag on Android 8/9 throws
+        // NoSuchMethodError (swallowed below, but pointlessly). Upstream has a
+        // higher minSdk, which is why its copy has no gate.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        return runCatching {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            am?.activeRecordingConfigurations?.isNotEmpty() == true
+        }.getOrDefault(false)
+    }
 }

@@ -101,6 +101,11 @@ class ImeDictationGuardWiringTest {
                 "the keyboard on screen",
             body.contains("getOrDefault(false)"),
         )
+        assertTrue(
+            "ImeDictation must gate the API-29 read on the SDK level — our minSdk is 26, so on " +
+                "Android 8/9 the call throws NoSuchMethodError on every drag (swallowed, but pointless)",
+            body.contains("Build.VERSION.SDK_INT < Build.VERSION_CODES.Q"),
+        )
     }
 
     // ── tests ────────────────────────────────────────────────────────────────
