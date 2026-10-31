@@ -1652,4 +1652,12 @@
     <string name="paste_preview_title">Вставленный текст %1$s</string>
     <string name="paste_folded_summary">Свёрнуто: %1$d символов</string>
     <string name="paste_unresolved_notice">В этом черновике есть метка вставки, которую больше нельзя развернуть (%1$s). Отправка отключена — удалите метку, чтобы отправить.</string>
+    <string name="add_custom_model_error_model_id_exists">«%1$s» уже существует у этого провайдера. Выберите другой ID модели.</string>
+    <string name="modeldetail_error_model_id_exists">«%1$s» уже используется другой моделью этого провайдера. Выберите другой ID модели.</string>
+    <string name="storage_orphan_banner_blocked">Объектов: %1$d (%2$s) — похоже на остатки, но в базе данных сейчас нет бесед. Очистка заблокирована, чтобы не удалить данные, которые приложение больше не видит.</string>
+    <string name="webpreview_renderer_gone">Страница перестала отвечать, и система закрыла её представление.</string>
+    <string name="notif_storage_budget_channel_name">Бюджет хранилища</string>
+    <string name="notif_storage_budget_channel_description">Предупреждает, когда собственные данные приложения (оболочка песочницы, сеансы, медиа) превышают бюджет.</string>
+    <string name="notif_storage_budget_title">Приложение занимает много места</string>
+    <string name="notif_storage_budget_body">Приложение использует %1$s (бюджет %2$s). Нажмите, чтобы узнать, что занимает место.</string>
 </resources>

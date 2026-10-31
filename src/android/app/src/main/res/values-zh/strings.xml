@@ -1726,4 +1726,8 @@
     <string name="paste_preview_title">粘贴内容 %1$s</string>
     <string name="paste_folded_summary">已折叠 %1$d 字</string>
     <string name="paste_unresolved_notice">草稿中含有无法展开的粘贴标记（%1$s），发送已停用。删除该标记后即可发送。</string>
+    <string name="notif_storage_budget_channel_name">存储预算</string>
+    <string name="notif_storage_budget_channel_description">当本应用自身的数据（沙箱 shell、会话、媒体）超出预算时提醒。</string>
+    <string name="notif_storage_budget_title">本应用占用较多存储空间</string>
+    <string name="notif_storage_budget_body">本应用已使用 %1$s（预算 %2$s）。点按查看空间被什么占用。</string>
 </resources>

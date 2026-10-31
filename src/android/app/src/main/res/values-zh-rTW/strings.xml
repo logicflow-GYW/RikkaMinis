@@ -1703,4 +1703,8 @@
     <string name="paste_preview_title">貼上內容 %1$s</string>
     <string name="paste_folded_summary">已摺疊 %1$d 字</string>
     <string name="paste_unresolved_notice">草稿中含有無法展開的貼上標記（%1$s），傳送已停用。刪除該標記後即可傳送。</string>
+    <string name="notif_storage_budget_channel_name">儲存空間預算</string>
+    <string name="notif_storage_budget_channel_description">當本應用程式自身的資料（沙箱 shell、工作階段、媒體）超出預算時提醒。</string>
+    <string name="notif_storage_budget_title">本應用程式佔用較多儲存空間</string>
+    <string name="notif_storage_budget_body">本應用程式已使用 %1$s（預算 %2$s）。點按查看空間被什麼佔用。</string>
 </resources>
