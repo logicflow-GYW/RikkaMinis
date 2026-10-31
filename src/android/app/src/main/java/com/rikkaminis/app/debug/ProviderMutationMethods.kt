@@ -305,7 +305,13 @@ internal object ProviderMutationMethods {
         val key = repo.loadApiKey(id)?.let {
             com.rikkaminis.app.data.KeyRoulette.next(it, instance.id)
         }
-        val probeURL = providerProbeUrl(instance.providerType, baseURL, key, instance.azureMode)
+        val probeURL = providerProbeUrl(
+            instance.providerType,
+            baseURL,
+            key,
+            instance.azureMode,
+            instance.appendV1Suffix,
+        )
         val client = okhttp3.OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
             .readTimeout(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -1016,17 +1022,21 @@ internal fun providerProbeUrl(
     baseURL: String,
     key: String?,
     azureMode: Boolean = false,
+    appendV1Suffix: Boolean = true,
 ): String =
     when (type) {
         ProviderType.anthropic ->
             if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
         ProviderType.gemini -> "${GeminiBasePath.normalize(baseURL)}/models?key=" + (key ?: "")
-        // [F-B-01] Same constructor the models list uses. The probe used to
-        // hand-roll `…/v1/models`, which disagreed with the fetch path for
-        // Azure (empty path, query mangled) and for `appendV1Suffix=false`
-        // custom bases (an extra /v1 that 404s) — a healthy provider was then
-        // reported as "not a models endpoint".
-        ProviderType.openAI -> buildModelsURL(baseURL, azureMode)
+        // [F-B-01] Azure needs the path rewrite (`buildModelsURL` owns it: strips
+        // /v1, appends /openai, keeps the query). A plain custom base only needs
+        // /v1 when the instance actually appends it — forcing it on an
+        // `appendV1Suffix=false` relay probed `/relay/v1/models` while the
+        // models refresh of the SAME instance hit `/relay/models` and worked.
+        ProviderType.openAI ->
+            if (azureMode) buildModelsURL(baseURL, true)
+            else if (appendV1Suffix && !baseURL.endsWith("/v1")) "$baseURL/v1/models"
+            else "${baseURL.trimEnd('/')}/models"
         ProviderType.openRouter -> "$baseURL/models"
         // xAI exposes an OpenAI-compatible /models endpoint at the same base.
         ProviderType.xAI ->

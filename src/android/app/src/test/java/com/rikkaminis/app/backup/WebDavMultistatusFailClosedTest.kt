@@ -280,6 +280,11 @@ class WebDavMultistatusFailClosedTest {
     fun `a bare self response does not prove the collection exists`() {
         // MKCOL is skipped when the collection "exists"; a bare response must
         // not count as proof or the later PUT fails far from the cause.
-        assertNull(parseBody(bareEntry("/dav/RikkaMinis_backups/"), "/dav/RikkaMinis_backups"))
+        assertNull(
+            parseBody(
+                doc(bareEntry("/dav/RikkaMinis_backups/")),
+                "/dav/RikkaMinis_backups",
+            ),
+        )
     }
 }
