@@ -1278,13 +1278,17 @@ internal fun ChatInputArea(
                 // (iOS: 64×64 squares): both are content held outside the field
                 // and both use the same chip geometry, so two rows would read as
                 // two different kinds of thing.
-                // [feat/paste-fold-marker] A paste is listed only while its
-                // marker is still in the field — the buffer row is data, the
-                // literal in the text is the reference. That is what keeps a
-                // sent or cleared composer from leaving a chip behind, without
-                // any extra clearing bookkeeping on the dozens of paths that
-                // rewrite the composer from outside.
-                val visiblePastes = pastedTexts.filter { inputFieldValue.text.contains(it.placeholder) }
+                // [feat/paste-fold-marker] Two kinds of row live in this list:
+                //  - inline: listed only while its `[Pasted#N]` literal is still
+                //    in the field — the literal is the reference, so a sent or
+                //    cleared composer drops the chip with no extra bookkeeping.
+                //  - detached: pasted into an EMPTY field, so there is no
+                //    literal at all; it stays listed until the user removes it
+                //    or sends (send appends it after the body). Same lifetime
+                //    as an attachment chip, which also survives a cleared text.
+                val visiblePastes = pastedTexts.filter {
+                    !it.inlineMarker || inputFieldValue.text.contains(it.placeholder)
+                }
                 if (attachments.isNotEmpty() || visiblePastes.isNotEmpty()) {
                     LazyRow(
                         modifier = Modifier
@@ -1586,7 +1590,9 @@ internal fun ChatInputArea(
                                 val tfv = foldLongPasteIfNeeded(
                                     old = inputFieldValue,
                                     new = tfv,
-                                    stash = { pasted -> viewModel.stashPastedText(pasted) },
+                                    stash = { pasted, inlineMarker ->
+                                        viewModel.stashPastedText(pasted, inlineMarker)
+                                    },
                                 )
                                 // [T-android-enter-to-send-multiline] Root cause:
                                 // the composer is a multi-line BasicTextField

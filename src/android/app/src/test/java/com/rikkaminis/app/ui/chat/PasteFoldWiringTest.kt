@@ -162,11 +162,12 @@ class PasteFoldWiringTest {
         assertTrue(body.contains("expandPastePlaceholders(raw, buffer)"))
         assertTrue(
             "consumed ids must be dropped from the buffer",
-            body.contains("filterNot { it.id in consumed }"),
+            body.contains("filterNot { it.id in consumed || it.id in detachedIds }"),
         )
         assertTrue(
-            "the marker-less fast path must not touch the buffer",
-            body.contains("if (buffer.isEmpty() || !raw.contains('#')) return raw"),
+            "the no-marker and no-detached-block fast paths must not touch the buffer",
+            body.contains("if (buffer.isEmpty()) return raw") &&
+                body.contains("if (consumed.isEmpty() && detachedIds.isEmpty()) return raw"),
         )
     }
 
@@ -217,10 +218,20 @@ class PasteFoldWiringTest {
             "the adopted literals must come from the pure detector",
             adopt.contains("unexpandedPasteMarkers(restored, _pastedTexts.value)"),
         )
+        // The stale-id defence moved with the allocation scheme: ids are handed
+        // out from the smallest FREE value, and a literal still on screen counts
+        // as used — so a restored orphan can never be given to a fresh paste.
         assertTrue(
-            "nextPasteId must move past every restored id, or a fresh paste would take " +
-                "over a stale marker and expand to the WRONG text",
-            adopt.contains("nextPasteId = maxId + 1"),
+            "allocation must reserve every id still mentioned by a literal on screen, or " +
+                "a fresh paste would take over a stale marker and expand to the WRONG text",
+            viewModel.contains("used += pasteMarkerIdsIn(_inputText.value)"),
+        )
+        assertTrue(
+            "the adopted orphan set itself must be reserved too (draft restored into an " +
+                "already-buffered composer)",
+            viewModel.contains(
+                "used += orphanPasteMarkers.mapNotNullTo(mutableSetOf()) { pasteMarkerId(it) }",
+            ),
         )
         val restore = viewModel.indexOf("ComposerDraftStore.restoreText(context, sessionId)")
         val call = viewModel.indexOf("adoptRestoredDraftPasteMarkers(restored)")
@@ -235,12 +246,13 @@ class PasteFoldWiringTest {
     // ── chip row / preview ───────────────────────────────────────────────────
 
     @Test
-    fun `a chip is shown only while its marker is still in the composer`() {
+    fun `a chip is shown while its marker is in the composer, or always when detached`() {
         assertTrue(
-            "chips must be filtered by marker presence — that is what keeps a sent / " +
+            "inline chips must be filtered by marker presence — that is what keeps a sent / " +
                 "cleared composer from leaving an orphan chip without any extra " +
-                "bookkeeping on the dozens of outside composer writers",
-            inputArea.contains("pastedTexts.filter { inputFieldValue.text.contains(it.placeholder) }"),
+                "bookkeeping on the dozens of outside composer writers. Detached pastes " +
+                "(no literal by design) stay listed until the user removes them or sends.",
+            inputArea.contains("!it.inlineMarker || inputFieldValue.text.contains(it.placeholder)"),
         )
         val pasteItems = inputArea.indexOf("items(visiblePastes")
         assertTrue("the paste chip items block must exist", pasteItems >= 0)

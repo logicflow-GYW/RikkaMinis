@@ -28,18 +28,28 @@ class PasteTextBufferTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    private fun fold(old: String, new: String, ids: (String) -> String): TextFieldValue =
+    private fun fold(
+        old: String,
+        new: String,
+        stash: (String, Boolean) -> String?,
+    ): TextFieldValue =
         foldLongPasteIfNeeded(
             old = TextFieldValue(old, TextRange(old.length)),
             new = TextFieldValue(new, TextRange(new.length)),
-            stash = ids,
+            stash = stash,
         )
 
-    private fun sequentialStash(): Pair<(String) -> String, MutableList<String>> {
+    /**
+     * Mirrors the ViewModel: an inline paste gets a marker, a detached one
+     * (empty field) is stored but yields null, which is what keeps the field
+     * empty. Ids follow paste order, like the smallest-free-value allocator
+     * would for a fresh buffer.
+     */
+    private fun sequentialStash(): Pair<(String, Boolean) -> String?, MutableList<String>> {
         val stored = mutableListOf<String>()
-        val mint: (String) -> String = { text ->
+        val mint: (String, Boolean) -> String? = { text, inlineMarker ->
             stored += text
-            PastedText.placeholderFor(stored.size)
+            if (inlineMarker) PastedText.placeholderFor(stored.size) else null
         }
         return mint to stored
     }
@@ -155,18 +165,41 @@ class PasteTextBufferTest {
     @Test
     fun `two pastes mint increasing ids and never touch the first marker`() {
         val (mint, stored) = sequentialStash()
-        val first = fold("", cjkChars(1300), mint)
-        assertEquals("[Pasted#1]", first.text)
+        val first = fold("note: ", "note: " + cjkChars(1300), mint)
+        assertEquals("note: [Pasted#1]", first.text)
         val second = fold(first.text + " and ", first.text + " and " + cjkChars(1400), mint)
-        assertEquals("[Pasted#1] and [Pasted#2]", second.text)
+        assertEquals("note: [Pasted#1] and [Pasted#2]", second.text)
         assertEquals(2, stored.size)
         assertTrue(stored[0].length < stored[1].length)
     }
 
     @Test
+    fun `a paste into an empty field leaves the composer empty and writes no marker`() {
+        // The user's main case: paste a wall of text into a blank composer.
+        // Nothing may appear in the field — the chip row is the only trace.
+        val (mint, stored) = sequentialStash()
+        val block = cjkChars(1300)
+        val out = fold("", block, mint)
+
+        assertEquals("", out.text)
+        assertEquals(TextRange(0), out.selection)
+        assertEquals(block, stored.single())
+    }
+
+    @Test
+    fun `a detached paste is only allowed when the field was empty`() {
+        // Same block, one character of draft: the literal comes back, because
+        // now the caret position is something the user chose.
+        val (mint, stored) = sequentialStash()
+        val out = fold("x", "x" + cjkChars(1300), mint)
+        assertEquals("x[Pasted#1]", out.text)
+        assertEquals(1, stored.size)
+    }
+
+    @Test
     fun `short insertions are returned untouched and stash nothing`() {
         var calls = 0
-        val mint: (String) -> String = { calls++; "[Pasted#9]" }
+        val mint: (String, Boolean) -> String? = { _, _ -> calls++; "[Pasted#9]" }
         val cases = listOf(
             "" to "hello",
             "abc" to "abcd",
@@ -182,7 +215,7 @@ class PasteTextBufferTest {
 
     @Test
     fun `deletions and caret-only changes pass through`() {
-        val out = fold(cjkChars(2000), cjkChars(1500)) { error("must not stash on delete") }
+        val out = fold(cjkChars(2000), cjkChars(1500)) { _, _ -> error("must not stash on delete") }
         assertEquals(cjkChars(1500), out.text)
     }
 
@@ -190,7 +223,7 @@ class PasteTextBufferTest {
     fun `an edit with equal length but different content does not fold`() {
         // delta == 0 → cheap gate. Multi-character replacement of the same
         // length is not a paste and must not be re-labelled as one.
-        val out = fold("aaaa", "bbbb") { error("must not stash on a same-length edit") }
+        val out = fold("aaaa", "bbbb") { _, _ -> error("must not stash on a same-length edit") }
         assertEquals("bbbb", out.text)
     }
 
@@ -201,7 +234,7 @@ class PasteTextBufferTest {
         // edit, not a paste, and must not be re-labelled as one.
         val old = "abcd".repeat(400)
         val new = cjkChars(1600)
-        val out = fold(old, new) { error("must not stash a same-length rewrite") }
+        val out = fold(old, new) { _, _ -> error("must not stash a same-length rewrite") }
         assertEquals(new, out.text)
     }
 
@@ -370,5 +403,54 @@ class PasteTextBufferTest {
         assertNull(pasteMarkerId("[Pasted#]"))
         assertEquals("[Pasted#7]", PastedText(7, "x").placeholder)
         assertEquals("x".length, PastedText(7, "x").charCount)
+    }
+
+    // ── detached blocks: appendUnlinkedPastes ────────────────────────────────
+
+    @Test
+    fun `detached blocks append after the body in id order`() {
+        val buffer = listOf(
+            PastedText(1, "first block", inlineMarker = false),
+            PastedText(2, "inline block"),
+            PastedText(3, "second block", inlineMarker = false),
+        )
+        assertEquals(
+            "\u5206\u6790\u4e00\u4e0b\n\nfirst block\n\nsecond block",
+            appendUnlinkedPastes("\u5206\u6790\u4e00\u4e0b", buffer),
+        )
+    }
+
+    @Test
+    fun `an empty body gets no leading separator`() {
+        val buffer = listOf(PastedText(1, "only", inlineMarker = false))
+        assertEquals("only", appendUnlinkedPastes("", buffer))
+    }
+
+    @Test
+    fun `a buffer with no detached blocks leaves the text alone`() {
+        assertEquals("plain", appendUnlinkedPastes("plain", listOf(PastedText(1, "x"))))
+        assertEquals("", appendUnlinkedPastes("", emptyList()))
+    }
+
+    // ── id allocation ───────────────────────────────────────────────────────
+
+    @Test
+    fun `ids are reused from the smallest free value`() {
+        assertEquals(1, nextFreePasteId(emptySet()))
+        assertEquals(2, nextFreePasteId(setOf(1)))
+        assertEquals(1, nextFreePasteId(setOf(2)))
+        assertEquals(3, nextFreePasteId(setOf(1, 2)))
+        assertEquals(2, nextFreePasteId(setOf(1, 3)))
+    }
+
+    @Test
+    fun `ids reserved by literals still on screen are skipped`() {
+        // A restored draft's orphan literal keeps #1 reserved even with an
+        // empty buffer: reusing it would expand the stale literal to the new
+        // block's text.
+        val used = pasteMarkerIdsIn("[Pasted#1] and [Pasted#3]")
+        assertEquals(setOf(1, 3), used)
+        assertEquals(2, nextFreePasteId(used))
+        assertEquals(emptySet<Int>(), pasteMarkerIdsIn("no markers [Pasted#] [pasted#x]"))
     }
 }

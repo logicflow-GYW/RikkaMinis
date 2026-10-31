@@ -5,18 +5,30 @@ import androidx.compose.ui.text.input.TextFieldValue
 
 /**
  * [feat/paste-fold-marker] A long block of text the user pasted, held out of
- * the composer and represented there by a `[Pasted#N]` literal.
+ * the composer and represented there by either a `[Pasted#N]` literal
+ * ([inlineMarker] = true) or by nothing at all ([inlineMarker] = false).
  *
  * Pasting a wall of text used to dump the whole thing into the input field:
  * the caret fell off the bottom, the field scrolled for pages, and the rest of
- * the draft became invisible. The text now lives here and the composer shows a
- * short marker instead; [expandPastePlaceholders] puts it back at send time, so
- * the model and the stored history both see the full text and nothing about the
- * wire format changes.
+ * the draft became invisible. The text now lives here; [expandPastePlaceholders]
+ * puts it back at send time, so the model and the stored history both see the
+ * full text and nothing about the wire format changes.
  *
- * Ported from `ui/chat/PastedTextBuffer.kt` in OpenMinis 1.15 (the same
- * `[Pasted#N]` contract), minus the >15 KB "turn it into a .txt attachment"
- * arm — see the FEAT-PASTE-FOLD report for what was deliberately left out.
+ * Two shapes, because the composer has two jobs for a paste:
+ *
+ *  - **Inline ([inlineMarker] = true)** — the field already held text, so the
+ *    paste landed at a caret position the user chose. A `[Pasted#N]` literal
+ *    stays in the text to remember that position; deleting the literal is how
+ *    the user un-inserts the block.
+ *  - **Detached ([inlineMarker] = false)** — the field was EMPTY when the paste
+ *    arrived, which is the common case ("paste a report, then say what to do
+ *    with it"). There is no position worth remembering, so the composer stays
+ *    visually empty and the chip row is the only trace. On send the block is
+ *    appended after the typed text, separated by a blank line — the same
+ *    "body + material" order as a message with an attachment. Fixing the order
+ *    here (rather than guessing a caret) is why this arm needs no marker at
+ *    all: a literal in the field the user can neither read nor delete is
+ *    exactly the noise this arm removes.
  *
  * MEMORY-ONLY, per ViewModel (i.e. per session). Unlike upstream, our composer
  * text IS persisted ([com.rikkaminis.app.data.ComposerDraftStore]), so the two
@@ -27,10 +39,22 @@ import androidx.compose.ui.text.input.TextFieldValue
  * the mismatch is handled fail-closed at the composer: [unexpandedPasteMarkers]
  * is non-empty ⇒ the UI disables sending and says why. Nothing is lost and no
  * half-persisted state can exist.
+ *
+ * A detached block has no such guard (there is no literal to notice), so a
+ * process death between the paste and the send drops it silently. Accepted:
+ * the window is one draft, and the alternative — writing a literal the user
+ * just told us is noise — trades a rare, obvious-in-retrospect loss for an
+ * everyday annoyance. Registered in the feature report.
  */
 data class PastedText(
     val id: Int,
     val text: String,
+    /**
+     * `true` ⇒ a `[Pasted#N]` literal sits in the composer and this entry is
+     * expanded in place. `false` ⇒ nothing sits in the composer and this entry
+     * is appended after the message body on send.
+     */
+    val inlineMarker: Boolean = true,
 ) {
     /** Marker written into the composer for this entry. */
     val placeholder: String get() = placeholderFor(id)
@@ -75,6 +99,10 @@ private val PASTE_PLACEHOLDER_REGEX = Regex("""\[[Pp]asted#(\d+)]""")
  * deleted from the buffer but left the marker for (the composer-side guard in
  * [unexpandedPasteMarkers] is what stops that one from being sent silently).
  *
+ * Detached entries ([PastedText.inlineMarker] = false) are not consulted here
+ * at all — they have no literal to match, and [appendUnlinkedPastes] is what
+ * puts them back.
+ *
  * @return the expanded text plus the ids that were actually consumed, so the
  *   caller can drop exactly those entries and leave orphans alone.
  */
@@ -84,7 +112,8 @@ fun expandPastePlaceholders(
 ): Pair<String, Set<Int>> {
     if (text.isEmpty() || buffer.isEmpty()) return text to emptySet()
     if (!text.contains('#')) return text to emptySet()
-    val byId = buffer.associateBy { it.id }
+    val byId = buffer.filter { it.inlineMarker }.associateBy { it.id }
+    if (byId.isEmpty()) return text to emptySet()
     val consumed = mutableSetOf<Int>()
     val out = StringBuilder(text.length)
     var cursor = 0
@@ -99,6 +128,28 @@ fun expandPastePlaceholders(
     if (consumed.isEmpty()) return text to emptySet()
     out.append(text, cursor, text.length)
     return out.toString() to consumed
+}
+
+/**
+ * [feat/paste-fold-marker] Append every detached block to [text], in id order,
+ * separated by one blank line (none when the body is empty).
+ *
+ * Id order is paste order: the first block the user pasted into an empty field
+ * reads first. The body — whatever the user typed afterwards — always comes
+ * first, matching the "body, then material" shape of a message that carries
+ * attachments. This is a fixed rule by design: a detached block has no caret
+ * to remember, and inventing one (e.g. "insert at the offset where the paste
+ * started") would silently move the user's own words when they edit above it.
+ */
+fun appendUnlinkedPastes(text: String, buffer: List<PastedText>): String {
+    val detached = buffer.filter { !it.inlineMarker }.sortedBy { it.id }
+    if (detached.isEmpty()) return text
+    val out = StringBuilder(text)
+    for (entry in detached) {
+        if (out.isNotEmpty()) out.append("\n\n")
+        out.append(entry.text)
+    }
+    return out.toString()
 }
 
 /**
@@ -136,11 +187,47 @@ fun unexpandedPasteMarkers(
 }
 
 /**
+ * [feat/paste-fold-marker] Every id mentioned by a marker literal in [text].
+ *
+ * Id allocation consults this so a freshly minted id can never collide with a
+ * literal that is still on screen — including the orphan of a restored draft,
+ * whose buffer row died with the process. Reusing that id would make the stale
+ * literal expand to the NEW block: content the user never placed there.
+ */
+fun pasteMarkerIdsIn(text: String): Set<Int> {
+    if (text.isEmpty() || !text.contains('#')) return emptySet()
+    return PASTE_PLACEHOLDER_REGEX.findAll(text)
+        .mapNotNull { it.groupValues[1].toIntOrNull() }
+        .toSet()
+}
+
+/**
+ * [feat/paste-fold-marker] Smallest positive id that is not in [used].
+ *
+ * Reuse, not monotonic growth: ids exist only to pair a marker with its block,
+ * so an id that no buffer row and no on-screen literal references is free.
+ * Growing forever made "delete #1, paste again → #2" look like the app was
+ * counting the user's pastes, which is exactly the kind of bookkeeping that
+ * leaks into the UI for no benefit.
+ *
+ * Collisions with a marker still in the text (an orphan from a restored draft)
+ * are avoided by the caller including [pasteMarkerIdsIn] in [used].
+ */
+fun nextFreePasteId(used: Set<Int>): Int {
+    var id = 1
+    while (id in used) id++
+    return id
+}
+
+/**
  * [feat/paste-fold-marker] Drop every occurrence of [id]'s marker from [text].
  *
  * Called from the chip's delete button, in the same edit that drops the buffer
  * entry, so the text and the buffer can never disagree. Exact-literal match:
  * deleting `#2` cannot disturb `#20`, because the trailing `]` makes it exact.
+ *
+ * A detached entry has no literal, so this is a no-op for it — the caller can
+ * run the same path for both kinds without branching.
  */
 fun removePasteMarker(text: String, id: Int): String =
     if (text.isEmpty() || !text.contains('#')) text
@@ -188,10 +275,19 @@ fun isLongPastedText(inserted: String): Boolean {
 
 /**
  * [feat/paste-fold-marker] If [new] differs from [old] by one large inserted
- * run, replace that run with a `[Pasted#N]` marker.
+ * run, hand that run to [stash] and replace it with whatever marker comes back.
  *
  * Returns [new] unchanged when the edit is not a big insertion, so ordinary
  * typing, deleting and IME composition flow through untouched.
+ *
+ * Two shapes, chosen by whether the field already held text:
+ *
+ *  - **Field empty** → `stash(inserted, inlineMarker = false)` and the block
+ *    leaves the text entirely; the composer stays empty. Null marker is the
+ *    signal for that arm (a detached paste has nothing to write).
+ *  - **Field non-empty** → `stash(inserted, inlineMarker = true)` and the
+ *    returned `[Pasted#N]` literal takes the run's place, remembering the
+ *    caret position the user pasted into.
  *
  * How the inserted span is located: common prefix from the left, common suffix
  * from the right, and whatever remains in the middle is what changed. That
@@ -218,12 +314,12 @@ fun isLongPastedText(inserted: String): Boolean {
  *    worth folding whichever way it arrived.
  *  - A multi-run edit (rare: some autocorrect implementations) falls back to
  *    treating the whole middle as one span, which is still correct — the user
- *    sees one marker for one large change.
+ *    sees one marker (or one chip) for one large change.
  */
 fun foldLongPasteIfNeeded(
     old: TextFieldValue,
     new: TextFieldValue,
-    stash: (String) -> String,
+    stash: (text: String, inlineMarker: Boolean) -> String?,
 ): TextFieldValue {
     val oldText = old.text
     val newText = new.text
@@ -249,7 +345,16 @@ fun foldLongPasteIfNeeded(
     val inserted = newText.substring(insertedStart, insertedEnd)
     if (!isLongPastedText(inserted)) return new
 
-    val marker = stash(inserted)
+    // An empty field is the "paste the material, then say what to do with it"
+    // case: there is no position worth remembering, so the block stays out of
+    // the text and the composer reads as empty.
+    val allowInlineMarker = oldText.isNotEmpty()
+    val marker = stash(inserted, allowInlineMarker)
+    if (marker == null) {
+        // Detached: the inserted run never reaches the field.
+        val caret = minOf(insertedStart, oldText.length)
+        return TextFieldValue(text = oldText, selection = TextRange(caret))
+    }
     val folded = newText.substring(0, insertedStart) + marker + newText.substring(insertedEnd)
     // Caret goes just after the marker — where the user's next keystroke
     // belongs, and what they would expect had they typed the marker by hand.
