@@ -238,16 +238,15 @@ internal fun ChatInputArea(
     // subscription written after its consumer).
     val clearComposerInput: () -> Unit = {
         cancelPendingImeBurst()
-        // [fix/composer-paste-lifecycle] Clearing the TEXT must clear the paste
-        // buffer too. A detached entry has no literal in the field, so the chip
-        // outlives the text it was pasted for and rides into the NEXT message
-        // (audit P1-C: clear-chat confirmed → material sent anyway). Inline
-        // entries become orphans the moment their marker leaves the text, and
-        // an orphan keeps reserving its id forever.
-        viewModel.clearPastedText()
         viewModel.setInputText("")
         inputFieldValue = androidx.compose.ui.text.input.TextFieldValue("")
         lastTrueCaretEnd = 0
+        // [fix/composer-paste-lifecycle] The text is not the whole composer: a
+        // detached paste has no literal in the field, so its chip would outlive
+        // the text and ride into the NEXT message (audit P1-C: clear-chat
+        // confirmed → material sent anyway). Inline entries become orphans the
+        // moment their marker leaves, and an orphan reserves its id forever.
+        viewModel.clearPastedText()
         // [meta-audit-1028 C3/F-04] Every clear entrance is a send / cancel —
         // the message leaves the composer, and the pickers that were floating
         // over it must leave with it. Neither `setInputText("")` nor the field
@@ -1325,17 +1324,10 @@ internal fun ChatInputArea(
                             PastedTextChip(
                                 pasted = pasted,
                                 onRemove = {
-                                    // Drop the buffer row and strip its marker
-                                    // in the SAME edit (through the composer
-                                    // funnel, which also kills a pending IME
-                                    // burst so the snapshot cannot re-add the
-                                    // literal). Exact-literal strip: removing
-                                    // #2 cannot disturb #20.
-                                    //
-                                    // [fix/composer-paste-lifecycle] A detached
-                                    // entry has no literal, so re-committing the
-                                    // unchanged text would only recompute the
-                                    // caret under the user's fingers (audit P3-F).
+                                    // Same edit: strip the literal through the
+                                    // composer funnel (kills a pending IME burst
+                                    // so the snapshot cannot re-add it). Detached
+                                    // entries have no literal (audit P3-F).
                                     viewModel.removePastedText(pasted.id)
                                     if (pasted.inlineMarker) {
                                         commitComposerBody(
