@@ -941,12 +941,14 @@ class ChatViewModel(
     val pastedTexts: StateFlow<List<PastedText>> = _pastedTexts.asStateFlow()
 
     /**
-     * Next marker number. Monotonic for the ViewModel's lifetime and never
-     * reused, even after entries are consumed or deleted: a recycled id would
-     * let a stale marker ("I pasted, deleted the chip, then pasted again")
-     * silently expand to the WRONG text. Numbers are cheap.
+     * Ids are allocated on demand from the smallest FREE value (see
+     * [nextFreePasteId]): an id is free once no buffer row and no literal on
+     * screen references it. Monotonic growth made "delete #1, paste again →
+     * #2" read as the app counting the user's pastes — visible bookkeeping
+     * with no benefit. The collision that made monotonic growth tempting (a
+     * stale literal of a restored draft) is handled by [pasteMarkerIdsIn]:
+     * literals still on screen count as used.
      */
-    private var nextPasteId: Int = 1
 
     /**
      * [feat/paste-fold-marker] Markers that came back inside a RESTORED draft
@@ -983,37 +985,56 @@ class ChatViewModel(
 
     /**
      * [feat/paste-fold-marker] Record the unexpandable markers of a restored
-     * draft and push [nextPasteId] past every id they mention.
+     * draft so the composer can refuse to send them.
      *
-     * The id bump is the part that prevents silent corruption: the restored
-     * `[Pasted#1]` must not be reused by the next paste, or that marker would
-     * expand to the NEW block's text — content the user never placed there.
+     * Their ids are never handed out again: [stashPastedText] counts the
+     * literals still on screen as used, so a fresh paste cannot take over a
+     * restored `[Pasted#1]` and make that stale literal expand to the NEW
+     * block's text — content the user never placed there.
      */
     private fun adoptRestoredDraftPasteMarkers(restored: String) {
         val orphans = unexpandedPasteMarkers(restored, _pastedTexts.value)
         if (orphans.isEmpty()) return
         orphanPasteMarkers = orphans.toSet()
-        val maxId = orphans.mapNotNull { pasteMarkerId(it) }.maxOrNull() ?: 0
-        if (maxId >= nextPasteId) nextPasteId = maxId + 1
         AppLogger.warning(
             TAG,
             "[Paste] restored draft carries ${orphans.size} unexpandable marker(s) " +
-                "→ send disabled until deleted; next id=$nextPasteId",
+                "→ send disabled until deleted",
         )
     }
 
     /**
-     * [feat/paste-fold-marker] Buffer [text] and return the marker to put in
-     * the composer in its place. Called from the composer's onValueChange via
-     * [foldLongPasteIfNeeded], which runs BEFORE the IME-burst debounce — the
-     * fold has to happen while the text is still short, or the 150 ms flush
-     * would write the raw block back over the marker.
+     * [feat/paste-fold-marker] Buffer [text] and, when the composer is to keep
+     * a literal for it, return the marker to put in the field.
+     *
+     * Called from the composer's onValueChange via [foldLongPasteIfNeeded],
+     * which runs BEFORE the IME-burst debounce — the fold has to happen while
+     * the text is still short, or the 150 ms flush would write the raw block
+     * back over the marker.
+     *
+     * @param inlineMarker `false` for a paste into an EMPTY field: no literal
+     *   is written and null is returned, so the composer stays visually clean
+     *   and the chip row is the only trace. `true` keeps the current
+     *   `[Pasted#N]`-in-text contract for a paste into existing text.
      */
-    fun stashPastedText(text: String): String {
-        val entry = PastedText(id = nextPasteId++, text = text)
+    fun stashPastedText(text: String, inlineMarker: Boolean): String? {
+        val used = _pastedTexts.value.mapTo(mutableSetOf()) { it.id }
+        // Literals still on screen stay reserved even when their row is gone
+        // (a restored draft's orphan): reusing the id would expand the stale
+        // literal to this new block.
+        used += pasteMarkerIdsIn(_inputText.value)
+        used += orphanPasteMarkers.mapNotNullTo(mutableSetOf()) { pasteMarkerId(it) }
+        val entry = PastedText(
+            id = nextFreePasteId(used),
+            text = text,
+            inlineMarker = inlineMarker,
+        )
         _pastedTexts.value = _pastedTexts.value + entry
-        AppLogger.info(TAG, "[Paste] stashed #${entry.id} (${text.length} chars)")
-        return entry.placeholder
+        AppLogger.info(
+            TAG,
+            "[Paste] stashed #${entry.id} (${text.length} chars, inline=$inlineMarker)",
+        )
+        return if (inlineMarker) entry.placeholder else null
     }
 
     /**
@@ -1027,23 +1048,36 @@ class ChatViewModel(
 
     /**
      * [feat/paste-fold-marker] Expand every marker this session can resolve,
-     * then drop exactly the entries that were consumed.
+     * append every detached block after the body, then drop exactly the
+     * entries that were consumed.
      *
      * Clearing eagerly (here) rather than at the dispatch point is safe because
      * every early return in [sendMessage] that keeps the user's text puts the
      * EXPANDED string back in the composer or in a stash — no path re-derives
      * from the raw composer text, so nothing is left pointing at a dead entry.
      * Orphan entries (buffer rows whose marker was deleted by hand) are left
-     * alone: they are harmless and the ids are never reused.
+     * alone: they are harmless, and their ids only come back once no literal
+     * on screen references them ([pasteMarkerIdsIn] keeps that reservation).
      */
     internal fun expandPastedText(raw: String): String {
         val buffer = _pastedTexts.value
-        if (buffer.isEmpty() || !raw.contains('#')) return raw
-        val (expanded, consumed) = expandPastePlaceholders(raw, buffer)
-        if (consumed.isEmpty()) return raw
-        _pastedTexts.value = _pastedTexts.value.filterNot { it.id in consumed }
-        AppLogger.info(TAG, "[Paste] expanded ${consumed.size} block(s) on send")
-        return expanded
+        if (buffer.isEmpty()) return raw
+        val (expanded, consumed) = if (raw.contains('#')) {
+            expandPastePlaceholders(raw, buffer)
+        } else {
+            raw to emptySet()
+        }
+        // Detached blocks were pasted into an empty field: no literal exists for
+        // them, so they ride after the typed body (see [appendUnlinkedPastes]).
+        val detachedIds = buffer.filter { !it.inlineMarker }.mapTo(mutableSetOf()) { it.id }
+        if (consumed.isEmpty() && detachedIds.isEmpty()) return raw
+        val out = appendUnlinkedPastes(expanded, buffer)
+        _pastedTexts.value = _pastedTexts.value.filterNot { it.id in consumed || it.id in detachedIds }
+        AppLogger.info(
+            TAG,
+            "[Paste] expanded ${consumed.size} marker(s) + ${detachedIds.size} detached block(s) on send",
+        )
+        return out
     }
 
     /**
