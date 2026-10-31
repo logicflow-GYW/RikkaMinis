@@ -36,6 +36,10 @@ object StorageBudget {
     internal const val KEY_LAST_SAMPLE_AT = "lastSampleAt"
     internal const val KEY_LAST_NOTIFIED_AT = "lastNotifiedAt"
     internal const val KEY_LAST_NOTIFIED_BYTES = "lastNotifiedBytes"
+    internal const val KEY_USAGE_APP = "usageAppBytes"
+    internal const val KEY_USAGE_SHELL = "usageShellBytes"
+    internal const val KEY_USAGE_FREE = "usageFreeBytes"
+    internal const val KEY_USAGE_TOTAL = "usageTotalBytes"
 
     /**
      * Warning floor: 6 GiB. A freshly installed app with a bare rootfs sits
@@ -167,11 +171,23 @@ object StorageBudget {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
         val last = prefs.getLong(KEY_LAST_SAMPLE_AT, 0L)
+        // [fix/composer-paste-lifecycle F-A-03] Restore BEFORE the freshness
+        // gate. The old flow only wrote the in-memory sample on the process
+        // that actually sampled, so after the (very common) process recycle
+        // every later process read cachedUsage == null and the agent — and the
+        // notifier — lost its own bill for the rest of the day.
+        if (cachedUsage == null) cachedUsage = restoreUsage(prefs, last)
         if (last > 0L && now - last < SAMPLE_INTERVAL_MS) return
         try {
             val usage = sample(context)
             cachedUsage = usage
-            prefs.edit().putLong(KEY_LAST_SAMPLE_AT, now).apply()
+            prefs.edit()
+                .putLong(KEY_LAST_SAMPLE_AT, now)
+                .putLong(KEY_USAGE_APP, usage.appBytes)
+                .putLong(KEY_USAGE_SHELL, usage.shellBytes)
+                .putLong(KEY_USAGE_FREE, usage.freeBytes)
+                .putLong(KEY_USAGE_TOTAL, usage.totalBytes)
+                .apply()
             AppLogger.info(
                 TAG,
                 "sample app=${fmt(usage.appBytes)} shell=${fmt(usage.shellBytes)} " +
@@ -192,6 +208,55 @@ object StorageBudget {
             prefs.edit().putLong(KEY_LAST_SAMPLE_AT, now).apply()
             AppLogger.warning(TAG, "sample failed: ${t.message}")
         }
+    }
+
+    /**
+     * [fix/composer-paste-lifecycle F-A-03] Rebuild the in-memory sample from
+     * the persisted one. Returns null when nothing usable is on file (no
+     * sample ever taken, or a failed walk — its timestamp write carries no
+     * usage numbers, so `usageTotalBytes` stays 0).
+     *
+     * Deliberately does NOT check freshness: the caller's 24h gate already
+     * decided this sample is the freshest fact we have, and a 20-hour-old
+     * bill is still a far better answer than "no idea" for the dozens of
+     * processes this app spawns per day.
+     */
+    private fun restoreUsage(prefs: android.content.SharedPreferences, sampledAt: Long): Usage? =
+        usageFromPersisted(
+            appBytes = prefs.getLong(KEY_USAGE_APP, 0L),
+            shellBytes = prefs.getLong(KEY_USAGE_SHELL, 0L),
+            freeBytes = prefs.getLong(KEY_USAGE_FREE, 0L),
+            totalBytes = prefs.getLong(KEY_USAGE_TOTAL, 0L),
+            sampledAt = sampledAt,
+        )
+
+    /**
+     * [fix/composer-paste-lifecycle F-A-03] Pure half of the cold-start
+     * restore: persisted numbers → the in-memory sample. Returns null when
+     * nothing usable is on file (no sample ever taken, or a failed walk — its
+     * timestamp write carries no usage numbers, so `totalBytes` stays 0).
+     *
+     * Deliberately does NOT check freshness: the caller's 24h gate already
+     * decided this sample is the freshest fact we have, and a 20-hour-old
+     * bill is still a far better answer than "no idea" for the dozens of
+     * processes this app spawns per day.
+     */
+    internal fun usageFromPersisted(
+        appBytes: Long,
+        shellBytes: Long,
+        freeBytes: Long,
+        totalBytes: Long,
+        sampledAt: Long,
+    ): Usage? {
+        if (sampledAt <= 0L) return null
+        if (totalBytes <= 0L) return null
+        return Usage(
+            appBytes = appBytes,
+            shellBytes = shellBytes,
+            freeBytes = freeBytes,
+            totalBytes = totalBytes,
+            sampledAt = sampledAt,
+        )
     }
 
     /** Test-facing formatter (pure; no android.text.format dependency). */

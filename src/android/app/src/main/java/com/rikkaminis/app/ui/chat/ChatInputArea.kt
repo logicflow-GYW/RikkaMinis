@@ -241,6 +241,12 @@ internal fun ChatInputArea(
         viewModel.setInputText("")
         inputFieldValue = androidx.compose.ui.text.input.TextFieldValue("")
         lastTrueCaretEnd = 0
+        // [fix/composer-paste-lifecycle] The text is not the whole composer: a
+        // detached paste has no literal in the field, so its chip would outlive
+        // the text and ride into the NEXT message (audit P1-C: clear-chat
+        // confirmed → material sent anyway). Inline entries become orphans the
+        // moment their marker leaves, and an orphan reserves its id forever.
+        viewModel.clearPastedText()
         // [meta-audit-1028 C3/F-04] Every clear entrance is a send / cancel —
         // the message leaves the composer, and the pickers that were floating
         // over it must leave with it. Neither `setInputText("")` nor the field
@@ -443,11 +449,21 @@ internal fun ChatInputArea(
     // it INSIDE an already-`hasText`-guarded block, a dead branch that routed
     // attachment-only drags to the keyboard instead of sending them. Reads the
     // field's own TextFieldValue (the single-writer truth the user sees, never
-    // staler than the debounced VM string) + the live attachment list, both at
-    // call time — the gesture block is a long-lived pointerInput(Unit) closure,
-    // so eligibility must be read per-event, not captured once per composition.
+    // staler than the debounced VM string) + the live attachment list + the
+    // detached paste chips, all at call time — the gesture block is a
+    // long-lived pointerInput(Unit) closure, so eligibility must be read
+    // per-event, not captured once per composition.
+    //
+    // [fix/composer-paste-lifecycle] A detached paste lives OUTSIDE the text
+    // (the field stays empty on purpose), so text-blank is no longer the same
+    // question as "nothing to send": paste a block into an empty composer and
+    // this predicate is the only reason the send button / drag / Enter can
+    // still fire (audit finding P1-B). Inline entries need no clause here —
+    // their marker is in the text.
     val canSwipeSendNow: () -> Boolean = {
-        inputFieldValue.text.isNotBlank() || attachments.isNotEmpty()
+        inputFieldValue.text.isNotBlank() ||
+            attachments.isNotEmpty() ||
+            pastedTexts.any { !it.inlineMarker }
     }
 
     // [feat/paste-fold-marker] Fail-closed send guard, evaluated per event for
@@ -1308,17 +1324,17 @@ internal fun ChatInputArea(
                             PastedTextChip(
                                 pasted = pasted,
                                 onRemove = {
-                                    // Drop the buffer row and strip its marker
-                                    // in the SAME edit (through the composer
-                                    // funnel, which also kills a pending IME
-                                    // burst so the snapshot cannot re-add the
-                                    // literal). Exact-literal strip: removing
-                                    // #2 cannot disturb #20.
+                                    // Same edit: strip the literal through the
+                                    // composer funnel (kills a pending IME burst
+                                    // so the snapshot cannot re-add it). Detached
+                                    // entries have no literal (audit P3-F).
                                     viewModel.removePastedText(pasted.id)
-                                    commitComposerBody(
-                                        removePasteMarker(inputFieldValue.text, pasted.id),
-                                        null,
-                                    )
+                                    if (pasted.inlineMarker) {
+                                        commitComposerBody(
+                                            removePasteMarker(inputFieldValue.text, pasted.id),
+                                            null,
+                                        )
+                                    }
                                 },
                             )
                         }
@@ -1503,7 +1519,12 @@ internal fun ChatInputArea(
                         // from the field's live value — never the snapshot.
                         cancelPendingImeBurst()
                         val effectiveInput = inputFieldValue.text
-                        if (effectiveInput.isBlank() && attachments.isEmpty()) return@handler false
+                        // [fix/composer-paste-lifecycle] Ask the ONE eligibility
+                        // predicate instead of re-deriving "is there something
+                        // to send" here: a detached paste keeps the field empty
+                        // on purpose, and a second hand-rolled copy of this
+                        // question is how per-site drift starts (audit P1-B).
+                        if (!canSwipeSendNow()) return@handler false
                         // Intercept slash commands so "/compact" et al.
                         // run locally instead of being sent as a chat
                         // turn. Mirrors iOS performSend().

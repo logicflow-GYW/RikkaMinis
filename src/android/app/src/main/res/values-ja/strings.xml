@@ -1697,4 +1697,12 @@
     <string name="paste_preview_title">貼り付けたテキスト %1$s</string>
     <string name="paste_folded_summary">折りたたみ: %1$d 文字</string>
     <string name="paste_unresolved_notice">この下書きには展開できない貼り付けマーカー（%1$s）があります。送信は無効です。マーカーを削除してから送信してください。</string>
+    <string name="add_custom_model_error_model_id_exists">「%1$s」はこのプロバイダーですでに使われています。別のモデル ID を選んでください。</string>
+    <string name="modeldetail_error_model_id_exists">「%1$s」はこのプロバイダーの別のモデルで使われています。別のモデル ID を選んでください。</string>
+    <string name="storage_orphan_banner_blocked">%1$d 件（%2$s）が残留物のように見えますが、データベースには現在会話がありません。アプリから見えなくなったデータを削除しないよう、クリーンアップはブロックされています。</string>
+    <string name="webpreview_renderer_gone">ページが応答しなくなったため、システムがそのビューを閉じました。</string>
+    <string name="notif_storage_budget_channel_name">ストレージ使用量の上限</string>
+    <string name="notif_storage_budget_channel_description">このアプリ自身のデータ（サンドボックスシェル、セッション、メディア）が上限を超えると通知します。</string>
+    <string name="notif_storage_budget_title">このアプリは多くのストレージを使用しています</string>
+    <string name="notif_storage_budget_body">このアプリが %1$s 使用しています（上限 %2$s）。タップして内訳を確認できます。</string>
 </resources>

@@ -144,13 +144,20 @@ class BrowserTeardownAndFailureSignalTest {
     fun `no JS wait or capture outlives the WebView`() {
         val src = readRepoFile(ManagerPath)
         val eval = memberSlice(src, "private suspend fun evaluateJavascript(")
+        // [F-B-02] The bridge's error shape now comes from ONE source
+        // (deadTabAsyncJsAnswer → deadTabGoneMessage), pinned by the wording
+        // test above. Accept the call so the gate still bites on "answers
+        // without an error shape" without forcing a fourth hand-written
+        // literal back into the manager.
+        val answersWithErrorShape =
+            eval.contains("deadTabAsyncJsAnswer(") || eval.contains("{\\\"error\\\":")
         assertTrue(
             "evaluateJavascript has no timeout: on a dead tab the callback never " +
                 "arrives, so it must answer with the bridge's error shape instead of " +
                 "awaiting forever:\n$eval",
             eval.contains("if (webViewInert()) {") &&
                 eval.contains("return@withContext") &&
-                eval.contains("{\\\"error\\\":"),
+                answersWithErrorShape,
         )
         val capture = memberSlice(src, "private suspend fun captureWebViewBitmap(")
         assertTrue(

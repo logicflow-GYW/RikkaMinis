@@ -21,6 +21,7 @@ import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.config.collections.canonicalModelProviderName
 import com.rikkaminis.app.config.collections.normalizeCustomModelId
 import com.rikkaminis.app.data.model.ProviderType
+import com.rikkaminis.app.provider.openai.buildModelsURL
 import com.rikkaminis.app.data.model.RoutingStrategy
 import com.rikkaminis.app.data.model.SystemVoiceEntries
 import com.rikkaminis.app.data.model.ThinkingLevel
@@ -304,7 +305,13 @@ internal object ProviderMutationMethods {
         val key = repo.loadApiKey(id)?.let {
             com.rikkaminis.app.data.KeyRoulette.next(it, instance.id)
         }
-        val probeURL = providerProbeUrl(instance.providerType, baseURL, key)
+        val probeURL = providerProbeUrl(
+            instance.providerType,
+            baseURL,
+            key,
+            instance.azureMode,
+            instance.appendV1Suffix,
+        )
         val client = okhttp3.OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
             .readTimeout(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -342,13 +349,10 @@ internal object ProviderMutationMethods {
             val latency = System.currentTimeMillis() - start
             val bodyStr = resp.body?.string() ?: ""
             resp.close()
-            // Best-effort model count parse — Anthropic/OpenAI/OpenRouter all
-            // wrap models in a top-level `data` array; Gemini uses `models`.
-            val modelCount: Int = try {
-                val obj = JSONObject(bodyStr)
-                val arr = obj.optJSONArray("data") ?: obj.optJSONArray("models")
-                arr?.length() ?: -1
-            } catch (_: Exception) { -1 }
+            // [F-B-04] Same parse as the verdict below (which also accepts a
+            // top-level array), so `ok:true` can no longer come with a missing
+            // `reachableModelCount`.
+            val modelCount: Int = probeModelsListCount(bodyStr) ?: -1
             // [R4-R F-05] A 2xx is only "reachable" when the body is actually a
             // models list. A `customBaseURL` pointing at a home page, a reverse
             // proxy's login page or a captive portal answers 200 with HTML (or
@@ -1013,13 +1017,26 @@ internal fun parseImageEndpointMode(raw: String): ImageEndpointMode =
         )
     }
 
-internal fun providerProbeUrl(type: ProviderType, baseURL: String, key: String?): String =
+internal fun providerProbeUrl(
+    type: ProviderType,
+    baseURL: String,
+    key: String?,
+    azureMode: Boolean = false,
+    appendV1Suffix: Boolean = true,
+): String =
     when (type) {
         ProviderType.anthropic ->
             if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
         ProviderType.gemini -> "${GeminiBasePath.normalize(baseURL)}/models?key=" + (key ?: "")
+        // [F-B-01] Azure needs the path rewrite (`buildModelsURL` owns it: strips
+        // /v1, appends /openai, keeps the query). A plain custom base only needs
+        // /v1 when the instance actually appends it — forcing it on an
+        // `appendV1Suffix=false` relay probed `/relay/v1/models` while the
+        // models refresh of the SAME instance hit `/relay/models` and worked.
         ProviderType.openAI ->
-            if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
+            if (azureMode) buildModelsURL(baseURL, true)
+            else if (appendV1Suffix && !baseURL.endsWith("/v1")) "$baseURL/v1/models"
+            else "${baseURL.trimEnd('/')}/models"
         ProviderType.openRouter -> "$baseURL/models"
         // xAI exposes an OpenAI-compatible /models endpoint at the same base.
         ProviderType.xAI ->
@@ -1042,20 +1059,31 @@ internal fun providerProbeUrl(type: ProviderType, baseURL: String, key: String?)
  * refusal is what turns `provider.instances.test` from "the TCP connect worked"
  * into "the endpoint this URL names answered like a models endpoint".
  */
-internal fun probePayloadIsModelsList(body: String): Boolean {
+internal fun probeModelsListCount(body: String): Int? {
     val trimmed = body.trimStart(' ', '\n', '\r', '\t', '\uFEFF')
-    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null
     val obj = runCatching { JSONObject(trimmed) }.getOrNull()
     if (obj != null) {
-        return obj.optJSONArray("data") != null || obj.optJSONArray("models") != null
+        val arr = obj.optJSONArray("data") ?: obj.optJSONArray("models")
+        return arr?.length()
     }
     // A top-level array is only reachable when the body parses as an array —
     // try that before refusing. Every element has to be an object (a models
     // entry is `{"id": …}`); an empty array is accepted for parity with an
     // empty `data` array.
-    val arr = runCatching { JSONArray(trimmed) }.getOrNull() ?: return false
-    return (0 until arr.length()).all { arr.opt(it) is JSONObject }
+    val arr = runCatching { JSONArray(trimmed) }.getOrNull() ?: return null
+    return if ((0 until arr.length()).all { arr.opt(it) is JSONObject }) arr.length() else null
 }
+
+/**
+ * [F-B-04] The verdict and the count must come from ONE parse. They used to be
+ * two readers of the same body with different tolerances: the verdict accepted
+ * a top-level array (some OpenAI-compatible relays answer that way) while the
+ * count only looked at `{data:[…]}` / `{models:[…]}`, so a relay that IS
+ * reachable reported `ok:true` with `reachableModelCount` missing entirely.
+ */
+internal fun probePayloadIsModelsList(body: String): Boolean =
+    probeModelsListCount(body) != null
 
 /**
  * [R5-E F-04] The entry construction shared by the two custom-model add faces —

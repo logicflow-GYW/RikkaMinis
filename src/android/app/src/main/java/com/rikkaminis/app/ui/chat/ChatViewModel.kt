@@ -1047,6 +1047,25 @@ class ChatViewModel(
     }
 
     /**
+     * [fix/composer-paste-lifecycle] Drop every buffered paste (audit P1-C).
+     *
+     * Called from the composer's clear funnel. A detached entry has no literal
+     * in the field, so nothing in the text or the UI can tell that it is stale
+     * after a clear; left alone it is appended to the NEXT message. Inline
+     * entries lose their marker with the text in the same edit, and an orphan
+     * row keeps its id reserved forever — both go here.
+     *
+     * Attachments are deliberately NOT cleared here: every clear entrance today
+     * keeps them (the send path clears them inside `sendMessage`), so changing
+     * that would be a different behaviour change, not a lifecycle fix.
+     */
+    fun clearPastedText() {
+        if (_pastedTexts.value.isEmpty() && orphanPasteMarkers.isEmpty()) return
+        _pastedTexts.value = emptyList()
+        orphanPasteMarkers = emptySet()
+    }
+
+    /**
      * [feat/paste-fold-marker] Expand every marker this session can resolve,
      * append every detached block after the body, then drop exactly the
      * entries that were consumed.

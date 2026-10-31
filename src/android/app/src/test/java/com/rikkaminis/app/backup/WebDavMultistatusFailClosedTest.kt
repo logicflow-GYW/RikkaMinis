@@ -246,4 +246,45 @@ class WebDavMultistatusFailClosedTest {
         val hrefs = out!!.map { (it as WebDavResourceInfo).href }
         assertFalse(hrefs.contains("/dav/RikkaMinis_backups"))
     }
+
+    // ── F-A-02 a bare response (no <propstat>, no <status>) ─────────────────
+
+    /**
+     * [fix/composer-paste-lifecycle] Hand-rolled DAV shims and S3 gateways
+     * emit this shape: href + response-level properties, nothing else. The
+     * `<response>` START used to reset `statusOk = true`, cancelling the
+     * fail-closed declaration above it — exactly the shape that declaration
+     * was written to reject was read as "200 OK" again.
+     */
+    private fun bareEntry(href: String): String = """
+          <d:response>
+            <d:href>$href</d:href>
+            <d:getcontentlength>456</d:getcontentlength>
+          </d:response>
+    """.trimIndent()
+
+    @Test
+    fun `a bare response with neither propstat nor status is not listed`() {
+        val out = parseBody(
+            doc(
+                selfEntry("HTTP/1.1 200 OK"),
+                bareEntry("/dav/RikkaMinis_backups/rikkaminis-20261026-090000000.json"),
+            ),
+            "/dav/RikkaMinis_backups",
+        )
+        assertTrue(out != null)
+        assertEquals(0, out!!.size)
+    }
+
+    @Test
+    fun `a bare self response does not prove the collection exists`() {
+        // MKCOL is skipped when the collection "exists"; a bare response must
+        // not count as proof or the later PUT fails far from the cause.
+        assertNull(
+            parseBody(
+                doc(bareEntry("/dav/RikkaMinis_backups/")),
+                "/dav/RikkaMinis_backups",
+            ),
+        )
+    }
 }

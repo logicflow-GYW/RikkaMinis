@@ -453,4 +453,34 @@ class PasteTextBufferTest {
         assertEquals(2, nextFreePasteId(used))
         assertEquals(emptySet<Int>(), pasteMarkerIdsIn("no markers [Pasted#] [pasted#x]"))
     }
+
+    @Test
+    fun `detached blocks keep paste order when ids are recycled`() {
+        // [fix/composer-paste-lifecycle] audit P1-A. nextFreePasteId hands out
+        // the smallest free id, so "delete #1, paste again" mints #1 for the
+        // NEWEST block — ids are not monotonic and must never be a sort key.
+        // Deliberately non-sequential fixture: the ordering contract lives in
+        // the buffer, and a sequential fixture would pass an id sort too.
+        val recycled = listOf(
+            PastedText(id = 2, text = "second-pasted", inlineMarker = false),
+            PastedText(id = 1, text = "third-pasted", inlineMarker = false),
+        )
+        assertEquals(
+            "typed body\n\nsecond-pasted\n\nthird-pasted",
+            appendUnlinkedPastes("typed body", recycled),
+        )
+        assertEquals(
+            "second-pasted\n\nthird-pasted",
+            appendUnlinkedPastes("", recycled),
+        )
+    }
+
+    @Test
+    fun `inline entries never take part in the detached append`() {
+        val mixed = listOf(
+            PastedText(id = 1, text = "inline", inlineMarker = true),
+            PastedText(id = 2, text = "detached", inlineMarker = false),
+        )
+        assertEquals("body\n\ndetached", appendUnlinkedPastes("body", mixed))
+    }
 }

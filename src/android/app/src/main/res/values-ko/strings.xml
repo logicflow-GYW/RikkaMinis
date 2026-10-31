@@ -1698,4 +1698,12 @@
     <string name="paste_preview_title">붙여넣은 텍스트 %1$s</string>
     <string name="paste_folded_summary">접힘: %1$d자</string>
     <string name="paste_unresolved_notice">이 임시 저장에는 펼칠 수 없는 붙여넣기 표시(%1$s)가 있습니다. 보내기가 비활성화되었습니다. 표시를 삭제한 후 보내세요.</string>
+    <string name="add_custom_model_error_model_id_exists">"%1$s"은(는) 이 공급자에 이미 있습니다. 다른 모델 ID를 선택하세요.</string>
+    <string name="modeldetail_error_model_id_exists">"%1$s"은(는) 이 공급자의 다른 모델에서 사용 중입니다. 다른 모델 ID를 선택하세요.</string>
+    <string name="storage_orphan_banner_blocked">%1$d개 항목(%2$s)이 잔여물로 보이지만 데이터베이스에 현재 대화가 없습니다. 앱이 더 이상 볼 수 없는 데이터를 삭제하지 않도록 정리를 차단했습니다.</string>
+    <string name="webpreview_renderer_gone">페이지가 응답하지 않아 시스템이 해당 뷰를 닫았습니다.</string>
+    <string name="notif_storage_budget_channel_name">저장공간 예산</string>
+    <string name="notif_storage_budget_channel_description">이 앱 자체 데이터(샌드박스 셸, 세션, 미디어)가 예산을 초과하면 알려줍니다.</string>
+    <string name="notif_storage_budget_title">이 앱이 저장공간을 많이 사용하고 있습니다</string>
+    <string name="notif_storage_budget_body">이 앱이 %1$s 사용 중입니다(예산 %2$s). 탭하여 무엇이 공간을 차지하는지 확인하세요.</string>
 </resources>

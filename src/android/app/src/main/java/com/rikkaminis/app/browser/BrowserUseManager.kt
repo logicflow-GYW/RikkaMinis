@@ -1384,7 +1384,10 @@ class BrowserUseManager(
             // destroyed" instead of "the page finished": reading the live page
             // then hangs on a JS callback that cannot arrive, so say plainly that
             // there is no page to describe.
-            details = if (webViewInert()) "  (no live WebView — the tab's renderer is gone)" else navigationDetails(),
+            // [F-B-02] Derived from the same single source as the JS answer, so
+            // a closed tab and a killed renderer no longer both read as
+            // "renderer is gone".
+            details = if (webViewInert()) "  (no live WebView) " + deadTabGoneMessage(destroyed) else navigationDetails(),
             errorDescription = navResult.errorDescription,
             routedTarget = navResult.routedTarget,
             timeoutSec = navTimeoutSec,
@@ -2307,7 +2310,10 @@ class BrowserUseManager(
         // instead of a hang.
         if (webViewInert()) {
             Log.w(TAG, "JS evaluation dropped: the WebView is gone")
-            return@withContext "{\"error\": \"This tab's WebView is gone (renderer killed or tab destroyed) — open a new tab\"}"
+            // [F-B-02] Third hand-written literal until now: it blamed the
+            // renderer even when the tab had simply been closed, while
+            // navigate/fetch already answered from [deadTabGoneMessage].
+            return@withContext deadTabAsyncJsAnswer(destroyed, rendererDead)!!
         }
         val deferred = CompletableDeferred<String>()
         webView.evaluateJavascript(js) { result ->

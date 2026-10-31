@@ -1699,4 +1699,12 @@
     <string name="paste_preview_title">Eingefügter Text %1$s</string>
     <string name="paste_folded_summary">Gefaltet: %1$d Zeichen</string>
     <string name="paste_unresolved_notice">Dieser Entwurf enthält eine Markierung für eingefügten Text, die nicht mehr aufgelöst werden kann (%1$s). Senden ist deaktiviert – lösche die Markierung, um zu senden.</string>
+    <string name="add_custom_model_error_model_id_exists">"%1$s" existiert für diesen Anbieter bereits. Wählen Sie eine andere Modell-ID.</string>
+    <string name="modeldetail_error_model_id_exists">"%1$s" wird bereits von einem anderen Modell dieses Anbieters verwendet. Wählen Sie eine andere Modell-ID.</string>
+    <string name="storage_orphan_banner_blocked">%1$d Element(e) (%2$s) sehen wie Reste aus, aber die Datenbank listet derzeit keine Unterhaltungen auf. Die Bereinigung ist blockiert, damit keine Daten gelöscht werden, die die App nicht mehr sieht.</string>
+    <string name="webpreview_renderer_gone">Die Seite reagiert nicht mehr; ihre Ansicht wurde vom System geschlossen.</string>
+    <string name="notif_storage_budget_channel_name">Speicherbudget</string>
+    <string name="notif_storage_budget_channel_description">Warnt, wenn die eigenen Daten dieser App (Sandbox-Shell, Sitzungen, Medien) das Budget überschreiten.</string>
+    <string name="notif_storage_budget_title">Diese App belegt viel Speicher</string>
+    <string name="notif_storage_budget_body">%1$s von dieser App belegt (Budget %2$s). Tippen, um zu sehen, was den Speicher belegt.</string>
 </resources>
