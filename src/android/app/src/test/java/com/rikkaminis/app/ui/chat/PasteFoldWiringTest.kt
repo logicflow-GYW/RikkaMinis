@@ -79,7 +79,7 @@ class PasteFoldWiringTest {
 
     @Test
     fun `the fold runs inside onValueChange before the IME burst gate`() {
-        val body = blockAfter(inputArea, "onValueChange = { rawTfv ->")
+        val body = blockAfter(inputArea, "onValueChange = { tfv ->")
         val fold = body.indexOf("foldLongPasteIfNeeded(")
         val burst = body.indexOf("shouldDebounceImeBurst(")
         val writeBack = body.indexOf("inputFieldValue = tfv")
@@ -96,7 +96,7 @@ class PasteFoldWiringTest {
 
     @Test
     fun `the fold reads the field value as old and the raw edit as new`() {
-        val body = blockAfter(inputArea, "onValueChange = { rawTfv ->")
+        val body = blockAfter(inputArea, "onValueChange = { tfv ->")
         val fold = body.substring(body.indexOf("foldLongPasteIfNeeded("))
         val call = fold.substring(0, fold.indexOf(')') + 1)
         assertTrue(
@@ -104,32 +104,32 @@ class PasteFoldWiringTest {
                 "never staler than the debounced VM copy): $call",
             call.contains("old = inputFieldValue"),
         )
-        assertTrue("new must be the un-folded edit: $call", call.contains("new = rawTfv"))
+        assertTrue(
+            "new must be the raw edit — inside `run { }` the binding shadows it, so the " +
+                "initializer is the last place the raw value is visible: $call",
+            call.contains("new = tfv,"),
+        )
         assertTrue(
             "the stash must mint the marker through the ViewModel buffer: $call",
             call.contains("viewModel.stashPastedText("),
         )
-        assertFalse(
-            "nothing may write the RAW edit back into the field — that is the marker loss",
-            body.contains("inputFieldValue = rawTfv"),
+        assertTrue(
+            "the write-back must use the shadowed (folded) `tfv`, never a raw copy",
+            body.contains("inputFieldValue = tfv"),
         )
     }
 
     @Test
     fun `every downstream mirror is fed the folded value, not the raw edit`() {
-        val body = blockAfter(inputArea, "onValueChange = { rawTfv ->")
+        val body = blockAfter(inputArea, "onValueChange = { tfv ->")
         val foldAt = body.indexOf("val tfv = foldLongPasteIfNeeded(")
         assertTrue("the fold's binding must be exactly `val tfv = foldLongPasteIfNeeded(`", foldAt >= 0)
-        // Everything below the fold must only see `tfv`. The residue gate above
-        // is the one legal reader of the raw value (it inspects composition
-        // state, which the fold does not touch).
-        // Start AFTER the fold call itself: `new = rawTfv` is its own argument.
-        val belowFold = body.substring(body.indexOf("new = rawTfv") + "new = rawTfv".length)
-        assertFalse(
-            "no mirror below the fold may read `rawTfv` (the burst snapshot / caret / " +
-                "publish funnel would then carry the unfolded block)",
-            belowFold.contains("rawTfv"),
-        )
+        // The residue gate above the fold is the one legal reader of the raw
+        // value (it inspects composition state, which the fold does not touch);
+        // everything below it sees the shadowed `tfv`.
+        val runAt = body.indexOf("run {")
+        assertTrue("the fold must live in a shadowing `run { }` scope", runAt >= 0)
+        assertTrue("the fold must be the first thing inside that scope", runAt < foldAt)
         for (mirror in listOf(
             "previousFieldText = inputFieldValue.text",
             "imeBurstBuffer = tfv.text",
