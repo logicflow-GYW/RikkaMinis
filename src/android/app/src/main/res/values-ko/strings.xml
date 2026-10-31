@@ -1693,4 +1693,9 @@
     <string name="mirror_diag_failed">마지막 동기화 실패</string>
     <string name="mirror_diag_unavailable">사용 가능한 저장소가 없습니다</string>
     <string name="mirror_retry">재시도</string>
+    <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
+    <string name="paste_chip_desc">접은 붙여넣기 #%1$d, %2$d자. 탭하여 미리보기.</string>
+    <string name="paste_preview_title">붙여넣은 텍스트 %1$s</string>
+    <string name="paste_folded_summary">접힘: %1$d자</string>
+    <string name="paste_unresolved_notice">이 임시 저장에는 펼칠 수 없는 붙여넣기 표시(%1$s)가 있습니다. 보내기가 비활성화되었습니다. 표시를 삭제한 후 보내세요.</string>
 </resources>

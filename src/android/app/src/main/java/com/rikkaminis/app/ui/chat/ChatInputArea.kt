@@ -155,6 +155,12 @@ internal fun ChatInputArea(
     val context = androidx.compose.ui.platform.LocalContext.current
     val inputText by viewModel.inputText.collectAsState()
     val attachments by viewModel.attachments.collectAsState()
+    // [feat/paste-fold-marker] Long pastes folded out of the field: each one is
+    // a `[Pasted#N]` literal in the text plus a chip in the row below. Chips are
+    // rendered from the buffer but FILTERED by marker presence, so a composer
+    // that no longer holds the literal (sent / cleared) can never leave an
+    // orphan chip behind — the text is the reference, the buffer row is data.
+    val pastedTexts by viewModel.pastedTexts.collectAsState()
     var showMoveSheet by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
     // [fix/ime-overlay-focus-coverage] MoveToSessionSheet owns its own window
@@ -444,8 +450,26 @@ internal fun ChatInputArea(
         inputFieldValue.text.isNotBlank() || attachments.isNotEmpty()
     }
 
+    // [feat/paste-fold-marker] Fail-closed send guard, read per event for the
+    // same reason as `canSwipeSendNow` above: the gesture/send callbacks are
+    // long-lived closures, so the condition has to be evaluated when it matters.
+    // A restored draft can hold a `[Pasted#N]` whose text died with the process;
+    // sending it verbatim would hand the model a literal marker in place of the
+    // user's paragraphs — silent content loss. Expansion itself stays lenient
+    // (a hand-typed marker is just text), so only "orphan" markers from the
+    // restore point block here.
+    val pasteSendBlockedNow: () -> Boolean = {
+        viewModel.pasteSendBlockedBy(inputFieldValue.text)
+    }
 
     val performSendOrEnqueue: () -> Unit = handler@{
+        // [feat/paste-fold-marker] Fail-closed: a restored draft can still hold
+        // a marker nothing can expand. The button is disabled in that state and
+        // the notice above the field says why, but the swipe gesture and the
+        // Enter key reach this same funnel — refuse here, before anything is
+        // cleared, so nothing is lost and the text stays where the user can fix
+        // it.
+        if (pasteSendBlockedNow()) return@handler
         // [fix/ttfb-thinktag-composer] Cancel the pending IME-burst flush and
         // read the send text from the field's own TextFieldValue — the
         // single-writer truth the user actually sees. History: [T2-M2]
@@ -1242,8 +1266,18 @@ internal fun ChatInputArea(
                         }
                     }
                 }
-                // Attachment thumbnails inside the box (iOS: 64×64 squares)
-                if (attachments.isNotEmpty()) {
+                // Folded long pastes and attachment thumbnails share ONE row
+                // (iOS: 64×64 squares): both are content held outside the field
+                // and both use the same chip geometry, so two rows would read as
+                // two different kinds of thing.
+                // [feat/paste-fold-marker] A paste is listed only while its
+                // marker is still in the field — the buffer row is data, the
+                // literal in the text is the reference. That is what keeps a
+                // sent or cleared composer from leaving a chip behind, without
+                // any extra clearing bookkeeping on the dozens of paths that
+                // rewrite the composer from outside.
+                val visiblePastes = pastedTexts.filter { inputFieldValue.text.contains(it.placeholder) }
+                if (attachments.isNotEmpty() || visiblePastes.isNotEmpty()) {
                     LazyRow(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1256,6 +1290,26 @@ internal fun ChatInputArea(
                         // past the top-right; no extra spacedBy needed.
                         horizontalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
+                        // String keys keep pastes and attachments in one key
+                        // space without relying on the attachment id type.
+                        items(visiblePastes, key = { "paste-${it.id}" }) { pasted ->
+                            PastedTextChip(
+                                pasted = pasted,
+                                onRemove = {
+                                    // Drop the buffer row and strip its marker
+                                    // in the SAME edit (through the composer
+                                    // funnel, which also kills a pending IME
+                                    // burst so the snapshot cannot re-add the
+                                    // literal). Exact-literal strip: removing
+                                    // #2 cannot disturb #20.
+                                    viewModel.removePastedText(pasted.id)
+                                    commitComposerBody(
+                                        removePasteMarker(inputFieldValue.text, pasted.id),
+                                        null,
+                                    )
+                                },
+                            )
+                        }
                         items(attachments, key = { it.id }) { attachment ->
                             // T-pwa-2: long-press menu only appears for
                             // .html / .htm attachments. The menu lives in
@@ -1390,6 +1444,12 @@ internal fun ChatInputArea(
                     Spacer(modifier = Modifier.height(6.dp))
                 }
 
+                // [feat/paste-fold-marker] Fail-closed notice: a restored draft
+                // can hold a `[Pasted#N]` whose text died with the process.
+                // Sending is disabled (button + Enter + swipe) and this says
+                // why, quoting the exact literal so the user can find it.
+                PasteSendBlockedNotice(markers = viewModel.blockingPasteMarkers(inputFieldValue.text))
+
                 // Composer input field. (Voice input mode was removed
                 // with the mic button; the field is now the only path.)
                 run {
@@ -1419,6 +1479,10 @@ internal fun ChatInputArea(
                     // onSend; this lambda is the single source of
                     // truth for what "press Enter to send" means.
                     val performEnterSend: () -> Boolean = handler@{
+                        // [feat/paste-fold-marker] Same fail-closed gate as
+                        // performSendOrEnqueue: the Enter key is the one send
+                        // path that can fire while the button is disabled.
+                        if (pasteSendBlockedNow()) return@handler false
                         // [fix/ttfb-thinktag-composer] Same contract as
                         // performSendOrEnqueue (see the full history there):
                         // cancel the pending burst flush so it cannot
@@ -1466,7 +1530,7 @@ internal fun ChatInputArea(
                     }
                     BasicTextField(
                         value = inputFieldValue,
-                        onValueChange = { tfv ->
+                        onValueChange = { rawTfv ->
                             // T217-2: drop IME residue commits after send.
                             // clearFocus triggers finishComposingText, which makes
                             // voice/Pinyin IMEs replay their composing candidate
@@ -1477,9 +1541,37 @@ internal fun ChatInputArea(
                             // is mid-composition — fast typing right after a send
                             // is never dropped.
                             val now = SystemClock.elapsedRealtime()
-                            if (tfv.composition != null && now - lastSendTimeMs < 500L && tfv.text.isNotEmpty()) {
+                            if (rawTfv.composition != null && now - lastSendTimeMs < 500L && rawTfv.text.isNotEmpty()) {
                                 return@BasicTextField
                             }
+                            // [feat/paste-fold-marker] Fold a long paste into a
+                            // `[Pasted#N]` marker BEFORE anything downstream
+                            // reads the edit. Two properties depend on this
+                            // exact position:
+                            //
+                            //  1. The burst gate below fires on the INSERTED
+                            //     length. After folding, a 40 KB paste looks
+                            //     like a 10-char insertion, so it commits
+                            //     immediately instead of being held for 150 ms
+                            //     — and, crucially, nothing downstream ever
+                            //     holds the raw block, so the burst flush can
+                            //     never write it back over the marker.
+                            //  2. Every caret/text mirror below
+                            //     (`previousFieldText`, `imeBurstBuffer`,
+                            //     `imeBurstCaret`, `lastTrueCaretEnd`,
+                            //     `publishPendingComposerText`) is computed from
+                            //     the FOLDED value. One of them reading the raw
+                            //     text is exactly how the marker would get
+                            //     overwritten ~150 ms later.
+                            //
+                            // `old` is the field's own TextFieldValue, which
+                            // onValueChange writes on every path, so it is never
+                            // staler than the ViewModel copy.
+                            val tfv = foldLongPasteIfNeeded(
+                                old = inputFieldValue,
+                                new = rawTfv,
+                                stash = { pasted -> viewModel.stashPastedText(pasted) },
+                            )
                             // [T-android-enter-to-send-multiline] Root cause:
                             // the composer is a multi-line BasicTextField
                             // (maxLines=6 ⇒ EditorInfo carries
@@ -2015,7 +2107,10 @@ internal fun ChatInputArea(
                     } else {
                         // Streaming with content → Send-into-queue; Idle with content → Send.
                         // Idle without text or attachments → disabled.
-                        val canActivate = hasContent
+                        // [feat/paste-fold-marker] ...and disabled while the
+                        // composer still holds a marker this session cannot
+                        // expand (the notice above the field explains it).
+                        val canActivate = hasContent && !pasteSendBlockedNow()
                         Box(
                             modifier = Modifier
                                 .size(38.dp)
@@ -2082,9 +2177,14 @@ internal fun ChatInputArea(
                     // and would commit the snapshot into the session the user just
                     // left (inputText is per-ViewModel) after the move cleared it.
                     cancelPendingImeBurst()
+                    // [feat/paste-fold-marker] `expandPastedText`: the paste
+                    // buffer is per-ViewModel, so a marker would arrive in the
+                    // target session with nothing to expand it (that session's
+                    // guard would then refuse to send). The TEXT travels; the
+                    // chips stay behind with the buffer they belong to.
                     ChatViewModelStore.stashPendingTransfer(
                         ChatViewModelStore.PendingTransfer(
-                            inputText = inputFieldValue.text,
+                            inputText = viewModel.expandPastedText(inputFieldValue.text),
                             attachments = viewModel.attachments.value,
                         ),
                     )

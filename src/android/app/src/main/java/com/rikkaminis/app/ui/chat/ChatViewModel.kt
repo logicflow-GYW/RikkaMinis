@@ -922,6 +922,131 @@ class ChatViewModel(
     }
 
     /**
+     * [feat/paste-fold-marker] Long pasted blocks folded out of the composer,
+     * each represented there by a `[Pasted#N]` literal.
+     *
+     * Scoped to this ViewModel, so it is per-session by construction: the
+     * store hands each session its own instance, and switching chats cannot
+     * leak an id from one buffer into another's markers.
+     *
+     * MEMORY-ONLY, deliberately. Our composer text survives process death
+     * ([ComposerDraftStore]); this buffer does not. That mismatch is handled
+     * fail-closed in the composer ([unexpandedPasteMarkers] → sending disabled
+     * + an inline notice) instead of by persisting the buffer: a persisted
+     * buffer would be a new field across model / entity / snapshot /
+     * serialization plus a reclamation policy for markers nothing references,
+     * which is the four-way-sync surface this feature does not need.
+     */
+    private val _pastedTexts = MutableStateFlow<List<PastedText>>(emptyList())
+    val pastedTexts: StateFlow<List<PastedText>> = _pastedTexts.asStateFlow()
+
+    /**
+     * Next marker number. Monotonic for the ViewModel's lifetime and never
+     * reused, even after entries are consumed or deleted: a recycled id would
+     * let a stale marker ("I pasted, deleted the chip, then pasted again")
+     * silently expand to the WRONG text. Numbers are cheap.
+     */
+    private var nextPasteId: Int = 1
+
+    /**
+     * [feat/paste-fold-marker] Markers that came back inside a RESTORED draft
+     * and can never be expanded this session (the buffer died with the process).
+     *
+     * This is the provenance that makes the send guard fail-closed without
+     * punishing a marker the user typed by hand: only literals recorded here
+     * block a send. It is filled at the single restore point in [init] and
+     * never grows afterwards, so ordinary typing — including a hand-typed
+     * `[Pasted#99]`, which the design says must not fail a send — is untouched.
+     *
+     * The literal (not the id) is stored: once the user deletes the marker from
+     * the composer the condition clears by itself, with no bookkeeping.
+     */
+    private var orphanPasteMarkers: Set<String> = emptySet()
+
+    /**
+     * [feat/paste-fold-marker] The orphan markers [text] still carries — what
+     * the composer quotes in its notice. Empty for every ordinary composer.
+     */
+    fun blockingPasteMarkers(text: String): List<String> {
+        val orphans = orphanPasteMarkers
+        if (orphans.isEmpty() || text.isEmpty()) return emptyList()
+        return orphans.filter { text.contains(it) }
+    }
+
+    /**
+     * [feat/paste-fold-marker] True when [text] still carries a marker this
+     * session cannot expand. Drives the composer's disabled-send state; the
+     * expansion itself stays lenient (see [expandPastePlaceholders]) so
+     * non-composer callers never have to care.
+     */
+    fun pasteSendBlockedBy(text: String): Boolean = blockingPasteMarkers(text).isNotEmpty()
+
+    /**
+     * [feat/paste-fold-marker] Record the unexpandable markers of a restored
+     * draft and push [nextPasteId] past every id they mention.
+     *
+     * The id bump is the part that prevents silent corruption: the restored
+     * `[Pasted#1]` must not be reused by the next paste, or that marker would
+     * expand to the NEW block's text — content the user never placed there.
+     */
+    private fun adoptRestoredDraftPasteMarkers(restored: String) {
+        val orphans = unexpandedPasteMarkers(restored, _pastedTexts.value)
+        if (orphans.isEmpty()) return
+        orphanPasteMarkers = orphans.toSet()
+        val maxId = orphans.mapNotNull { pasteMarkerId(it) }.maxOrNull() ?: 0
+        if (maxId >= nextPasteId) nextPasteId = maxId + 1
+        AppLogger.warning(
+            TAG,
+            "[Paste] restored draft carries ${orphans.size} unexpandable marker(s) " +
+                "→ send disabled until deleted; next id=$nextPasteId",
+        )
+    }
+
+    /**
+     * [feat/paste-fold-marker] Buffer [text] and return the marker to put in
+     * the composer in its place. Called from the composer's onValueChange via
+     * [foldLongPasteIfNeeded], which runs BEFORE the IME-burst debounce — the
+     * fold has to happen while the text is still short, or the 150 ms flush
+     * would write the raw block back over the marker.
+     */
+    fun stashPastedText(text: String): String {
+        val entry = PastedText(id = nextPasteId++, text = text)
+        _pastedTexts.value = _pastedTexts.value + entry
+        AppLogger.info(TAG, "[Paste] stashed #${entry.id} (${text.length} chars)")
+        return entry.placeholder
+    }
+
+    /**
+     * [feat/paste-fold-marker] Drop one buffered entry (the chip's delete
+     * button). The caller removes the marker from the composer text in the SAME
+     * edit — see ChatInputArea — so buffer and text never disagree.
+     */
+    fun removePastedText(id: Int) {
+        _pastedTexts.value = _pastedTexts.value.filterNot { it.id == id }
+    }
+
+    /**
+     * [feat/paste-fold-marker] Expand every marker this session can resolve,
+     * then drop exactly the entries that were consumed.
+     *
+     * Clearing eagerly (here) rather than at the dispatch point is safe because
+     * every early return in [sendMessage] that keeps the user's text puts the
+     * EXPANDED string back in the composer or in a stash — no path re-derives
+     * from the raw composer text, so nothing is left pointing at a dead entry.
+     * Orphan entries (buffer rows whose marker was deleted by hand) are left
+     * alone: they are harmless and the ids are never reused.
+     */
+    internal fun expandPastedText(raw: String): String {
+        val buffer = _pastedTexts.value
+        if (buffer.isEmpty() || !raw.contains('#')) return raw
+        val (expanded, consumed) = expandPastePlaceholders(raw, buffer)
+        if (consumed.isEmpty()) return raw
+        _pastedTexts.value = _pastedTexts.value.filterNot { it.id in consumed }
+        AppLogger.info(TAG, "[Paste] expanded ${consumed.size} block(s) on send")
+        return expanded
+    }
+
+    /**
      * [T-selection-add-to-input] Append [snippet] to the chat composer
      * with a single trailing space:
      *   - composer empty → `"<snippet> "`
@@ -2623,7 +2748,16 @@ class ChatViewModel(
         // draft whose slot was freed (sent / discarded) never resurrects.
         if (isDraft) {
             val restored = com.rikkaminis.app.data.ComposerDraftStore.restoreText(context, sessionId)
-            if (restored.isNotEmpty()) _inputText.value = restored
+            if (restored.isNotEmpty()) {
+                _inputText.value = restored
+                // [feat/paste-fold-marker] The buffer is memory-only, so a
+                // restored `[Pasted#N]` has nothing to expand to. Adopt those
+                // markers here — the one place a draft comes back from disk —
+                // so the composer can refuse to send them instead of shipping
+                // the literal to the model (and so the next paste cannot
+                // re-use their ids).
+                adoptRestoredDraftPasteMarkers(restored)
+            }
         }
         // [T-session-paused-badge-active-false-positive] Drive the session-list
         // PAUSED badge directly off canResume — the authoritative "this session
@@ -3717,12 +3851,22 @@ class ChatViewModel(
     // alias-free references. The old private nested data class is gone.
 
     fun sendMessage(rawText: String) {
+        // [feat/paste-fold-marker] Folded pastes come back BEFORE anything else
+        // reads the text: this function is the single funnel for the UI (send
+        // button, Enter/swipe), the debug RPC and the headless runner, so
+        // expanding here covers every persistence path at once. The expansion
+        // is single-pass over the original string (see
+        // [expandPastePlaceholders]) and drops exactly the entries it consumed.
+        // Unknown ids survive as literal text — a send must never fail because
+        // of a marker nobody minted; the composer-side guard is what stops a
+        // restored draft from shipping one silently.
+        val text = Utf16Sanitizer.sanitize(expandPastedText(rawText))
         // [backlog #1 / fix/utf16-lone-surrogate] User input is one of the two
         // text boundaries into the app (the other is the provider stream): a
         // clipboard paste can carry an unpaired UTF-16 surrogate, which later
-        // trips strict encoders far away from the source. Sanitize on the way
-        // in and use that value for every downstream path, queue included.
-        val text = Utf16Sanitizer.sanitize(rawText)
+        // trips strict encoders far away from the source. The sanitize above
+        // runs on the EXPANDED text, so the folded block is covered too; use
+        // `text` for every downstream path, queue included.
         // [mem-spike-diag] 用户发送是三条高开销路径的起点：会话加载 ->
         // 上下文构建（phase:build-request）-> 流式渲染。这里只标起点，让日志
         // 能把「发消息之后」的内存曲线按会话对齐（2026-09-13 16:54 那次尖峰

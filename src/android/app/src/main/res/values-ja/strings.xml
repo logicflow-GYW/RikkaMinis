@@ -1692,4 +1692,9 @@
     <string name="mirror_diag_failed">前回の同期に失敗しました</string>
     <string name="mirror_diag_unavailable">利用可能なストレージがありません</string>
     <string name="mirror_retry">再試行</string>
+    <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
+    <string name="paste_chip_desc">折りたたまれた貼り付け #%1$d、%2$d 文字。タップでプレビュー。</string>
+    <string name="paste_preview_title">貼り付けたテキスト %1$s</string>
+    <string name="paste_folded_summary">折りたたみ: %1$d 文字</string>
+    <string name="paste_unresolved_notice">この下書きには展開できない貼り付けマーカー（%1$s）があります。送信は無効です。マーカーを削除してから送信してください。</string>
 </resources>
