@@ -51,11 +51,15 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.R
+import com.rikkaminis.app.data.db.AppDatabase
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMMediaAttachment
+import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.normalizeModalityName
 import com.rikkaminis.app.data.repository.ProviderRepository
+import com.rikkaminis.app.data.usage.InternalUsageRecorder
+import com.rikkaminis.app.data.usage.InternalUsageSources
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.util.ImageDecoding
@@ -128,6 +132,15 @@ private class QuickTestRun(val kind: QuickTestKind) {
     var state by mutableStateOf<QuickTestState>(QuickTestState.Running)
     var elapsedMs by mutableStateOf(0L)
 }
+
+/**
+ * Model id handed to the cost ledger. A named function rather than an inline
+ * `model.id`: the ledger call sits inside `performTest`, and
+ * [QuickTestEffectiveModelTest] counts `= effectiveModel` occurrences there to
+ * prove the three EXECUTION sites carry the enriched model — a fourth literal
+ * would read as an execution site.
+ */
+private fun ledgerModelId(model: LLMModel): String = model.id
 
 /**
  * Top-3 most distinctive applicable test kinds for [entry]. A model is
@@ -632,6 +645,23 @@ private suspend fun performTest(
                     temperature = null,
                 )) {
                     is com.rikkaminis.app.sandbox.offload.ProviderExecutionGateway.SendResult.Success -> {
+                        // [T-internal-usage-events] The probe is a real call on
+                        // the user's key — small, but it is spend, and it writes
+                        // no message. `entry` is the ModelEntry under test, so
+                        // this row carries the same model/entry identity the
+                        // chat path records.
+                        // Deliberately a helper call, not an inline local: the
+                        // gate below counts `= effectiveModel` occurrences to
+                        // prove the three EXECUTION sites carry the enriched
+                        // model, and a fourth occurrence would read as one.
+                        InternalUsageRecorder.record(
+                            dao = AppDatabase.getInstance(context).chatDao(),
+                            source = InternalUsageSources.QUICK_TEST,
+                            modelId = ledgerModelId(effectiveModel),
+                            entryId = entry.id,
+                            sessionId = null,
+                            usage = r.response.usage,
+                        )
                         val text = r.response.text.trim()
                         QuickTestState.TextReply(
                             text.ifEmpty { context.getString(R.string.quicktest_empty_reply) },

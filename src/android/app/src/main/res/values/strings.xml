@@ -757,6 +757,12 @@
     <string name="usage_filter_all">All Time</string>
     <string name="usage_filter_7d">Last 7 Days</string>
     <string name="usage_filter_30d">Last 30 Days</string>
+    <string name="usage_filter_90d">Last 90 Days</string>
+    <string name="usage_section_internal">Internal Calls (not in the totals above)</string>
+    <string name="usage_source_compact">Compaction summaries</string>
+    <string name="usage_source_title">Session titles</string>
+    <string name="usage_source_quick_test">Connection probe</string>
+    <string name="usage_source_row_title">%1$s · %2$d calls</string>
     <string name="usage_label_total_input">Total Input (incl. Cache)</string>
     <string name="usage_label_output">Output Tokens</string>
     <string name="usage_label_cache_read">Cache Read</string>

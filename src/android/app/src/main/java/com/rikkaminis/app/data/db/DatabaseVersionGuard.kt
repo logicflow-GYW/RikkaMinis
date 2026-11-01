@@ -74,7 +74,7 @@ object DatabaseVersionGuard {
      * apart silently: a stale copy here would either disable the guard or
      * trip it on every launch.
      */
-    const val CODE_DB_VERSION = 14
+    const val CODE_DB_VERSION = 15
 
     /** Filename must match the one passed to `Room.databaseBuilder`. */
     private const val DB_NAME = "minis.db"
@@ -110,8 +110,15 @@ object DatabaseVersionGuard {
      * declare this index and Room's open-time validation rejects an index it
      * finds on disk but does not expect; the drop destroys no data (an index
      * is derived entirely from its column) and re-upgrading recreates it.
+     *
+     * The 14 → 15 bump ([T-internal-usage-events]) added `15 to 14`:
+     * MIGRATION_14_15 is an ADD TABLE (+ADD INDEX) whose reverse
+     * (AppDatabase.MIGRATION_15_14) is a REAL DROP TABLE. Not an empty body:
+     * a leftover table is not guaranteed harmless to whatever Room version the
+     * user rolls back to, and a pre-15 build cannot read a row of it anyway —
+     * dropping a handful of cost rows beats a launch-time failure.
      */
-    private val HANDLED_DOWNGRADES: Set<Pair<Int, Int>> = setOf(13 to 12, 14 to 13)
+    private val HANDLED_DOWNGRADES: Set<Pair<Int, Int>> = setOf(13 to 12, 14 to 13, 15 to 14)
 
     /**
      * Whether a registered downgrade migration covers this jump, in which case

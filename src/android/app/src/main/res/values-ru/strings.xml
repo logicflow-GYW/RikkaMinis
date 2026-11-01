@@ -596,6 +596,12 @@
     <string name="usage_filter_all">Всё время</string>
     <string name="usage_filter_7d">Последние 7 дней</string>
     <string name="usage_filter_30d">Последние 30 дней</string>
+    <string name="usage_filter_90d">Последние 90 дней</string>
+    <string name="usage_section_internal">Внутренние вызовы (не входят в сумму выше)</string>
+    <string name="usage_source_compact">Сводки сжатия</string>
+    <string name="usage_source_title">Заголовки сеансов</string>
+    <string name="usage_source_quick_test">Проверка соединения</string>
+    <string name="usage_source_row_title">%1$s · %2$d вызовов</string>
     <string name="usage_label_total_input">Всего входных (вкл. кэш)</string>
     <string name="usage_label_output">Выходные токены</string>
     <string name="usage_label_cache_read">Чтение из кэша</string>

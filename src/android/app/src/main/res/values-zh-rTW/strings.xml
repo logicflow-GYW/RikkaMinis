@@ -51,6 +51,12 @@
     <string name="usage_filter_all">所有時間</string>
     <string name="usage_filter_7d">近 7 天</string>
     <string name="usage_filter_30d">近 30 天</string>
+    <string name="usage_filter_90d">近 90 天</string>
+    <string name="usage_section_internal">內部呼叫（不計入上方合計）</string>
+    <string name="usage_source_compact">壓縮摘要</string>
+    <string name="usage_source_title">會話標題</string>
+    <string name="usage_source_quick_test">連線測試</string>
+    <string name="usage_source_row_title">%1$s · %2$d 次</string>
     <string name="usage_label_cache_hit_rate">緩存命中率</string>
     <string name="common_on">開</string>
     <string name="common_off">關</string>

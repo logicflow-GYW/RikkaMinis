@@ -10,6 +10,8 @@ import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.ThinkingLevel
+import com.rikkaminis.app.data.usage.InternalUsageRecorder
+import com.rikkaminis.app.data.usage.InternalUsageSources
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.ImageBudget
 import com.rikkaminis.app.provider.LLMProvider
@@ -2190,6 +2192,22 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
                     return@launch
                 }
             }
+
+            // [T-internal-usage-events] Title generation is an LLM call that
+            // writes no message: without this row the tokens were spent on the
+            // user's account but invisible on the usage page. Covers both the
+            // auto path and the manual "Regenerate" (they share this call
+            // site); the resolved provider exposes an instance context but not
+            // the ModelEntry id, so `entryId` stays null — the ledger groups by
+            // source, and the model id is the axis that matters for cost.
+            InternalUsageRecorder.record(
+                dao = chatRepository.dao,
+                source = InternalUsageSources.TITLE,
+                modelId = provider.model.id,
+                entryId = null,
+                sessionId = realSessionId.ifEmpty { sessionId },
+                usage = response.usage,
+            )
 
             AppLogger.info(
                 "TitleGen",

@@ -2,6 +2,7 @@ package com.rikkaminis.app.data.repository
 
 import androidx.sqlite.db.SupportSQLiteQuery
 import com.rikkaminis.app.data.db.ChatDao
+import com.rikkaminis.app.data.db.InternalUsageEventEntity
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.CompactMarkerEntity
 import com.rikkaminis.app.data.db.MessageEntity
@@ -134,6 +135,10 @@ class ChatRepositoryCreateSessionTest {
         override suspend fun insertSession(session: ChatSessionEntity) {
             insertedSession = session
         }
+
+        override suspend fun insertInternalUsageEvent(event: InternalUsageEventEntity) {}
+        override suspend fun internalUsageEventsBetween(sinceMs: Long, untilMs: Long): List<InternalUsageEventEntity> =
+            emptyList()
 
         override suspend fun updateThinkingOverride(
             id: String,

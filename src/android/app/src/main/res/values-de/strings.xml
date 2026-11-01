@@ -391,6 +391,12 @@
     <string name="usage_filter_all">Gesamt</string>
     <string name="usage_filter_7d">Letzte 7 Tage</string>
     <string name="usage_filter_30d">Letzte 30 Tage</string>
+    <string name="usage_filter_90d">Letzte 90 Tage</string>
+    <string name="usage_section_internal">Interne Aufrufe (nicht in obiger Summe)</string>
+    <string name="usage_source_compact">Komprimierungs-Zusammenfassungen</string>
+    <string name="usage_source_title">Sitzungstitel</string>
+    <string name="usage_source_quick_test">Verbindungstest</string>
+    <string name="usage_source_row_title">%1$s · %2$d Aufrufe</string>
     <string name="usage_label_total_input">Gesamteingabe (inkl. Cache)</string>
     <string name="usage_label_output">Ausgabe-Token</string>
     <string name="usage_label_cache_read">Cache-Lesen</string>
