@@ -3,6 +3,7 @@ package com.rikkaminis.app.ui.chat
 import android.util.Log
 import androidx.lifecycle.viewModelScope
 import com.rikkaminis.app.agent.runtime.AgentRunEvent
+import com.rikkaminis.app.guard.ToolLoopScope
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.ProviderFactory
@@ -355,6 +356,9 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
                 val remaining = chatRepository.loadMessages(sid)
                 agentHistory.clear()
                 toolLoopDetector.reset()
+                // [dv1101-review F-01] Same rewind as retryFromMessage: the
+                // guard's ladders belong to the branch being abandoned.
+                ToolLoopScope.onUserTurn(sid)
                 for (entity in remaining) agentHistory.add(entity.toLLMMessage())
                 // [R5-C C-C-04②] The re-sync rewound the transcript back to the
                 // last committed user message — same rewind rules as

@@ -9,6 +9,7 @@ package com.rikkaminis.app.ui.chat
 // changed. No logic change.
 
 import kotlinx.coroutines.withContext
+import com.rikkaminis.app.guard.ToolLoopScope
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.service.SessionConcurrencyManager
@@ -101,6 +102,9 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
     agentHistory.clear()
     toolLoopDetector.reset()
+    // [dv1101-review F-01] Edit-and-truncate rebuilds the conversation exactly
+    // like retry — the guard must follow the old detector's reset here too.
+    ToolLoopScope.onUserTurn(sid)
     val remaining = chatRepository.loadMessages(sid)
     for (entity in remaining) {
         agentHistory.add(entity.toLLMMessage())
@@ -193,6 +197,11 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     val userText = combinedText.toString()
     val userPartsJson = buildUserPartsJson(userText, prepared.mediaRefPartsJson, prepared.attachedFilesXml)
     val userEntity = chatRepository.appendMessage(sid, "user", userPartsJson)
+    // [dv1101-review F-01] Mid-stream injection IS the user speaking: the guard's
+    // contract ("a new user round clears the ladders") has to hold on this entry
+    // too — otherwise the redirect the user typed to unstick a stopped run starts
+    // out still stopped.
+    ToolLoopScope.onUserTurn(sid)
     agentHistory.add(
         LLMMessage(
             role = LLMMessage.Role.USER,
@@ -359,6 +368,10 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
         // cutoff walk and the compaction anchors can resolve this turn.
         val userEntity = chatRepository.appendMessage(sid, "user", userPartsJson)
 
+        // [dv1101-review F-01] Same contract as the mid-stream injection: a drained
+        // queued prompt is its own user turn and must not inherit the previous
+        // turn's stop.
+        ToolLoopScope.onUserTurn(sid)
         // [T-consecutive-user-bridge] The prior runAgentLoop may have
         // exited with agentHistory ending on user(tool_result) — e.g. the
         // MAX_AGENT_TURNS ceiling was hit between a tool result landing
