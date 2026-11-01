@@ -37,6 +37,7 @@ import com.rikkaminis.app.offload.OffloadPermissionManager
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.provider.thinking.EffortTierLearner
 import com.rikkaminis.app.sandbox.ExecutionCoordinator
+import com.rikkaminis.app.sandbox.HostStatusSnapshot
 import com.rikkaminis.app.sandbox.NativeOffloadServer
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.sandbox.RootfsManager
@@ -742,6 +743,20 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
 
         NativeOffloadServer.start(RootfsManager.getInstance(this).rootfsDir)
+
+        // [feat/host-status-snapshot] Publish host physical state (battery /
+        // storage / network / doze / uptime) into `<rootfs>/run/minis-host-status.json`
+        // so guest scripts answer "how much battery is left" with a `cat`
+        // instead of an offload RPC round-trip. Started after the offload
+        // server because both live under the same rootfs, and wrapped because a
+        // diagnostics publisher must never be able to abort onCreate. The
+        // publisher no-ops while the rootfs is still being extracted and picks
+        // it up on the next heartbeat — no extra readiness hook needed.
+        runCatching {
+            HostStatusSnapshot.start(this, RootfsManager.getInstance(this).rootfsDir)
+        }.onFailure {
+            AppLogger.warning("HostStatusSnapshot", "start failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
 
         // Initialize session activity tracker for foreground service management
         SessionActivityTracker.init(this)
