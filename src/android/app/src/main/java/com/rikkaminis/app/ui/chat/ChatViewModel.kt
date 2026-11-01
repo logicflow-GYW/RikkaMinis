@@ -16,6 +16,7 @@ import com.rikkaminis.app.conversation.ContextCompactor
 import com.rikkaminis.app.conversation.ContextGrowthTracker
 import com.rikkaminis.app.conversation.compactAll
 import com.rikkaminis.app.diagnostics.SessionIdAliases
+import com.rikkaminis.app.guard.ToolLoopScope
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.data.FileMentionIndex
 import com.rikkaminis.app.data.db.CompactMarkerEntity
@@ -4160,6 +4161,13 @@ class ChatViewModel(
             // their name (rendered as a file tile) and are not persisted.
             val userPartsJson = buildUserPartsJson(trimmed, prepared.mediaRefPartsJson, prepared.attachedFilesXml)
             val persistedUser = chatRepository.appendMessage(activeSessionId, "user", userPartsJson)
+
+            // [feat/tool-loop-guard] A new user turn is a new chance: the session's loop ladders
+            // (repeat / no-effect / reread / failure) and its outward-pacing history start from
+            // zero, so a stop from the previous turn cannot leak into this one. Placed after the
+            // user row is durable — everything the agent loop does for this message happens
+            // after it.
+            ToolLoopScope.onUserTurn(activeSessionId)
 
             val userMsg = ChatMessage(
                 id = persistedUser.id,
