@@ -47,6 +47,11 @@ object AgentTools {
         // conversation, not memory files, and the need shows up precisely when
         // context pressure (compaction) has already cost the model detail.
         add(conversationHistoryDefinition())
+        // [knowledge-pack] app_guide: built-in app UI guides (page structure /
+        // entries / traps / login pages) so a screen-driving turn starts from
+        // knowledge instead of exploring. Read-only, always available;
+        // deliberately NOT gated on memory or sub-agents.
+        add(AppGuideTool.definition())
         if (subagentEnabled) {
             // [T7-subagent] spawn_agent: skill = independent sub-agent instance.
             add(SubagentSkill.definition())

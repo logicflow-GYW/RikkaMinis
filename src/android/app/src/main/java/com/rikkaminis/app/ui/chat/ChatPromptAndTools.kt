@@ -18,6 +18,7 @@ import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.sandbox.offload.ProviderExecutionGateway
 import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.tools.AgentTraceRecorder
+import com.rikkaminis.app.tools.AppGuideTool
 import com.rikkaminis.app.tools.FileEditTool
 import com.rikkaminis.app.tools.FileReadTool
 import com.rikkaminis.app.tools.FileWriteTool
@@ -340,6 +341,10 @@ internal suspend fun ChatViewModel.executeTool(
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
             "memory_rollup" -> executeMemoryRollupTool()
+            // [knowledge-pack] app_guide: built-in app UI guides (page
+            // structure / entries / traps / login pages). Read-only lookup
+            // over bundled assets — never touches the sandbox or the network.
+            AppGuideTool.NAME -> AppGuideTool.execute(argsJson, context)
             // [U10] conversation_history: reads THIS session's persisted
             // transcript (session id comes from the ViewModel, never from
             // arguments) so turns dropped by compaction are still reachable.
@@ -679,6 +684,10 @@ internal suspend fun ChatViewModel.executeSubagentTool(
     "memory_write" -> executeMemoryWriteTool(argsJson)
     "memory_get" -> executeMemoryGetTool(argsJson)
     "memory_rollup" -> executeMemoryRollupTool()
+    // [knowledge-pack] Same arm as the main dispatch: a skill that leaves
+    // allowedTools null gets app_guide in its schema, so a missing arm here
+    // would answer "Unknown or forbidden tool" for a tool it advertised.
+    AppGuideTool.NAME -> AppGuideTool.execute(argsJson, context)
     // Subagents run inside the same session, so the same transcript is fair
     // game (read-only, redacted). Kept in sync with the main dispatch switch —
     // a missing arm here is silent: the tool would work in the main loop and
