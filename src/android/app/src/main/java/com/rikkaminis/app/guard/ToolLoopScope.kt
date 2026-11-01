@@ -1,5 +1,6 @@
 package com.rikkaminis.app.guard
 
+import com.rikkaminis.app.tools.ToolConcurrencyPolicy
 import com.rikkaminis.app.tools.ToolExecutionResult
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -52,15 +53,14 @@ import kotlinx.serialization.json.JsonPrimitive
  */
 object ToolLoopScope {
 
-    /** `browser_use` actions that only look at the page (mirrors `ToolConcurrencyPolicy`'s read set). */
-    val BROWSER_READ_ACTIONS: Set<String> = setOf(
-        "get_text",
-        "screenshot",
-        "get_page_info",
-        "get_readable",
-        "get_backbone",
-        "list_tabs",
-    )
+    /**
+     * `browser_use` actions that only look at the page. Single source of truth:
+     * [ToolConcurrencyPolicy.BROWSER_READ_ACTIONS] — the concurrency policy already has to classify
+     * these as pure reads to schedule them in parallel, so keeping a second copy here only invited
+     * drift (it did: `get_cookies` was missing, and the guard refused a legitimate repeated read at
+     * the Repeat ladder's 12th rung). Add new read actions there, not here.
+     */
+    val BROWSER_READ_ACTIONS: Set<String> = ToolConcurrencyPolicy.BROWSER_READ_ACTIONS
 
     /** `browser_use` actions that put words in front of another human/service and therefore get paced. */
     val OUTWARD_ACTIONS: Set<String> = setOf("click", "type")
@@ -155,6 +155,10 @@ object ToolLoopScope {
      * [GuardVerdict.Wait] so the host shows the "waited Ns" notice.
      */
     fun beforeCall(sessionId: String?, toolName: String, argsJson: String): GuardVerdict {
+        // [dv1101-review F-05] Short-circuit before parsing: every unmanaged tool (file_write with a
+        // large payload, shell_execute with a long command) used to pay a full JSON parse here and
+        // again in afterCall for nothing. Tool name decides "managed" without looking at the args.
+        if (!isManagedToolName(toolName)) return GuardVerdict.Proceed
         val args = parseArgs(argsJson)
         val decision = decide(toolName, args)
         if (!decision.managed) return GuardVerdict.Proceed
@@ -179,6 +183,9 @@ object ToolLoopScope {
         result: ToolExecutionResult,
         verdict: GuardVerdict,
     ): ToolExecutionResult {
+        // [dv1101-review F-05] Same short-circuit as beforeCall — nothing below
+        // can fire for an unmanaged tool, and parsing its args buys nothing.
+        if (!isManagedToolName(toolName)) return result
         val args = parseArgs(argsJson)
         val decision = decide(toolName, args)
         val ladder = if (decision.managed) {
@@ -213,6 +220,9 @@ object ToolLoopScope {
     fun refusal(toolName: String, reason: String): ToolExecutionResult = ToolExecutionResult(
         output = "[loop_guard] $toolName was not run. $reason",
         success = false,
+        // [dv1101-review F-05] Every other tool path hands the UI a title; a
+        // refusal used to render an untitled failed block.
+        toolTitle = toolName,
     )
 
     /**
@@ -234,6 +244,15 @@ object ToolLoopScope {
 
     private fun guardToolName(toolName: String, decision: Decision): String =
         if (decision.read) GUARD_READ_KEY else toolName
+
+    /**
+     * Name-only "is this one of the two tools in [decide]'s `when`" — used by [beforeCall] /
+     * [afterCall] to skip parsing args for the other ~30 tools. Must stay in sync with that `when`.
+     */
+    private fun isManagedToolName(toolName: String): Boolean {
+        val normalized = toolName.trim().lowercase()
+        return normalized == "browser_use" || normalized == "shell_execute"
+    }
 
     /** The guard copy of the args: `text` travels under [GUARD_TEXT_ARG] so the facade never paces. */
     private fun guardArgs(args: JsonObject): JsonObject {

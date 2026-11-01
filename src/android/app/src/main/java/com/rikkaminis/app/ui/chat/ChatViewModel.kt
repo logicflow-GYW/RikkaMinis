@@ -3129,6 +3129,11 @@ class ChatViewModel(
         // both; the next turn re-evaluates pressure from live state.
         _compactSummary.value = null
         toolLoopDetector.reset()
+        // [dv1101-review F-01] A wiped transcript is a new conversation, so the
+        // session's loop ladders (repeat / no-effect / reread / failure) and its
+        // outward-pacing history must go with it. Every `toolLoopDetector.reset()`
+        // site is this guard's sibling — see ToolLoopScopeWiringTest.
+        ToolLoopScope.onUserTurn(sid)
         // [FIX-R4-P F-02] The wiped transcript's pressure reading must not
         // survive the wipe: `contextPressure()` re-derives EXHAUSTED from a
         // stale `_lastTurnContextTokens`, so the Context-Full dialog the user
@@ -3508,6 +3513,9 @@ class ChatViewModel(
                 // Rebuild agentHistory from the trimmed DB state.
                 agentHistory.clear()
                 toolLoopDetector.reset()
+                // [dv1101-review F-01] Rewinding to a tool block abandons the
+                // branch that got stopped — the new attempt starts clean.
+                ToolLoopScope.onUserTurn(sid)
                 for (entity in chatRepository.loadMessages(sid)) {
                     agentHistory.add(entity.toLLMMessage())
                 }
@@ -3688,6 +3696,11 @@ class ChatViewModel(
             // Rebuild agentHistory from remaining DB messages
             agentHistory.clear()
             toolLoopDetector.reset()
+            // [dv1101-review F-01] Retry is a rewind, not "the same loop again":
+            // without this the guard a stopped turn installed would refuse every
+            // managed action of the retried attempt — the standard recovery
+            // gesture would be the one thing that cannot recover.
+            ToolLoopScope.onUserTurn(sid)
             val remaining = chatRepository.loadMessages(sid)
             for (entity in remaining) {
                 agentHistory.add(entity.toLLMMessage())

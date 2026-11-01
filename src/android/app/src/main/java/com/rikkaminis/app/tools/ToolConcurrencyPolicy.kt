@@ -51,7 +51,7 @@ object ToolConcurrencyPolicy {
      * (navigate / click / type / scroll / fetch / new_tab / close_tab /
      * set_cookies / ...) stay serial.
      */
-    private val BROWSER_READ_ACTIONS: Set<String> = setOf(
+    internal val BROWSER_READ_ACTIONS: Set<String> = setOf(
         "get_text",
         "screenshot",
         "get_page_info",
