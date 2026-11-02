@@ -13,8 +13,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         CompactMarkerEntity::class,
         WebAppShortcutEntity::class,
+        InternalUsageEventEntity::class,
     ],
-    version = 14,
+    version = 15,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -348,6 +349,64 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * [T-internal-usage-events] Cost ledger for LLM calls that never become
+         * chat messages — see [InternalUsageEventEntity] for why it is a side
+         * table rather than a rewrite of the chat usage path.
+         *
+         * Purely additive (ADD TABLE + ADD INDEX), which is what makes the
+         * reverse below legitimate under the rules in the
+         * [com.rikkaminis.app.data.db.DatabaseVersionGuard] doc block.
+         *
+         * The column set must stay byte-identical to the entity: Room compares
+         * the on-disk table against the entity at open time, so a forgotten
+         * column here surfaces as "Migration didn't properly handle
+         * internal_usage_events" on the first launch after upgrade, not at
+         * build time.
+         */
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `internal_usage_events` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`created_at` INTEGER NOT NULL, " +
+                        "`source` TEXT NOT NULL, " +
+                        "`model_id` TEXT NOT NULL, " +
+                        "`entry_id` TEXT, " +
+                        "`session_id` TEXT, " +
+                        "`input_tokens` INTEGER NOT NULL, " +
+                        "`output_tokens` INTEGER NOT NULL, " +
+                        "`cache_creation_tokens` INTEGER NOT NULL, " +
+                        "`cache_read_tokens` INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_internal_usage_events_created_at` " +
+                        "ON `internal_usage_events` (`created_at`)"
+                )
+            }
+        }
+
+        /**
+         * [T-internal-usage-events] Downgrade counterpart of [MIGRATION_14_15].
+         *
+         * Deliberately DROP, even though the ledger is "just derived data":
+         * an unknown table left behind is not guaranteed harmless across the
+         * Room versions a user may roll back to, and a pre-15 build cannot read
+         * a single row of it anyway. Losing a few compaction/title cost rows is
+         * cheaper than a launch-time schema validation failure — the same
+         * trade-off [MIGRATION_14_13] made for its index.
+         *
+         * MUST ship in the same commit as [MIGRATION_14_15] and with the
+         * matching `15 to 14` entry in
+         * [com.rikkaminis.app.data.db.DatabaseVersionGuard.HANDLED_DOWNGRADES];
+         * the two unit tests named in that file's KDoc fail otherwise.
+         */
+        val MIGRATION_15_14 = object : Migration(15, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS `internal_usage_events`")
+            }
+        }
+
+        /**
          * [T-android-downgrade-compat] There is deliberately NO downgrade
          * migration in this file, even though Room supports them. This is a
          * hard Room constraint, not a style choice:
@@ -441,10 +500,10 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "minis.db"
                 )
-                    // [T-android-downgrade-compat] 11 upgrades, 0 downgrades — see the
+                    // [T-android-downgrade-compat] 14 upgrades, 3 downgrades — see the
                     // MIGRATION_3_4 doc block above for why a downgrade pair belongs
                     // with its forward bump, not with this build.
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_12, MIGRATION_13_14, MIGRATION_14_13)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_12, MIGRATION_13_14, MIGRATION_14_13, MIGRATION_14_15, MIGRATION_15_14)
                     .build()
                     .also { INSTANCE = it }
             }

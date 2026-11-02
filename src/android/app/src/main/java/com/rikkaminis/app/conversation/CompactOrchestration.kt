@@ -7,6 +7,8 @@ import com.rikkaminis.app.data.db.CompactMarkerEntity
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.ThinkingLevel
+import com.rikkaminis.app.data.usage.InternalUsageRecorder
+import com.rikkaminis.app.data.usage.InternalUsageSources
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.sandbox.offload.ProviderExecutionGateway
@@ -900,6 +902,25 @@ internal suspend fun ChatViewModel.generateCompactSummary(conversationText: Stri
         }
         when (r) {
             is ProviderExecutionGateway.SendResult.Success -> {
+                // [T-internal-usage-events] A compaction summary is a real LLM
+                // call that writes no message, so `messages.token_usage` never
+                // sees it and the usage page under-reported the account's
+                // spend. Recorded here — before the truncation check — because
+                // a truncated attempt burned its tokens too and then fell
+                // through to the next candidate.
+                // Deliberately a local, not an inline `candidate.model.id`: the
+                // compact-decision gate keys on that exact argument shape to
+                // prove the *route identity* carries the model id, and a second
+                // literal occurrence would make its selftest arm blind.
+                val usedModel = candidate.model.id
+                InternalUsageRecorder.record(
+                    dao = chatRepository.dao,
+                    source = InternalUsageSources.COMPACT,
+                    modelId = usedModel,
+                    entryId = entryId,
+                    sessionId = realSessionId.ifEmpty { sessionId },
+                    usage = r.response.usage,
+                )
                 if (compactSummaryIsTruncated(r.response.stopReason)) {
                     AppLogger.info(
                         ChatViewModel.TAG,

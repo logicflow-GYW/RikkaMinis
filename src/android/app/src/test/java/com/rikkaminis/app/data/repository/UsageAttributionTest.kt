@@ -1,6 +1,7 @@
 package com.rikkaminis.app.data.repository
 
 import com.rikkaminis.app.data.db.ChatDao
+import com.rikkaminis.app.data.db.InternalUsageEventEntity
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.CompactMarkerEntity
 import com.rikkaminis.app.data.db.MessageEntity
@@ -52,6 +53,8 @@ class UsageAttributionTest {
 
         // -- inert implementations for the remaining interface methods --
         override suspend fun insertSession(session: ChatSessionEntity) {}
+        override suspend fun insertInternalUsageEvent(event: InternalUsageEventEntity) {}
+        override suspend fun internalUsageEventsBetween(sinceMs: Long, untilMs: Long): List<InternalUsageEventEntity> = emptyList()
         override suspend fun updateThinkingOverride(id: String, value: String?, updatedAt: Long) {}
         override fun observeSessions(): Flow<List<ChatSessionEntity>> = emptyFlow()
         override fun observeSessionsSorted(): Flow<List<ChatSessionEntity>> = emptyFlow()

@@ -71,6 +71,9 @@ class DatabaseVersionGuardTest {
             // downgrade covered by the wired MIGRATION_14_13 reverse ->
             // normal open, no guidance
             Row(14, 13, proceed),
+            // downgrade covered by the wired MIGRATION_15_14 reverse ->
+            // normal open, no guidance
+            Row(15, 14, proceed),
             // downgrades with no registered migration -> guidance, never a crash
             Row(14, 12, guidance),
             Row(99, 12, guidance),
@@ -79,6 +82,7 @@ class DatabaseVersionGuardTest {
             Row(15, 13, guidance),
             // a hypothetical future bump must not be auto-handled
             Row(16, 13, guidance),
+            Row(16, 14, guidance),
             Row(17, 14, guidance),
         )
 
@@ -89,7 +93,7 @@ class DatabaseVersionGuardTest {
                 DatabaseVersionGuard.decide(row.onDisk, row.code),
             )
         }
-        assertEquals("all rows executed", 15, rows.size)
+        assertEquals("all rows executed", 17, rows.size)
     }
 
     @Test
@@ -104,6 +108,7 @@ class DatabaseVersionGuardTest {
             for (onDisk in (code + 1)..(code + 25)) {
                 if (onDisk == 13 && code == 12) continue // wired: MIGRATION_13_12
                 if (onDisk == 14 && code == 13) continue // wired: MIGRATION_14_13
+                if (onDisk == 15 && code == 14) continue // wired: MIGRATION_15_14
                 if (DatabaseVersionGuard.decide(onDisk, code) == proceed) {
                     fail(
                         "decide(onDisk=$onDisk, code=$code) unexpectedly PROCEEDed an " +
@@ -121,7 +126,9 @@ class DatabaseVersionGuardTest {
         // The 12 → 13 bump wired MIGRATION_13_12 (empty-body reverse of a
         // plain ADD INDEX declared on MessageEntity); the 13 → 14 bump
         // (port/v114-session-index) wired MIGRATION_14_13 (real DROP INDEX
-        // reverse of an ADD INDEX declared on ChatSessionEntity). The
+        // reverse of an ADD INDEX declared on ChatSessionEntity); the
+        // 14 → 15 bump ([T-internal-usage-events]) wired MIGRATION_15_14
+        // (real DROP TABLE reverse of an ADD TABLE). The
         // whitelist must name exactly those pairs: the 25x25 sweep below is
         // the guard against a half-landed or silently widened bump. See
         // HANDLED_DOWNGRADES.
@@ -129,9 +136,9 @@ class DatabaseVersionGuardTest {
             (0..25).map { onDisk -> onDisk to code }
         }.filter { DatabaseVersionGuard.isHandledDowngrade(it.first, it.second) }
         assertEquals(
-            "the whitelist must name exactly the wired MIGRATION_13_12 and " +
-                "MIGRATION_14_13; got $hits",
-            setOf(13 to 12, 14 to 13),
+            "the whitelist must name exactly the wired MIGRATION_13_12, " +
+                "MIGRATION_14_13 and MIGRATION_15_14; got $hits",
+            setOf(13 to 12, 14 to 13, 15 to 14),
             hits.toSet(),
         )
 

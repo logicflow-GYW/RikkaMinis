@@ -485,6 +485,12 @@
     <string name="usage_filter_all">所有时间</string>
     <string name="usage_filter_7d">近 7 天</string>
     <string name="usage_filter_30d">近 30 天</string>
+    <string name="usage_filter_90d">近 90 天</string>
+    <string name="usage_section_internal">内部调用（不计入上方合计）</string>
+    <string name="usage_source_compact">压缩摘要</string>
+    <string name="usage_source_title">会话标题</string>
+    <string name="usage_source_quick_test">连接测试</string>
+    <string name="usage_source_row_title">%1$s · %2$d 次</string>
     <string name="usage_label_total_input">总输入（含缓存）</string>
     <string name="usage_label_output">输出 Token</string>
     <string name="usage_label_cache_read">缓存读取</string>

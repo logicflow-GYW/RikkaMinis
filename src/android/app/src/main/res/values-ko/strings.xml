@@ -391,6 +391,12 @@
     <string name="usage_filter_all">전체 기간</string>
     <string name="usage_filter_7d">최근 7일</string>
     <string name="usage_filter_30d">최근 30일</string>
+    <string name="usage_filter_90d">최근 90일</string>
+    <string name="usage_section_internal">내부 호출(위 합계에 포함되지 않음)</string>
+    <string name="usage_source_compact">압축 요약</string>
+    <string name="usage_source_title">세션 제목</string>
+    <string name="usage_source_quick_test">연결 테스트</string>
+    <string name="usage_source_row_title">%1$s · %2$d회</string>
     <string name="usage_label_total_input">총 입력 (캐시 포함)</string>
     <string name="usage_label_output">출력 토큰</string>
     <string name="usage_label_cache_read">캐시 읽기</string>

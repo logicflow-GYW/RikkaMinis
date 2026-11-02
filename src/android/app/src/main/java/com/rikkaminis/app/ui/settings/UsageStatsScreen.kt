@@ -35,10 +35,14 @@ import androidx.compose.ui.res.stringResource
 import com.rikkaminis.app.data.db.ChatDao
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ProviderConfig
+import com.rikkaminis.app.data.usage.InternalSourceStats
+import com.rikkaminis.app.data.usage.InternalUsageSources
 import com.rikkaminis.app.data.usage.ModelIdentity
 import com.rikkaminis.app.data.usage.UNKNOWN_PROVIDER
 import com.rikkaminis.app.data.usage.UsageAggregator
 import com.rikkaminis.app.data.usage.UsageRow
+import com.rikkaminis.app.data.usage.aggregateInternalUsageBySource
+import com.rikkaminis.app.data.usage.toRecord
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -66,7 +70,7 @@ private data class ModelStats(
 private data class ProviderGroup(val name: String, val models: List<ModelStats>)
 
 /** Time-range filter for the usage page. ALL keeps the legacy full scan. */
-private enum class UsageRange { ALL, DAYS_7, DAYS_30 }
+private enum class UsageRange { ALL, DAYS_7, DAYS_30, DAYS_90 }
 
 private data class GrandTotal(
     val totalInput: Long = 0,
@@ -87,6 +91,7 @@ fun UsageStatsScreen(
 ) {
     var grandTotal by remember { mutableStateOf(GrandTotal()) }
     var providerGroups by remember { mutableStateOf<List<ProviderGroup>>(emptyList()) }
+    var internalSources by remember { mutableStateOf<List<InternalSourceStats>>(emptyList()) }
     var isLoaded by remember { mutableStateOf(false) }
     var range by remember { mutableStateOf(UsageRange.ALL) }
 
@@ -99,11 +104,12 @@ fun UsageStatsScreen(
         // model entries out of it, so a config update must re-run the
         // aggregation instead of leaving the page on the previous provider /
         // model labelling.
-        val (total, groups) = withContext(Dispatchers.Default) {
+        val (total, groups, ledgerRows) = withContext(Dispatchers.Default) {
             computeUsageStats(range, chatDao, providerConfig)
         }
         grandTotal = total
         providerGroups = groups
+        internalSources = ledgerRows
         // Loading skeleton only on the first load; subsequent range flips keep
         // showing stale data instead of flashing blank. (T6-L2: isLoaded is set
         // to true at the end of this block and never reset, so the deleted
@@ -141,6 +147,7 @@ fun UsageStatsScreen(
                                     UsageRange.ALL -> stringResource(R.string.usage_filter_all)
                                     UsageRange.DAYS_7 -> stringResource(R.string.usage_filter_7d)
                                     UsageRange.DAYS_30 -> stringResource(R.string.usage_filter_30d)
+                                    UsageRange.DAYS_90 -> stringResource(R.string.usage_filter_90d)
                                 },
                                 style = MaterialTheme.typography.bodyMedium,
                             )
@@ -168,6 +175,27 @@ fun UsageStatsScreen(
             }
         }
 
+        // [T-internal-usage-events] Separate section on purpose: these tokens
+        // never became a message, so they are not in the totals above — a user
+        // reconciling the page against a per-token relay bill needs to see them
+        // without them silently inflating the chat numbers.
+        if (internalSources.isNotEmpty()) {
+            SettingsSection(header = stringResource(R.string.usage_section_internal)) {
+                internalSources.forEachIndexed { idx, source ->
+                    SettingsValueRow(
+                        title = stringResource(
+                            R.string.usage_source_row_title,
+                            internalSourceLabel(source.source),
+                            source.requests,
+                        ),
+                        value = "${formatCount(source.totalInput)} / ${formatCount(source.outputTokens)}",
+                        valueColor = MaterialTheme.colorScheme.onSurface,
+                        showDivider = idx < internalSources.size - 1,
+                    )
+                }
+            }
+        }
+
         for (group in providerGroups) {
             SettingsSection(header = group.name) {
                 group.models.forEachIndexed { idx, model ->
@@ -187,13 +215,14 @@ private suspend fun computeUsageStats(
     range: UsageRange,
     chatDao: ChatDao,
     providerConfig: ProviderConfig?,
-): Pair<GrandTotal, List<ProviderGroup>> {
+): Triple<GrandTotal, List<ProviderGroup>, List<InternalSourceStats>> {
     val now = System.currentTimeMillis()
     // Half-open window [since, until) — identical bounds to the legacy path.
     val window = when (range) {
         UsageRange.ALL -> 0L to Long.MAX_VALUE
         UsageRange.DAYS_7 -> (now - 7L * 24 * 60 * 60 * 1000) to (now + 1)
         UsageRange.DAYS_30 -> (now - 30L * 24 * 60 * 60 * 1000) to (now + 1)
+        UsageRange.DAYS_90 -> (now - 90L * 24 * 60 * 60 * 1000) to (now + 1)
     }
 
     // modelId → (displayName, provider). [da1033-I06] The LIVE config wins over the
@@ -314,7 +343,30 @@ private suspend fun computeUsageStats(
         cacheReadTokens = statsList.sumOf { it.cacheReadTokens },
         cacheCreationTokens = statsList.sumOf { it.cacheCreationTokens },
     )
-    return total to sortedGroups
+
+    // [T-internal-usage-events] Calls that never became a message (compaction
+    // summary, session title, connection probe) live in their own ledger, so
+    // they cannot be double-counted against the message-derived numbers above —
+    // and they are shown as a separate section rather than folded into the
+    // per-model rows, because folding them in would corrupt the distinct-day /
+    // distinct-session counters the SQL path pre-aggregates as plain counts.
+    // ponytail: separate section, not merged per model.
+    // 天花板: no per-model split of internal spend, no day-over-day trend.
+    // 升级触发: someone asks "which model burned my compaction tokens", or the
+    // ledger grows enough that a per-day chart earns its own GROUP BY.
+    val ledgerRows = aggregateInternalUsageBySource(
+        chatDao.internalUsageEventsBetween(window.first, window.second).map { it.toRecord() },
+    )
+    return Triple(total, sortedGroups, ledgerRows)
+}
+
+/** Ledger source id → label; unknown ids fall back to the raw id. */
+@Composable
+private fun internalSourceLabel(source: String): String = when (source) {
+    InternalUsageSources.COMPACT -> stringResource(R.string.usage_source_compact)
+    InternalUsageSources.TITLE -> stringResource(R.string.usage_source_title)
+    InternalUsageSources.QUICK_TEST -> stringResource(R.string.usage_source_quick_test)
+    else -> source
 }
 
 @Composable

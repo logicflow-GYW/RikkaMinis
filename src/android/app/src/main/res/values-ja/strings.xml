@@ -391,6 +391,12 @@
     <string name="usage_filter_all">全期間</string>
     <string name="usage_filter_7d">過去7日間</string>
     <string name="usage_filter_30d">過去30日間</string>
+    <string name="usage_filter_90d">過去 90 日</string>
+    <string name="usage_section_internal">内部呼び出し（上の合計には含まれません）</string>
+    <string name="usage_source_compact">圧縮サマリー</string>
+    <string name="usage_source_title">セッションタイトル</string>
+    <string name="usage_source_quick_test">接続テスト</string>
+    <string name="usage_source_row_title">%1$s · %2$d 回</string>
     <string name="usage_label_total_input">合計入力（キャッシュ含む）</string>
     <string name="usage_label_output">出力トークン</string>
     <string name="usage_label_cache_read">キャッシュ読み取り</string>

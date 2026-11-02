@@ -228,6 +228,27 @@ interface ChatDao {
     """)
     suspend fun usageStatsAggregated(sinceMs: Long, untilMs: Long): List<UsageStatsRow>
 
+    /**
+     * [T-internal-usage-events] Ledger writes go through
+     * [com.rikkaminis.app.data.usage.InternalUsageRecorder] — this DAO method is
+     * the storage half, not a second entry point.
+     */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertInternalUsageEvent(event: InternalUsageEventEntity)
+
+    /**
+     * Rows for the internal-call section of the usage page. Half-open window
+     * [sinceMs, untilMs), same convention as [usageStatsAggregated]. Rows are
+     * tiny (one per compaction / title / probe) and grouped in Kotlin by
+     * [com.rikkaminis.app.data.usage.aggregateInternalUsageBySource].
+     */
+    @Query("""
+        SELECT * FROM internal_usage_events
+        WHERE created_at >= :sinceMs AND created_at < :untilMs
+        ORDER BY created_at ASC
+    """)
+    suspend fun internalUsageEventsBetween(sinceMs: Long, untilMs: Long): List<InternalUsageEventEntity>
+
     // Last message preview for session list
     @Query("""
         SELECT parts_json FROM messages

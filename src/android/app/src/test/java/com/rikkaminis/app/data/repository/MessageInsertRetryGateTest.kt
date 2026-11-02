@@ -2,6 +2,7 @@ package com.rikkaminis.app.data.repository
 
 import android.database.sqlite.SQLiteConstraintException
 import com.rikkaminis.app.data.db.ChatDao
+import com.rikkaminis.app.data.db.InternalUsageEventEntity
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.CompactMarkerEntity
 import com.rikkaminis.app.data.db.MessageEntity
@@ -207,6 +208,8 @@ internal open class InertChatDao : ChatDao {
     open override suspend fun nextSortOrder(sessionId: String): Int = 0
     open override suspend fun insertMessage(message: MessageEntity) {}
     override suspend fun insertSession(session: ChatSessionEntity) {}
+    override suspend fun insertInternalUsageEvent(event: InternalUsageEventEntity) {}
+    override suspend fun internalUsageEventsBetween(sinceMs: Long, untilMs: Long): List<InternalUsageEventEntity> = emptyList()
     override suspend fun updateThinkingOverride(id: String, value: String?, updatedAt: Long) {}
     override fun observeSessions(): Flow<List<ChatSessionEntity>> = emptyFlow()
     override fun observeSessionsSorted(): Flow<List<ChatSessionEntity>> = emptyFlow()
