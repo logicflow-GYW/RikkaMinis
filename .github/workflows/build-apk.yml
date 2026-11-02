@@ -45,10 +45,49 @@ jobs:
         run: |
           python3 --version || (echo "::error::python3 is required for the scan gate" && exit 1)
           sh scripts/scan/scan.sh
+
           # Scanner self-test — same fixture ground truth as scan-gate.yml:
           # assert the scanners still catch what they claim to catch before
           # this build stamps its artifacts green.
-          python3 scripts/scan/test_scan.py --jobs 4
+          #
+          # [ci/speed] Measured on run 41367085524: this step is 182s, of which
+          # 121s is test_scan.py and 63s is the 113 gates. The fixtures only
+          # re-prove the SCANNERS; a scanner can lose teeth only if
+          # scripts/scan/** moved in this push, and on every other push the
+          # gates above have already run over this exact tree. So: run the
+          # fixtures when the scanners changed, skip otherwise.
+          #
+          # Fail OPEN — if the base commit cannot be resolved for any reason
+          # (workflow_dispatch, force-push, gc'd object, surprise API shape) we
+          # run the fixtures. "Self-test silently skipped" must never be the
+          # reason a toothless scanner ships.
+          #
+          # Base resolution order: push event → github.event.before (authoritative
+          # push range); anything else (workflow_dispatch, branch builds) →
+          # origin/main, i.e. "did this branch touch the scanners?". Both
+          # missing → run the fixtures.
+          BASE="${{ github.event.before }}"
+          if [ -z "$BASE" ]; then
+            git fetch --depth=1 --no-tags origin +main:refs/remotes/origin/main >/dev/null 2>&1 || true
+            BASE="$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' || true)"
+          fi
+          if [ -n "$BASE" ] && ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git fetch --depth=1 --no-tags origin "$BASE" >/dev/null 2>&1 || true
+          fi
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "::notice::base commit not resolvable — running the fixture self-test unconditionally"
+            python3 scripts/scan/test_scan.py --jobs 4
+            exit 0
+          fi
+          echo "scan-gate base=$BASE head=${{ github.sha }}"
+          CHANGED="$(git diff --name-only "$BASE" "${{ github.sha }}" -- scripts/scan 2>&1)" || CHANGED="GIT_DIFF_FAILED"
+          if [ "$CHANGED" = "GIT_DIFF_FAILED" ] || [ -n "$CHANGED" ]; then
+            echo "::notice::scanners moved in this push (or the diff was unreadable) — running the fixture self-test"
+            printf '%s\n' "$CHANGED"
+            python3 scripts/scan/test_scan.py --jobs 4
+          else
+            echo "::notice::scripts/scan/** untouched in this push — skipping the fixture self-test (~121s); scan.sh ran all 113 gates over this tree"
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -246,6 +285,24 @@ jobs:
       #     identifier prompt getter threw when BuildConfig was empty. The stub
       #     step above makes it non-empty, so they pass again.
       # If any suite is red, the build fails — no silent scoping.
+      #
+      # [ci/speed] `clean` runs BEFORE the tests, not between the tests and the
+      # APK. The guarantee it exists for is unchanged (see the comment on the
+      # step below): AGP keeps a `cache: gradle` (actions/setup-java) that can
+      # restore stale native/CMake output, silently shipping an OLD .so —
+      # Tier 0 caught exactly this, a crash-handler .so older than its source.
+      # What changed is the price. Run AFTER the tests, it deleted the release
+      # variant's freshly compiled Kotlin, and `assembleRelease` recompiled it
+      # from zero (measured 334s: ~57s duplicate compile plus ~40 tasks
+      # re-executed only because the tree had been wiped). Run BEFORE the
+      # tests it gives the identical guarantee — no .so exists until
+      # `assembleRelease` native-builds it from source — while letting the APK
+      # build reuse everything the test build already compiled.
+      - name: Clean native build (cpp freshness)
+        run: |
+          cd src/android
+          ./gradlew clean --stacktrace
+
       - name: Run unit tests (full suite)
         run: |
           cd src/android
@@ -260,16 +317,9 @@ jobs:
           cd src/android
           ./gradlew compileDebugAndroidTestKotlin --stacktrace
 
-      # Force a fresh build: AGP keeps a `cache: gradle` (actions/setup-java)
-      # that can restore stale native/CMake output, silently shipping an OLD
-      # .so. Tier 0 caught exactly this — the crash-handler .so in the APK
-      # predated the code change. clean + drop .cxx so cpp changes actually
-      # get recompiled from source.
-      - name: Clean native build (cpp freshness)
-        run: |
-          cd src/android
-          ./gradlew clean --stacktrace
-
+      # (The cpp-freshness `clean` this comment used to guard now runs before
+      # the unit tests — see the "Clean native build" step above. Keeping it
+      # there is what lets this step reuse the compiled release variant.)
       - name: Build APK with Gradle
         run: |
           cd src/android
