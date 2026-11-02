@@ -22,33 +22,179 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # ────────────────────────────────────────────────────────────────────────
+  # job 1/4 — static gates. Pure Python, no toolchain (~60s measured).
+  #
+  # [ci/speed] This used to be the first step of the single build job, which
+  # bought "a gate failure costs ~3 minutes, not ~12". That ordering is given
+  # up here on purpose: the 113 gates have been green run after run, so the
+  # common case paid their full 178s as pure latency in front of everything
+  # else. In the job split they run BESIDE the two heavy jobs instead.
+  # If gate failures ever become frequent again, the revert is: fold this job
+  # back to the head of build-apk's steps.
+  # ────────────────────────────────────────────────────────────────────────
+  scan-gate:
     runs-on: ubuntu-24.04
-    # Needed by the "Publish to Releases" step to create/update a GitHub Release
-    # and upload the APK asset. Everything else here only reads the repo.
     permissions:
-      contents: write
+      contents: read
     steps:
-      # deps/proot is a git submodule — the proot sandbox engine source. This
-      # workflow builds the sandbox binary from source (see the "Build proot
-      # from source" step), so the submodule must be checked out.
       - name: Checkout Code
         uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       # Pre-build static scan gate: four-way sync, i18n orphan keys, bare
       # valueOf. Fails the build early on structural data-loss bugs that the
-      # compiler cannot catch. Runs before JDK/SDK setup — pure Python, no
-      # toolchain needed.
+      # compiler cannot catch. Pure Python — this job needs no toolchain, which
+      # is why it is the cheapest of the four and always finishes first.
       - name: Run pre-build scan gate
         run: |
           python3 --version || (echo "::error::python3 is required for the scan gate" && exit 1)
           sh scripts/scan/scan.sh
+
           # Scanner self-test — same fixture ground truth as scan-gate.yml:
           # assert the scanners still catch what they claim to catch before
           # this build stamps its artifacts green.
-          python3 scripts/scan/test_scan.py --jobs 4
+          #
+          # [ci/speed] Measured on run 41367085524: this step is 182s, of which
+          # 121s is test_scan.py and 63s is the 113 gates. The fixtures only
+          # re-prove the SCANNERS; a scanner can lose teeth only if
+          # scripts/scan/** moved in this push, and on every other push the
+          # gates above have already run over this exact tree. So: run the
+          # fixtures when the scanners changed, skip otherwise.
+          #
+          # Fail OPEN — if the base commit cannot be resolved for any reason
+          # (workflow_dispatch, force-push, gc'd object, surprise API shape) we
+          # run the fixtures. "Self-test silently skipped" must never be the
+          # reason a toothless scanner ships.
+          #
+          # Base resolution order: push event → github.event.before (authoritative
+          # push range); anything else (workflow_dispatch, branch builds) →
+          # origin/main, i.e. "did this branch touch the scanners?". Both
+          # missing → run the fixtures.
+          BASE="${{ github.event.before }}"
+          if [ -z "$BASE" ]; then
+            git fetch --depth=1 --no-tags origin +main:refs/remotes/origin/main >/dev/null 2>&1 || true
+            BASE="$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' || true)"
+          fi
+          if [ -n "$BASE" ] && ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            git fetch --depth=1 --no-tags origin "$BASE" >/dev/null 2>&1 || true
+          fi
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "::notice::base commit not resolvable — running the fixture self-test unconditionally"
+            python3 scripts/scan/test_scan.py --jobs 4
+            exit 0
+          fi
+          echo "scan-gate base=$BASE head=${{ github.sha }}"
+          CHANGED="$(git diff --name-only "$BASE" "${{ github.sha }}" -- scripts/scan 2>&1)" || CHANGED="GIT_DIFF_FAILED"
+          if [ "$CHANGED" = "GIT_DIFF_FAILED" ] || [ -n "$CHANGED" ]; then
+            echo "::notice::scanners moved in this push (or the diff was unreadable) — running the fixture self-test"
+            printf '%s\n' "$CHANGED"
+            python3 scripts/scan/test_scan.py --jobs 4
+          else
+            echo "::notice::scripts/scan/** untouched in this push — skipping the fixture self-test (~121s); scan.sh ran all 113 gates over this tree"
+          fi
+
+  # ────────────────────────────────────────────────────────────────────────
+  # job 2/4 — JVM unit tests + instrumented-test compilation.
+  #
+  # No NDK here, and that is a measured claim: `testReleaseUnitTest` never
+  # traverses mergeReleaseNativeLibs (in the step log of run 41367085524 that
+  # task appears only under assembleRelease), so the 27s NDK install and the
+  # three native builds belong to job 3 alone.
+  # ────────────────────────────────────────────────────────────────────────
+  unit-tests:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          # [T-ci-sdk-tools-deprecation] The action's default is
+          # `tools platform-tools`, but Google stopped serving the deprecated
+          # `tools` package on 2026-09-15 — sdkmanager now exits with
+          # "Warning: Failed to find package 'tools'" (measured: CI run #1532,
+          # 2026-09-15; upstream issue android-actions/setup-android#537).
+          # We never needed `tools`; request only what the build uses.
+          packages: 'platform-tools'
+
+      # build.gradle.kts wires `stageDebugSkillAssets` into every debug asset
+      # merge. The script is `onlyIf { script.exists() }`, but it reads
+      # .claude/skills/debug-server/ which is private and absent from this
+      # public mirror — create it so the Exec task has an input dir.
+      #
+      # The Anthropic OAuth identifier prompt is private for the same reason.
+      # Unit tests need only a non-empty deterministic value; they never assert
+      # or ship this placeholder. Production OAuth builds must still provide the
+      # real private value via app/provider-customization.properties.
+      #
+      # [ci/speed] Duplicated verbatim in the build-apk job — jobs do not share
+      # a workspace and this is five lines. A composite action would hide which
+      # job needs what; keep the two copies in sync instead (same reason the
+      # scan gate treats duplicated statements as debt).
+      - name: Stub missing private inputs
+        run: |
+          mkdir -p .claude/skills/debug-server
+          cat > src/android/app/provider-customization.properties <<'EOF'
+          ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=CI_TEST_IDENTIFIER_PROMPT_NOT_FOR_PRODUCTION
+          EOF
+
+      # JVM unit tests — the full suite. The test backlog that used to force a
+      # scoped filter here is cleared:
+      #   - OpenAIProviderTest: 11 failures were stale non-streaming mock
+      #     contracts (sendMessage has always streamed internally); tests now
+      #     speak SSE. (commit "test: align OpenAIProviderTest with the
+      #     always-streaming contract")
+      #   - TerminalSanitizerTest: 4 failures were real bugs — the CR fold only
+      #     kept the last segment instead of proper column-overwrite semantics,
+      #     and a final trim() destroyed meaningful leading/trailing whitespace
+      #     (progress bars). Fixed in the implementation.
+      #   - AnthropicProviderTest: 24 failures shared one root cause — the OAuth
+      #     identifier prompt getter threw when BuildConfig was empty. The stub
+      #     step above makes it non-empty, so they pass again.
+      # If any suite is red, the build fails — no silent scoping.
+      - name: Run unit tests (full suite)
+        run: |
+          cd src/android
+          ./gradlew testReleaseUnitTest --stacktrace
+
+      # Compile instrumented (on-device) tests — they require a real device
+      # to run, so CI only validates compilation. The task assembles the
+      # debug test APK (including the ui-test-manifest dependency) and
+      # catches syntax/type errors in the androidTest sources.
+      - name: Compile instrumented tests (compile-time gate)
+        run: |
+          cd src/android
+          ./gradlew compileDebugAndroidTestKotlin --stacktrace
+
+  # ────────────────────────────────────────────────────────────────────────
+  # job 3/4 — release APK: native builds, R8, signing, post-build verification.
+  #
+  # This is the only job that needs the deps/proot submodule, the NDK and the
+  # signing secrets, so it is also the only job granted nothing but read (the
+  # write token lives in job 4).
+  # ────────────────────────────────────────────────────────────────────────
+  build-apk:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # deps/proot is a git submodule — the proot sandbox engine source. This
+      # workflow builds the sandbox binary from source (see the "Build proot
+      # from source" step below), so the submodule must be checked out.
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -245,31 +391,20 @@ jobs:
       #   - AnthropicProviderTest: 24 failures shared one root cause — the OAuth
       #     identifier prompt getter threw when BuildConfig was empty. The stub
       #     step above makes it non-empty, so they pass again.
-      # If any suite is red, the build fails — no silent scoping.
-      - name: Run unit tests (full suite)
-        run: |
-          cd src/android
-          ./gradlew testReleaseUnitTest --stacktrace
-
-      # Compile instrumented (on-device) tests — they require a real device
-      # to run, so CI only validates compilation. The task assembles the
-      # debug test APK (including the ui-test-manifest dependency) and
-      # catches syntax/type errors in the androidTest sources.
-      - name: Compile instrumented tests (compile-time gate)
-        run: |
-          cd src/android
-          ./gradlew compileDebugAndroidTestKotlin --stacktrace
-
       # Force a fresh build: AGP keeps a `cache: gradle` (actions/setup-java)
       # that can restore stale native/CMake output, silently shipping an OLD
       # .so. Tier 0 caught exactly this — the crash-handler .so in the APK
-      # predated the code change. clean + drop .cxx so cpp changes actually
-      # get recompiled from source.
+      # predated the code change. clean so cpp changes actually get recompiled
+      # from source.
+      #
+      # [ci/speed] On a fresh hosted runner there is no build/ dir at all, so
+      # today this is a ~7s no-op. It stays because it is the single thing
+      # standing between a future build-dir cache and a silently stale .so —
+      # seven seconds to keep a guard that already caught a real regression.
       - name: Clean native build (cpp freshness)
         run: |
           cd src/android
           ./gradlew clean --stacktrace
-
       - name: Build APK with Gradle
         run: |
           cd src/android
@@ -331,6 +466,46 @@ jobs:
           path: src/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
+  # ────────────────────────────────────────────────────────────────────────
+  # job 4/4 — publish.
+  #
+  # `needs:` is the fail-fast: any of the three failing skips this job, so a
+  # red run can never publish. Note what GitHub does NOT do — a failing job
+  # does not cancel its still-running siblings (fail-fast exists only for
+  # matrix jobs), so the run turns red the moment the failing job fails while
+  # the others finish their remaining minutes. The publish gate is what makes
+  # that harmless: no artifact, no tag, no release.
+  #
+  # This is the only job with a write token — contents: write is what moving
+  # the rolling tag and replacing the release asset need.
+  # ────────────────────────────────────────────────────────────────────────
+  publish:
+    needs: [scan-gate, unit-tests, build-apk]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      # Needed for the `git push -f` of the rolling tag below; no submodules.
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      # The APK crosses the job boundary as an artifact (14.7 MB, ~2s each way).
+      - name: Download APK Artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: RikkaMinis-apk
+          path: dist
+
+      # Recomputed rather than passed between jobs: it is one arithmetic line
+      # off the run number, and the build job already stamped these values into
+      # the APK itself — this copy only feeds the release title/body.
+      - name: Inject build version
+        run: |
+          VC=$((220000000 + GITHUB_RUN_NUMBER))
+          echo "MINIS_VERSION_CODE=$VC" >> "$GITHUB_ENV"
+          echo "MINIS_VERSION_NAME_SUFFIX=+$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "versionCode=$VC  versionNameSuffix=+$GITHUB_RUN_NUMBER"
+
       # Rename to a versioned, arch-tagged filename mirroring the official
       # release naming (RikkaMinis-<versionName>-arm64-v8a.apk). The filename is
       # FIXED (base version only, no -beta suffix): the rolling android-latest
@@ -345,7 +520,7 @@ jobs:
           VN="1.0.0${MINIS_VERSION_NAME_SUFFIX:-}"
           VC="${MINIS_VERSION_CODE:-22}"
           OUT="RikkaMinis-arm64-v8a.apk"
-          cp src/android/app/build/outputs/apk/release/app-release.apk "$OUT"
+          cp dist/app-release.apk "$OUT"
           echo "version=$VN" >> "$GITHUB_OUTPUT"
           echo "versionCode=$VC" >> "$GITHUB_OUTPUT"
           echo "asset=$OUT" >> "$GITHUB_OUTPUT"
