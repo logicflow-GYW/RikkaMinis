@@ -3195,21 +3195,19 @@ class OpenAIProvider constructor(
                             }
                         }
                         for (tu in msg.contentParts.filterIsInstance<AgentContentPart.ToolUse>()) {
-                            val (callId, fcId) = splitResponsesAPIIds(tu.id)
-                            val safeCallId = capResponsesId(callId)
-                            // Responses API requires both `id` (fc_…) and `call_id` (call_…).
-                            // When the message was synthesized outside a Responses round-trip
-                            // (e.g. injected from Chat Completions history) the fcId is null —
-                            // generate a deterministic synthetic so the API still accepts it.
-                            val safeFcId = fcId?.let { capResponsesId(it) }
-                                ?: "fc_syn_${safeCallId.takeLast(24)}"
-                            input.put(JSONObject().apply {
-                                put("type", "function_call")
-                                put("id", safeFcId)
-                                put("call_id", safeCallId)
-                                put("name", tu.name)
-                                put("arguments", tu.input.toString())
-                            })
+                            val (callId, _) = splitResponsesAPIIds(tu.id)
+                            // [fix/responses-replay-item-id] See OpenAIResponsesToolReplay:
+                            // the server-assigned item id is NOT replayed. The old code
+                            // emitted one here (with a synthetic fallback), which made
+                            // stateless Azure multi-resource relays reject the tool-result
+                            // round with 400 and poisoned the whole history on retry.
+                            input.put(
+                                OpenAIResponsesToolReplay.functionCall(
+                                    callId = capResponsesId(callId),
+                                    name = tu.name,
+                                    arguments = tu.input.toString(),
+                                )
+                            )
                         }
                     }
                     LLMMessage.Role.USER -> {
@@ -3432,7 +3430,9 @@ class OpenAIProvider constructor(
     /**
      * Combine Responses-API call_id + item_id into a single string the agent loop
      * can carry through tool_use/tool_result blocks. The next request splits it
-     * back apart so the API sees the original ids verbatim.
+     * back apart: Chat Completions replays the call_id half, while a /responses
+     * replay uses ONLY call_id for a client-built function_call (see
+     * OpenAIResponsesToolReplay — the server-assigned item id is not replayed).
      */
     private fun combineResponsesAPIIds(callId: String, fcId: String): String =
         if (fcId.isEmpty()) callId else "$callId|$fcId"
