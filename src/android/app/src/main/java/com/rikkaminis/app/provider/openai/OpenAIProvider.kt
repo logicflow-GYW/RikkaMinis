@@ -856,10 +856,13 @@ class OpenAIProvider constructor(
         // worker's daily file, for a line that only reports a length.
         data class ToolCallAccumulator(var id: String = "", var name: String = "", val args: StringBuilder = StringBuilder(), var started: Boolean = false, var lastLoggedInputChars: Int = -1)
         val toolCallAccumulators = mutableMapOf<Int, ToolCallAccumulator>()
-        // Responses API: function_call items are keyed by their item_id (fc_…). We store
-        // the call_id separately because the agent loop needs the call_id to correlate
-        // tool results, but the next request must echo back the item_id verbatim — so we
-        // emit a combined "callId|fcId" identifier that splitResponsesAPIIds() unpacks.
+        // Responses API: the stream keys function_call items by item_id (fc_…), while the
+        // agent loop correlates tool results by call_id — so we emit a combined
+        // "callId|fcId" identifier that splitResponsesAPIIds() unpacks. The fc_… half is
+        // a transport/pairing key ONLY: [fix/responses-replay-item-id] it is NEVER echoed
+        // back to the API (see OpenAIResponsesToolReplay). This app runs stateless
+        // (`store:false`), so a replayed item id references nothing — Azure multi-resource
+        // relays answer it with 400 "created under a different Azure OpenAI resource".
         // [T-toolinput-sample-1012] lastLoggedInputChars: ToolInputDelta log
         // sampling state, same contract as the chat-completions accumulator.
         data class ResponsesToolCallAccumulator(var callId: String = "", var name: String = "", val args: StringBuilder = StringBuilder(), var started: Boolean = false, var lastLoggedInputChars: Int = -1)
@@ -3433,6 +3436,11 @@ class OpenAIProvider constructor(
      * back apart: Chat Completions replays the call_id half, while a /responses
      * replay uses ONLY call_id for a client-built function_call (see
      * OpenAIResponsesToolReplay — the server-assigned item id is not replayed).
+     *
+     * The `fc_…` half therefore stays in the persisted id for two reasons only:
+     * legacy-history compatibility (ids written before
+     * [fix/responses-replay-item-id] already carry it) and stable tool-use ↔
+     * tool-result pairing. It never goes on the wire.
      */
     private fun combineResponsesAPIIds(callId: String, fcId: String): String =
         if (fcId.isEmpty()) callId else "$callId|$fcId"

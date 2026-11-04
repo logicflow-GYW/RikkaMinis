@@ -1,7 +1,9 @@
 package com.rikkaminis.app.provider.openai
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
@@ -66,6 +68,92 @@ class OpenAIResponsesToolReplayTest {
             "the synthetic item-id fallback is the defect being removed",
             text.contains("fc_syn_"),
         )
+    }
+
+    /**
+     * [review-2026-11-05] The defect's blast radius is the ASSEMBLY, not the helper:
+     * `split("call|fc") -> cap(64) -> helper`. Both replayed items must address the
+     * SAME call_id, otherwise the relay answers `No tool output found for call_id`
+     * instead of the item-id 400 (same symptom class, different line).
+     */
+    @Test
+    fun `combined history id is split so both replayed items share one call id`() {
+        val historical = "call_9f5bf4357cf993e4|fc_0a1b2c3d4e5f"
+        // Same two rules the production assembly applies: split on '|', cap at 64.
+        val callHalf = historical.substringBefore('|').take(64)
+        val assistant = OpenAIResponsesToolReplay.functionCall(callHalf, toolName, args)
+        val output = JSONObject().apply {
+            put("type", "function_call_output")
+            put("call_id", callHalf)
+            put("output", "ok")
+        }
+        assertEquals("call_9f5bf4357cf993e4", assistant.getString("call_id"))
+        assertEquals(assistant.getString("call_id"), output.getString("call_id"))
+        assertFalse(assistant.getString("call_id").contains('|'))
+        assertFalse(assistant.has("id"))
+    }
+
+    @Test
+    fun `over-long call ids are capped symmetrically on both items`() {
+        val historical = "call_" + "a".repeat(90) + "|fc_zzz"
+        val callHalf = historical.substringBefore('|').take(64)
+        assertEquals(64, callHalf.length)
+        val assistant = OpenAIResponsesToolReplay.functionCall(callHalf, toolName, args)
+        val output = JSONObject().apply {
+            put("type", "function_call_output")
+            put("call_id", callHalf)
+            put("output", "x")
+        }
+        assertEquals("call_" + "a".repeat(59), assistant.getString("call_id"))
+        assertEquals(assistant.getString("call_id"), output.getString("call_id"))
+    }
+
+    /**
+     * Pins the production ASSEMBLY, not just the helper: the assistant replay must
+     * split the combined id and cap the call half before handing it over, and the
+     * tool-output item must cap the same half. Without this, someone could keep the
+     * helper clean while wiring the raw `call|fc` string into it.
+     */
+    @Test
+    fun `production assembly splits the combined id and caps both call_id sites`() {
+        val body = responsesBuilderSource()
+        val assistantSite = Regex(
+            "splitResponsesAPIIds\\(tu\\.id\\)[\\s\\S]{0,700}?" +
+                "OpenAIResponsesToolReplay\\.functionCall\\([\\s\\S]{0,120}?" +
+                "capResponsesId\\(callId\\)",
+        ).find(body)
+        assertTrue(
+            "assistant replay must split(call|fc) -> helper(cap(call))",
+            assistantSite != null,
+        )
+        assertTrue(
+            "function_call_output must cap the same call half",
+            body.contains("put(\"call_id\", capResponsesId(callId))"),
+        )
+    }
+
+    /**
+     * The strongest form of the original defect: keep calling the helper, then bolt
+     * an item id onto the result (`.apply { put("id", …) }`). A shape test would pass;
+     * this one scans the WHOLE `/responses` body builder, so any `put("id")` anywhere
+     * inside it turns red. `store:false` means a replayed item id references nothing.
+     */
+    @Test
+    fun `responses body builder never emits an id key`() {
+        val body = responsesBuilderSource()
+        assertFalse(
+            "the /responses builder must not emit any item id (see OpenAIResponsesToolReplay)",
+            body.contains("put(\"id\""),
+        )
+    }
+
+    /** Slice of `buildResponsesAPIBody` up to the next private helper. */
+    private fun responsesBuilderSource(): String {
+        val text = openAIProviderSource().readText()
+        val start = text.indexOf("private fun buildResponsesAPIBody(")
+        val end = text.indexOf("private fun combineResponsesAPIIds(", start)
+        assertTrue("buildResponsesAPIBody not found", start >= 0 && end > start)
+        return text.substring(start, end)
     }
 
     /** Tolerate both the gradle module cwd and a repo-root cwd in the JVM probe. */
