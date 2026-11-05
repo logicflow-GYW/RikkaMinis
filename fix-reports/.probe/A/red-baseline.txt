@@ -1,0 +1,11 @@
+PASS  F-01a one ToolCallComplete emitted
+FAIL  F-01a args survive empty arguments on output_item.done — args={}
+FAIL  F-01b function_call_arguments.done arms the call — completes=[{}]
+FAIL  F-01c item without id still yields ToolCallComplete(call_3) — completes=[]
+PASS  F-01d EOF drain emits the half-finished call
+FAIL  F-02 error frame throws instead of finishing silently — chunks=[Finished]
+FAIL  F-02 mapped to the rate-limit family (not TransientError) — thrown=null
+FAIL  F-02 no Finished emitted after the error frame 
+FAIL  F-06a ReasoningContent emitted for Mistral thinking blocks — got=[]
+FAIL  F-06b ReasoningContent emitted on EOF without [DONE] — got=[]
+8 FAILURE(S)
