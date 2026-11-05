@@ -23,6 +23,9 @@ import org.json.JSONObject
  *   {"t":"tu_delta","id":"...","v":"..."}
  *   {"t":"tu_done","id":"...","name":"...","args":{...}}
  *   {"t":"usage","in":123,"out":45,"cache_creation":0,"cache_read":0,"ctx":0}
+ *     cache_creation / cache_read are OPTIONAL: the key is omitted when the
+ *     provider did not report cache tokens (null) and present (even when 0)
+ *     when caching is enabled. Presence is the discriminator — see F-05.
  *   {"t":"finished","stop":"stop_reason","truncated":false}
  *   {"t":"media","type":"image","mime":"image/png","b64":"..."}
  *   {"t":"error","m":"message"}
@@ -53,14 +56,21 @@ object ChatStreamJsonl {
             .put("t", "tu_delta").put("id", chunk.id).put("v", chunk.accumulated).toString()
         is LLMStreamChunk.ToolCallComplete -> JSONObject()
             .put("t", "tu_done").put("id", chunk.id).put("name", chunk.name).put("args", chunk.args).toString()
-        is LLMStreamChunk.Usage -> JSONObject()
-            .put("t", "usage")
-            .put("in", chunk.usage.inputTokens)
-            .put("out", chunk.usage.outputTokens)
-            .put("cache_creation", chunk.usage.cacheCreationInputTokens ?: 0)
-            .put("cache_read", chunk.usage.cacheReadInputTokens ?: 0)
-            .put("ctx", chunk.usage.latestContextTokens)
-            .toString()
+        is LLMStreamChunk.Usage -> JSONObject().apply {
+            put("t", "usage")
+            put("in", chunk.usage.inputTokens)
+            put("out", chunk.usage.outputTokens)
+            // [rhub1105 F-05] Key PRESENCE carries "caching enabled" — exactly
+            // the `json.has(...)` discriminator AnthropicProvider.parseUsage
+            // uses to tell "provider did not report" (null) from "reported a
+            // real zero". `?: 0` collapsed both into one integer and the
+            // main-process decode then turned every 0 back into null, so
+            // MessageMetadata.hasCacheRead / hasCacheCreation were always
+            // false on the :modelservice (default) streaming path.
+            chunk.usage.cacheCreationInputTokens?.let { put("cache_creation", it) }
+            chunk.usage.cacheReadInputTokens?.let { put("cache_read", it) }
+            put("ctx", chunk.usage.latestContextTokens)
+        }.toString()
         is LLMStreamChunk.Finished -> JSONObject()
             .put("t", "finished").put("stop", chunk.stopReason ?: "").put("truncated", chunk.truncated).toString()
         is LLMStreamChunk.MediaAttachment -> JSONObject()
@@ -116,8 +126,15 @@ object ChatStreamJsonl {
                 LLMUsage(
                     inputTokens = obj.optInt("in", 0),
                     outputTokens = obj.optInt("out", 0),
-                    cacheCreationInputTokens = obj.optInt("cache_creation", 0).takeIf { it > 0 },
-                    cacheReadInputTokens = obj.optInt("cache_read", 0).takeIf { it > 0 },
+                    // [rhub1105 F-05] Mirror the encode side: an absent key
+                    // (or an explicit JSONObject.NULL from an older worker)
+                    // means "not reported" = null; a present key means a real
+                    // value, including 0. `.takeIf { it > 0 }` silently
+                    // erased the distinction. Backward compatible with legacy
+                    // lines that always wrote 0 — those now decode as 0 (the
+                    // only reading those lines ever supported).
+                    cacheCreationInputTokens = if (obj.has("cache_creation") && !obj.isNull("cache_creation")) obj.optInt("cache_creation") else null,
+                    cacheReadInputTokens = if (obj.has("cache_read") && !obj.isNull("cache_read")) obj.optInt("cache_read") else null,
                     latestContextTokens = obj.optInt("ctx", 0),
                 )
             )
