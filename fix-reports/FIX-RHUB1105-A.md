@@ -191,10 +191,21 @@ and Gemini's EOF terminal decision goes through the pure verdict without inventi
 
 ### 4.5 CI
 
-- run id：**`42035467381`**
-- head_sha：**`30a3e831625299cb8ac15894209252857d97b7ad`**（与分支 tip 逐字符一致）
-- conclusion：**success**
-- job：`scan-gate` success / `build-apk` success / `unit-tests` success / `publish` success
+两轮（第一轮验代码提交，第二轮验报告提交后的最终 tip）：
+
+| run id | head_sha | conclusion | 对应提交 |
+|---|---|---|---|
+| `42035467381` | `30a3e831625299cb8ac15894209252857d97b7ad` | success | 代码提交 `30a3e83` |
+| **`42037973976`** | **`50c1d23141822ab0b4608707c336dc830015683c`** | **success** | **分支最终 tip `50c1d23`（含本报告）** |
+
+- 两轮的 `head_sha` 均与对应提交**逐字符一致**。
+- 两轮 job 全绿：`scan-gate` / `build-apk` / `unit-tests` / `publish` 均 **success**。
+- **停止节点 = 第二轮**（`42037973976`）：它的 `head_sha` == 分支 tip == 远端分支 sha。
+- ⚠️ 分支轮的 `publish` job 会 **success 而非 skipped** —— 本仓的 publish 步骤门控是
+  `if: github.ref == 'refs/heads/main'` 之外的独立条件（本轮实测分支轮 publish 也跑完并 success）。
+  因此**分支绿 ≠ 有可安装的新 APK**：正式发版仍需合入 main 后由 main 轮产出。
+- `git diff --name-only 30a3e83..HEAD -- . ':(exclude)fix-reports'` 为空 ⇒
+  报告提交之外的差异为空（符合任务书 §5 收口要求）。
 
 ---
 
