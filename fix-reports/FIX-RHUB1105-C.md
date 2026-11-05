@@ -116,6 +116,9 @@
 
 - 分支：`fix/rhub1105-gemini-blockreason`
 - 基线：`00dc003a3743110258b7cdf2e1feca9c53278f24`
-- **CI run id**：待填（dispatch 后回填）
-- **head_sha**：待填（dispatch 后回填）
+- **修复提交**：`99e84a3cb8850cdc5a20bbf4a8adbc19fe7b6701`
+- **CI run id**：`42027037214`（run_number **3000**，`workflow_dispatch`）
+- **CI 结论**：`success` —— 四个 job 全 success：`build-apk` / `scan-gate` / `unit-tests` / `publish`
+- **head_sha**：`99e84a3cb8850cdc5a20bbf4a8adbc19fe7b6701` —— 与本地 HEAD **逐字符一致**
+- 远端分支 sha 核对：`git ls-remote --heads origin refs/heads/fix/rhub1105-gemini-blockreason` = `99e84a3cb8850cdc5a20bbf4a8adbc19fe7b6701`，与本地 HEAD 一致
 - 停止节点：**CI success 且 head_sha 逐字符一致 = 停止节点，不合 main**。
