@@ -535,12 +535,15 @@ class GeminiProvider(
                             }
                         }
                         is AgentContentPart.ToolUse -> {
-                            parts.put(JSONObject().apply {
-                                put("functionCall", JSONObject().apply {
-                                    put("name", part.name)
-                                    put("args", part.input)
-                                })
-                            })
+                            // [fix/gemini-thought-signature-echo] Gemini 3.x
+                            // rejects a history-replayed functionCall with no
+                            // thoughtSignature (deterministic 400 on the 2nd
+                            // tool round, real device 2026-11-05). This app is
+                            // stateless and does not persist thought parts, so
+                            // the part carries Google's client-rebuild sentinel
+                            // via GeminiToolReplay. Do NOT inline the JSON here —
+                            // the wire shape is pinned by GeminiToolReplayTest.
+                            parts.put(GeminiToolReplay.functionCall(part.name, part.input))
                         }
                         is AgentContentPart.ToolResult -> {
                             val responseObj = JSONObject()
