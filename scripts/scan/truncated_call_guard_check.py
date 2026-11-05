@@ -151,12 +151,91 @@ SELFTEST_MARK = "TRUNCATED_CALL_GUARD_SELFTEST=PASS"
 # [dv29 A-01] Mutators for the Anthropic feed arms. These are NOT criteria —
 # they exist so the arms below can dirty the tree in the shape a regression
 # would take. The criteria themselves derive everything from structure.
+#
+# [rhub1105-E] The anchors below are SHAPES, not spellings. They used to be the
+# verbatim lines of one particular revision
+# (`toolChars += toolUseStartActivityChars(currentToolId!!, currentToolName!!)`),
+# so extracting the block state into `AnthropicToolBlock` — which only changed
+# `currentToolId!!` into the already-non-null `currentToolId` — made every
+# `str.replace(anchor, …)` a no-op: the tree was never dirtied, the criterion
+# never fired, and four arms went green-with-no-teeth while the gate itself
+# stayed green. An anchor that dies on a rename cannot witness anything.
 ANTHROPIC_START_ANCHOR = 'val contentBlock = event.optJSONObject("content_block")'
-ANTHROPIC_START_FEED = ("toolChars += toolUseStartActivityChars("
-                        "currentToolId!!, currentToolName!!)")
-ANTHROPIC_STOP_FEED = ("toolChars += toolUseStopActivityChars("
-                       "currentToolId!!, currentToolName!!)")
-ANTHROPIC_DELTA_FEED = "toolChars += toolInputDeltaActivityChars(partial)"
+ANTHROPIC_START_CALLEE = "toolUseStartActivityChars"
+ANTHROPIC_STOP_CALLEE = "toolUseStopActivityChars"
+ANTHROPIC_DELTA_CALLEE = "toolInputDeltaActivityChars"
+
+
+def feed_call_spans(text, callee):
+    """[(start, end)] of every `counter += <callee>(…)`, paren-balanced.
+
+    The counter's name is not part of the shape (it may be renamed), and the
+    arguments are skipped as a balanced group — so adding, renaming or
+    de-nulling an argument keeps the mutator pointed at the same call.
+    """
+    out = []
+    for m in re.finditer(r"\b[A-Za-z_]\w*\s*\+=\s*%s\s*\(" % re.escape(callee), text):
+        close = match_paren(text, m.end() - 1)
+        if close < 0:
+            continue
+        out.append((m.start(), close + 1))
+    return out
+
+
+def drop_feed_call(text, callee):
+    """Delete the whole `counter += <callee>(…)` expression (shape-anchored)."""
+    spans = feed_call_spans(text, callee)
+    if not spans:
+        return text + "\n// sentinel-missing\n"
+    start, end = spans[0]
+    return text[:start] + text[end:]
+
+
+def feed_call_with_constant(text, callee):
+    """Keep the call, its counter and its callee, drop only its DATA."""
+    spans = feed_call_spans(text, callee)
+    if not spans:
+        return text + "\n// sentinel-missing\n"
+    start, end = spans[0]
+    expr = text[start:end]
+    head = expr[:expr.index(callee)]
+    return text[:start] + head + callee + '("", "")' + text[end:]
+
+
+def lift_feed_call_out_of_guard(text):
+    """Move the announcement feed ABOVE the `tool_use` test.
+
+    Order matters: delete first, then splice — otherwise the spliced copy would
+    be the one a later `drop` removed, leaving the guarded feed intact and the
+    arm silently testing nothing.
+    """
+    out = drop_feed_call(text, ANTHROPIC_START_CALLEE)
+    i = out.find(ANTHROPIC_START_ANCHOR)
+    if i < 0:
+        return out + "\n// sentinel-missing\n"
+    cut = i + len(ANTHROPIC_START_ANCHOR)
+    return (out[:cut]
+            + '\n                        toolChars += toolUseStartActivityChars("", "")'
+            + out[cut:])
+
+
+def feed_call_as_raw_arithmetic(text, callee):
+    """Replace the weight call by raw arithmetic on its own first argument.
+
+    The argument is read out of the call (never spelled here), so the mutation
+    keeps meaning "the decision left the shared table" even after a rename.
+    """
+    spans = feed_call_spans(text, callee)
+    if not spans:
+        return text + "\n// sentinel-missing\n"
+    start, end = spans[0]
+    expr = text[start:end]
+    head = expr[:expr.index(callee)]
+    open_idx = start + expr.index("(", len(head))
+    close = match_paren(text, open_idx)
+    args = split_args(text[open_idx + 1:close]) if close > 0 else []
+    arg0 = (args[0] if args else "0") or "0"
+    return text[:start] + head + arg0 + ".length" + text[end:]
 
 
 LEX_FAILURES = []
@@ -564,6 +643,65 @@ def line_of_regex(text, pattern):
     return text.count("\n", 0, m.start()) + 1 if m else 0
 
 
+# [rhub1105-E] The in-stream error arms of the OpenAI provider, located by the
+# PROTOCOL LABELS that delimit them — never by a reference COUNT.
+#
+# C9 used to assert `openAiStreamErrorStatus` appears >= 2 times in the
+# provider, as a proxy for "both in-stream error arms go through the one
+# derivation". That proxy broke exactly when the wiring IMPROVED: a third error
+# path (the Responses top-level `type == "error"` frame) started routing through
+# the same derivation, the count went 2 -> 3, and a mutation that removed the
+# derivation from ONE arm still left the count at 2 — the criterion went blind
+# while its selftest arm reported "expected [...] got []". A count is a proxy;
+# the contract is "every arm that decides an error family uses the derivation".
+#
+# (label, start label, end label, required)
+#   required=False → the arm may legitimately be absent (that is the feature's
+#   business, not this criterion's); if it IS present it must still route
+#   through the derivation.
+OPENAI_ERROR_ARMS = (
+    ("the Responses top-level error frame",
+     # `type == "error"` — the COMPARISON is the label, not the local's name:
+     # `eventType`, `event.type` etc. must keep this arm locatable.
+     r'\w+\s*==\s*"error"', r'"response\.failed"\s*->', False),
+    ("the Responses response.failed arm",
+     r'"response\.failed"\s*->', r'"response\.incomplete"\s*->', True),
+    ("the Chat Completions inline error arm",
+     r'\bval\s+inlineError\s*=\s*event\.optJSONObject\("error"\)',
+     r'\bval\s+choices\s*=\s*event\.optJSONArray\("choices"\)', True),
+)
+
+
+def openai_error_arms(code):
+    """{label: (start, end|None, required)} for the arms above.
+
+    A start label that is present but is not followed by its sibling end label
+    yields ``end=None``: the caller must report "cannot delimit" instead of
+    slicing to the end of the file, because an unbounded slice would let a
+    NEIGHBOURING arm's call satisfy this arm's check (a false negative).
+    """
+    out = []
+    for label, start_pat, end_pat, required in OPENAI_ERROR_ARMS:
+        m = re.search(start_pat, code)
+        if m is None:
+            out.append((label, None, None, required))
+            continue
+        e = re.search(end_pat, code[m.end():])
+        out.append((label, m.start(), (m.end() + e.start()) if e else None, required))
+    return out
+
+
+# `mapHttpError(` whose FIRST argument is itself a call — the shape that makes
+# the decision single-source. A bare reference to the derivation somewhere in
+# the arm (e.g. a dropped result) does not decide anything.
+_ARM_ROUTES_RE = re.compile(r"mapHttpError\(\s*([A-Za-z_]\w*)\s*\(")
+
+
+def arm_routes_through(segment, fn):
+    """True when the arm hands the derivation to mapHttpError as its status."""
+    return any(m.group(1) == fn for m in _ARM_ROUTES_RE.finditer(segment))
+
+
 def load(root):
     paths = [POLICY, ENGINE, OPENAI, ANTHROPIC, TOOL_EXECUTORS, GEMINI, SIGNALS,
              ANTHROPIC_SIGNALS]
@@ -952,30 +1090,34 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                         "openai-stream-error-single-source", SIGNALS,
                         line_of(signals, "internal fun %s(" % fn),
                         "%s does not map %s (%s)" % (fn, token, why)))
-            uses = len(re.findall(r"\b%s\s*\(" % re.escape(fn), ok_code))
-            if uses < 2:
-                problems.append((
-                    "openai-stream-error-single-source", OPENAI,
-                    line_of(openai, "mapHttpError("),
-                    "%s is referenced %d time(s) in the provider — both in-stream error "
-                    "arms (chat-completions inline error AND response.failed) must use it"
-                    % (fn, uses)))
-            failed_arm = ok_code.find('"response.failed" ->')
-            if failed_arm >= 0:
-                arm = ok_code[failed_arm:failed_arm + 4000]
-                close = arm.find("\n                        type ==")
-                arm = arm[:close] if close > 0 else arm
-                if fn not in arm:
+            # [rhub1105-E] Per-ARM coverage instead of a global reference count:
+            # a fourth error path must extend this criterion by ADDING an arm
+            # (or by not needing one), never by silently relaxing the check on
+            # the arms that already exist.
+            for arm_label, arm_start, arm_end, arm_required in openai_error_arms(ok_code):
+                arm_line = ok_code.count("\n", 0, arm_start) + 1 if arm_start is not None else 0
+                if arm_start is None:
+                    if arm_required:
+                        problems.append((
+                            "openai-stream-error-single-source", OPENAI, arm_line,
+                            "%s is gone — the in-stream error path it used to route "
+                            "through %s no longer exists, so nothing decides its family"
+                            % (arm_label, fn)))
+                    continue
+                anchor = ok_code[arm_start:arm_start + 60].strip()
+                if arm_end is None:
                     problems.append((
-                        "openai-stream-error-single-source", OPENAI,
-                        line_of(openai, '"response.failed" ->'),
-                        "the response.failed arm does not route through %s — a symbolic "
-                        "rate-limit code must not be hand-classified into TransientError"
-                        % fn))
-            elif ok_code.count('"response.failed"') < 1:
-                problems.append((
-                    "openai-stream-error-single-source", OPENAI, 0,
-                    "the Responses terminal-failure arm is gone"))
+                        "openai-stream-error-single-source", OPENAI, arm_line,
+                        "%s ('%s') cannot be delimited by its sibling protocol label — "
+                        "the gate refuses to guess which error sites belong to it"
+                        % (arm_label, anchor)))
+                    continue
+                if not arm_routes_through(ok_code[arm_start:arm_end], fn):
+                    problems.append((
+                        "openai-stream-error-single-source", OPENAI, arm_line,
+                        "%s ('%s') does not hand %s to mapHttpError( — a symbolic "
+                        "rate-limit code must not be hand-classified into another "
+                        "error family" % (arm_label, anchor, fn)))
 
     # ------------------------------------------------------------------
     # C10 — [dv29 A-01] Anthropic's EOF guard counts tool-call activity, so
@@ -1233,22 +1375,16 @@ def selftest(root):
         # ()" instead of a false green.
         ("anthropic block announcement stops feeding the tool counter",
          "anthropic-tool-start-feeds-counter+anthropic-tool-weights-single-source",
-         on(3, lambda s: s.replace(ANTHROPIC_START_FEED, "", 1))),
+         on(3, lambda s: drop_feed_call(s, ANTHROPIC_START_CALLEE))),
         ("anthropic block completion stops feeding the tool counter",
          "anthropic-tool-stop-feeds-counter+anthropic-tool-weights-single-source",
-         on(3, lambda s: s.replace(ANTHROPIC_STOP_FEED, "", 1))),
+         on(3, lambda s: drop_feed_call(s, ANTHROPIC_STOP_CALLEE))),
         ("anthropic announcement feed moves outside the tool_use guard",
          "anthropic-tool-start-feeds-counter",
-         on(3, lambda s: s.replace(
-             ANTHROPIC_START_ANCHOR,
-             'val contentBlock = event.optJSONObject("content_block")\n'
-             '                        toolChars += toolUseStartActivityChars("", "")\n'
-             '                        if (contentBlock?.safeOptString("type", "") == "tool_use") {',
-             1).replace(ANTHROPIC_START_FEED + "\n", "", 1))),
+         on(3, lift_feed_call_out_of_guard)),
         ("anthropic argument feed reverts to raw arithmetic",
          "anthropic-tool-weights-single-source",
-         on(3, lambda s: s.replace(ANTHROPIC_DELTA_FEED,
-                                        "toolChars += partial.length", 1))),
+         on(3, lambda s: feed_call_as_raw_arithmetic(s, ANTHROPIC_DELTA_CALLEE))),
         # ---- [wide3-04] the four externally falsified shapes ----------------
         # Each of these keeps every character the old criteria looked for and
         # drops only the decision — so each expectation names exactly one arm.
@@ -1282,8 +1418,7 @@ def selftest(root):
                                    "chatCompletionsToolCallEventWeight(0)", 1))),
         ("anthropic announcement feeds a constant (empty) tool identity",
          "anthropic-tool-start-feeds-counter",
-         on(3, lambda s: s.replace(ANTHROPIC_START_FEED,
-                                   'toolChars += toolUseStartActivityChars("", "")', 1))),
+         on(3, lambda s: feed_call_with_constant(s, ANTHROPIC_START_CALLEE))),
         # ---- [wide4] the five externally falsified shapes --------------------
         # Each keeps the spelling, the wording and the pairing; each drops only
         # the decision, so each expectation names exactly one criterion.
