@@ -153,7 +153,15 @@ class GeminiProvider(
                     // both paths instead of two different classifications.
                     throw mapHttpError(verdict.status, responseBody)
                 is GeminiGenerateContentVerdict.EmptyCandidates ->
-                    throw LLMError.ProviderError(verdict.describe())
+                    // [Rhub-Protocol-1105 F-04] The refusal error is built by
+                    // the SAME helper the streaming arm uses, so the two arms
+                    // cannot drift on the wording or on the classification.
+                    // A blockReason-less empty body keeps the plain wording.
+                    throw if (verdict.blockReason.isNullOrEmpty()) {
+                        LLMError.ProviderError(verdict.describe())
+                    } else {
+                        geminiPromptBlockError(verdict.blockReason)
+                    }
             }
             val text = extractText(json)
             val finishReason = extractFinishReason(json)
@@ -333,6 +341,28 @@ class GeminiProvider(
                         payload,
                     )
                 }
+
+                // [Rhub-Protocol-1105 F-04] A refusal arrives as a frame with
+                // `promptFeedback.blockReason` and NO candidates. The
+                // non-streaming arm reads it (geminiGenerateContentVerdict →
+                // EmptyCandidates → ProviderError); the streaming arm had no
+                // branch for it, so the frame fell through the loop, the stream
+                // reached EOF and the refusal became:
+                //   • an EMPTY EOF → `failOnSilentEmptyCompletion` →
+                //     `TransientError("Server returned an empty response …")`
+                //     — i.e. a safety refusal reported as a transient network
+                //     fault, which the app then auto-retried (and was refused
+                //     again) while the `blockReason=SAFETY` diagnostic was lost;
+                //   • a refusal AFTER text had streamed → `sawAnyOutput` was
+                //     true, so nothing intercepted it and the turn became
+                //     `truncated = true`, triggering a truncation
+                //     auto-continuation whose request is refused as well.
+                //
+                // The check runs on EVERY frame (a mid-stream refusal must
+                // terminate too) and is idempotent: the throw ends the stream,
+                // so no flag is needed. Same classification as the
+                // non-streaming arm — a ProviderError, NOT a TransientError.
+                geminiPromptBlockReason(json)?.let { throw geminiPromptBlockError(it) }
 
                 if (!started) {
                     send(LLMStreamChunk.Started)
@@ -1065,10 +1095,42 @@ internal fun geminiGenerateContentVerdict(json: JSONObject): GeminiGenerateConte
     }
     val candidates = json.optJSONArray("candidates")
     if (candidates == null || candidates.length() == 0) {
-        val blockReason = json.optJSONObject("promptFeedback")
-            ?.safeOptString("blockReason", "")
-            ?.ifEmpty { null }
-        return GeminiGenerateContentVerdict.EmptyCandidates(blockReason)
+        // [Rhub-Protocol-1105 F-04] Read through the shared helper, so the
+        // non-streaming arm and the streaming arm agree on WHAT a refusal is.
+        return GeminiGenerateContentVerdict.EmptyCandidates(geminiPromptBlockReason(json))
     }
     return GeminiGenerateContentVerdict.Ok
 }
+
+/**
+ * [Rhub-Protocol-1105 F-04] The `promptFeedback.blockReason` of a frame, or
+ * null when the frame carries no refusal.
+ *
+ * Pure and shared by both Gemini arms so the two cannot drift on WHAT counts
+ * as a refusal (the non-streaming arm reads the same field through
+ * [geminiGenerateContentVerdict]).
+ */
+internal fun geminiPromptBlockReason(json: JSONObject): String? =
+    json.optJSONObject("promptFeedback")
+        ?.safeOptString("blockReason", "")
+        ?.ifEmpty { null }
+
+/**
+ * [Rhub-Protocol-1105 F-04] The ONE refusal error both Gemini arms raise.
+ *
+ * The streaming arm had no branch for a refusal frame, so a safety refusal
+ * reached the user as `TransientError("Server returned an empty response …")`
+ * — a transient network fault the app then retried (and was refused again),
+ * with the `blockReason` diagnostic lost. Sharing this builder keeps the two
+ * arms on ONE wording and ONE classification: a `ProviderError` (never a
+ * `TransientError`, never a truncated turn).
+ *
+ * The wording is the non-streaming arm's, unchanged: the message names the
+ * block reason and states that the refusal is not reported as a completed
+ * turn. `EmptyCandidates.describe()` stays the single source of that text, so
+ * the two arms cannot drift apart.
+ */
+internal fun geminiPromptBlockError(blockReason: String): LLMError.ProviderError =
+    LLMError.ProviderError(
+        GeminiGenerateContentVerdict.EmptyCandidates(blockReason).describe(),
+    )

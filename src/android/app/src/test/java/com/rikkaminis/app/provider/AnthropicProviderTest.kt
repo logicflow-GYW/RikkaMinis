@@ -7,6 +7,8 @@ import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.provider.anthropic.AnthropicProvider
+import com.rikkaminis.app.provider.anthropic.AnthropicToolBlock
+import com.rikkaminis.app.provider.anthropic.resolveAnthropicToolArgs
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
@@ -14,6 +16,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -631,5 +634,230 @@ class AnthropicProviderTest {
         val thinking = body.getJSONObject("thinking")
         assertEquals("adaptive", thinking.getString("type"))
         assertEquals("summarized", thinking.getString("display"))
+    }
+
+    // -- [Rhub-1105 F-03] tool_use arguments announced in content_block_start --
+
+    /**
+     * A relay (one-api / new-api family) commonly wraps a NON-streaming
+     * upstream `tool_use` into a single `content_block_start` whose
+     * `content_block.input` already holds the complete argument object, then
+     * sends `content_block_stop` with no `input_json_delta` at all. The
+     * provider read only id/name from the announcement, so the call arrived
+     * with `{}` and every argument-bearing tool was rejected by the preflight
+     * validator.
+     *
+     * Expectations are written as literals on purpose: deriving them from the
+     * production constants would let a mutation masquerade as a pass.
+     */
+
+    private fun anthropicStream(sseBody: String): List<LLMStreamChunk> = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"),
+        )
+        provider.streamMessage(
+            listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024,
+        ).toList()
+    }
+
+    private fun firstCompleteArgs(chunks: List<LLMStreamChunk>): JSONObject =
+        chunks.filterIsInstance<LLMStreamChunk.ToolCallComplete>().first().args
+
+    @Test
+    fun `tool use announced with complete input keeps its arguments`() {
+        val sse = buildString {
+            appendLine("""event: content_block_start""")
+            appendLine("""data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"ls"}}}""")
+            appendLine()
+            appendLine("""event: content_block_stop""")
+            appendLine("""data: {"type":"content_block_stop","index":0}""")
+            appendLine()
+            appendLine("""event: message_delta""")
+            appendLine("""data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}""")
+            appendLine()
+        }
+
+        val args = firstCompleteArgs(anthropicStream(sse))
+        assertEquals("ls", args.optString("command"))
+    }
+
+    @Test
+    fun `standard delta stream still takes its arguments from the deltas only`() {
+        val sse = buildString {
+            appendLine("""data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_2","name":"bash","input":{}}}""")
+            appendLine()
+            appendLine("""data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}""")
+            appendLine()
+            appendLine("""data: {"type":"content_block_stop","index":0}""")
+            appendLine()
+            appendLine("""data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}""")
+            appendLine()
+        }
+
+        val args = firstCompleteArgs(anthropicStream(sse))
+        assertEquals("pwd", args.optString("command"))
+    }
+
+    @Test
+    fun `two tool blocks in a row do not leak the first block arguments into the second`() {
+        val sse = buildString {
+            appendLine("""data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"bash","input":{"command":"ls"}}}""")
+            appendLine()
+            appendLine("""data: {"type":"content_block_stop","index":0}""")
+            appendLine()
+            appendLine("""data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"bash","input":{}}}""")
+            appendLine()
+            appendLine("""data: {"type":"content_block_stop","index":1}""")
+            appendLine()
+            appendLine("""data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}""")
+            appendLine()
+        }
+
+        val completes = anthropicStream(sse).filterIsInstance<LLMStreamChunk.ToolCallComplete>()
+        assertEquals(2, completes.size)
+        assertEquals("ls", completes[0].args.optString("command"))
+        assertEquals(0, completes[1].args.length())
+    }
+
+    @Test
+    fun `orphan block cut before its stop event keeps its announced arguments`() {
+        val sse = buildString {
+            appendLine("""data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_3","name":"bash","input":{"command":"ls -la"}}}""")
+            appendLine()
+        }
+
+        val args = firstCompleteArgs(anthropicStream(sse))
+        assertEquals("ls -la", args.optString("command"))
+    }
+
+    @Test
+    fun `initial input is used when no delta arrived`() {
+        val initial = JSONObject().put("command", "ls")
+        val args = resolveAnthropicToolArgs("", initial)
+        assertEquals("ls", args.optString("command"))
+    }
+
+    @Test
+    fun `delta buffer wins over initial input`() {
+        val initial = JSONObject().put("command", "ls")
+        val args = resolveAnthropicToolArgs("{\"command\":\"pwd\"}", initial)
+        assertEquals("pwd", args.optString("command"))
+    }
+
+    @Test
+    fun `empty buffer without initial input yields empty object`() {
+        val args = resolveAnthropicToolArgs("", null)
+        assertEquals(0, args.length())
+    }
+
+    @Test
+    fun `unparsable delta buffer degrades to empty object`() {
+        val args = resolveAnthropicToolArgs("{\"command\":", null)
+        assertEquals(0, args.length())
+    }
+
+    @Test
+    fun `empty initial input is not treated as arguments`() {
+        // An empty object carries no arguments — it must not win over a delta
+        // that actually carries the real arguments.
+        val args = resolveAnthropicToolArgs("{\"command\":\"pwd\"}", JSONObject())
+        assertEquals("pwd", args.optString("command"))
+    }
+
+    @Test
+    fun `block announced with complete input resolves to that input`() {
+        val block = AnthropicToolBlock()
+        val started = block.onBlockStart(
+            JSONObject()
+                .put("type", "tool_use")
+                .put("id", "toolu_1")
+                .put("name", "bash")
+                .put("input", JSONObject().put("command", "ls")),
+        )
+        assertTrue(started)
+        assertEquals("ls", block.resolveArgs().optString("command"))
+    }
+
+    @Test
+    fun `block deltas win over the announced input`() {
+        val block = AnthropicToolBlock()
+        block.onBlockStart(
+            JSONObject()
+                .put("type", "tool_use")
+                .put("id", "toolu_1")
+                .put("name", "bash")
+                .put("input", JSONObject().put("command", "ls")),
+        )
+        block.appendDelta("{\"command\":\"pwd\"}")
+        assertEquals("pwd", block.resolveArgs().optString("command"))
+    }
+
+    @Test
+    fun `a second block does not inherit the first block arguments`() {
+        val block = AnthropicToolBlock()
+        block.onBlockStart(
+            JSONObject()
+                .put("type", "tool_use")
+                .put("id", "toolu_a")
+                .put("name", "bash")
+                .put("input", JSONObject().put("command", "ls")),
+        )
+        assertEquals("ls", block.resolveArgs().optString("command"))
+        block.clear()
+
+        block.onBlockStart(
+            JSONObject()
+                .put("type", "tool_use")
+                .put("id", "toolu_b")
+                .put("name", "bash")
+                .put("input", JSONObject()),
+        )
+        assertEquals(0, block.resolveArgs().length())
+    }
+
+    @Test
+    fun `a second block does not inherit the first block arguments without an explicit clear`() {
+        // The reset lives in onBlockStart, so a stale initial input can never
+        // survive into the next block even if the caller forgot to clear.
+        val block = AnthropicToolBlock()
+        block.onBlockStart(
+            JSONObject()
+                .put("type", "tool_use")
+                .put("id", "toolu_a")
+                .put("name", "bash")
+                .put("input", JSONObject().put("command", "ls")),
+        )
+        block.onBlockStart(
+            JSONObject()
+                .put("type", "tool_use")
+                .put("id", "toolu_b")
+                .put("name", "bash")
+                .put("input", JSONObject()),
+        )
+        assertEquals(0, block.resolveArgs().length())
+    }
+
+    @Test
+    fun `a non tool_use block is not opened`() {
+        val block = AnthropicToolBlock()
+        val started = block.onBlockStart(JSONObject().put("type", "text"))
+        assertFalse(started)
+        assertFalse(block.isOpen)
+    }
+
+    @Test
+    fun `a non tool block header drops the pending initial input`() {
+        // An abandoned tool block whose arguments were already announced must
+        // not hand those arguments to the NEXT block.
+        val block = AnthropicToolBlock()
+        block.onBlockStart(
+            JSONObject()
+                .put("type", "tool_use")
+                .put("id", "toolu_a")
+                .put("name", "bash")
+                .put("input", JSONObject().put("command", "ls")),
+        )
+        block.onBlockStart(JSONObject().put("type", "text"))
+        assertEquals(0, block.resolveArgs().length())
     }
 }

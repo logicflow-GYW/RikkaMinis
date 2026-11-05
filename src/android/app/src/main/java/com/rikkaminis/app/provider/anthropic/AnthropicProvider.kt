@@ -330,12 +330,16 @@ class AnthropicProvider(
         // to body.charStream() would change byte handling for the raw stream
         // paths without fixing anything observable.
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
-        // Track current tool_use block being streamed
-        var currentToolId: String? = null
-        var currentToolName: String? = null
-        val toolInputBuffer = StringBuilder()
+        // Track current tool_use block being streamed.
+        // [Rhub-1105 F-03] The block state lives in AnthropicToolBlock so the
+        // argument-resolution rule (delta buffer wins; the announcement's own
+        // `input` is the fallback) is one implementation shared by the
+        // provider and its unit tests, and so the block-scoped reset that
+        // keeps a previous block's arguments from leaking into the next one
+        // cannot be forgotten at one of the call sites.
+        val toolBlock = AnthropicToolBlock()
         // [T-toolinput-sample-1012] -1 = "no delta logged yet" for the current
-        // tool call; reset alongside toolInputBuffer in content_block_start.
+        // tool call; reset alongside toolBlock in content_block_start.
         var lastLoggedInputChars = -1
         // [RC2-truncated-detection] Accumulated assistant text/thinking chars
         // and whether the stream reached a clean terminal (message_delta with
@@ -401,10 +405,21 @@ class AnthropicProvider(
                     }
                     "content_block_start" -> {
                         val contentBlock = event.optJSONObject("content_block")
+                        // [Rhub-1105 F-03] Every block header resets the
+                        // block-scoped state: the previous block's initial
+                        // input must never reach the next one. Called for
+                        // non-tool blocks too (it then only resets).
+                        toolBlock.onBlockStart(contentBlock)
+                        // [Rhub-1105 F-03] The tool_use guard stays HERE (not
+                        // inside AnthropicToolBlock) so the truncated-call gate
+                        // can still see that only a tool block announcement
+                        // feeds toolChars. The block state itself lives in
+                        // AnthropicToolBlock: it keeps the announcement's own
+                        // `input` aside as the fallback for a block that
+                        // streams no `input_json_delta`.
                         if (contentBlock?.safeOptString("type", "") == "tool_use") {
-                            currentToolId = contentBlock.safeOptString("id", "")
-                            currentToolName = contentBlock.safeOptString("name", "")
-                            toolInputBuffer.clear()
+                            val currentToolId = toolBlock.toolId!!
+                            val currentToolName = toolBlock.toolName!!
                             lastLoggedInputChars = -1 // [T-toolinput-sample-1012] reset sampling state
                             android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart id=$currentToolId name=$currentToolName")
                             // [dv29 A-01] The announcement is already tool-call
@@ -414,9 +429,14 @@ class AnthropicProvider(
                             // looks like a fully empty stream here and the
                             // orphan flush hands an argument-less call to the
                             // executor.
-                            toolChars += toolUseStartActivityChars(currentToolId!!, currentToolName!!)
-                            send(LLMStreamChunk.ToolUseStart(currentToolId!!, currentToolName!!))
+                            toolChars += toolUseStartActivityChars(currentToolId, currentToolName)
+                            send(LLMStreamChunk.ToolUseStart(currentToolId, currentToolName))
                         }
+                        // [Rhub-1105 F-03] A non-tool block header resets only
+                        // the initial input (the arguments of an abandoned
+                        // block must not reach the next one); the block's
+                        // identity survives, exactly as before this fix — the
+                        // EOF orphan flush still needs it.
                     }
                     "content_block_delta" -> {
                         val delta = event.optJSONObject("delta") ?: continue
@@ -437,8 +457,8 @@ class AnthropicProvider(
                             }
                             "input_json_delta" -> {
                                 val partial = delta.safeOptString("partial_json", "")
-                                if (partial.isNotEmpty() && currentToolId != null) {
-                                    toolInputBuffer.append(partial)
+                                if (partial.isNotEmpty() && toolBlock.isOpen) {
+                                    toolBlock.appendDelta(partial)
                                     // [B11] Tool input bytes count as stream activity: a
                                     // pure-tool turn that is cut mid input_json_delta must
                                     // still trip the truncated-Finished below instead of
@@ -447,34 +467,33 @@ class AnthropicProvider(
                                     // [T-toolinput-sample-1012] Sampled like the OpenAI paths:
                                     // first delta + one per TOOL_LOG_INPUT_STEP_CHARS of growth
                                     // (per-fragment lines measured 74% of the worker's daily file).
-                                    val n = toolInputBuffer.length
+                                    val n = toolBlock.inputBuffer.length
                                     if (lastLoggedInputChars < 0 || n - lastLoggedInputChars >= TOOL_LOG_INPUT_STEP_CHARS) {
                                         lastLoggedInputChars = n
-                                        android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${n}chars")
+                                        android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=${toolBlock.toolId} accumulated=${n}chars")
                                     }
-                                    send(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
+                                    send(LLMStreamChunk.ToolInputDelta(toolBlock.toolId!!, toolBlock.inputBuffer.toString()))
                                 }
                             }
                         }
                     }
                     "content_block_stop" -> {
-                        if (currentToolId != null && currentToolName != null) {
-                            val args = try {
-                                JSONObject(toolInputBuffer.toString())
-                            } catch (_: Exception) {
-                                JSONObject()
-                            }
+                        if (toolBlock.isOpen) {
+                            val currentToolId = toolBlock.toolId!!
+                            val currentToolName = toolBlock.toolName!!
+                            // [Rhub-1105 F-03] Delta buffer wins; the block's own
+                            // initial input is the fallback for relays that
+                            // never stream `input_json_delta`.
+                            val args = toolBlock.resolveArgs()
                             android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=$currentToolId name=$currentToolName args=${args.toString().take(300)}")
-                            send(LLMStreamChunk.ToolCallComplete(currentToolId!!, currentToolName!!, args))
+                            send(LLMStreamChunk.ToolCallComplete(currentToolId, currentToolName, args))
                             // [dv29 A-01] Defence in depth for a completed tool
                             // block that never streamed a delta (zero-argument
                             // call): a stream cut between this block and the
                             // terminal message_delta must still read as
                             // truncated rather than as a clean no-finish EOF.
-                            toolChars += toolUseStopActivityChars(currentToolId!!, currentToolName!!)
-                            currentToolId = null
-                            currentToolName = null
-                            toolInputBuffer.clear()
+                            toolChars += toolUseStopActivityChars(currentToolId, currentToolName)
+                            toolBlock.clear()
                         }
                     }
                     "message_delta" -> {
@@ -537,23 +556,22 @@ class AnthropicProvider(
             // stream with no ToolCallComplete and exited as a clean no-tool turn.
             // Mirrors OpenAIProvider's responses-API drain (:1384-1401, T248) —
             // the incomplete JSON is handed to ToolJsonRepair/preflight downstream
-            // instead of dropped. currentToolId is null here on the normal path
-            // (content_block_stop already completed it), so this only fires on the
-            // orphan case.
-            if (currentToolId != null && currentToolName != null) {
-                val args = try {
-                    JSONObject(toolInputBuffer.toString())
-                } catch (_: Exception) {
-                    JSONObject()
-                }
+            // instead of dropped. The tool block is already closed here on the
+            // normal path (content_block_stop completed it), so this only fires
+            // on the orphan case.
+            if (toolBlock.isOpen) {
+                val currentToolId = toolBlock.toolId!!
+                val currentToolName = toolBlock.toolName!!
+                // [Rhub-1105 F-03] Same fallback as content_block_stop: an
+                // orphan block announced with a complete `input` and cut before
+                // its stop event still carries its arguments.
+                val args = toolBlock.resolveArgs()
                 com.rikkaminis.app.logging.AppLogger.warning(
                     "AnthropicProvider",
-                    "Stream ended mid-tool-call id=$currentToolId name=$currentToolName argsLen=${toolInputBuffer.length} — flushing as ToolCallComplete (B11)",
+                    "Stream ended mid-tool-call id=$currentToolId name=$currentToolName argsLen=${toolBlock.inputBuffer.length} — flushing as ToolCallComplete (B11)",
                 )
-                send(LLMStreamChunk.ToolCallComplete(currentToolId!!, currentToolName!!, args))
-                currentToolId = null
-                currentToolName = null
-                toolInputBuffer.clear()
+                send(LLMStreamChunk.ToolCallComplete(currentToolId, currentToolName, args))
+                toolBlock.clear()
             }
             // [RC2-truncated-detection] Loop exited by EOF / [DONE] before any
             // message_delta (server cut mid-stream after text/thinking deltas but
