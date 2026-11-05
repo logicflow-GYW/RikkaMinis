@@ -865,7 +865,9 @@ class OpenAIProvider constructor(
         // relays answer it with 400 "created under a different Azure OpenAI resource".
         // [T-toolinput-sample-1012] lastLoggedInputChars: ToolInputDelta log
         // sampling state, same contract as the chat-completions accumulator.
-        data class ResponsesToolCallAccumulator(var callId: String = "", var name: String = "", val args: StringBuilder = StringBuilder(), var started: Boolean = false, var lastLoggedInputChars: Int = -1)
+        // [T-rhub1105-F01] The accumulator moved to file scope so the lookup rule
+        // (item_id → call_id → output_index) can be a single member function
+        // instead of being re-implemented at each of the three call sites.
         val responsesToolCalls = mutableMapOf<String, ResponsesToolCallAccumulator>()
         // One-shot info log the first time the Responses API streams a reasoning
         // delta — useful for confirming the Thinking pipeline is wired up when
@@ -1073,6 +1075,9 @@ class OpenAIProvider constructor(
                             if (delta.isNotEmpty()) send(LLMStreamChunk.Text(delta))
                         }
                         // function_call item announced — capture call_id + name, start accumulator.
+                        // [T-rhub1105-F01] `id` (the `fc_…` item id) is OPTIONAL in the
+                        // Responses schema, so it may no longer be a hard requirement —
+                        // the stable `call_id` is enough to key the accumulator.
                         type == "response.output_item.added" -> {
                             val item = event.optJSONObject("item") ?: continue
                             val itemType = item.optString("type", "")
@@ -1080,22 +1085,67 @@ class OpenAIProvider constructor(
                                 val itemId = item.optString("id", "")
                                 val callId = item.optString("call_id", "")
                                 val name = item.optString("name", "")
-                                if (itemId.isNotEmpty() && callId.isNotEmpty() && name.isNotEmpty()) {
-                                    responsesToolCalls[itemId] = ResponsesToolCallAccumulator(callId = callId, name = name)
+                                val outputIndex = event.optInt("output_index", -1)
+                                if (callId.isNotEmpty() && name.isNotEmpty()) {
+                                    val key = if (itemId.isNotEmpty()) itemId else callId
+                                    val acc = ResponsesToolCallAccumulator(
+                                        callId = callId,
+                                        name = name,
+                                        itemId = itemId,
+                                        outputIndex = outputIndex,
+                                    )
+                                    responsesToolCalls[key] = acc
                                     val combined = combineResponsesAPIIds(callId, itemId)
                                     android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart (Responses) id=$combined name=$name")
                                     send(LLMStreamChunk.ToolUseStart(combined, name))
-                                    responsesToolCalls[itemId]?.started = true
+                                    acc.started = true
                                 }
+                            }
+                        }
+                        // [T-rhub1105-F01] The authoritative end of the argument stream.
+                        // The API may deliver the complete arguments in this frame (some
+                        // relays emit no `.delta` at all) — treat it as the truth and
+                        // finalize the call here. Without this arm the tool call was
+                        // only ever completed by `response.output_item.done`.
+                        type == "response.function_call_arguments.done" -> {
+                            val itemId = event.optString("item_id", "")
+                            val callId = event.optString("call_id", "")
+                            val outputIndex = event.optInt("output_index", -1)
+                            val arguments = event.optString("arguments", "")
+                            val acc = resolveResponsesAccumulator(
+                                responsesToolCalls.values,
+                                itemId,
+                                callId,
+                                outputIndex,
+                            )
+                            if (acc != null) {
+                                if (arguments.isNotEmpty()) {
+                                    // Authoritative value — replace the streamed buffer.
+                                    acc.args.setLength(0)
+                                    acc.args.append(arguments)
+                                }
+                                val key = responsesToolCalls.entries.firstOrNull { it.value === acc }?.key
+                                if (key != null) responsesToolCalls.remove(key)
+                                val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
+                                val combined = combineResponsesAPIIds(acc.callId, acc.itemId)
+                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${args.toString().take(300)}")
+                                send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                             }
                         }
                         type == "response.function_call_arguments.delta" -> {
                             val itemId = event.optString("item_id", "")
+                            val callId = event.optString("call_id", "")
+                            val outputIndex = event.optInt("output_index", -1)
                             val delta = event.optString("delta", "")
-                            val acc = responsesToolCalls[itemId]
+                            val acc = resolveResponsesAccumulator(
+                                responsesToolCalls.values,
+                                itemId,
+                                callId,
+                                outputIndex,
+                            )
                             if (acc != null && delta.isNotEmpty()) {
                                 acc.args.append(delta)
-                                val combined = combineResponsesAPIIds(acc.callId, itemId)
+                                val combined = combineResponsesAPIIds(acc.callId, acc.itemId)
                                 // [T-toolinput-sample-1012] Sampled like the chat-completions path:
                                 // first delta + one per TOOL_LOG_INPUT_STEP_CHARS of growth.
                                 val n = acc.args.length
@@ -1125,13 +1175,53 @@ class OpenAIProvider constructor(
                             val itemType = item.optString("type", "")
                             if (itemType == "function_call") {
                                 val itemId = item.optString("id", "")
-                                val acc = responsesToolCalls.remove(itemId) ?: continue
-                                val argsStr = item.optString("arguments", acc.args.toString())
+                                val callId = item.optString("call_id", "")
+                                val outputIndex = event.optInt("output_index", -1)
+                                val acc = resolveResponsesAccumulator(
+                                    responsesToolCalls.values,
+                                    itemId,
+                                    callId,
+                                    outputIndex,
+                                ) ?: continue
+                                val key = responsesToolCalls.entries.firstOrNull { it.value === acc }?.key
+                                if (key != null) responsesToolCalls.remove(key)
+                                // [T-rhub1105-F01] `optString(key, fallback)` returns the
+                                // PRESENT value even when it is the empty string — so a
+                                // `.done` frame carrying `"arguments": ""` used to WIPE the
+                                // streamed buffer and produce `{}`. An empty string is
+                                // not authoritative: fall back to what we accumulated.
+                                // A non-empty `arguments` IS authoritative (the server
+                                // may have corrected the payload).
+                                val authoritative = item.optString("arguments", "")
+                                val argsStr = if (authoritative.isNotEmpty()) authoritative else acc.args.toString()
                                 val args = try { JSONObject(argsStr) } catch (_: Exception) { JSONObject() }
-                                val combined = combineResponsesAPIIds(acc.callId, itemId)
+                                val combined = combineResponsesAPIIds(acc.callId, acc.itemId)
                                 android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${args.toString().take(300)}")
                                 send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                             }
+                        }
+                        // [T-rhub1105-F02] Top-level `type == "error"` frame and
+                        // inline `error` object on the Responses API. The Chat
+                        // Completions branch has this arm, the Responses branch did
+                        // NOT: such a frame fell through the `when`, the stream ended
+                        // normally and the caller saw a clean (but empty) finish
+                        // instead of the real error. Same single-source mapping as
+                        // every other error site: [dv28 A-08] symbolic code → HTTP
+                        // semantics → mapHttpError (no new mapping table here).
+                        type == "error" || event.optJSONObject("error") != null -> {
+                            val err = event.optJSONObject("error") ?: event
+                            val code = err.optString("code", "")
+                            val errType = err.optString("type", "")
+                            val message = err.optString("message", "")
+                                .ifEmpty { "Responses API error frame without message" }
+                            com.rikkaminis.app.logging.AppLogger.error(
+                                "OpenAIProvider",
+                                "Responses API error frame — code=$code type=$errType message=$message"
+                            )
+                            throw mapHttpError(
+                                openAiStreamErrorStatus(code, errType),
+                                err.toString(),
+                            )
                         }
                         type == "response.failed" -> {
                             // [T-responses-terminal-events] Explicit terminal
@@ -1292,6 +1382,13 @@ class OpenAIProvider constructor(
                             // here — one reader, two consumers, no drift.
                             for (thinkingText in chatCompletionsDeltaThinkingBlocks(d)) {
                                 reasoningAccum.append(thinkingText)
+                                // [T-rhub1105-F06] Mistral's `content[].type == "thinking"`
+                                // is a SERVER-NATIVE reasoning field — semantically the
+                                // same as `reasoning_content`, so it must arm the
+                                // ReasoningContent emitter. It is NOT the `<think>`
+                                // tag path (extractThinkTags), which deliberately does
+                                // NOT set this flag.
+                                sawReasoningField = true
                                 if (!sawReasoningDelta) {
                                     sawReasoningDelta = true
                                 }
@@ -1424,6 +1521,16 @@ class OpenAIProvider constructor(
                 }
             }
             responsesToolCalls.clear()
+
+            // [T-rhub1105-F06] The `[DONE]` branch emits ReasoningContent, but the
+            // EOF path (stream cut without `[DONE]`) did not — so a turn whose
+            // reasoning arrived and whose connection died lost its reasoning
+            // payload entirely (only ThinkingDelta was emitted). This is an
+            // INDEPENDENT payload, not a termination signal: it must be sent
+            // even when the EOF guard below decides there is nothing to finish.
+            if (!finishedSent && sawReasoningField) {
+                send(LLMStreamChunk.ReasoningContent(reasoningAccum.toString()))
+            }
 
             // [RC2-truncated-detection] EOF without [DONE] / finish_reason but
             // with accumulated content — the model reply was cut mid-stream
