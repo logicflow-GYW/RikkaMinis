@@ -886,10 +886,10 @@
     <string name="model_entry_display_name">Display Name</string>
     <string name="model_entry_max_output_tokens">Max Output Tokens</string>
     <string name="model_entry_provider">Provider</string>
-    <string name="model_entry_visibility">Visibility</string>
-    <string name="model_entry_hidden_models_won_t_appear_in_the_model_">Hidden models won\'t appear in the model picker.</string>
-    <string name="model_entry_hidden">Hidden</string>
-    <string name="model_entry_restores_the_provider_reported_display_n">Restores the provider-reported display name and token limits, and un-hides the model.</string>
+    <string name="model_entry_selection">Selection</string>
+    <string name="model_entry_unselect">Remove from selection</string>
+    <string name="model_entry_unselect_footer">Removes this model from your selected models. You can add it back from the provider\'s model list.</string>
+    <string name="model_entry_restores_the_provider_reported_display_n">Restores the provider-reported display name and token limits.</string>
     <string name="model_entry_reset_to_default">Reset to Default</string>
     <!-- T210: ModelEntryDetailScreen sections (iOS parity). -->
     <string name="modeldetail_identity_footer_custom">This is a custom model. The Model ID is editable.</string>

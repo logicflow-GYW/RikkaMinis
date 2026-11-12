@@ -28,6 +28,7 @@ import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.model.inferContextWindowTokens
 import com.rikkaminis.app.data.model.normalizeModalityName
 import com.rikkaminis.app.data.repository.ProviderRepository
+import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.ui.components.RowLabel
 import com.rikkaminis.app.ui.components.SectionTextField
@@ -35,15 +36,25 @@ import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisButton
 import com.rikkaminis.app.ui.components.MinisTextButton
 
+// [selection-only-ui-writer-1112] Log tag for the selection-set mutations
+// this screen performs (remove from selection).
+private const val TAG = "ModelEntryDetail"
+
 /**
  * Detail / edit screen for a single ModelEntry. T210: brought to iOS
  * parity with five inset-grouped sections — Identity, Capabilities,
- * Visibility, Input Modality, Output Modality (+ optional Reset). The
+ * Selection, Input Modality, Output Modality (+ optional Reset). The
  * data layer (`ModelOverrides.contextWindow`, `supportsReasoning`,
  * `inputModalities`, `outputModalities`) was already in place; pre-T210
  * the UI only exposed displayName / maxOutputTokens / hidden, which
  * meant Android users had no way to override the things iOS lets them
  * tweak (context window, thinking flag, per-modality enablement).
+ *
+ * [selection-only-ui-writer-1112] The section that used to be "Visibility"
+ * is now "Selection": since the selection-only migration the entry table
+ * holds SELECTIONS only, so there is no separate visible/hidden state left
+ * to toggle. The section offers the one membership operation that remains
+ * — remove the model from the selection set — through `unselectEntry`.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,11 +69,27 @@ fun ModelEntryDetailScreen(
     val instance = config.instances.find { it.id == instanceId }
     val context = LocalContext.current
 
+    // [selection-only-ui-writer-1112] Set when the user removed this entry
+    // from the selection set. The write makes the row disappear, and the
+    // `entry == null` branch below would fire its own onBack() — two pops
+    // for one tap. Mirrors ProviderDetailScreen's `deleted` flag.
+    //
+    // Declared BEFORE the null check: Kotlin resolves local declarations in
+    // source order, so a `remember` declared after the early-return branch
+    // is not in scope inside it (CI #43215338745: `Unresolved reference
+    // 'removedFromSelection'`). Keyed on entryId (not entry.id) because
+    // `entry` is null in that branch.
+    var removedFromSelection by remember(entryId) { mutableStateOf(false) }
+
     if (entry == null) {
         // [S6-composition-back] onBack() during composition is a Compose
         // anti-pattern (re-fires on every recomposition of this branch) —
         // wrap in LaunchedEffect like ModelGroupDetailScreen/MountDetailScreen.
-        LaunchedEffect(Unit) { onBack() }
+        // [selection-only-ui-writer-1112] The removal path already popped the
+        // screen itself; popping again here would double-pop.
+        if (!removedFromSelection) {
+            LaunchedEffect(Unit) { onBack() }
+        }
         return
     }
 
@@ -113,7 +140,6 @@ fun ModelEntryDetailScreen(
     var thinkingEnabled by remember(entry.id, baseModel.supportsReasoning, overrides.supportsReasoning) {
         mutableStateOf(overrides.supportsReasoning ?: baseModel.supportsReasoning ?: false)
     }
-    var isHidden by remember(entry.id, entry.isHidden) { mutableStateOf(entry.isHidden) }
     var showQuickTest by remember(entry.id) { mutableStateOf(false) }
 
     // Modality state — derive from override-or-base so the toggles reflect
@@ -190,14 +216,31 @@ fun ModelEntryDetailScreen(
                         imageOutput = imageOutput,
                         audioOutput = audioOutput,
                     )
+                    // [selection-only-ui-writer-1112] The save path must NOT
+                    // carry `isHidden` at all. Since the selection-only
+                    // migration the entry table holds SELECTIONS only — a row
+                    // with `isHidden = true` is a legacy catalog copy that the
+                    // migration deletes and that the backup importer drops
+                    // (`decideLegacyHiddenImportKeep` = `!isHidden || isCustom`).
+                    // Persisting `copy(isHidden = true)` from this screen
+                    // therefore minted a row that (a) disappears from every
+                    // `!isHidden` reader (model picker, onboarding, group
+                    // sheet, agent-loop sheet) while (b) still showing as
+                    // selected in the Manage sheet (which reads the full set),
+                    // and (c) was silently dropped on the next backup
+                    // restore — the user's selected model lost.
+                    // "Unselect" is the only remaining operation and it goes
+                    // through `unselectEntry` (the same path the config
+                    // setter and the management sheet use), never through a
+                    // hidden flag.
                     val updated = if (entry.isCustom) {
                         // [da1022-E] trim before persisting; the composite
                         // entry key is minted from this id, so a whitespace
                         // edge would mint a dangling key. Blank input is
                         // blocked by the Save button's enabled gate below.
-                        entry.copy(baseModel = baseModel.copy(id = modelId.trim()), overrides = newOverrides, isHidden = isHidden)
+                        entry.copy(baseModel = baseModel.copy(id = modelId.trim()), overrides = newOverrides)
                     } else {
-                        entry.copy(overrides = newOverrides, isHidden = isHidden)
+                        entry.copy(overrides = newOverrides)
                     }
                     val persistedId = providerRepository.updateEntry(updated)
                     // [meta-audit-1028 E5 / B06 F-07] `null` covers two
@@ -323,16 +366,36 @@ fun ModelEntryDetailScreen(
             )
         }
 
-        // ── Visibility ──────────────────────────────────────────────────
+        // ── Selection ──────────────────────────────────────────────────
+        // [selection-only-ui-writer-1112] Since the selection-only migration
+        // the entry table holds SELECTIONS only — there is no separate
+        // "visible vs hidden" state left to toggle (the old Visibility switch
+        // wrote `copy(isHidden = true)`, which minted a row that every
+        // `!isHidden` reader dropped — model picker, onboarding, group sheet,
+        // agent-loop sheet — while the Manage sheet still showed it as
+        // selected, and which the backup importer then discarded on the next
+        // restore). The only remaining membership operation is "remove from
+        // selection", and it goes through `unselectEntry` — the same path the
+        // config setter and the management sheet use.
         SettingsSection(
-            header = stringResource(R.string.model_entry_visibility),
-            footer = stringResource(R.string.model_entry_hidden_models_won_t_appear_in_the_model_),
+            header = stringResource(R.string.model_entry_selection),
+            footer = stringResource(R.string.model_entry_unselect_footer),
         ) {
-            SettingsSwitchRow(
-                title = stringResource(R.string.model_entry_hidden),
-                checked = isHidden,
-                onCheckedChange = { isHidden = it },
+            SettingsRow(
+                title = stringResource(R.string.model_entry_unselect),
+                titleColor = MaterialTheme.colorScheme.error,
+                showChevron = false,
                 showDivider = false,
+                onClick = {
+                    // Set the guard BEFORE the write: the write makes `entry`
+                    // null, and the null-entry branch would otherwise fire its
+                    // own onBack() — two pops for one tap (the same double-pop
+                    // shape ProviderDetailScreen guards with its `deleted` flag).
+                    removedFromSelection = true
+                    providerRepository.unselectEntry(entry.id)
+                    AppLogger.info(TAG, "Removed model entry ${entry.id} from the selection set")
+                    onBack()
+                },
             )
         }
 
@@ -406,7 +469,11 @@ fun ModelEntryDetailScreen(
                     showChevron = false,
                     showDivider = false,
                     onClick = {
-                        providerRepository.updateEntry(entry.copy(overrides = ModelOverrides(), isHidden = false))
+                        // [selection-only-ui-writer-1112] No `isHidden` here
+                        // either: the Reset clears the user's overrides, and
+                        // "hidden" is not an override — it is a membership
+                        // flag the selection-only table no longer carries.
+                        providerRepository.updateEntry(entry.copy(overrides = ModelOverrides()))
                         onBack()
                     },
                 )
