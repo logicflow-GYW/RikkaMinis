@@ -88,7 +88,12 @@ object GeminiModelsApi {
             if (isOfficialGeminiBase(baseUrl)) LLMModel.allGemini else emptyList()
         val cacheKey = "key|$base|" + apiKey
         if (context != null && !forceRefresh) {
-            cache.load(context, cacheKey)?.let { return@withContext it }
+            // [model-defaults-1112] Re-enrich on the cache read path — see the
+            // same note in OpenAIModelsApi. A row cached while the models.dev
+            // registry was unavailable would otherwise sit without a context
+            // window for the full 7-day TTL (the Gemini fetch itself reports no
+            // limits, so the registry is the only source here).
+            cache.load(context, cacheKey)?.let { return@withContext ModelsDevApi.enrichModels(it) }
         }
 
         val builder = Request.Builder()
@@ -166,7 +171,23 @@ object GeminiModelsApi {
                             }
                         } == true
                     if (supportsGen) {
-                        result.add(LLMModel(name, displayName, "Google"))
+                        // [model-defaults-1112] `GET /v1beta/models` reports
+                        // `inputTokenLimit` / `outputTokenLimit` per model. Both were
+                        // dropped, so a Gemini row's context window came only from the
+                        // models.dev registry (or the id heuristic) even though the
+                        // vendor stated it. models.dev still wins where it has a row
+                        // (ModelsDevApi.applyDevData is `registry ?: existing`), so this
+                        // mainly covers ids the registry has not catalogued yet
+                        // (preview / express / new generations).
+                        result.add(
+                            LLMModel(
+                                id = name,
+                                displayName = displayName,
+                                provider = "Google",
+                                contextWindow = obj.optInt("inputTokenLimit").takeIf { it > 0 },
+                                maxOutputTokens = obj.optInt("outputTokenLimit").takeIf { it > 0 },
+                            )
+                        )
                     }
                 }
                 if (result.isEmpty()) return@withContext fallback

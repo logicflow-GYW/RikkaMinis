@@ -10,6 +10,7 @@ import com.rikkaminis.app.provider.sseDataPayload
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
+import com.rikkaminis.app.data.model.acceptsImageInput
 import com.rikkaminis.app.data.model.LLMMediaAttachment
 import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.LLMStreamChunk
@@ -546,7 +547,8 @@ class GeminiProvider(
         // [§27a] Same predicate as OpenAIProvider.buildRequestBody (verbatim).
         // Gemini answers 400 when an image part reaches a text-only model, so
         // image parts are downgraded to a text placeholder below.
-        val supportsImages = "image" in (model.inputModalities ?: emptyList())
+        // [model-defaults-1112] Shared tri-state — see LLMModel.imageInputDecision.
+        val supportsImages = model.acceptsImageInput
         val lastUserIndex = sanitizedMessages.indexOfLast { it.role == LLMMessage.Role.USER }
         for ((index, msg) in sanitizedMessages.withIndex()) {
             val role = if (msg.role == LLMMessage.Role.USER) "user" else "model"

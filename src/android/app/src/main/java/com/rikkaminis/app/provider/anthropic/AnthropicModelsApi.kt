@@ -41,7 +41,13 @@ object AnthropicModelsApi {
         // share cached model lists (vLLM vs api.anthropic.com can differ).
         val cacheKey = (baseURL ?: "") + "|" + apiKey
         if (context != null && !forceRefresh) {
-            AnthropicModelsCache.load(context, cacheKey)?.let { return@withContext it }
+            // [model-defaults-1112] Re-enrich on the cache read path — see the
+            // same note in OpenAIModelsApi. /v1/models carries no capability
+            // metadata, so a row cached before the models.dev registry landed
+            // would keep supportsReasoning=null (thinking pill gate) for the
+            // full 7-day TTL.
+            AnthropicModelsCache.load(context, cacheKey)
+                ?.let { return@withContext ModelsDevApi.enrichModels(it) }
         }
 
         // [R5-E F-07 / C-06①] Official-ness is a HOST property, not "the user typed

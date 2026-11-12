@@ -26,9 +26,12 @@ import org.json.JSONObject
  *    attached screenshot on the wire twice; "same bytes in three carriers" is
  *    the assertion that keeps that from creeping back.
  *
- * claudeHaiku45 declares no inputModalities → non-vision → each image becomes
- * the [VISION_UNSUPPORTED_PLACEHOLDER] text block, which is countable without
- * any base64 payload on the wire.
+ * [model-defaults-1112] The fixture model pins `inputModalities = ["text"]`
+ * (DECLARED text-only) so the placeholder arm is the deliberate contract, not
+ * a side effect of absent metadata: since the tri-state image decision, an
+ * ABSENT list on a claude id would fall to the vision-family hint and SEND the
+ * image. Each image becomes the [VISION_UNSUPPORTED_PLACEHOLDER] text block,
+ * which is countable without any base64 payload on the wire.
  */
 class AnthropicImageCarrierWireTest {
 
@@ -43,7 +46,7 @@ class AnthropicImageCarrierWireTest {
         server.start()
         provider = AnthropicProvider(
             apiKey = "test-key",
-            model = LLMModel.claudeHaiku45,
+            model = LLMModel.claudeHaiku45.copy(inputModalities = listOf("text")),
             basePath = server.url("/").toString().trimEnd('/'),
         )
     }
