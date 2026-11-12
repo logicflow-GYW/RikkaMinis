@@ -1330,6 +1330,11 @@ internal class AgentLoopEngine(
             // so we catch at collect level and unwrap.
             var collectDone = false
             var retryAttempt = 0  // per-turn auto-retry counter (resets on each new turn)
+            // [review1112-p1-5] One-shot capacity recovery for this turn: when
+            // the provider says the request is too large, trim and re-send once.
+            // Declared per turn (not per attempt) so the budget is spent at most
+            // once per user turn, and re-created when the turn loop advances.
+            val overshootRetry = ContextOvershootRetry()
             while (!collectDone) {
                 // T7-C: deadline 到达后不发新 provider 请求
                 if (traceObserver.activeRunBudget?.isExpired() == true) {
@@ -1920,6 +1925,116 @@ internal class AgentLoopEngine(
                                     )
                                 }
                             }
+                    }
+                    // [review1112-p1-5] Capacity self-heal on the MAIN chat path.
+                    //
+                    // `LLMModel.contextWindowTokens` guesses 1M for an id it does
+                    // not recognise, and its comment justified that by pointing at
+                    // a "compaction self-heal (isContextTooLargeError halving retry
+                    // in AgentLoopEngine / CompactOrchestration)". The halving retry
+                    // only ever runs inside the summariser — the chat turn itself
+                    // had NO capacity recovery, so an over-estimated window turned
+                    // into a 400, then a fallback, then "Provider returned an
+                    // error" with nothing naming the cause. This is the missing
+                    // half: trim the history and re-send the SAME turn once.
+                    //
+                    // Bounded by construction: ContextOvershootRetry latches after
+                    // the first attempt, so the retry cannot loop. Narrow by
+                    // construction too — it needs a corroborating local estimate
+                    // and a history long enough for the trimmer to actually free
+                    // space, so an unrelated 400 that merely contains "context
+                    // length" cannot drop the user's history.
+                    if (isContextTooLargeError(actual) &&
+                        overshootRetry.shouldShrinkAndRetry(
+                            isContextTooLarge = true,
+                            estimatedInput = preflightEstimate,
+                            window = host.effectiveContextWindowTokens() ?: 0,
+                            historyMessages = host.agentHistory.size,
+                        )
+                    ) {
+                        val windowNow = host.effectiveContextWindowTokens() ?: 0
+                        val before = host.agentHistory.size
+                        AppLogger.warning(
+                            TAG_STREAM,
+                            "[Overshoot] context-too-large from ${loopState.currentProvider.model.id} " +
+                                "(est=$preflightEstimate window=$windowNow history=$before) — " +
+                                "trimming and retrying the same turn",
+                        )
+                        host.trimContextHistoryWindow(
+                            contextWindow = windowNow,
+                            lastContextTokens = preflightEstimate.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                        )
+                        // Re-capture the request snapshot: trim mutates
+                        // agentHistory, and `preflightMessages` was captured
+                        // before it. Sending the stale snapshot would re-send the
+                        // exact request that just 400'd.
+                        preflightMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+                        val rawReEstimate = ContextEstimator.estimateRequestTokens(
+                            messages = preflightMessages,
+                            systemPrompt = systemPrompt,
+                            tools = host.agentTools,
+                        )
+                        rawEstimate = rawReEstimate
+                        preflightEstimate = rawReEstimate * calibrationRatioFor(loopState.currentProvider) / 100
+                        // [review1112-p1-5] Re-shrink the OUTPUT budget too.
+                        //
+                        // `maxTokens` was decided BEFORE the loop from a preflight
+                        // that trusted the same over-estimated window: with a real
+                        // 128K window mis-guessed as 1M, a 100K-token history and
+                        // a 128K output budget both pass preflight, then 400. The
+                        // trim frees input space but leaves the output budget at
+                        // the value that helped blow the real ceiling, so the
+                        // retry can 400 again for a different reason. The retry's
+                        // purpose is "get this turn out"; the output floor is the
+                        // safe budget for that. A second overshoot is not retried
+                        // (the latch is spent), so this is the only chance.
+                        maxTokens = MIN_MAX_TOKENS_CONST
+                        AppLogger.warning(
+                            TAG_STREAM,
+                            "[Overshoot] history $before → ${host.agentHistory.size} msgs, " +
+                                "re-estimated input=$preflightEstimate, maxTokens→$maxTokens",
+                        )
+                        if (host.agentHistory.size >= before) {
+                            // The trimmer declined (history already within its keep
+                            // window / nothing to drop). Retrying would re-send the
+                            // same oversized request, so fall through to the normal
+                            // fallback path instead of burning a round trip.
+                            AppLogger.warning(
+                                TAG_STREAM,
+                                "[Overshoot] trim freed nothing — falling through to the normal failure path",
+                            )
+                        } else {
+                            // Same turn-level reset the transient-retry branch does
+                            // before its `continue` — without it the retried
+                            // stream's deltas double-append on top of this
+                            // attempt's partial text/thinking blocks. Kept in the
+                            // same order as that branch so the two cannot drift.
+                            val hadPartialBlocks =
+                                rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)
+                            if (hadPartialBlocks) {
+                                withContext(Dispatchers.Main) {
+                                    host.updateAssistantMessage(
+                                        loopState.assistantId,
+                                        loopState.accumulatedText + turnTextSb.toString(),
+                                        true,
+                                        loopState.allToolBlocks,
+                                    )
+                                }
+                            }
+                            turnTextSb.setLength(0)
+                            currentTextBlockSb = null
+                            turnTextBlockIdx = -1
+                            turnThinking.clear()
+                            toolCalls.clear()
+                            loopState.pendingChunkSb.setLength(0)
+                            resetStreamThrottle(loopState)
+                            withContext(Dispatchers.Main) { host.clearInlineError() }
+                            AppLogger.warning(
+                                TAG_STREAM,
+                                "[Overshoot] retrying the same turn with the trimmed history",
+                            )
+                            continue
+                        }
                     }
                     val isRateLimit = actual is com.rikkaminis.app.data.model.LLMError.RateLimited
                     val is5xx = actual is com.rikkaminis.app.data.model.LLMError.ProviderError &&

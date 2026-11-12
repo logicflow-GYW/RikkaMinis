@@ -340,9 +340,17 @@ def check_source(engine: str, state: str, label: str):
 
     # ── R2: rollback keeps the per-turn index ─────────────────────────────
     rollbacks = call_sites(code, ROLLBACK_FUN)
-    if len(rollbacks) != 2:
-        bad.append("%s:1: expected exactly 2 rollbackTurnBlocksTo(loopState.allToolBlocks, …) sites, "
-                   "found %d" % (label, len(rollbacks)))
+    # [review1112-p1-5] The count is a FLOOR, not an equality. Each rollback
+    # site is a distinct failure path that must discard only the failed
+    # attempt's blocks (transient retry, provider fallback, and — added
+    # 2026-11-12 — the context-overshoot trim-and-retry). Pinning an exact
+    # number made every new recovery path a red gate for the wrong reason,
+    # while the property that actually matters (the index argument) is checked
+    # per site immediately below. Two is the historical minimum; a path that
+    # silently disappears still trips this.
+    if len(rollbacks) < 2:
+        bad.append("%s:1: expected at least 2 rollbackTurnBlocksTo(loopState.allToolBlocks, …) "
+                   "sites (transient retry + fallback), found %d" % (label, len(rollbacks)))
     for pos, args in rollbacks:
         line = line_of(engine, pos)
         if len(args) < 2:

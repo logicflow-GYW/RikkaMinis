@@ -298,6 +298,60 @@ def arm6_reasoning_false_not_authoritative(texts):
             "that do reason"
         )
 
+    # [review1112-p1-3] NEGATIVE arm: a branch that makes `false` authoritative
+    # must not exist ANYWHERE in the decision.
+    #
+    # The two assertions above only require the true-branch and the whitelist
+    # branch to be PRESENT; appending one extra arm
+    #
+    #     endpointFlag == false -> false
+    #
+    # keeps both of them intact and turns the rule off for every model whose
+    # gateway reports `false` (i.e. all of them on the local AI-Gateway). That
+    # is the realistic regression shape: nobody deletes the `true` branch (the
+    # code would look obviously wrong), they add what looks like a reasonable
+    # "respect the endpoint's declaration" arm.
+    #
+    # Measured on the real tree: adding exactly that line left this gate green
+    # (6 arms, 0 violations), because the old self-test mutated by REPLACING
+    # the whitelist branch instead of appending a false branch.
+    for pattern, why in (
+        (r"endpointFlag\s*==\s*false\s*->\s*false",
+         "the endpoint's `false` is authoritative again — every model served "
+         "through a gateway that reports false would lose its thinking toggle"),
+        (r"endpointFlag\s*==\s*false\s*->\s*true",
+         "a `false` flag now ADMITS reasoning — the flag is being inverted"),
+        (r"endpointFlag\s*\?:\s*false",
+         "the endpoint's flag is folded in as `?: false`, which turns an "
+         "unreported (null) flag into a hard false"),
+    ):
+        if re.search(pattern, code):
+            out.append("A6 reasoning: %s — found `%s`" % (why, pattern))
+
+    # The whitelist must still be REACHED: the call site has to pass the
+    # id-family answer in. Hard-wiring `knownReasoningFamily = false` there
+    # (or dropping the argument) leaves the decision function itself correct
+    # and still switches the toggle off for every gateway model — the same
+    # outcome, one layer out. Checked on the parser file because that is where
+    # the call lives.
+    parser = texts.get(OPENAI_MODELS_REL)
+    if parser is None:
+        out.append("A6 missing %s" % OPENAI_MODELS_REL)
+    else:
+        pcode = mask_comments(parser)
+        if "resolveSupportsReasoning" in pcode:
+            if re.search(r"knownReasoningFamily\s*=\s*false", pcode):
+                out.append(
+                    "A6 reasoning: the call site hard-wires "
+                    "`knownReasoningFamily = false` — the whitelist can never "
+                    "answer, so the endpoint's false wins for every model"
+                )
+            elif not re.search(r"knownReasoningFamily\s*=", pcode):
+                out.append(
+                    "A6 reasoning: the call site no longer passes the "
+                    "id-family answer to `resolveSupportsReasoning`"
+                )
+
     return out
 
 
@@ -495,11 +549,23 @@ def _selftest():
              lambda s: s.replace(
                  "return if (parsed == guess) null else parsed",
                  "return parsed")),
-            # A6: the false flag becomes authoritative again.
+            # A6: the false flag becomes authoritative again — in the shape a
+            # real regression takes: the existing arms stay, a new
+            # `endpointFlag == false -> false` arm is APPENDED in front of the
+            # whitelist. (The old mutation REPLACED the whitelist arm, which is
+            # a shape nobody writes and which the presence-only assertions
+            # caught for the wrong reason — see arm6's negative block.)
             ("A6", ENDPOINT_META_REL,
              lambda s: s.replace(
-                 "    knownReasoningFamily -> true\n",
+                 "    endpointFlag == true -> true\n",
+                 "    endpointFlag == true -> true\n"
                  "    endpointFlag == false -> false\n")),
+            # A6: same defect one layer out — the call site stops passing the
+            # id-family whitelist, so the endpoint's false wins by default.
+            ("A6", OPENAI_MODELS_REL,
+             lambda s: s.replace(
+                 "knownReasoningFamily = knownReasoning,",
+                 "knownReasoningFamily = false,")),
         ]
 
         for expect_arm, rel, mutate in mutations:

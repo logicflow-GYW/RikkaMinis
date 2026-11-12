@@ -25,7 +25,7 @@ internal class ProviderModelsCache(
     private val ttlMs: Long = DEFAULT_TTL_MS,
 ) {
     @Serializable
-    private data class Entry(
+    internal data class Entry(
         val models: List<LLMModel>,
         val savedAt: Long,
         // [gateway-context-1112] Schema version of the cached rows.
@@ -38,39 +38,71 @@ internal class ProviderModelsCache(
         // in which a user would refresh, see the old value, and conclude the
         // fix did not work.
         //
-        // Bumping the version makes those rows miss on load (the file is
-        // simply not readable as the current shape), which sends the fetcher
-        // back to the network — one request per provider, once.
+        // [review1112-p1-1] THE DEFAULT IS `0`, NOT [CURRENT_SCHEMA_VERSION],
+        // and that is the whole mechanism. kotlinx.serialization fills a
+        // MISSING key with the declared default, so a v1 row (which has no
+        // `schemaVersion` key at all) decoded against a default of
+        // `CURRENT_SCHEMA_VERSION` came back claiming to BE the current
+        // version — the guard below then accepted it and served the pre-fix
+        // rows for the rest of the TTL. Measured on the JVM with the real
+        // serialization plugin: `{"models":[…],"savedAt":…}` decoded to
+        // `schemaVersion=2`, `passesGuard=true`.
+        //
+        // `0` is "older than any version ever published", so every legacy row
+        // misses on the first launch after the upgrade and is re-fetched once
+        // — which is what the bump was supposed to do. A real v2 row always
+        // writes the key explicitly (see [save]), so it still loads.
         //
         // ponytail: a single integer, bumped by hand when the cached row
         // shape changes. | 天花板: a version that changes the LIST of models
         // rather than the shape of one row would need the same treatment, and
         // this counter does not distinguish the two. | 升级触发: a change to
         // the LLMModel fields that a fetcher fills in.
-        val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
+        val schemaVersion: Int = 0,
     )
 
     private fun cacheDir(context: Context): File =
         File(context.cacheDir, "models-cache/$namespace").apply { mkdirs() }
 
-    private fun keyFile(context: Context, cacheKey: String): File {
+    private fun keyFile(dir: File, cacheKey: String): File {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(cacheKey.toByteArray(Charsets.UTF_8))
         val hex = digest.joinToString("") { "%02x".format(it) }
-        return File(cacheDir(context), "$hex.json")
+        return File(dir, "$hex.json")
     }
+
+    private fun keyFile(context: Context, cacheKey: String): File =
+        keyFile(cacheDir(context), cacheKey)
 
     fun load(context: Context, cacheKey: String): List<LLMModel>? {
         val file = keyFile(context, cacheKey)
         if (!file.isFile) return null
-        val entry = runCatching { JSON.decodeFromString<Entry>(file.readText()) }
-            .getOrNull() ?: return null
-        // [gateway-context-1112] A row written by an older parser carries no
-        // endpoint metadata; treat it as a miss so the fetch goes back to the
-        // network instead of serving the pre-fix rows for the rest of the TTL.
-        if (entry.schemaVersion != CURRENT_SCHEMA_VERSION) return null
-        if (System.currentTimeMillis() - entry.savedAt > ttlMs) return null
-        return entry.models
+        return decodeCachedModels(
+            text = runCatching { file.readText() }.getOrNull() ?: return null,
+            nowMs = System.currentTimeMillis(),
+            ttlMs = ttlMs,
+        )
+    }
+
+    /**
+     * [review1112-p1-1] Directory-scoped load, for tests.
+     *
+     * Android's `Context` is an abstract class with dozens of abstract members
+     * and this module has no Robolectric/mockk, so a unit test cannot build one
+     * just to hand over a `cacheDir` (the first version of this test tried and
+     * failed to compile on CI: `does not implement abstract base member
+     * 'bindService'`). [load] stays the production path and keeps the full body
+     * — the wiring gate asserts on ITS body, deliberately, so that a cache that
+     * becomes an inert delegate cannot pass.
+     */
+    fun loadFromDir(dir: File, cacheKey: String): List<LLMModel>? {
+        val file = keyFile(dir, cacheKey)
+        if (!file.isFile) return null
+        return decodeCachedModels(
+            text = runCatching { file.readText() }.getOrNull() ?: return null,
+            nowMs = System.currentTimeMillis(),
+            ttlMs = ttlMs,
+        )
     }
 
     fun save(context: Context, cacheKey: String, models: List<LLMModel>) {
@@ -90,6 +122,31 @@ internal class ProviderModelsCache(
             if (!tmp.renameTo(file)) {
                 // rename can fail across a bind-mount boundary; fall back to a
                 // direct write so the cache is still populated.
+                file.writeText(tmp.readText())
+                tmp.delete()
+            }
+        }
+    }
+
+    /**
+     * [review1112-p1-1] Directory-scoped save, for tests; see [loadFromDir].
+     *
+     * Deliberately a SEPARATE body rather than a shared helper: the wiring gate
+     * asserts that `save`'s own body performs the write, precisely so a cache
+     * that degrades into a delegating shell cannot stay green. The duplication
+     * is one atomic-write idiom, and the round-trip test pins that the two
+     * paths produce rows the same `load` accepts.
+     */
+    fun saveToDir(dir: File, cacheKey: String, models: List<LLMModel>) {
+        val file = keyFile(dir, cacheKey)
+        runCatching {
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            tmp.writeText(
+                JSON.encodeToString(
+                    Entry(models, System.currentTimeMillis(), CURRENT_SCHEMA_VERSION),
+                ),
+            )
+            if (!tmp.renameTo(file)) {
                 file.writeText(tmp.readText())
                 tmp.delete()
             }
@@ -129,8 +186,45 @@ internal class ProviderModelsCache(
          * window, output cap, the `supports_*` flags).
          */
         const val CURRENT_SCHEMA_VERSION = 2
-        private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        internal val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     }
+}
+
+/**
+ * [review1112-p1-1] Decode one cache file's text into its model list, or null
+ * when the entry must be treated as a MISS.
+ *
+ * Extracted from [ProviderModelsCache.load] so the whole accept/reject
+ * contract is JVM-testable without an Android `Context` — the defect this
+ * fixes lived entirely in the decode step and was invisible to every existing
+ * test (none of them constructed a legacy row).
+ *
+ * Three independent reasons to miss, in the order they are cheapest to check:
+ *
+ *  1. the text is not decodable JSON in the current shape (torn write,
+ *     unknown shape) — the pre-existing `runCatching` behaviour;
+ *  2. the row was written by an older parser ([Entry.schemaVersion] differs
+ *     from [ProviderModelsCache.CURRENT_SCHEMA_VERSION]). A row with NO
+ *     `schemaVersion` key decodes to the declared default `0`, which is
+ *     deliberately "older than any published version" — see the note on
+ *     [ProviderModelsCache.Entry.schemaVersion] for why the default must not
+ *     be the current version;
+ *  3. the row is stale (`nowMs - savedAt > ttlMs`).
+ */
+internal fun decodeCachedModels(
+    text: String,
+    nowMs: Long,
+    ttlMs: Long,
+): List<LLMModel>? {
+    val entry = runCatching {
+        ProviderModelsCache.JSON.decodeFromString<ProviderModelsCache.Entry>(text)
+    }.getOrNull() ?: return null
+    // [gateway-context-1112] A row written by an older parser carries no
+    // endpoint metadata; treat it as a miss so the fetch goes back to the
+    // network instead of serving the pre-fix rows for the rest of the TTL.
+    if (entry.schemaVersion != ProviderModelsCache.CURRENT_SCHEMA_VERSION) return null
+    if (nowMs - entry.savedAt > ttlMs) return null
+    return entry.models
 }
 
 /**

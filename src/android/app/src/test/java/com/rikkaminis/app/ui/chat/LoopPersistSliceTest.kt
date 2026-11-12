@@ -84,10 +84,26 @@ class LoopPersistSliceTest {
         val engine = readRepoFile(enginePath)
         // Rollback must remove ONLY the failed attempt's partial blocks — a
         // continuation prefix belongs to an earlier turn and must survive.
-        assertEquals(
-            "exactly two rollback sites",
-            2,
-            Regex("rollbackTurnBlocksTo\\(loopState\\.allToolBlocks, turnStartBlockIndex\\)").findAll(engine).count(),
+        //
+        // [review1112-p1-5] The count is a FLOOR, not an equality. Each site is a
+        // distinct failure path that has to discard the failed attempt's blocks:
+        // transient retry, provider fallback, and (added 2026-11-12) the
+        // context-overshoot trim-and-retry. Pinning an exact number turned every
+        // new recovery path into a red test for the wrong reason; the property
+        // that matters is the INDEX argument, asserted for every site below.
+        // A path that silently disappears still trips the floor.
+        val rollbackSites = Regex(
+            "rollbackTurnBlocksTo\\(loopState\\.allToolBlocks, turnStartBlockIndex\\)",
+        ).findAll(engine).count()
+        assertTrue(
+            "expected at least 2 rollback sites (transient retry + fallback), found $rollbackSites",
+            rollbackSites >= 2,
+        )
+        // …and no rollback may use the run-scoped index instead.
+        assertFalse(
+            "a rollback uses the run-scoped unpersisted start — it would delete an " +
+                "earlier turn's unpersisted prefix",
+            engine.contains("rollbackTurnBlocksTo(loopState.allToolBlocks, loopState.unpersistedBlockStart)"),
         )
         assertTrue(
             "per-turn visibility still scopes to this turn",
