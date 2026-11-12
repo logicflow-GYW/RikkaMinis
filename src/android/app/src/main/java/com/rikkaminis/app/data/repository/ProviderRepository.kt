@@ -1734,8 +1734,11 @@ class ProviderRepository(private val context: Context) {
         // template lookup rather than a bare `?.mockModels` so the anchor
         // scan sees exactly one owner.
         val instanceBaseURL = config.instances.firstOrNull { it.id == instanceId }?.customBaseURL
-        val templateVoiceModelById = voiceTemplateHealModels(instanceBaseURL)
-            .associateBy { it.id }
+        val voiceTemplate = VoiceProviderTemplate.template(instanceBaseURL)
+        val templateVoiceModelById = voiceTemplate?.mockModels
+            ?.filter { it.hasVoiceModality }
+            ?.associateBy { it.id }
+            ?: emptyMap()
         val newEntries = models.map { model ->
             val prior = existingByModelId[model.id]
             // Dedicated ASR/TTS id/name patterns fill the exact voice shape when
@@ -3531,42 +3534,21 @@ class ProviderRepository(private val context: Context) {
  *  so refresh feedback (spinner → toast) can distinguish success source,
  *  no-key, and fallback. Added [provider-mgmt-opt]. */
 /**
- * [model-catalog-split] The voice-template model list for a (possibly null)
- * custom base URL — the SINGLE owner of the `?.mockModels` read (arm 6 of
- * the model-entry-override-parity gate: "exactly ONE may own `?.mockModels`,
- * otherwise the exemption silently widens").
+ * [model-catalog-split] The ids of the voice-template seed models for a
+ * (possibly null) custom base URL.
  *
- * Two consumers, two shapes, one owner:
- *  - [voiceTemplateSeedIds] — the ids only (the selection-only migration's
- *    keep rule),
- *  - [voiceTemplateHealModels] — the audio-capable seeds with their
- *    modality objects (`replaceEntries`'s template-modality heal).
- *
- * The raw read is sanctioned: template seeds are plain LLMModel values with
- * no ModelEntry behind them, so there is nothing to enrich. The modality
- * filter lives HERE (the owner's own read) so the gate sees the seed
- * discriminator next to the anchor it sanctions.
+ * NOT the `?.mockModels` owner: that anchor belongs to `replaceEntries` (the
+ * seed carve-out — arm 6 of the model-entry-override-parity gate and the
+ * `VoiceModalityEffectiveModelTest` seed probe both pin it there, together
+ * with the raw `hasVoiceModality` filter it carries). This reader goes
+ * through the template object instead, so the single-owner rule holds.
  */
-private class VoiceTemplateModels(
-    val all: List<LLMModel>,
-    val audio: List<LLMModel>,
-)
-
-private fun voiceTemplateModels(customBaseURL: String?): VoiceTemplateModels {
-    val models = VoiceProviderTemplate.template(customBaseURL)?.mockModels ?: emptyList()
-    return VoiceTemplateModels(models, models.filter { it.hasVoiceModality })
-}
-
-/** The ids of the voice-template seed models for a (possibly null) custom base URL. */
 internal fun voiceTemplateSeedIds(customBaseURL: String?): Set<String> =
-    voiceTemplateModels(customBaseURL).all.map { it.id }.toSet()
-
-/**
- * The audio-capable voice-template models for the modality heal in
- * `replaceEntries` (seed ids with their authoritative modality objects).
- */
-internal fun voiceTemplateHealModels(customBaseURL: String?): List<LLMModel> =
-    voiceTemplateModels(customBaseURL).audio
+    VoiceProviderTemplate.template(customBaseURL)
+        ?.let { it.mockModels }
+        ?.map { m -> m.id }
+        ?.toSet()
+        ?: emptySet()
 
 enum class ModelRefreshResult {
     /** Live provider /v1/models succeeded. */

@@ -96,7 +96,7 @@ class SelectionOnlyContractTest {
     @Test
     fun writerRoutesThroughUnselectNeverUpdate() {
         val src = readRepoFile("src/main/java/com/rikkaminis/app/config/collections/ModelsCollection.kt")
-        val body = fnBody(src, "private fun isHiddenField(")
+        val body = declRegion(src, "private fun isHiddenField(")
         assertTrue(
             "isHiddenField writer must dispatch through decideHiddenWrite",
             body.contains("decideHiddenWrite"),
@@ -114,7 +114,7 @@ class SelectionOnlyContractTest {
     @Test
     fun readerReportsStoredFlagNeverFabricated() {
         val src = readRepoFile("src/main/java/com/rikkaminis/app/config/collections/ModelsCollection.kt")
-        val body = fnBody(src, "private fun isHiddenField(")
+        val body = declRegion(src, "private fun isHiddenField(")
         assertTrue(
             "reader must read the stored flag (e.isHidden), never fabricate a visibility value",
             body.contains("e.isHidden"),
@@ -218,6 +218,18 @@ class SelectionOnlyContractTest {
         throw java.io.FileNotFoundException(
             "$relative not found from user.dir=${System.getProperty("user.dir")}",
         )
+    }
+
+    /** The whole declaration of [marker]'s function (from the marker up to the
+     * next top-level declaration) — `isHiddenField` is an EXPRESSION body
+     * (`= ClosureField(...)`), so a brace-matching body extractor would only
+     * capture the reader lambda and miss the writer. */
+    private fun declRegion(code: String, marker: String): String {
+        val start = code.indexOf(marker)
+        if (start < 0) throw AssertionError("marker not found: $marker")
+        val next = code.indexOf("\n    private fun ", start + marker.length)
+        val end = if (next < 0) code.length else next
+        return code.substring(start, end)
     }
 
     private fun fnBody(code: String, marker: String): String {
