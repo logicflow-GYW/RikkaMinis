@@ -9,6 +9,8 @@ import com.rikkaminis.app.data.model.parseRetryAfterMs
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.acceptsImageInput
+import com.rikkaminis.app.data.model.ImageInputDecision
+import com.rikkaminis.app.data.model.imageInputDecision
 import com.rikkaminis.app.provider.LegacyMediaPlan
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
@@ -864,7 +866,7 @@ class AnthropicProvider(
         // [model-defaults-1112] Shared tri-state (declared-vision / known vision
         // family / declared text-only / unknown) — see LLMModel.imageInputDecision.
         val supportsImages = model.acceptsImageInput
-        if (!supportsImages && model.imageInputDecision == com.rikkaminis.app.data.model.ImageInputDecision.UNKNOWN) {
+        if (!supportsImages && model.imageInputDecision == ImageInputDecision.UNKNOWN) {
             android.util.Log.i(
                 "AnthropicProvider",
                 "[model-defaults] image→placeholder reason=undeclared-input-modalities model=${model.id}",

@@ -13,6 +13,8 @@ import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.LLMUsage
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.data.model.acceptsImageInput
+import com.rikkaminis.app.data.model.ImageInputDecision
+import com.rikkaminis.app.data.model.imageInputDecision
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.ProviderBoundary
 import com.rikkaminis.app.provider.TOOL_LOG_INPUT_STEP_CHARS
@@ -2082,7 +2084,7 @@ class OpenAIProvider constructor(
         // silent. Never "send and see" for UNKNOWN: the image part would stay
         // in history and brick every later turn of the conversation.
         val supportsImages = model.acceptsImageInput
-        if (!supportsImages && model.imageInputDecision == com.rikkaminis.app.data.model.ImageInputDecision.UNKNOWN) {
+        if (!supportsImages && model.imageInputDecision == ImageInputDecision.UNKNOWN) {
             android.util.Log.i(
                 "OpenAIProvider",
                 "[model-defaults] image→placeholder reason=undeclared-input-modalities model=${model.id} " +
