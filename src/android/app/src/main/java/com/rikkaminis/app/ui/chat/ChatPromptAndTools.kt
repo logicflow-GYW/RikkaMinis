@@ -522,14 +522,26 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     // toggle, mirroring the tool gate: memory off ⇒ neither tools nor
     // fragments, so the sub-agent can't be handed context it can't act on.
     val memoryOn = _memoryEnabled.value
+    // [fix/memcache-prefix-split] Stable→volatile ordering: global + rollup
+    // (slow-changing) first, daily log (changes on EVERY memory_write) LAST
+    // so the sub-agent's prefix cache survives memory writes too. Order
+    // defined once in MemoryPromptOrder — keep buildSystemPrompt in sync.
     val subagentContext = buildList {
-        skillRepository?.skillPromptFragment(activeSessionId)?.let(::add)
-        if (memoryOn) {
-            memoryRepository?.loadGlobalMemoryFragment()?.let(::add)
-            memoryRepository?.loadRecentDailyMemoryFragment()?.let(::add)
-            memoryRepository?.loadRollupFragment()?.let(::add)
+        skillRepository?.skillPromptFragment(activeSessionId)?.let {
+            add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.SKILL, it))
         }
-    }
+        if (memoryOn) {
+            memoryRepository?.loadGlobalMemoryFragment()?.let {
+                add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.GLOBAL_MEMORY, it))
+            }
+            memoryRepository?.loadRollupFragment()?.let {
+                add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.ROLLUP, it))
+            }
+            memoryRepository?.loadRecentDailyMemoryFragment()?.let {
+                add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.DAILY_MEMORY, it))
+            }
+        }
+    }.let(MemoryPromptOrder::orderInStandingRegion).map { it.text }
     val systemPrompt = SubagentSkill.buildSystemPrompt(skill, subagentContext)
     val provider = currentProvider ?: return ToolExecutionResult(
         "Error: No active provider available", false, toolTitle = title,
@@ -1597,26 +1609,19 @@ Sub-agent routing: the in-session sub-agent feature (spawn_agent) and cross-sess
             append("\n\n")
             append(globalMemoryFragment)
         }
-        if (dailyMemoryFragment != null) {
-            append("\n\n")
-            append(dailyMemoryFragment)
-        }
         // [T6-rollup] Inject MEMORY-ROLLUP.md (distilled stable rules)
-        // as a compact memory fragment, plus a size hint to trigger
-        // on-demand rollup when daily logs grow large.
+        // as a compact memory fragment. Kept in the STANDING region:
+        // the rollup only grows when the agent explicitly runs
+        // memory_rollup (rare, deliberate) — unlike the daily-log
+        // fragment (moved below, after Runtime context), which changes
+        // on EVERY memory_write.
         if (rollupFragment != null) {
             append("\n\nMemory rollup (MEMORY-ROLLUP.md — stable rules distilled from daily logs):\n")
             append(rollupFragment)
         }
-        if (rollupSizeHint != null && rollupBytes >= 50_000L) {
-            append("\n\nNote: Daily logs are large ($rollupSizeHint). ")
-            append("memory_rollup selects the largest eligible old log that has not been distilled yet; ")
-            append("call it to surface stable rules without waiting for the calendar to advance. ")
-            append("It is idempotent and leaves source logs unchanged.")
-        }
-        // Runtime context goes last so the prefix above stays byte-stable
-        // across requests within the same day. Keep ordering deterministic
-        // (date → tz → lang → model count) — any reorder defeats the cache.
+        // Runtime context: deterministic ordering (date → tz → lang →
+        // model count). Keep it deterministic — any reorder here still
+        // defeats the cache.
         append("\n\nRuntime context:\n")
         append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
         append("- Device language: ").append(lang).append("\n")
@@ -1631,6 +1636,31 @@ Sub-agent routing: the in-session sub-agent feature (spawn_agent) and cross-sess
             append(it).append("\n")
         }
         append("- minis-model-use models available: ").append(modelUseCount)
+        // [fix/memcache-prefix-split 2026-11-12] VOLATILE TAIL — everything
+        // below this line may change between turns on a memory_write.
+        // The daily-log fragment and the rollup size hint used to sit ABOVE
+        // "Runtime context:", inside the byte-stable prefix — one
+        // memory_write and the whole prefix (system + tools + history) went
+        // stale for prefix-based prompt caches (OpenAI/DeepSeek head
+        // matching, Anthropic cache_control breakpoints). Mirrors the same
+        // root-cause fix upstream: OpenMinis-Linux MemoryBlockSplit
+        // [GH#357] — "daily logs must live in the dynamic tail; otherwise
+        // every memory_write rewrites bytes inside the cached prefix and
+        // the entire prompt cache misses". Within a day, everything above
+        // "Runtime context:" is now byte-stable across memory_write.
+        // Ordering contract pinned by ChatPromptMemoryOrderTest
+        // (MemoryPromptOrder: standing = skill/global/rollup, volatile =
+        // daily/hint).
+        if (dailyMemoryFragment != null) {
+            append("\n\n")
+            append(dailyMemoryFragment)
+        }
+        if (rollupSizeHint != null && rollupBytes >= 50_000L) {
+            append("\n\nNote: Daily logs are large ($rollupSizeHint). ")
+            append("memory_rollup selects the largest eligible old log that has not been distilled yet; ")
+            append("call it to surface stable rules without waiting for the calendar to advance. ")
+            append("It is idempotent and leaves source logs unchanged.")
+        }
     }
 }
 
