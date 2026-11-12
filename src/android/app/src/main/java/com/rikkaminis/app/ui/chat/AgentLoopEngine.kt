@@ -1976,10 +1976,23 @@ internal class AgentLoopEngine(
                         )
                         rawEstimate = rawReEstimate
                         preflightEstimate = rawReEstimate * calibrationRatioFor(loopState.currentProvider) / 100
+                        // [review1112-p1-5] Re-shrink the OUTPUT budget too.
+                        //
+                        // `maxTokens` was decided BEFORE the loop from a preflight
+                        // that trusted the same over-estimated window: with a real
+                        // 128K window mis-guessed as 1M, a 100K-token history and
+                        // a 128K output budget both pass preflight, then 400. The
+                        // trim frees input space but leaves the output budget at
+                        // the value that helped blow the real ceiling, so the
+                        // retry can 400 again for a different reason. The retry's
+                        // purpose is "get this turn out"; the output floor is the
+                        // safe budget for that. A second overshoot is not retried
+                        // (the latch is spent), so this is the only chance.
+                        maxTokens = MIN_MAX_TOKENS_CONST
                         AppLogger.warning(
                             TAG_STREAM,
                             "[Overshoot] history $before → ${host.agentHistory.size} msgs, " +
-                                "re-estimated input=$preflightEstimate",
+                                "re-estimated input=$preflightEstimate, maxTokens→$maxTokens",
                         )
                         if (host.agentHistory.size >= before) {
                             // The trimmer declined (history already within its keep
