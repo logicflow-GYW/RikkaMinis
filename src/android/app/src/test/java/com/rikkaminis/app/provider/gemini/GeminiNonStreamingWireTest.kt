@@ -187,9 +187,12 @@ class GeminiNonStreamingWireTest {
     @Test
     fun `a text-only Gemini model sees the request image as a placeholder`() = runBlocking {
         server.enqueue(MockResponse().setBody(okBody))
-        // gemini25Flash in the builtin catalog declares no input modalities →
-        // no vision → the §27a placeholder, never an inlineData part.
-        provider().sendMessage(
+        // [model-defaults-1112] Pin a DECLARED text-only fixture: gemini25Flash
+        // carries no input modalities, and an ABSENT list now falls to the
+        // vision-family hint (a gemini id) and SENDS the image — so the
+        // placeholder arm needs an explicit ["text"] declaration.
+        provider(model = LLMModel.gemini25Flash.copy(inputModalities = listOf("text")))
+            .sendMessage(
             listOf(
                 LLMMessage(
                     role = LLMMessage.Role.USER,
@@ -205,7 +208,7 @@ class GeminiNonStreamingWireTest {
             "expected the vision placeholder, got ${parts.map { it.keys().asSequence().toList() }}",
             parts.any {
                 it.optString("text", "") ==
-                    "[Image attached but this model does not support vision input]"
+                    com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER
             },
         )
         assertTrue(parts.none { it.has("inlineData") })

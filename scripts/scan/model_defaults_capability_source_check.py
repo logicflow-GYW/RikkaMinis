@@ -84,7 +84,15 @@ PLACEHOLDER_TESTS = (
 PLACEHOLDER_TEST_RELS = (
     "src/android/app/src/test/java/com/rikkaminis/app/provider/anthropic/AnthropicContentBlocksWireTest.kt",
     "src/android/app/src/test/java/com/rikkaminis/app/provider/anthropic/AnthropicImageCarrierWireTest.kt",
+    "src/android/app/src/test/java/com/rikkaminis/app/provider/gemini/GeminiNonStreamingWireTest.kt",
+    "src/android/app/src/test/java/com/rikkaminis/app/provider/openai/OpenAIToolResultImagesTest.kt",
 )
+
+# A6 — the old verdict-only wording, banned anywhere in the test tree: a copy
+# pins the literal instead of the constant, so a wording change surfaces as a
+# test failure at the copy rather than at the one place that owns it (exactly
+# what happened in CI run 43201047456 — two failures, both literal copies).
+STALE_PLACEHOLDER_LITERAL = "does not support vision input"
 
 # Arm 4 — fetchers whose cache-hit path must re-enrich.
 CACHE_ENRICH_RELS = (
@@ -153,7 +161,7 @@ def arm2_tri_state_owner(texts):
 
 
 def arm3_placeholder_fixtures(texts):
-    """A3: placeholder wire tests pin a DECLARED text-only fixture."""
+    """A3: placeholder WIRE tests pin a DECLARED text-only fixture."""
     out = []
     for rel in PLACEHOLDER_TEST_RELS:
         src = texts.get(rel)
@@ -163,12 +171,29 @@ def arm3_placeholder_fixtures(texts):
         code = mask_comments(src)
         if "VISION_UNSUPPORTED_PLACEHOLDER" not in code:
             continue  # the test no longer asserts the placeholder arm at all
-        if not re.search(r'inputModalities\s*=\s*listOf\(\s*"text"\s*\)', code):
+        # Only tests that route through a provider+model depend on the fixture's
+        # declaration; a pure serializer test passes supportsImages explicitly.
+        wire_test = bool(re.search(r'\bmodel\s*=\s*LLMModel', code)) or "provider(model" in code
+        if wire_test and not re.search(r'inputModalities\s*=\s*listOf\(\s*"text"\s*\)', code):
             out.append(
                 "A3 %s asserts the placeholder arm on a fixture that does not "
-                "DECLARE text-only input — with an absent list a claude id now "
+                "DECLARE text-only input — with an absent list a known-vision id "
                 "falls to FAMILY_HINT and the arm silently tests the send path"
                 % os.path.basename(rel)
+            )
+    return out
+
+
+def arm6_no_stale_placeholder_literal(texts):
+    """A6: the old wording must not exist anywhere in the test tree."""
+    out = []
+    for rel in PLACEHOLDER_TEST_RELS:
+        src = texts.get(rel)
+        if src and STALE_PLACEHOLDER_LITERAL in src:
+            out.append(
+                "A6 %s hard-codes the retired placeholder wording — assert the "
+                "constant (VISION_UNSUPPORTED_PLACEHOLDER) instead, so the "
+                "wording has one owner" % os.path.basename(rel)
             )
     return out
 
@@ -234,7 +259,8 @@ def arm5_registry_hardening(texts):
 
 
 CHECKS = (arm1_provider_gate_owners, arm2_tri_state_owner, arm3_placeholder_fixtures,
-          arm4_cache_path_enriches, arm5_registry_hardening)
+          arm4_cache_path_enriches, arm5_registry_hardening,
+          arm6_no_stale_placeholder_literal)
 
 TRACKED = tuple(
     list(PROVIDER_SITES) + [LLM_MODEL_REL] + list(PLACEHOLDER_TEST_RELS) +
@@ -305,6 +331,8 @@ def selftest():
          lambda s: s.replace("if (parsed.size < MIN_REGISTRY_PROVIDERS) {", "if (false) {", 1), "A5"),
         ("A5 in-place cache write", MODELS_DEV_REL,
          lambda s: s.replace("if (!tmp.renameTo(file)) {", "if (false) {", 1), "A5"),
+        ("A6 stale placeholder literal", PLACEHOLDER_TEST_RELS[3],
+         lambda s: s + '\n// "[Image attached but this model does not support vision input]"\n', "A6"),
     ]
     for label, rel, mutate, needle in cases:
         with tempfile.TemporaryDirectory() as tmp:

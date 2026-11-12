@@ -124,15 +124,16 @@ class OpenAIToolResultImagesTest {
         )
 
         assertEquals(listOf("text", "text"), partTypes(out))
-        assertEquals(
-            "[Image attached but this model does not support vision input]",
-            out.getJSONObject(1).getString("text"),
-        )
-        // The placeholder is the production constant, not a copy of it.
-        assertEquals(
-            "[Image attached but this model does not support vision input]",
-            com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER,
-        )
+        // [model-defaults-1112] Single source: the emitted text IS the production
+        // constant (no literal copy here — the previous revision copied the old
+        // wording into two assertions, so a wording change failed this test
+        // instead of being caught where it belongs).
+        val text = out.getJSONObject(1).getString("text")
+        assertEquals(com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER, text)
+        // The wording must name the cause (withheld / undeclared) and the remedy
+        // (enable image input), so the model can relay an actionable message.
+        assertTrue("cause missing from placeholder: $text", text.contains("withheld"))
+        assertTrue("remedy missing from placeholder: $text", text.contains("image input"))
         assertFalse(out.toString().contains(imageB64))
     }
 
