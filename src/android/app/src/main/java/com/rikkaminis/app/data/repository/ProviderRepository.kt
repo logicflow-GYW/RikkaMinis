@@ -2866,7 +2866,7 @@ class ProviderRepository(private val context: Context) {
                 instanceId,
                 when (result) {
                     ModelRefreshResult.NO_KEY -> "No API key configured"
-                    else -> "No models returned",
+                    else -> "No models returned"
                 },
             )
             return _remoteCatalogs.value[instanceId] ?: RemoteCatalogState()
