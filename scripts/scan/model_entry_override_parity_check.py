@@ -68,6 +68,18 @@ wiring in BOTH files:
           declared non-selection list), so a new audio predicate cannot escape
           the funnel by not being listed here.
 
+  Arm 8 — [selection-only-ui-writer-1112] the entry table is SELECTION-ONLY:
+          no row may carry `isHidden = true` (the one-shot migration deletes
+          those rows, and the backup importer drops them — so a UI that mints
+          one loses the user's selected model on the next restore). The
+          screen must therefore (a) never persist `isHidden` on the save
+          path, (b) never write `copy(isHidden = …)` at all, and (c) express
+          "remove from selection" through `unselectEntry` — the same path the
+          config setter and the management sheet use. The old Visibility
+          switch violated all three: it kept a local `isHidden` state and
+          wrote it back on Save, which made the model vanish from every
+          `!isHidden` reader while the Manage sheet still showed it selected.
+
 [batch5-t07] Five external witnesses walked through this gate (report-A §08).
 Every arm now judges the EFFECT on the shared lexer/ast/valueflow primitives,
 and the gate's own lexers (`strip_kotlin_comments`, `code_only`, `_balanced`,
@@ -318,6 +330,59 @@ def check_save_persists_derived(rel, block, base_line=1):
                         "the Save handler exits here on every path (a constant-true guard) "
                         "before `updateEntry(...)` — the edited entry is never persisted"))
             break
+    return out
+
+
+def check_selection_only_writer(rel, view):
+    """Arm 8 — the selection-only invariant on the UI write path.
+
+    Since the selection-only migration the entry table holds SELECTIONS only:
+    a row with `isHidden = true` is a disposable catalog copy (the migration
+    deletes it, the backup importer drops it). A screen that persists such a
+    row makes the user's selected model vanish from every `!isHidden` reader
+    (model picker, onboarding, group sheet, agent-loop sheet) while the Manage
+    sheet still shows it as selected — and loses it entirely on the next
+    backup restore.
+
+    Three judgements on the masked view (comments and string interiors are
+    blanked, so prose can never satisfy a criterion):
+
+      a. no `copy(isHidden = …)` anywhere — that is the minting call;
+      b. the save path must not mention `isHidden` at all;
+      c. "remove from selection" must go through `unselectEntry`.
+
+    (c) is the positive requirement: without it the screen would lose the
+    only surface the user had for leaving the selection set.
+    """
+    out = []
+    code = view  # already masked: comments + string interiors blanked
+
+    # (a) no copy(isHidden = …) anywhere in the file.
+    for m in re.finditer(r"copy\s*\(\s*isHidden", code):
+        out.append((rel, code.count("\n", 0, m.start()) + 1, "8",
+                    "the screen must never mint a hidden row (`copy(isHidden = …)`) — "
+                    "the entry table is selection-only; use unselectEntry instead"))
+
+    # (b) the save path must not persist isHidden. The save block is the
+    # `onClick = {` … `updateEntry(...)` region; anything else on the file
+    # (a read of the stored flag) is legitimate.
+    found = save_block(code)
+    if found is None:
+        out.append((rel, 0, "8", "save onClick block not found — gate ROT"))
+    else:
+        block, _ = found
+        for m in re.finditer(r"\bisHidden\b", block):
+            out.append((rel, code.count("\n", 0, m.start()) + 1, "8",
+                        "the save path must not touch `isHidden` — the persisted "
+                        "value is the selection itself, not a visibility flag"))
+
+    # (c) the removal surface must route through unselectEntry.
+    if "unselectEntry" not in code:
+        out.append((rel, 0, "8",
+                    "the screen must expose 'remove from selection' through "
+                    "`unselectEntry` — that is the only membership operation "
+                    "left in a selection-only table"))
+
     return out
 
 
@@ -795,6 +860,9 @@ def run_checks(root, rels=None):
     # Arms 4-7 — the effective-model funnel.
     checks += check_effective_model_funnel(root, rels)
 
+    # Arm 8 — selection-only: the screen must not mint hidden rows.
+    checks += check_selection_only_writer(ME_REL, views["me"])
+
     return checks
 
 
@@ -820,6 +888,13 @@ fun ModelEntryDetailScreen(instanceId: String, entryId: String, providerReposito
         },
         enabled = !entry.isCustom || modelId.isNotBlank(),
     ) { Text("save") }
+    SettingsRow(
+        title = "Remove from selection",
+        onClick = {
+            providerRepository.unselectEntry(entry.id)
+            onBack()
+        },
+    )
 }
 """
 
@@ -848,6 +923,13 @@ fun ModelEntryDetailScreen(instanceId: String, entryId: String, providerReposito
         },
         enabled = !entry.isCustom || modelId.isNotBlank(),
     ) { Text("save") }
+    SettingsRow(
+        title = "Remove from selection",
+        onClick = {
+            providerRepository.unselectEntry(entry.id)
+            onBack()
+        },
+    )
 }
 """
 
@@ -868,6 +950,13 @@ fun ModelEntryDetailScreen(instanceId: String, entryId: String, providerReposito
         },
         enabled = !entry.isCustom || modelId.isNotBlank(),
     ) { Text("save") }
+    SettingsRow(
+        title = "Remove from selection",
+        onClick = {
+            providerRepository.unselectEntry(entry.id)
+            onBack()
+        },
+    )
 }
 """
 
@@ -1205,6 +1294,30 @@ BASE_FIXTURES = {
     "vm": FIX_VM,
 }
 
+# ── arm 8 (selection-only-ui-writer-1112) dirty fixtures ───────────────────
+# The pre-fix screen kept a local `isHidden` state and wrote it back on Save.
+# That minted a row the migration deletes and the backup importer drops.
+
+# (a) the save path persists the flag → the minting call is back.
+FIX_ME_BAD_WRITES_IS_HIDDEN = FIX_ME_OK.replace(
+    "entry.copy(overrides = newOverrides)",
+    "entry.copy(overrides = newOverrides, isHidden = isHidden)",
+)
+
+# (b) the copy() form (the pre-fix shape) → also a minting call. The
+# overrides are still persisted, so this fixture trips arm 8 ALONE.
+FIX_ME_BAD_COPY_IS_HIDDEN = FIX_ME_OK.replace(
+    "entry.copy(overrides = newOverrides)",
+    "entry.copy(overrides = newOverrides, isHidden = true)",
+)
+
+# (c) the removal surface disappeared → the user lost the only way to leave
+# the selection set from this screen.
+FIX_ME_BAD_NO_UNSELECT = FIX_ME_OK.replace(
+    "            providerRepository.unselectEntry(entry.id)\n",
+    "",
+)
+
 # (name, {rel-key: fixture override}, expected-arm)
 # ── wide3-01 witnesses ──────────────────────────────────────────────────────
 # The Save block still computes `newOverrides`; the persisted copy takes an empty
@@ -1288,6 +1401,10 @@ SELFTEST_CASES = [
     ("ob-dead-merge-prefix", {"ob": FIX_OB_DEAD_MERGE_PREFIX}, "3"),
     ("pr-funnel-discards-tail", {"pr": FIX_PR_FUNNEL_DISCARDED_TAIL}, "4"),
     ("asr-resolved-discards-tail", {"asr": FIX_ASR_DISCARDED_TAIL}, "5"),
+    # arm 8 — selection-only write path
+    ("me-writes-is-hidden", {"me": FIX_ME_BAD_WRITES_IS_HIDDEN}, "8"),
+    ("me-copy-is-hidden", {"me": FIX_ME_BAD_COPY_IS_HIDDEN}, "8"),
+    ("me-no-unselect", {"me": FIX_ME_BAD_NO_UNSELECT}, "8"),
 ]
 
 
@@ -1354,7 +1471,7 @@ def main():
         for rel, line, arm, msg in violations:
             print("  [%s] %s:%d %s" % (arm, rel, line, msg))
         return 1
-    print("model_entry_override_parity_check: OK (7 arms, 0 violations)")
+    print("model_entry_override_parity_check: OK (8 arms, 0 violations)")
     return 0
 
 

@@ -246,14 +246,14 @@ object OpenAIModelsApi {
      * A null [providerName] returns the SAME list instance — no copy, so the
      * unnamed (legacy) path is byte-for-byte what it was.
      *
-     * ponytail: cache rows are only relabelled, never re-enriched — capability
-     *   numbers baked in by the old blind scan survive until the TTL lapses.
-     *   | ceiling: a user who fetched the Kimi list before this fix sees
-     *   wrong context/effort numbers for at most 48h (forceRefresh re-fetches
-     *   immediately and the live path enriches with the right key now).
-     *   | upgrade trigger: a report that a Kimi model's context window / effort
-     *   ladder disagrees with models.dev while its provider field is right —
-     *   then the cache path needs `ModelsDevApi.enrichModels` too.
+     * [model-defaults-1112] The rows are only RE-LABELLED here — the
+     * capability enrichment (`ModelsDevApi.enrichModels`) is applied by the
+     * CALLER, on both the live and the cache path (see `fetchModels`), so
+     * this helper stays a pure rename. (The previous ponytail note here
+     * claimed the cache path never re-enriched and named the fix as a
+     * future upgrade trigger — that trigger fired on 2026-11-12 and the
+     * enrichment landed in `fetchModels`; the note was left describing the
+     * pre-fix world.)
      */
     private fun List<LLMModel>.withProviderName(
         isCustomBase: Boolean,

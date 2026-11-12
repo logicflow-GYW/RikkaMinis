@@ -708,10 +708,10 @@
     <string name="model_entry_display_name">Отображаемое имя</string>
     <string name="model_entry_max_output_tokens">Макс. токенов вывода</string>
     <string name="model_entry_provider">Провайдер</string>
-    <string name="model_entry_visibility">Видимость</string>
-    <string name="model_entry_hidden_models_won_t_appear_in_the_model_">Скрытые модели не отображаются в выборе моделей.</string>
-    <string name="model_entry_hidden">Скрыто</string>
-    <string name="model_entry_restores_the_provider_reported_display_n">Восстанавливает отображаемое имя и лимиты токенов, заявленные провайдером, и снимает скрытие модели.</string>
+    <string name="model_entry_selection">Выбор</string>
+    <string name="model_entry_unselect">Убрать из выбранных</string>
+    <string name="model_entry_unselect_footer">Удаляет эту модель из выбранных моделей. Её можно снова добавить из списка моделей провайдера.</string>
+    <string name="model_entry_restores_the_provider_reported_display_n">Восстанавливает отображаемое имя и лимит токенов, сообщённые провайдером.</string>
     <string name="model_entry_reset_to_default">Сбросить к значениям по умолчанию</string>
     <string name="modeldetail_identity_footer_custom">Это пользовательская модель. ID модели можно редактировать.</string>
     <string name="modeldetail_identity_footer_builtin">Встроенная модель. Отображаемое имя переопределяет значение по умолчанию провайдера.</string>

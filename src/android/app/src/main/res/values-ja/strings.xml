@@ -621,10 +621,10 @@
     <string name="model_entry_display_name">表示名</string>
     <string name="model_entry_max_output_tokens">最大出力トークン数</string>
     <string name="model_entry_provider">AIプロバイダー</string>
-    <string name="model_entry_visibility">表示</string>
-    <string name="model_entry_hidden_models_won_t_appear_in_the_model_">非表示のモデルはモデルピッカーに表示されません。</string>
-    <string name="model_entry_hidden">非表示</string>
-    <string name="model_entry_restores_the_provider_reported_display_n">プロバイダーが報告する表示名とトークン上限を復元し、モデルを再表示します。</string>
+    <string name="model_entry_selection">選択</string>
+    <string name="model_entry_unselect">選択から外す</string>
+    <string name="model_entry_unselect_footer">このモデルを選択中のモデルから削除します。プロバイダーのモデル一覧から追加し直せます。</string>
+    <string name="model_entry_restores_the_provider_reported_display_n">プロバイダーが返す表示名とトークン上限を復元します。</string>
     <string name="model_entry_reset_to_default">デフォルトにリセット</string>
     <!-- T210: ModelEntryDetailScreen sections (iOS parity). -->
     <string name="modeldetail_identity_footer_custom">カスタムモデルです。モデル ID を編集できます。</string>

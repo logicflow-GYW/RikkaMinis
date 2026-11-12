@@ -621,10 +621,10 @@
     <string name="model_entry_display_name">Anzeigename</string>
     <string name="model_entry_max_output_tokens">Maximale Ausgabe-Tokens</string>
     <string name="model_entry_provider">KI-Anbieter</string>
-    <string name="model_entry_visibility">Sichtbarkeit</string>
-    <string name="model_entry_hidden_models_won_t_appear_in_the_model_">Ausgeblendete Modelle werden nicht in der Modellauswahl angezeigt.</string>
-    <string name="model_entry_hidden">Ausgeblendet</string>
-    <string name="model_entry_restores_the_provider_reported_display_n">Stellt den vom Anbieter gemeldeten Anzeigenamen und die Token-Grenzen wieder her und blendet das Modell wieder ein.</string>
+    <string name="model_entry_selection">Auswahl</string>
+    <string name="model_entry_unselect">Aus der Auswahl entfernen</string>
+    <string name="model_entry_unselect_footer">Entfernt dieses Modell aus Ihren ausgewählten Modellen. Sie können es über die Modellliste des Anbieters wieder hinzufügen.</string>
+    <string name="model_entry_restores_the_provider_reported_display_n">Stellt den vom Anbieter gemeldeten Anzeigenamen und die Token-Grenze wieder her.</string>
     <string name="model_entry_reset_to_default">Auf Standard zurücksetzen</string>
     <!-- T210: ModelEntryDetailScreen sections (iOS parity). -->
     <string name="modeldetail_identity_footer_custom">Dies ist ein benutzerdefiniertes Modell. Die Modell-ID ist editierbar.</string>
