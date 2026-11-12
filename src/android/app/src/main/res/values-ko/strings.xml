@@ -1712,4 +1712,11 @@
     <string name="notif_storage_budget_channel_description">이 앱 자체 데이터(샌드박스 셸, 세션, 미디어)가 예산을 초과하면 알려줍니다.</string>
     <string name="notif_storage_budget_title">이 앱이 저장공간을 많이 사용하고 있습니다</string>
     <string name="notif_storage_budget_body">이 앱이 %1$s 사용 중입니다(예산 %2$s). 탭하여 무엇이 공간을 차지하는지 확인하세요.</string>
+    <string name="provider_detail_refresh_catalog_result">새로 고침 — 원격 %1$d개, 선택됨 %2$d개.</string>
+    <string name="provider_detail_remote_catalog_count">원격 카탈로그: %1$d</string>
+    <string name="provider_detail_remote_catalog_unfetched">가져오지 않음</string>
+    <string name="manage_models_select_all_count">모두 선택 (%1$d)</string>
+    <string name="manage_models_deselect_all">선택 해제</string>
+    <string name="manage_models_remote_section_header">제공자에서 사용 가능 (%1$d)</string>
+    <string name="manage_models_error_prefix">새로 고침 실패: %1$s</string>
 </resources>

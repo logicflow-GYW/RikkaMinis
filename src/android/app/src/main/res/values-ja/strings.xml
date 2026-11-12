@@ -1711,4 +1711,11 @@
     <string name="notif_storage_budget_channel_description">このアプリ自身のデータ（サンドボックスシェル、セッション、メディア）が上限を超えると通知します。</string>
     <string name="notif_storage_budget_title">このアプリは多くのストレージを使用しています</string>
     <string name="notif_storage_budget_body">このアプリが %1$s 使用しています（上限 %2$s）。タップして内訳を確認できます。</string>
+    <string name="provider_detail_refresh_catalog_result">更新しました — リモート %1$d 件、選択中 %2$d 件。</string>
+    <string name="provider_detail_remote_catalog_count">リモートカタログ: %1$d</string>
+    <string name="provider_detail_remote_catalog_unfetched">未取得</string>
+    <string name="manage_models_select_all_count">すべて選択 (%1$d)</string>
+    <string name="manage_models_deselect_all">選択を解除</string>
+    <string name="manage_models_remote_section_header">プロバイダーから取得可能 (%1$d)</string>
+    <string name="manage_models_error_prefix">更新できませんでした: %1$s</string>
 </resources>

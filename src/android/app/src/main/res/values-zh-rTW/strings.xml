@@ -1713,4 +1713,11 @@
     <string name="notif_storage_budget_channel_description">當本應用程式自身的資料（沙箱 shell、工作階段、媒體）超出預算時提醒。</string>
     <string name="notif_storage_budget_title">本應用程式佔用較多儲存空間</string>
     <string name="notif_storage_budget_body">本應用程式已使用 %1$s（預算 %2$s）。點按查看空間被什麼佔用。</string>
+    <string name="provider_detail_refresh_catalog_result">已重新整理 — 遠端 %1$d 個模型，已選 %2$d 個。</string>
+    <string name="provider_detail_remote_catalog_count">遠端目錄：%1$d</string>
+    <string name="provider_detail_remote_catalog_unfetched">尚未取得</string>
+    <string name="manage_models_select_all_count">全選（%1$d）</string>
+    <string name="manage_models_deselect_all">取消全選</string>
+    <string name="manage_models_remote_section_header">服務商提供的模型（%1$d）</string>
+    <string name="manage_models_error_prefix">重新整理失敗：%1$s</string>
 </resources>
