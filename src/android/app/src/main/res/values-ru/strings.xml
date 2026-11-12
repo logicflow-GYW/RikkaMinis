@@ -1666,4 +1666,11 @@
     <string name="notif_storage_budget_channel_description">Предупреждает, когда собственные данные приложения (оболочка песочницы, сеансы, медиа) превышают бюджет.</string>
     <string name="notif_storage_budget_title">Приложение занимает много места</string>
     <string name="notif_storage_budget_body">Приложение использует %1$s (бюджет %2$s). Нажмите, чтобы узнать, что занимает место.</string>
+    <string name="provider_detail_refresh_catalog_result">Обновлено — удалённых моделей %1$d, выбрано %2$d.</string>
+    <string name="provider_detail_remote_catalog_count">Удалённый каталог: %1$d</string>
+    <string name="provider_detail_remote_catalog_unfetched">Ещё не загружен</string>
+    <string name="manage_models_select_all_count">Выбрать все (%1$d)</string>
+    <string name="manage_models_deselect_all">Снять выделение</string>
+    <string name="manage_models_remote_section_header">Доступно от провайдера (%1$d)</string>
+    <string name="manage_models_error_prefix">Не удалось обновить: %1$s</string>
 </resources>

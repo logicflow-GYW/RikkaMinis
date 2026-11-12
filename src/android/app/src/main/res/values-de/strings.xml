@@ -1713,4 +1713,11 @@
     <string name="notif_storage_budget_channel_description">Warnt, wenn die eigenen Daten dieser App (Sandbox-Shell, Sitzungen, Medien) das Budget überschreiten.</string>
     <string name="notif_storage_budget_title">Diese App belegt viel Speicher</string>
     <string name="notif_storage_budget_body">%1$s von dieser App belegt (Budget %2$s). Tippen, um zu sehen, was den Speicher belegt.</string>
+    <string name="provider_detail_refresh_catalog_result">Aktualisiert — %1$d entfernte Modelle, %2$d ausgewählt.</string>
+    <string name="provider_detail_remote_catalog_count">Entfernter Katalog: %1$d</string>
+    <string name="provider_detail_remote_catalog_unfetched">Noch nicht abgerufen</string>
+    <string name="manage_models_select_all_count">Alle auswählen (%1$d)</string>
+    <string name="manage_models_deselect_all">Auswahl aufheben</string>
+    <string name="manage_models_remote_section_header">Vom Anbieter verfügbar (%1$d)</string>
+    <string name="manage_models_error_prefix">Aktualisierung fehlgeschlagen: %1$s</string>
 </resources>
