@@ -151,6 +151,16 @@ object OpenAIModelsApi {
                     }
 
                     val displayName = obj.optString("name", id)
+                    // [gateway-context-1112] The endpoint's OWN capability
+                    // metadata — context window, output cap, display name and
+                    // the four `supports_*` flags. The parser used to read
+                    // only `id` / `name` / `architecture`, so a gateway that
+                    // advertises a 960K window had that number dropped on the
+                    // floor and the app fell back to the models.dev registry
+                    // and then to an id-shape guess (the 128K the user saw).
+                    // The endpoint's own number is the most trustworthy source
+                    // there is, so it is captured here at the boundary.
+                    val endpointMeta = parseOpenAIModelEndpointMetadata(obj)
                     // Third-party gateways (vLLM, OpenRouter-compat proxies) often
                     // report per-model modalities under `architecture.{input,output}_modalities`
                     // the same way OpenRouter does — pick them up so vision/audio
@@ -179,11 +189,24 @@ object OpenAIModelsApi {
                     parsed.add(
                         LLMModel(
                             id = id,
-                            displayName = displayName,
+                            // [gateway-context-1112] Prefer the endpoint's own
+                            // display name; fall back to the id (the previous
+                            // behaviour) when the endpoint reports none.
+                            displayName = endpointMeta.displayName ?: displayName,
                             provider = resolveProviderName(isCustomBase, providerName),
+                            contextWindow = endpointMeta.contextWindow,
+                            maxOutputTokens = endpointMeta.maxOutputTokens,
                             inputModalities = inputModalities,
                             outputModalities = outputModalities,
-                            supportsReasoning = if (knownReasoning) true else null,
+                            // [gateway-context-1112] The endpoint's own flag
+                            // wins only when it says TRUE — see
+                            // `resolveSupportsReasoning` for why a `false` is
+                            // not authoritative (the local gateway reports
+                            // false for every model).
+                            supportsReasoning = resolveSupportsReasoning(
+                                endpointFlag = endpointMeta.supportsReasoning,
+                                knownReasoningFamily = knownReasoning,
+                            ),
                         )
                     )
                 }

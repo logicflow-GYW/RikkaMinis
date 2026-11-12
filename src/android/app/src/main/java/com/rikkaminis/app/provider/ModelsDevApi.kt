@@ -143,7 +143,7 @@ object ModelsDevApi {
         val keys = providerKeyMap[model.provider] ?: emptyList()
         for (key in keys) {
             val prov = registry[key] ?: continue
-            val devModel = prov.models[model.id] ?: continue
+            val devModel = findDevModel(prov, model.id) ?: continue
             return applyDevData(model, devModel)
         }
 
@@ -151,11 +151,13 @@ object ModelsDevApi {
         // [FIX-1 / F-212] Prefer the entry whose registry key matches this
         // model's own provider before the order-dependent scan (see the same
         // note in enrichModels).
-        registry[model.provider.lowercase()]?.models?.get(model.id)?.let { devModel ->
-            return applyDevData(model, devModel)
+        registry[model.provider.lowercase()]?.let { prov ->
+            findDevModel(prov, model.id)?.let { devModel ->
+                return applyDevData(model, devModel)
+            }
         }
         for ((_, prov) in registry) {
-            val devModel = prov.models[model.id] ?: continue
+            val devModel = findDevModel(prov, model.id) ?: continue
             return applyDevData(model, devModel)
         }
 
@@ -168,7 +170,7 @@ object ModelsDevApi {
             val keys = providerKeyMap[model.provider] ?: emptyList()
             for (key in keys) {
                 val prov = registry[key] ?: continue
-                val devModel = prov.models[model.id] ?: continue
+                val devModel = findDevModel(prov, model.id) ?: continue
                 return@map applyDevData(model, devModel)
             }
             // [FIX-1 / F-212] The scan below is the last resort and it is NOT
@@ -178,15 +180,45 @@ object ModelsDevApi {
             // user's custom provider) still gets the authoritative row when one
             // exists — the unconditional scan stays as the final fallback so no
             // lookup that used to succeed can start failing.
-            registry[model.provider.lowercase()]?.models?.get(model.id)?.let { devModel ->
-                return@map applyDevData(model, devModel)
+            registry[model.provider.lowercase()]?.let { prov ->
+                findDevModel(prov, model.id)?.let { devModel ->
+                    return@map applyDevData(model, devModel)
+                }
             }
             for ((_, prov) in registry) {
-                val devModel = prov.models[model.id] ?: continue
+                val devModel = findDevModel(prov, model.id) ?: continue
                 return@map applyDevData(model, devModel)
             }
             model
         }
+    }
+
+    /**
+     * [gateway-context-1112] Find the registry row for [modelId] inside one
+     * provider entry.
+     *
+     * The exact id is tried first. If it misses, the id is retried with its
+     * leading `provider/` segment removed.
+     *
+     * Why: a gateway that multiplexes several vendors behind one endpoint
+     * publishes ids in the `vendor/model` form (the local AI-Gateway does
+     * exactly this — `codebuddy-cn/glm-5.3-flash`), and models.dev has no
+     * row for such an id. The bare part (`glm-5.3-flash`) IS in the
+     * registry, so without this fallback every gateway row missed the
+     * registry entirely and the app had nothing but a shape heuristic to
+     * work with.
+     *
+     * The fallback only fires when the exact id missed, so a row that really
+     * does exist under its full id keeps winning. And because the endpoint's
+     * own numbers now take precedence over the registry (see
+     * [applyDevData]), this fallback can only ever FILL A GAP — it can never
+     * override a number the endpoint itself reported.
+     */
+    private fun findDevModel(prov: ProviderEntry, modelId: String): ModelDevEntry? {
+        prov.models[modelId]?.let { return it }
+        val bare = registryLookupId(modelId)
+        if (bare == modelId) return null
+        return prov.models[bare]
     }
 
     // MARK: - Public: Effective model of a ModelEntry
@@ -239,18 +271,41 @@ object ModelsDevApi {
 
     // MARK: - Apply models.dev data
 
-    private fun applyDevData(model: LLMModel, devModel: ModelDevEntry): LLMModel {
-        return model.copy(
-            contextWindow = devModel.contextWindow ?: model.contextWindow,
-            maxOutputTokens = devModel.maxOutputTokens ?: model.maxOutputTokens,
-            supportsReasoning = devModel.reasoning ?: model.supportsReasoning,
-            interleavedReasoningField = devModel.interleavedField ?: model.interleavedReasoningField,
-            inputModalities = devModel.inputModalities ?: model.inputModalities,
-            outputModalities = devModel.outputModalities ?: model.outputModalities,
-            reasoningEffortValues = devModel.reasoningEffortValues ?: model.reasoningEffortValues,
-            declaresNoEffortTiers = if (devModel.declaresNoEffortTiers) true else model.declaresNoEffortTiers,
+    /**
+     * Merge the models.dev registry row onto a model row.
+     *
+     * [gateway-context-1112] The precedence is **the endpoint's own number
+     * wins**, and the registry only fills what the endpoint did not report.
+     *
+     * It used to be the other way round (`devModel.contextWindow ?:
+     * model.contextWindow`), which is right for a row the endpoint says
+     * NOTHING about but wrong for one that states a number: a gateway
+     * advertising `context_length: 960000` was overwritten by the registry's
+     * value for the same model id, and when the registry had no row at all
+     * the app fell through to an id-shape guess (128K). The endpoint is the
+     * only source that knows what THIS deployment actually accepts — a
+     * relay may cap a model well below its vendor's published window — so
+     * when both sides have a value, the endpoint's is the truth.
+     *
+     * A registry-only row (endpoint reported nothing) keeps the old
+     * behaviour: the registry fills the gap.
+     *
+     * The merge itself lives in [mergeRegistryRow] (a pure function) so it
+     * can be JVM-tested — this object cannot be, because it touches
+     * `android.util.Log`.
+     */
+    private fun applyDevData(model: LLMModel, devModel: ModelDevEntry): LLMModel =
+        mergeRegistryRow(
+            model = model,
+            registryContextWindow = devModel.contextWindow,
+            registryMaxOutputTokens = devModel.maxOutputTokens,
+            registrySupportsReasoning = devModel.reasoning,
+            registryInterleavedField = devModel.interleavedField,
+            registryInputModalities = devModel.inputModalities,
+            registryOutputModalities = devModel.outputModalities,
+            registryReasoningEffortValues = devModel.reasoningEffortValues,
+            registryDeclaresNoEffortTiers = devModel.declaresNoEffortTiers,
         )
-    }
 
     // MARK: - Build models from provider entry
 

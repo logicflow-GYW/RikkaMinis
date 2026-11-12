@@ -25,7 +25,30 @@ internal class ProviderModelsCache(
     private val ttlMs: Long = DEFAULT_TTL_MS,
 ) {
     @Serializable
-    private data class Entry(val models: List<LLMModel>, val savedAt: Long)
+    private data class Entry(
+        val models: List<LLMModel>,
+        val savedAt: Long,
+        // [gateway-context-1112] Schema version of the cached rows.
+        //
+        // Version 1 rows were written by a parser that DROPPED the endpoint's
+        // own capability metadata (`context_length`, the output cap, the
+        // `supports_*` flags), so every cached row from before the fix is
+        // missing the numbers the endpoint reported — and it would keep
+        // missing them for the whole 7-day TTL, which is exactly the window
+        // in which a user would refresh, see the old value, and conclude the
+        // fix did not work.
+        //
+        // Bumping the version makes those rows miss on load (the file is
+        // simply not readable as the current shape), which sends the fetcher
+        // back to the network — one request per provider, once.
+        //
+        // ponytail: a single integer, bumped by hand when the cached row
+        // shape changes. | 天花板: a version that changes the LIST of models
+        // rather than the shape of one row would need the same treatment, and
+        // this counter does not distinguish the two. | 升级触发: a change to
+        // the LLMModel fields that a fetcher fills in.
+        val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
+    )
 
     private fun cacheDir(context: Context): File =
         File(context.cacheDir, "models-cache/$namespace").apply { mkdirs() }
@@ -42,6 +65,10 @@ internal class ProviderModelsCache(
         if (!file.isFile) return null
         val entry = runCatching { JSON.decodeFromString<Entry>(file.readText()) }
             .getOrNull() ?: return null
+        // [gateway-context-1112] A row written by an older parser carries no
+        // endpoint metadata; treat it as a miss so the fetch goes back to the
+        // network instead of serving the pre-fix rows for the rest of the TTL.
+        if (entry.schemaVersion != CURRENT_SCHEMA_VERSION) return null
         if (System.currentTimeMillis() - entry.savedAt > ttlMs) return null
         return entry.models
     }
@@ -55,7 +82,11 @@ internal class ProviderModelsCache(
             // .json that load() silently discards via runCatching — forcing a
             // network refetch that looks like "the cache never worked".
             val tmp = File(file.parentFile, "${file.name}.tmp")
-            tmp.writeText(JSON.encodeToString(Entry(models, System.currentTimeMillis())))
+            tmp.writeText(
+                JSON.encodeToString(
+                    Entry(models, System.currentTimeMillis(), CURRENT_SCHEMA_VERSION),
+                ),
+            )
             if (!tmp.renameTo(file)) {
                 // rename can fail across a bind-mount boundary; fall back to a
                 // direct write so the cache is still populated.
@@ -88,6 +119,16 @@ internal class ProviderModelsCache(
 
     companion object {
         const val DEFAULT_TTL_MS = 7L * 24 * 3600 * 1000
+        /**
+         * [gateway-context-1112] Version of the cached row shape. Bump this
+         * whenever a fetcher starts filling a field the cached rows did not
+         * carry — the old rows then miss on load and are re-fetched once
+         * instead of being served for the rest of the TTL.
+         *
+         * v2 = the rows now carry the endpoint's own metadata (context
+         * window, output cap, the `supports_*` flags).
+         */
+        const val CURRENT_SCHEMA_VERSION = 2
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     }
 }

@@ -3026,6 +3026,84 @@ MODEL_DEFAULTS_GATES = [
 ]
 
 
+# [gateway-context-1112] The fetched-model context-window chain: the endpoint's
+# own /v1/models metadata is read, it outranks the models.dev registry, the
+# registry lookup falls back to the vendor-stripped id, there is ONE
+# context-window heuristic, and the prefilled guess is not pinned as an
+# override. Internal fixtures only — the gate mutates copies of the six
+# tracked files.
+GATEWAY_CONTEXT_GATES = [
+    ("gateway_context_metadata_check",
+     "GATEWAY_CONTEXT_METADATA_SELFTEST=PASS", (), (REPO_ROOT,)),
+]
+
+
+def test_scan_parallel_block_numbering():
+    """[gateway-context-1112] The block-numbering contract of the driver.
+
+    The failure this pins is REAL, not hypothetical: the denominator was
+    bumped in the 115 header lines of `scan_blocks.sh` but missed in
+    `scan_parallel.py`'s `HEADER_RE`, so the driver matched ZERO blocks and
+    the whole gate went red with "no check blocks found" — a failure that
+    pointed nowhere near its cause.
+
+    Two properties are pinned:
+
+      1. the driver parses the REAL block file and finds a contiguous 1..N
+         sequence (this is what silently produced zero blocks);
+      2. a header whose denominator disagrees with the block count is
+         rejected with a message that NAMES the mismatch — not a generic
+         "no blocks" error.
+    """
+    print("━━━ scan_parallel block numbering (contiguity + denominator self-check) ━━━")
+    sys.path.insert(0, SCRIPT_DIR)
+    import scan_parallel  # noqa: E402
+
+    # 1) the real file parses into a contiguous 1..N sequence.
+    try:
+        blocks = scan_parallel.parse_blocks()
+    except SystemExit as exc:
+        check("scan_parallel parses the real block file", False, str(exc))
+        return
+    nums = [b[0] for b in blocks]
+    check("scan_parallel parses the real block file", len(blocks) > 0,
+          "parsed %d blocks" % len(blocks))
+    check("block numbering is contiguous 1..N",
+          nums == list(range(1, len(nums) + 1)),
+          "first=%s last=%s" % (nums[:3], nums[-3:]))
+
+    # 2) a wrong denominator is caught, and the message names the mismatch.
+    tmp = tempfile.mkdtemp(prefix="scan-blocks-")
+    try:
+        path = os.path.join(tmp, "scan_blocks.sh")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('echo "━━━ [1/7] first ━━━"\n'
+                     'echo "━━━ [2/7] second ━━━"\n')
+        try:
+            scan_parallel.parse_blocks(path)
+            caught = False
+            detail = "no error raised for a mismatched denominator"
+        except SystemExit as exc:
+            msg = str(exc)
+            caught = ("denominator" in msg) and ("2 blocks" in msg or "7" in msg)
+            detail = msg
+        check("a mismatched header denominator is rejected by name", caught, detail)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_gateway_context_gates():
+    print("━━━ gateway-context-1112 endpoint metadata precedence (selftest teeth + real tree) ━━━")
+    for script, marker, st_extra, real_args in GATEWAY_CONTEXT_GATES:
+        argv = [sys.executable, os.path.join(SCRIPT_DIR, script + ".py")] + list(st_extra) + ["--selftest"]
+        proc = subprocess.run(argv, capture_output=True, text=True)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        check("%s selftest has teeth (%s)" % (script, marker),
+              proc.returncode == 0 and marker in out, out[-280:])
+        rc, out = run_scanner(script + ".py", *real_args)
+        check("%s real tree green" % script, rc == 0, out[-280:])
+
+
 def test_model_defaults_gates():
     print("━━━ model-defaults-1112 fetched-model capability chain (selftest teeth + real tree) ━━━")
     for script, marker, st_extra, real_args in MODEL_DEFAULTS_GATES:
@@ -3388,6 +3466,8 @@ TEST_ORDER = (
     "test_da1025_gates",
     "test_w1027_storage_budget",
     "test_model_defaults_gates",
+    "test_gateway_context_gates",
+    "test_scan_parallel_block_numbering",
     "test_da1026_gates",
     "test_auto_approve_gates",
     "test_primitive_selftests",
