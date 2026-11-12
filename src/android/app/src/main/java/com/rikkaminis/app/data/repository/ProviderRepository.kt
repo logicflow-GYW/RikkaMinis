@@ -3287,7 +3287,7 @@ class ProviderRepository(private val context: Context) {
         importInstanceCredentials(dict, instance)
 
         // Import models (replace built-in defaults)
-        val importedEntries = parseImportedModelEntries(dict, instance.id)
+        val importedEntries = parseImportedModelEntriesPlain(dict, instance.id)
         if (importedEntries.isNotEmpty()) {
             // Import replaces built-in entries directly (not via replaceEntries which takes LLMModel list)
             synchronized(configLock) {
@@ -3325,7 +3325,7 @@ class ProviderRepository(private val context: Context) {
 
     /**
      * [review1112-p1-2] One parsed backup row plus the index of the `models[]`
-     * element it came from. See [parseImportedModelEntriesWithSourceIndex] for
+     * element it came from. See [parseImportedModelEntries] for
      * why the index must survive filtering.
      */
     private data class ImportedModelEntry(val sourceIndex: Int, val entry: ModelEntry)
@@ -3336,27 +3336,37 @@ class ProviderRepository(private val context: Context) {
      * (which replaces the instance's entries wholesale) and
      * [mergeImportInstanceJSON] (which upserts models missing from an existing
      * instance). Returns an empty list when the payload carries no models.
+     *
+     * [review1112-p1-2] Rows that may not enter a selection-only table are
+     * skipped (see [decideImportedRowKeep]); callers that pair `_entryIds`
+     * positionally must use [parseImportedModelEntries] instead, whose
+     * rows carry their original `models[]` index.
      */
-    private fun parseImportedModelEntries(dict: JSONObject, instanceId: String): List<ModelEntry> =
-        parseImportedModelEntriesWithSourceIndex(dict, instanceId).map { it.entry }
+    private fun parseImportedModelEntriesPlain(
+        dict: JSONObject,
+        instanceId: String,
+    ): List<ModelEntry> =
+        parseImportedModelEntries(dict, instanceId).map { it.entry }
 
     /**
-     * [review1112-p1-2] Same parse as [parseImportedModelEntries], but each
-     * entry keeps the index of the `models[]` element it came from.
+     * [review1112-p1-2] The `models[]`-index-carrying form of the parse.
+     *
+     * Kept as a SEPARATE entry point rather than by widening the original's
+     * return type, because the original name is the anchor of
+     * `provider_import_id_roundtrip` (arm 3 / arm 5 walk this function body to
+     * prove every `LLMModel` field is read AND passed). Renaming the real
+     * implementation out from under that gate made it scan an empty wrapper
+     * and report 22 phantom "the field is not read" violations — the gate was
+     * right to be anchored on a name; the fix is to keep that name on the code
+     * that does the work.
      *
      * The index matters because the backup layer pairs `_entryIds` with the
-     * `models` array POSITIONALLY (`ConfigBackup` → [mergeImportInstanceJSON],
-     * which reads `srcEntryIds.getOrNull(i)` against the parsed list). Dropping
-     * rows from the parsed list without carrying the source index would shift
-     * every later pairing by one and remap model-group members onto the wrong
-     * entries — a worse defect than the hidden rows being filtered.
-     *
-     * Rows that may not enter a selection-only table are skipped here (see
-     * [decideImportedRowKeep]); callers that need the positional pairing must
-     * use the `sourceIndex` on each returned row rather than its position in
-     * the returned list.
+     * `models` array POSITIONALLY (`ConfigBackup` → [mergeImportInstanceJSON]).
+     * Dropping rows from the parsed list without carrying the source index
+     * would shift every later pairing by one and remap model-group members onto
+     * the wrong entries — a worse defect than the hidden rows being filtered.
      */
-    private fun parseImportedModelEntriesWithSourceIndex(
+    private fun parseImportedModelEntries(
         dict: JSONObject,
         instanceId: String,
     ): List<ImportedModelEntry> {
@@ -3558,7 +3568,7 @@ class ProviderRepository(private val context: Context) {
         val updated = applyImportInstanceFields(existing, fields)
         if (updated != existing) updateInstance(updated)
 
-        val entries = parseImportedModelEntriesWithSourceIndex(dict, existing.id)
+        val entries = parseImportedModelEntries(dict, existing.id)
         val entryMap = HashMap<String, String>()
         for (parsed in entries) {
             // [review1112-p1-2] Pair `_entryIds` by the row's ORIGINAL index in

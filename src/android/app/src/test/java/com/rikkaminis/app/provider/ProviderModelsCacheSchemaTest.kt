@@ -120,21 +120,16 @@ class ProviderModelsCacheSchemaTest {
 
     @Test
     fun saveThenLoad_roundTripsThroughTheCurrentVersion() {
-        // A real save→load round trip through the production methods (the
-        // android.content.Context stub supplies only `cacheDir`). This is the
-        // one assertion that catches the OTHER half of the defect: the default
-        // is now 0, so a `save()` that stopped writing the version explicitly
-        // would produce a row that immediately misses on the next launch —
-        // a permanently cold cache, which would look like "the cache never
-        // worked" all over again.
+        // A real save→load round trip through the production methods, using the
+        // directory-scoped entry points (Android's Context is an abstract class
+        // with dozens of abstract members — instantiating one in a unit test is
+        // not possible without a mocking framework, and the first attempt at
+        // this test failed to compile on CI for exactly that reason).
         val dir = java.io.File(
             System.getProperty("java.io.tmpdir"),
             "review1112-cache-" + System.nanoTime(),
         )
         dir.mkdirs()
-        val ctx = object : android.content.Context() {
-            override val cacheDir: java.io.File = dir
-        }
         val cache = ProviderModelsCache("review1112", ttlMs = ttl)
         val models = listOf(
             com.rikkaminis.app.data.model.LLMModel(
@@ -144,8 +139,8 @@ class ProviderModelsCacheSchemaTest {
                 contextWindow = 272000,
             ),
         )
-        cache.save(ctx, "credential-key", models)
-        val loaded = cache.load(ctx, "credential-key")
+        cache.saveToDir(dir, "credential-key", models)
+        val loaded = cache.loadFromDir(dir, "credential-key")
         assertNotNull("save() wrote a row that load() immediately rejects", loaded)
         assertEquals(272000, loaded!!.single().contextWindow)
         // …and the on-disk text really does carry the version explicitly.

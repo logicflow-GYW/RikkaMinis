@@ -64,15 +64,39 @@ internal class ProviderModelsCache(
     private fun cacheDir(context: Context): File =
         File(context.cacheDir, "models-cache/$namespace").apply { mkdirs() }
 
-    private fun keyFile(context: Context, cacheKey: String): File {
+    private fun keyFile(dir: File, cacheKey: String): File {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(cacheKey.toByteArray(Charsets.UTF_8))
         val hex = digest.joinToString("") { "%02x".format(it) }
-        return File(cacheDir(context), "$hex.json")
+        return File(dir, "$hex.json")
     }
+
+    private fun keyFile(context: Context, cacheKey: String): File =
+        keyFile(cacheDir(context), cacheKey)
 
     fun load(context: Context, cacheKey: String): List<LLMModel>? {
         val file = keyFile(context, cacheKey)
+        if (!file.isFile) return null
+        return decodeCachedModels(
+            text = runCatching { file.readText() }.getOrNull() ?: return null,
+            nowMs = System.currentTimeMillis(),
+            ttlMs = ttlMs,
+        )
+    }
+
+    /**
+     * [review1112-p1-1] Directory-scoped load, for tests.
+     *
+     * Android's `Context` is an abstract class with dozens of abstract members
+     * and this module has no Robolectric/mockk, so a unit test cannot build one
+     * just to hand over a `cacheDir` (the first version of this test tried and
+     * failed to compile on CI: `does not implement abstract base member
+     * 'bindService'`). [load] stays the production path and keeps the full body
+     * — the wiring gate asserts on ITS body, deliberately, so that a cache that
+     * becomes an inert delegate cannot pass.
+     */
+    fun loadFromDir(dir: File, cacheKey: String): List<LLMModel>? {
+        val file = keyFile(dir, cacheKey)
         if (!file.isFile) return null
         return decodeCachedModels(
             text = runCatching { file.readText() }.getOrNull() ?: return null,
@@ -98,6 +122,31 @@ internal class ProviderModelsCache(
             if (!tmp.renameTo(file)) {
                 // rename can fail across a bind-mount boundary; fall back to a
                 // direct write so the cache is still populated.
+                file.writeText(tmp.readText())
+                tmp.delete()
+            }
+        }
+    }
+
+    /**
+     * [review1112-p1-1] Directory-scoped save, for tests; see [loadFromDir].
+     *
+     * Deliberately a SEPARATE body rather than a shared helper: the wiring gate
+     * asserts that `save`'s own body performs the write, precisely so a cache
+     * that degrades into a delegating shell cannot stay green. The duplication
+     * is one atomic-write idiom, and the round-trip test pins that the two
+     * paths produce rows the same `load` accepts.
+     */
+    fun saveToDir(dir: File, cacheKey: String, models: List<LLMModel>) {
+        val file = keyFile(dir, cacheKey)
+        runCatching {
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            tmp.writeText(
+                JSON.encodeToString(
+                    Entry(models, System.currentTimeMillis(), CURRENT_SCHEMA_VERSION),
+                ),
+            )
+            if (!tmp.renameTo(file)) {
                 file.writeText(tmp.readText())
                 tmp.delete()
             }
