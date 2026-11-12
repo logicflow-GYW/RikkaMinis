@@ -856,14 +856,34 @@ object OpenMinisBackupCompat {
 
             val models = JSONArray()
             val entryIds = JSONArray()
+            var skippedLegacyHidden = 0
             for (j in 0 until entries.length()) {
                 val e = entries.optJSONObject(j) ?: continue
                 if (e.optString("providerInstanceId", "") != inst.optString("id", "")) continue
                 val model = e.optJSONObject("model") ?: continue
+                // [model-catalog-split] A legacy hidden row that isn't custom is
+                // a disposable catalog copy, not a user asset: the one-shot
+                // selection-only migration (ProviderRepository
+                // .decideSelectionOnlyKeep) deletes exactly these rows, so the
+                // compat importer must not resurrect them into a table that is
+                // supposed to hold selections only. The keep condition mirrors
+                // that rule's custom / !isHidden arms (its voice-template-seed
+                // and System-voice arms are RikkaMinis-side reconcile concepts
+                // that don't exist in OpenMinis exports).
+                val legacyHidden = e.optBoolean("isHidden", false)
+                val isCustomEntry = e.optBoolean("isCustom", false)
+                if (!decideLegacyHiddenImportKeep(legacyHidden, isCustomEntry)) {
+                    skippedLegacyHidden++
+                    continue
+                }
                 val mo = JSONObject()
                 mo.put("modelId", model.optString("id", ""))
                 mo.put("displayName", model.optString("displayName", model.optString("id", "")))
-                mo.put("isHidden", e.optBoolean("isHidden", false))
+                mo.put("isHidden", legacyHidden)
+                // [model-catalog-split] Keep the source-derived write shape:
+                // the compat-parity gate derives the key set from the SOURCE
+                // read, so the put must visibly carry the source expression
+                // (a local boolean made the gate read it as a constant).
                 if (e.optBoolean("isCustom", false)) mo.put("isCustom", true)
                 if (model.optInt("contextWindow", 0) > 0) {
                     mo.put("contextWindow", model.optInt("contextWindow"))
@@ -928,6 +948,15 @@ object OpenMinisBackupCompat {
             }
             obj.put("models", models)
             obj.put("_entryIds", entryIds)
+            if (skippedLegacyHidden > 0) {
+                // 丢弃是可解释的（与迁移规则一致），但不许无声：用户在旧包
+                // 「全部拉取、默认隐藏」时代攒下的目录副本在恢复后不再出现，
+                // 必须告诉他为什么。
+                notes.add(
+                    "provider \"$label\"：跳过 $skippedLegacyHidden 条旧版隐藏目录副本条目" +
+                        "（isHidden=true 且非自定义 — 分表后只恢复已选模型，与迁移规则一致）"
+                )
+            }
             if (models.length() == 0) {
                 // 与 Python 版一致：0 模型也导出（凭据/实例仍有价值，
                 // RikkaMinis 导入端对空 models 保留内置模型表）。
@@ -1446,3 +1475,21 @@ internal fun secretsCarryCredentials(secrets: JSONObject?): Boolean {
     }
     return false
 }
+
+/**
+ * [model-catalog-split] Whether one legacy OpenMinis `modelEntries` row
+ * survives conversion into a RikkaMinis backup.
+ *
+ * RikkaMinis' entry table is selection-only (see
+ * `ProviderRepository.decideSelectionOnlyKeep`): a row with
+ * `isHidden = true` that is not `isCustom` is a disposable catalog copy the
+ * user never selected — the one-shot migration deletes exactly those rows,
+ * so the compat importer must skip them too instead of resurrecting them
+ * through a restore. Custom entries are user assets: imported even when
+ * hidden (the migration keeps them as well).
+ *
+ * Extracted as a pure function so the rule is JVM-testable without an
+ * [org.json.JSONObject] or the converter's surrounding state.
+ */
+internal fun decideLegacyHiddenImportKeep(isHidden: Boolean, isCustom: Boolean): Boolean =
+    !isHidden || isCustom

@@ -1004,6 +1004,16 @@
     <string name="provider_detail_refresh_preserved">No matching models.dev entry — kept existing model list.</string>
     <string name="provider_detail_refresh_failed">Could not refresh models.</string>
     <string name="provider_detail_refresh_models_list">Refresh model list</string>
+    <!-- [model-catalog-split] Remote-catalog refresh feedback + management
+         sheet copy. English defaults only — translation sync for the other
+         languages is a separate flow. -->
+    <string name="provider_detail_refresh_catalog_result">Refreshed — %1$d remote models, %2$d selected.</string>
+    <string name="provider_detail_remote_catalog_count">Remote catalog: %1$d</string>
+    <string name="provider_detail_remote_catalog_unfetched">Not fetched yet</string>
+    <string name="manage_models_select_all_count">Select all (%1$d)</string>
+    <string name="manage_models_deselect_all">Deselect all</string>
+    <string name="manage_models_remote_section_header">Available from provider (%1$d)</string>
+    <string name="manage_models_error_prefix">Couldn\'t refresh: %1$s</string>
     <string name="provider_detail_delete_provider_confirm">Are you sure you want to delete \"%1$s\"? This cannot be undone.</string>
     <string name="provider_detail_delete_model_confirm">Are you sure you want to delete \"%1$s\"? This action cannot be undone.</string>
     <string name="agent_loop_models_model_count_singular">1 model</string>

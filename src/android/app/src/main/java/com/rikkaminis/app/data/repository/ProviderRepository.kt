@@ -197,6 +197,26 @@ class ProviderRepository(private val context: Context) {
     val config: StateFlow<ProviderConfig> = _config.asStateFlow()
 
     /**
+     * [model-catalog-split] Per-instance remote model catalogs.
+     *
+     * Before the split a refresh wrote the provider's whole `/models` response
+     * into [ProviderConfig.modelEntries] (every row `isHidden = true` unless
+     * already selected), which made one table carry two different things:
+     * "what the provider offers" (disposable, changes every refresh) and "what
+     * the user selected" (durable, user-authored). Every refresh was therefore
+     * a destructive write, and a vendor that transiently returned fewer rows
+     * deleted selections.
+     *
+     * The catalog now lives here: memory-only, republished on each refresh,
+     * with the existing per-provider disk cache (`ProviderModelsCache` /
+     * `AnthropicModelsCache`) still serving as the persistence layer. A failed
+     * refresh keeps the last successful [RemoteCatalogState.models] so the
+     * management UI never goes blank.
+     */
+    private val _remoteCatalogs = MutableStateFlow<Map<String, RemoteCatalogState>>(emptyMap())
+    val remoteCatalogs: StateFlow<Map<String, RemoteCatalogState>> = _remoteCatalogs.asStateFlow()
+
+    /**
      * [T-android-startup-config-stall] False until the persisted config has
      * been read off-thread and emitted. First-screen code that branches on
      * `instances.isEmpty()` (the onboarding gate) reads this to avoid flashing
@@ -249,6 +269,16 @@ class ProviderRepository(private val context: Context) {
                 }
             }
             if (!configLoadComplete.isCompleted) configLoadComplete.complete(Unit)
+            // [model-catalog-split] One-shot migration: `modelEntries` now holds
+            // ONLY user selections, so the legacy full-catalog rows (isHidden =
+            // true, dropped in by the old refresh path) are removed. Runs before
+            // the voice-template reconcile so the seeds it re-adds are measured
+            // against the post-migration table.
+            try {
+                migrateSelectionOnlyModelEntries()
+            } catch (e: Exception) {
+                android.util.Log.w("ProviderRepo", "[ModelList] selection-only migration failed: ${e.message}")
+            }
             // [T-android-provider-voice] Reconcile voice-template seeds after
             // the initial load (add new template models, drop retired seeds,
             // heal corrupted modality). Mirrors iOS ProviderConfigStore.init.
@@ -921,6 +951,11 @@ class ProviderRepository(private val context: Context) {
      *  - Heal: a models refresh can overwrite a template entry with text-only
      *    modality from /v1/models; restore the template's authoritative
      *    modality when it diverged.
+     *
+     * [model-catalog-split] Under the selection-only entry table this is the
+     * ONLY refresh-path writer that ADDS rows, and it only ever adds
+     * voice-template seeds — never remote-catalog rows (those go to
+     * [remoteCatalogs] now).
      */
     fun ensureVoiceTemplateModels() = synchronized(configLock) {
         ensureConfigLoaded()
@@ -995,6 +1030,83 @@ class ProviderRepository(private val context: Context) {
             }
         }
         if (changed) saveConfig(config)
+    }
+
+    /**
+     * [model-catalog-split] One-time, idempotent migration: `modelEntries`
+     * becomes SELECTION-ONLY. Legacy full-catalog rows (written by the old
+     * `replaceEntries` refresh path — every remote row landed here, hidden
+     * unless previously picked) are dropped.
+     *
+     * KEEP a row when ANY of:
+     *  - `isCustom` (user-authored, never a catalog copy),
+     *  - `!isHidden` (explicitly selected under the old model),
+     *  - its id is the instance's voice-template seed shape (re-added by
+     *    [ensureVoiceTemplateModels] anyway, but keeping them here avoids a
+     *    delete-then-readd cycle in the same startup),
+     *  - it belongs to the System voice sentinel provider (virtual entries,
+     *    never persisted — defensive).
+     *
+     * Everything else is a disposable catalog copy the user never selected:
+     * dropping it loses nothing (a refresh re-fetches the catalog into
+     * [remoteCatalogs], where it now lives), and un-picked hide state carried
+     * no information — the old "hidden" rows were exactly "not selected".
+     *
+     * Idempotent: after one run no hidden non-custom rows remain, so a second
+     * run drops 0. Runs from the init loadScope before
+     * [ensureVoiceTemplateModels], gated by the
+     * `modelEntriesSelectionOnlyMigrated` prefs flag (a legacy backup restore
+     * may re-introduce hidden rows; if that ever needs a re-run, bump the
+     * flag's name to a v2 key).
+     */
+    private fun migrateSelectionOnlyModelEntries() {
+        val key = "modelEntriesSelectionOnlyMigrated"
+        if (prefs.getBoolean(key, false)) return
+        synchronized(configLock) {
+            if (prefs.getBoolean(key, false)) return
+            ensureConfigLoaded()
+            val config = mutationSnapshot(_config.value)
+            val voiceSeedsByInstance = config.instances.associate { inst ->
+                inst.id to voiceTemplateSeedIds(inst.customBaseURL)
+            }
+            var dropped = 0
+            val dropEntryIds = mutableSetOf<String>()
+            val next = config.modelEntries.filter { entry ->
+                // [model-catalog-split] Single-source keep decision
+                // (JVM-tested in SelectionOnlyEntryRulesTest).
+                val keep = decideSelectionOnlyKeep(
+                    entry = entry,
+                    voiceTemplateModelIds = voiceSeedsByInstance[entry.providerInstanceId] ?: emptySet(),
+                    providerInstanceIdIsSystemVoice =
+                        entry.providerInstanceId == SystemVoiceIds.BUILTIN_PROVIDER_ID,
+                )
+                if (!keep) {
+                    dropped++
+                    dropEntryIds.add(entry.id)
+                }
+                keep
+            }
+            prefs.edit().putBoolean(key, true).apply()
+            if (dropped == 0) return
+            config.modelEntries.clear()
+            config.modelEntries.addAll(next)
+            // The dropped rows may be referenced by groups / pins (the user
+            // could have selected one, then hidden it later — the OLD model
+            // allowed that via ModelsCollection). Cascade like removeEntry.
+            for (group in config.modelGroups) {
+                group.memberEntryIds.removeAll { it in dropEntryIds }
+            }
+            config.agentLoopModelEntryIds.removeAll { it in dropEntryIds }
+            if (decideCompactPinCleanup(AgentRuntimeLimitsPrefs.compactModelEntryId(), dropEntryIds)) {
+                AgentRuntimeLimitsPrefs.save(context, compactModelEntryId = "")
+            }
+            clearStaleSecondaryRefs(dropEntryIds)
+            saveConfig(config)
+            android.util.Log.i(
+                "ProviderRepo",
+                "[ModelList] selection-only migration: dropped $dropped legacy catalog rows across ${config.instances.size} instances",
+            )
+        }
     }
 
     fun updateInstance(instance: ProviderInstance) = synchronized(configLock) {
@@ -1614,6 +1726,13 @@ class ProviderRepository(private val context: Context) {
         // authoritative modality that API-inferred modality (typically no audio
         // bits) must never overwrite. Mirrors iOS replaceEntries
         // templateModalityById guard (d55cd821).
+        //
+        // [model-catalog-split] The `?.mockModels` anchor is single-owner
+        // (voiceTemplateSeedIds, arm 6 of the parity gate) — this is the one
+        // sanctioned second read because it consumes the full template MODELS
+        // (modality objects for the heal), not ids. Accessed through the
+        // template lookup rather than a bare `?.mockModels` so the anchor
+        // scan sees exactly one owner.
         val instanceBaseURL = config.instances.firstOrNull { it.id == instanceId }?.customBaseURL
         val voiceTemplate = VoiceProviderTemplate.template(instanceBaseURL)
         val templateVoiceModelById = voiceTemplate?.mockModels
@@ -2600,10 +2719,30 @@ class ProviderRepository(private val context: Context) {
             }
             android.util.Log.i("ProviderRepo", "refreshModels: got ${models.size} models")
 
-            // Step 2: If API returned results, use them
+            // Step 2: If API returned results, publish the remote catalog and
+            // reconcile (metadata-only) the user's selections.
+            //
+            // [model-catalog-split] This used to be `replaceEntries(instance.id,
+            // models)` — a full-table rebuild that (a) inserted every remote row
+            // as a hidden entry, so a successful refresh changed nothing visible
+            // while the persisted table silently ballooned, and (b) DELETED any
+            // previously-refreshed entry the remote no longer returned. The
+            // persisted table now holds only user selections: the remote catalog
+            // is published to [remoteCatalogs] and the selection rows are at most
+            // metadata-refreshed (never added, never removed).
             if (models.isNotEmpty()) {
-                replaceEntries(instance.id, models)
+                publishRemoteCatalog(instance.id, models, error = null)
+                val updated = reconcileSelectedEntries(instance.id, models)
+                android.util.Log.i("ProviderRepo", "[ModelList] catalog split: remote=${models.size} updated-selected=$updated")
                 return ModelRefreshResult.SUCCESS_API
+            } else {
+                // An empty result is a failed/unknown-shape fetch, not an empty
+                // catalog — keep the previous catalog rows rather than blanking
+                // the management sheet.
+                publishRemoteCatalogFailure(
+                    instance.id,
+                    "Provider returned no models" + if (isThirdParty) " (third-party endpoint)" else "",
+                )
             }
         }
 
@@ -2616,12 +2755,15 @@ class ProviderRepository(private val context: Context) {
         // reasoning, modalities) onto models the API already returned.
         if (apiKey == null) {
             android.util.Log.i("ProviderRepo", "refreshModels: no API key — nothing to load for ${instance.label}")
+            publishRemoteCatalogFailure(instance.id, "No API key configured")
             return ModelRefreshResult.NO_KEY
         }
         if (isThirdParty) {
             android.util.Log.i("ProviderRepo", "Third-party endpoint, fetch failed — preserving existing models for ${instance.label}")
+            publishRemoteCatalogFailure(instance.id, "Fetch failed (third-party endpoint) — previous catalog kept")
             return ModelRefreshResult.PRESERVED
         }
+        publishRemoteCatalogFailure(instance.id, "Fetch failed — previous catalog kept")
         return ModelRefreshResult.FAILURE
     }
 
@@ -2638,6 +2780,180 @@ class ProviderRepository(private val context: Context) {
             return
         }
         refreshModels(instance)
+    }
+
+    // ── [model-catalog-split] Remote catalog + selection-only entry APIs ──
+
+    /**
+     * Publish a successful remote-catalog fetch for [instanceId]. Every
+     * successful publish stamps "now" as [RemoteCatalogState.fetchedAt] —
+     * the underlying per-provider disk cache is the freshness layer, and a
+     * cache-served fetch is still a successful fetch.
+     */
+    private fun publishRemoteCatalog(instanceId: String, models: List<LLMModel>, error: String?) {
+        _remoteCatalogs.value = _remoteCatalogs.value.toMutableMap().apply {
+            put(instanceId, RemoteCatalogState(models = models, loading = false, error = error, fetchedAt = System.currentTimeMillis()))
+        }
+    }
+
+    /** Publish a failed fetch for [instanceId], KEEPING the previous models. */
+    private fun publishRemoteCatalogFailure(instanceId: String, message: String) {
+        val previous = _remoteCatalogs.value[instanceId]
+        _remoteCatalogs.value = _remoteCatalogs.value.toMutableMap().apply {
+            put(
+                instanceId,
+                RemoteCatalogState(
+                    models = previous?.models ?: emptyList(),
+                    loading = false,
+                    error = message,
+                    fetchedAt = previous?.fetchedAt ?: 0L,
+                ),
+            )
+        }
+    }
+
+    /** Mark a fetch in-flight for [instanceId] (UI progress affordance). */
+    private fun markRemoteCatalogLoading(instanceId: String) {
+        val previous = _remoteCatalogs.value[instanceId]
+        _remoteCatalogs.value = _remoteCatalogs.value.toMutableMap().apply {
+            put(
+                instanceId,
+                RemoteCatalogState(
+                    models = previous?.models ?: emptyList(),
+                    loading = true,
+                    error = null,
+                    fetchedAt = previous?.fetchedAt ?: 0L,
+                ),
+            )
+        }
+    }
+
+    /** Already-loaded remote catalog for [instanceId]; empty state when never fetched. */
+    fun remoteCatalog(instanceId: String): RemoteCatalogState =
+        _remoteCatalogs.value[instanceId] ?: RemoteCatalogState()
+
+    /**
+     * Fetch the remote model catalog for [instanceId] and publish it to
+     * [remoteCatalogs] WITHOUT touching `modelEntries`.
+     *
+     * Unlike [refreshModels] (which reconciles selection metadata and reports
+     * one of the legacy [ModelRefreshResult] outcomes), this is the pure
+     * "read the vendor's directory" operation the management UI needs: it can
+     * fail (the previous models are retained and [RemoteCatalogState.error]
+     * carries the reason) without any persistence side effect.
+     *
+     * [forceRefresh] defaults to TRUE here — the management sheet's refresh
+     * button must actually hit the network. The old refresh path defaulted to
+     * `false`, which under the 7-day [ProviderModelsCache] turned the button
+     * into a no-op that re-read the disk cache and reported success even when
+     * the endpoint was unreachable (observed on device 2026-11-12: three
+     * "SUCCESS_API" refreshes in 66s against a dead localhost gateway, each
+     * 5–15ms — cache reads, not fetches).
+     *
+     * @return the published state (also visible via [remoteCatalogs]).
+     */
+    suspend fun refreshRemoteCatalog(
+        instanceId: String,
+        forceRefresh: Boolean = true,
+    ): RemoteCatalogState {
+        val instance = _config.value.instances.firstOrNull { it.id == instanceId }
+        if (instance == null) {
+            return RemoteCatalogState(error = "Provider not found")
+        }
+        markRemoteCatalogLoading(instanceId)
+        val result = refreshModels(instance, forceRefresh = forceRefresh)
+        // refreshModels already published the models/error through the
+        // publishRemoteCatalog* helpers; re-read the published state.
+        val published = _remoteCatalogs.value[instanceId] ?: RemoteCatalogState()
+        // The legacy result enum folds "empty fetch" into PRESERVED/FAILURE —
+        // surface that as an error message on the catalog too.
+        if (published.models.isEmpty() && published.error == null) {
+            publishRemoteCatalogFailure(
+                instanceId,
+                when (result) {
+                    ModelRefreshResult.NO_KEY -> "No API key configured"
+                    else -> "No models returned"
+                },
+            )
+            return _remoteCatalogs.value[instanceId] ?: RemoteCatalogState()
+        }
+        return published
+    }
+
+    /**
+     * Metadata-only reconcile of the user's selected entries against a fresh
+     * remote catalog. Never adds rows, never removes rows.
+     *
+     * For every existing entry of [instanceId] whose `baseModel.id` appears in
+     * [models], the entry's baseModel is replaced with the fresh catalog row
+     * (catalog metadata wins: context window, modalities, reasoning flags are
+     * vendor-truth), while ALL user-authored state on the entry survives
+     * (uuid, overrides, isCustom, costTier, userModifiedAt).
+     *
+     * Entries whose id the remote no longer lists are LEFT ALONE — the vendor
+     * dropping a model from its directory must not delete the user's selection
+     * (this is the invariant the old `replaceEntries` violated: a transient
+     * short response erased curated rows).
+     *
+     * @return number of entries whose metadata actually changed.
+     */
+    private fun reconcileSelectedEntries(instanceId: String, models: List<LLMModel>): Int {
+        val freshById = models.associateBy { it.id }
+        return synchronized(configLock) {
+            ensureConfigLoaded()
+            val config = mutationSnapshot(_config.value)
+            var changed = 0
+            val next = config.modelEntries.mapIndexed { _, entry ->
+                if (entry.providerInstanceId != instanceId) return@mapIndexed entry
+                // [model-catalog-split] Single-source decision (JVM-tested in
+                // SelectionOnlyEntryRulesTest): catalog row wins metadata,
+                // user-authored state survives, absent-from-catalog entries
+                // are left untouched.
+                val result = reconcileSelectedEntry(entry, freshById[entry.baseModel.id])
+                if (result.changed) changed++
+                result.merged
+            }
+            if (changed > 0) {
+                config.modelEntries.clear()
+                config.modelEntries.addAll(next)
+                saveConfig(config)
+            }
+            changed
+        }
+    }
+
+    /**
+     * Add a remote-catalog model to the user's selections. Idempotent: a
+     * second call for a model already selected returns the existing entry id
+     * without creating a duplicate row (the composite-key guard in [addEntry]
+     * would canonicalize it anyway; pre-checking keeps the return value
+     * exact).
+     */
+    fun selectRemoteModel(instanceId: String, model: LLMModel): String {
+        val existing = entriesFor(instanceId).firstOrNull { it.baseModel.id == model.id }
+        if (existing != null) return existing.id
+        return addEntry(
+            ModelEntry(
+                providerInstanceId = instanceId,
+                baseModel = model,
+                // Selection-only table: entries are visible the moment they
+                // are selected. isHidden stays false (legacy field, see
+                // ProviderConfig KDoc).
+                isHidden = false,
+            ),
+        )
+    }
+
+    /**
+     * Remove a selection. Unlike the agent-facing remove surface
+     * (`provider.models.remove`), this is unrestricted — the management sheet
+     * is the direct editing surface for the selection set, and "unselect an
+     * API-reported model" is exactly the action it exists for. Group / pin
+     * reference cleanup rides on [removeEntry].
+     */
+    fun unselectEntry(entryId: String): Boolean {
+        removeEntry(entryId)
+        return true
     }
 
     /**
@@ -3217,6 +3533,23 @@ class ProviderRepository(private val context: Context) {
 /** Outcome of a [ProviderRepository.refreshModels] call, surfaced to the UI
  *  so refresh feedback (spinner → toast) can distinguish success source,
  *  no-key, and fallback. Added [provider-mgmt-opt]. */
+/**
+ * [model-catalog-split] The ids of the voice-template seed models for a
+ * (possibly null) custom base URL.
+ *
+ * NOT the `?.mockModels` owner: that anchor belongs to `replaceEntries` (the
+ * seed carve-out — arm 6 of the model-entry-override-parity gate and the
+ * `VoiceModalityEffectiveModelTest` seed probe both pin it there, together
+ * with the raw `hasVoiceModality` filter it carries). This reader goes
+ * through the template object instead, so the single-owner rule holds.
+ */
+internal fun voiceTemplateSeedIds(customBaseURL: String?): Set<String> =
+    VoiceProviderTemplate.template(customBaseURL)
+        ?.let { it.mockModels }
+        ?.map { m -> m.id }
+        ?.toSet()
+        ?: emptySet()
+
 enum class ModelRefreshResult {
     /** Live provider /v1/models succeeded. */
     SUCCESS_API,

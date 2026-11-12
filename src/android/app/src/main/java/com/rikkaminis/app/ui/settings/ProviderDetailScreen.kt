@@ -54,6 +54,7 @@ import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.normalizeModalities
 import com.rikkaminis.app.data.repository.ProviderRepository
+import com.rikkaminis.app.data.repository.RemoteCatalogState
 import android.widget.Toast
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.components.MinisAlertDialog
@@ -179,25 +180,35 @@ fun ProviderDetailScreen(
     // a full-list scan on each recomposition (every keystroke, every toggle),
     // O(n) of the catalog for a screen that already renders all of them.
     //
-    // [T-provider-detail-visible-models] The detail screen now shows ONLY the
-    // models the user has selected (isHidden == false) — mirrors rikkahub's
-    // "pull everything, display the chosen few" model. The full catalog stays
-    // in the repository (modelEntries) and is reachable via the "Manage All
-    // Models" row that opens the ManageProviderModelsSheet; refresh keeps
-    // downloading everything so nothing is lost, and refreshModels() preserves
-    // each entry's isHidden/overrides/uuid across refreshes (ProviderRepository
-    // L959-987). `visibleEntries` lives on the repo and filters the same
-    // StateFlow-backed list, so toggling visibility in the manager screen
-    // updates this list reactively with zero extra wiring.
-    val entries = remember(instanceId, config) {
+    // [T-provider-detail-visible-models][model-catalog-split] The detail
+    // screen shows ONLY the models the user has selected — mirrors rikkahub's
+    // "pull everything, display the chosen few" model. After the
+    // selection-only split the vendor's directory no longer lives in the
+    // persisted table: it is ProviderRepository.remoteCatalogs (memory; the
+    // 7-day disk cache stays the persistence layer), reachable via the
+    // "Manage All Models" row that opens ManageProviderModelsSheet. A catalog
+    // refresh is a pure read that at most reconciles metadata of entries the
+    // user already selected — it can no longer add, delete, or hide rows.
+    // `visibleEntries` lives on the repo and filters the same StateFlow-backed
+    // list, so selection changes in the manager sheet update this list
+    // reactively with zero extra wiring.
+    // [model-catalog-split] Remote catalog observation: refreshRemoteCatalog
+    // publishes here (memory; the 7-day disk cache stays the persistence
+    // layer). Declared BEFORE the two remember blocks below that use it as a
+    // key — Kotlin locals are order-sensitive, and the CI build red'd on
+    // exactly this ordering (Unresolved reference 'remoteCatalogs').
+    val remoteCatalogs by providerRepository.remoteCatalogs.collectAsState()
+    val remoteCatalog = remoteCatalogs[instanceId] ?: RemoteCatalogState()
+    val entries = remember(instanceId, config, remoteCatalogs) {
         providerRepository.visibleEntries(instanceId)
     }
-    // Full catalog size, for the section header. Computed the same remembered
-    // way so it doesn't rescan on every recomposition either. [da1026-C] The
-    // refresh toast deliberately does NOT read this snapshot: it is keyed on
-    // the config that existed before the fetch ran, so it would report the
-    // pre-refresh count. The toast re-reads entriesFor() after the refresh.
-    val allEntries = remember(instanceId, config) {
+    // [model-catalog-split] allEntries now equals the user's SELECTIONS: the
+    // persisted table is selection-only, so this is the same set the section
+    // header renders. ThinkingRulesSection keeps eating it (its semantics were
+    // already "the selected set"), and the pending-delete resolver below still
+    // scopes to it. [da1026-C] The refresh toast deliberately does NOT read
+    // this snapshot: it re-reads entriesFor() after the refresh instead.
+    val allEntries = remember(instanceId, config, remoteCatalogs) {
         providerRepository.entriesFor(instanceId)
     }
     var isRefreshing by remember { mutableStateOf(false) }
@@ -295,7 +306,20 @@ fun ProviderDetailScreen(
             // no separate full-width refresh row any more).
             SettingsRow(
                 title = stringResource(R.string.provider_detail_manage_models),
-                subtitle = stringResource(R.string.provider_detail_models_count_header, allEntries.size),
+                // [model-catalog-split] The subtitle reports the REMOTE catalog
+                // size, not allEntries.size: after the split allEntries ==
+                // the selected set, which the section header above already
+                // shows ("Models (N)") — the old line double-reported one
+                // number with two meanings. The vendor's directory size is the
+                // information this row adds. Keyed on remoteCatalogs via the
+                // collectAsState above, so a background refresh updates it.
+                subtitle = if (remoteCatalog.models.isNotEmpty()) {
+                    stringResource(R.string.provider_detail_remote_catalog_count, remoteCatalog.models.size)
+                } else {
+                    // Never fetched (or a failed fetch that retained nothing):
+                    // the catalog row simply isn't there yet.
+                    stringResource(R.string.provider_detail_remote_catalog_unfetched)
+                },
                 onClick = { showManageModelsSheet = true },
                 showChevron = true,
                 showDivider = false,
@@ -311,24 +335,39 @@ fun ProviderDetailScreen(
                             val toastContext = exportContext
                             scope.launch {
                                 try {
-                                    val result = providerRepository.refreshModels(instance)
-                                    // [da1026-C] Count AFTER the refresh, never from a
-                                    // captured snapshot: `allEntries` is a plain value
-                                    // remembered against (instanceId, config), so the
-                                    // closure below captured the PRE-refresh list and the
-                                    // toast always reported the old number — a brand-new
-                                    // provider's first successful refresh said
-                                    // "Refreshed 0 models from API". entriesFor() is a
-                                    // synchronous filter over the in-memory config
-                                    // StateFlow (no Room, no IO), so reading it here on
-                                    // the main dispatcher is safe and needs no withContext.
-                                    val total = providerRepository.entriesFor(instance.id).size
+                                    // [model-catalog-split] Refresh the REMOTE
+                                    // catalog (pure read; never writes the
+                                    // persisted table). forceRefresh stays at
+                                    // the API default (true) — this button must
+                                    // actually hit the network; the old
+                                    // refreshModels default (false) turned it
+                                    // into a disk-cache read that reported
+                                    // success offline. Never pass an explicit
+                                    // non-default forceRefresh here.
+                                    val catalog = providerRepository.refreshRemoteCatalog(instance.id)
+                                    // Count AFTER the refresh (same [da1026-C]
+                                    // discipline as the old toast): M re-reads
+                                    // the persisted selection table, which the
+                                    // catalog reconcile may have just touched.
+                                    // entriesFor is a synchronous filter over
+                                    // the in-memory config StateFlow — safe on
+                                    // the main dispatcher, no withContext.
+                                    val selected = providerRepository.entriesFor(instance.id).size
                                     Toast.makeText(
                                         toastContext,
-                                        refreshResultMessage(result, total, toastContext),
+                                        toastContext.getString(
+                                            R.string.provider_detail_refresh_catalog_result,
+                                            catalog.models.size,
+                                            selected,
+                                        ),
                                         Toast.LENGTH_SHORT,
                                     ).show()
-                                    AppLogger.info(TAG, "Refreshed models for ${instance.id}: $result")
+                                    AppLogger.info(
+                                        TAG,
+                                        "Refreshed remote catalog for ${instance.id}: " +
+                                            "${catalog.models.size} remote, $selected selected" +
+                                            (catalog.error?.let { ", error=$it" } ?: ""),
+                                    )
                                 } finally {
                                     isRefreshing = false
                                 }
@@ -818,24 +857,6 @@ internal fun ModalityIconsRow(
         if ("audio" in outputModalities) Icon(Icons.Default.VolumeUp, contentDescription = stringResource(R.string.modeldetail_audio_output), tint = outputTint, modifier = size)
         if ("video" in outputModalities) Icon(Icons.Default.MovieCreation, contentDescription = stringResource(R.string.modeldetail_video_output), tint = outputTint, modifier = size)
     }
-}
-
-/** Maps a [ModelRefreshResult] to a user-facing toast message. Uses
- *  `context.getString` so all strings come from resources (i18n). Added
- *  [provider-mgmt-opt]. */
-private fun refreshResultMessage(
-    result: com.rikkaminis.app.data.repository.ModelRefreshResult,
-    modelCount: Int,
-    context: android.content.Context,
-): String = when (result) {
-    com.rikkaminis.app.data.repository.ModelRefreshResult.SUCCESS_API ->
-        context.getString(R.string.provider_detail_refresh_success_api, modelCount)
-    com.rikkaminis.app.data.repository.ModelRefreshResult.NO_KEY ->
-        context.getString(R.string.provider_detail_refresh_no_key)
-    com.rikkaminis.app.data.repository.ModelRefreshResult.PRESERVED ->
-        context.getString(R.string.provider_detail_refresh_preserved)
-    com.rikkaminis.app.data.repository.ModelRefreshResult.FAILURE ->
-        context.getString(R.string.provider_detail_refresh_failed)
 }
 
 // ─── [deep-audit-1040 B-07] Pending-delete resolution ────────────────────────

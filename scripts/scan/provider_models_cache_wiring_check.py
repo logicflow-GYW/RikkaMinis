@@ -417,11 +417,21 @@ def fetch_reaches_store(code, call_pos):
     and the success result green while deleting every entry of the instance
     (and the compact pin with it). Same Rail as the arguments above: the value
     the chain produces has to be the value the next hop consumes.
+
+    [model-catalog-split] The store moved: the refresh path no longer hands
+    the fetched list to `replaceEntries(` (that call rebuilt the whole table
+    and deleted rows the vendor stopped listing). It hands it to
+    `publishRemoteCatalog(` (the runtime catalog) and to
+    `reconcileSelectedEntries(` (the metadata-only reconcile of the user's
+    selections). Either hop counts as "the fetched list reached the store" —
+    what must NOT happen is the list being dropped, or a constant standing in
+    for it.
     """
     name = None
     for m in re.finditer(r"(?<![\w.])val\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", code[:call_pos]):
         name = m.group(1)
-    for m in re.finditer(r"(?<![\w.])replaceEntries\s*\(", code):
+    store_calls = ("replaceEntries", "publishRemoteCatalog", "reconcileSelectedEntries")
+    for m in re.finditer(r"(?<![\w.])(%s)\s*\(" % "|".join(store_calls), code):
         if re.search(r"\bfun\s+$", code[:m.start()]):
             continue
         for a, b in call_args(code, m.end() - 1):
@@ -484,9 +494,10 @@ def analyse(repo, registry, adapters, cache):
         amap = _map_args(clean, args, reg_names)
         reaches, src = fetch_reaches_store(clean, open_paren)
         res.append((
-            "the fetched model list is handed to the store (replaceEntries)",
+            "the fetched model list is handed to the store "
+            "(publishRemoteCatalog / reconcileSelectedEntries / replaceEntries)",
             reaches,
-            "fetch result `%s` never reaches replaceEntries( — the store gets a "
+            "fetch result `%s` never reaches a store hop — the store gets a "
             "constant instead" % src if not reaches else "handoff source `%s`" % src,
             REPO_REL,
             line,
@@ -702,7 +713,8 @@ class Repo(private val context: android.content.Context) {
             emptyList<Any>()
         }
         if (models.isNotEmpty()) {
-            replaceEntries(instance.id, models)
+            publishRemoteCatalog(instance.id, models, error = null)
+            reconcileSelectedEntries(instance.id, models)
         }
     }
 }
@@ -872,9 +884,12 @@ _breaker(16, "cache", [("        return entry.models\n", "        return emptyLi
 
 
 # 17) w13 — the fetch stays green and the store is handed a constant empty list.
-_breaker(17, "repo", [("            replaceEntries(instance.id, models)\n",
-                       "            replaceEntries(instance.id, emptyList())\n")],
-         "the fetched model list is handed to the store (replaceEntries)")
+_breaker(17, "repo", [("            publishRemoteCatalog(instance.id, models, error = null)\n"
+                       "            reconcileSelectedEntries(instance.id, models)\n",
+                       "            publishRemoteCatalog(instance.id, emptyList(), error = null)\n"
+                       "            reconcileSelectedEntries(instance.id, emptyList())\n")],
+         "the fetched model list is handed to the store "
+         "(publishRemoteCatalog / reconcileSelectedEntries / replaceEntries)")
 
 
 def selftest():

@@ -769,15 +769,66 @@ def check_sheet(code):
 def check_provider_detail(code):
     """C7a/b/c — the refresh toast must report a count read AFTER the refresh.
     C11c [da1028-C] — the ThinkingRulesSection call site forwards the model
-    entry list."""
+    entry list.
+
+    [model-catalog-split] The refresh hop is now `refreshRemoteCatalog(` (the
+    runtime catalog fetch) and the toast is built from the catalog + a fresh
+    selection re-read — the legacy `refreshModels(` / `refreshResultMessage(`
+    pair is gone. Both shapes are graded; the new one is fail-closed the same
+    way (a toast whose count comes from a composition-time snapshot is stale
+    exactly like before).
+    """
     results = [check_thinking_rules_call_site(code)]
     rm_pos = find_call_site(code, "refreshModels")
+    if rm_pos < 0:
+        rm_pos = find_call_site(code, "refreshRemoteCatalog")
     msg_pos = find_call_site(code, "refreshResultMessage")
     if rm_pos < 0:
-        results.append(("C7", False, "anchor `refreshModels(` call not found (fail-closed)"))
+        results.append(("C7", False, "anchor `refreshModels(` / `refreshRemoteCatalog(` call not found (fail-closed)"))
         return results
     if msg_pos < 0:
-        results.append(("C7", False, "anchor `refreshResultMessage(` call not found (fail-closed)"))
+        # [model-catalog-split] the catalog-toast shape: the message is built
+        # from the catalog result and a fresh selection re-read. The toast is
+        # a getString(R.string.<key>, …) call, so the anchor is the resource
+        # reference (not a `name(` call site).
+        msg_pos = code.find("provider_detail_refresh_catalog_result")
+        if msg_pos < 0:
+            results.append(("C7", False, "anchor `refreshResultMessage(` / `provider_detail_refresh_catalog_result` not found (fail-closed)"))
+            return results
+        results.append(("C7a", msg_pos > rm_pos,
+                        "toast is downstream of the fetch (refresh@%d < toast@%d)"
+                        % (rm_pos, msg_pos)))
+        args = call_args(code, msg_pos) or ""
+        path = code[rm_pos:msg_pos + len(args) + 2]
+        decls = local_value_decls(code)
+        snapshots = composition_snapshots(code)
+        carriers = state_carrier_names(code)
+        reassigned = set(
+            n for n in carriers
+            if re.search(r"(?m)^[ \t]*%s\s*=[^=]" % re.escape(n), path))
+        stale = []
+        for _a, _b in split_top(args, (",",)):
+            arg = args[_a:_b].strip()
+            if not arg:
+                continue
+            chain = expression_value_chain(arg, decls)
+            value = " ‖ ".join(chain)
+            dead = sorted(n for n in snapshots
+                          if re.search(r"\b%s\b" % re.escape(n), value) and n not in reassigned)
+            if dead:
+                stale.append("%r still carries the pre-refresh snapshot %s"
+                             % (arg, ", ".join(dead)))
+        results.append(("C7b", not stale,
+                        "toast args carry no un-reassigned pre-refresh read" if not stale
+                        else "; ".join(stale)))
+        # The count must be a re-read on the refresh path: either the catalog's
+        # own `models.size` (fresh from the fetch) or a fresh entriesFor( read.
+        fresh = bool(FRESH_ENTRIES_RE.search(path) or
+                     re.search(r"\.models\s*\.\s*size", path))
+        results.append(("C7c", fresh,
+                        "refresh path re-reads the count (fresh entriesFor / catalog size)"
+                        if fresh else
+                        "no toast argument reads a count produced ON the refresh path"))
         return results
     results.append(("C7a", msg_pos > rm_pos,
                     "toast is downstream of the fetch (refreshModels@%d < refreshResultMessage@%d)"

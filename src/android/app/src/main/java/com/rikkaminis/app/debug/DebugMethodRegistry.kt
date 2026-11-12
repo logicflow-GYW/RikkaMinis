@@ -637,7 +637,7 @@ object DebugMethodRegistry {
                 ParamSpec("displayName", "string", required = false, description = "null clears the override."),
                 ParamSpec("maxOutputTokens", "int", required = false, description = "null clears the override."),
                 ParamSpec("contextWindow", "int", required = false, description = "null clears the override."),
-                ParamSpec("isHidden", "bool", required = false, description = "Toggle picker visibility."),
+                ParamSpec("isHidden", "bool", required = false, description = "Unselect the model from the selected set (legacy isHidden alias); true removes the entry, false is a no-op."),
                 ParamSpec("modelId", "string", required = false, description = "Custom entries only."),
             ),
             returns = "Updated entry.",
@@ -645,7 +645,7 @@ object DebugMethodRegistry {
         ),
         MethodSpec(
             name = "provider.models.delete",
-            description = "Remove a custom model entry. Built-in entries can't be deleted — hide them via update isHidden=true.",
+            description = "Remove a custom model entry. Built-in entries can't be deleted — unselect them via update isHidden=true (legacy alias).",
             params = listOf(
                 ParamSpec("entryId", "string", required = true, description = "Target entry UUID."),
                 ParamSpec("confirm", "bool", required = true, default = false, description = "Must be true."),

@@ -25,9 +25,11 @@ import java.io.File
  *   set models.remove '"<entry-id>"'
  *     → ModelsCollection.remove(); rejected for non-custom entries.
  *
- * Future: per-entry hide via the existing
+ * Future: per-entry unselect via the existing
  *   set models.<entryId>.isHidden true
- * path. Already supported by ModelsCollection.isHiddenField; nothing
+ * path (legacy alias — the entry table is selection-only, so "hidden"
+ * now means "removed from the selected set"; false is a no-op).
+ * Already supported by ModelsCollection.isHiddenField; nothing
  * else needs to change in this handler when the agent picks it up.
  *
  * Exit codes:
@@ -102,7 +104,8 @@ class ConfigOffloadHandler(private val context: Context) : NativeOffloadHandler 
                 "                                 set models.remove '\"<entry-uuid>\"'\n" +
                 "                               Built-in / API-reported entries cannot be\n" +
                 "                               removed (use `set models.<entryId>.isHidden\n" +
-                "                               true` to hide instead).\n" +
+                "                               true` to unselect instead — legacy alias for\n" +
+                "                               removing the model from the selected set).\n" +
                 "  add <topic> <value-json>     Create a new child in an addable collection\n" +
                 "                               (e.g. providers, groups). The app generates\n" +
                 "                               its UUID (returned in applied[0].new). Same\n" +
