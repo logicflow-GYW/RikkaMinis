@@ -1173,20 +1173,25 @@ object ConfigBackup {
     /**
      * Entry uuids for [instanceId] in the exact order
      * [ProviderRepository.exportInstanceJSON] serializes its `models` array:
-     * the underlying list's append order (visible and hidden entries
-     * interleaved as inserted), NOT a visible-then-hidden split. Keeping this
-     * in lock-step with that method is what makes positional old→new uuid
-     * pairing correct on import; if exportInstanceJSON's ordering ever
-     * changes, this must follow.
+     * the underlying list's append order, NOT a visible-then-hidden split.
+     * Keeping this in lock-step with that method is what makes positional
+     * old→new uuid pairing correct on import; if exportInstanceJSON's
+     * ordering ever changes, this must follow.
      *
      * [fix-audit-finding-1] This previously concatenated
-     * `visibleEntries + filter(isHidden)`, which diverges from
+     * `visibleEntries + filter(isHidden)`, which diverged from
      * exportInstanceJSON's single `filter { providerInstanceId == instanceId }`
-     * once visible/hidden entries are interleaved (almost always after a
+     * once visible/hidden entries were interleaved (almost always after a
      * refresh) — positional pairing then mapped model-group members onto the
      * wrong entry. `entriesFor` is the exact same predicate + order as
      * exportInstanceJSON, so the three paths (export, append-import,
      * merge-import) all pair by identical positioning.
+     *
+     * [model-catalog-split] The table is selection-only now: every row in it
+     * is a user selection (no `isHidden = true` catalog copies remain), so
+     * there is nothing to filter and NO filter may be reintroduced here —
+     * every selected entry must reach the backup. `entriesFor` returns the
+     * full selected set for the instance.
      */
     private fun orderedEntryIds(
         providerRepo: ProviderRepository,
@@ -3419,20 +3424,20 @@ internal const val ROLLUP_BACKUP_FILE: String =
  * [fix-audit-finding-1] The entry-id ordering contract.
  *
  * `_entryIds` MUST be emitted in the exact order [ProviderRepository.exportInstanceJSON]
- * serializes its `models` array — the underlying list's *append* order, which
- * interleaves visible and hidden entries exactly as they were inserted, NOT a
- * re-sorted visible-then-hidden split. Both exportInstanceJSON and
- * [orderedEntryIds] derive from the same `filter { providerInstanceId ==
- * instanceId }`, so this projection is the identity over that filter and the
- * two stay in lock-step by construction.
+ * serializes its `models` array — the underlying list's *append* order, NOT a
+ * re-sorted split. Both exportInstanceJSON and [orderedEntryIds] derive from
+ * the same `filter { providerInstanceId == instanceId }`, so this projection
+ * is the identity over that filter and the two stay in lock-step by
+ * construction.
  *
  * This is a pure, JVM-testable function (no Android [ProviderRepository])
  * precisely so the ordering contract can be pinned by [EntryIdOrderContractTest]:
- * given any interleaved visible/hidden entry list, this projection must equal
- * the `models`-array order (the same list's `baseModel.id` order). A future
- * edit that re-sorts here — e.g. reintroducing a `visible + hidden` split —
- * breaks positional old→new uuid pairing on merge-import and must fail the
- * test.
+ * this projection must always equal the `models`-array order (the same list's
+ * `baseModel.id` order) and must never filter — [model-catalog-split] the
+ * table is selection-only, so every entry it contains is a user selection
+ * that the backup must carry. A future edit that re-sorts or filters here —
+ * e.g. reintroducing a `visible + hidden` split — breaks positional old→new
+ * uuid pairing on merge-import and must fail the test.
  */
 internal fun entryIdsInExportOrder(entries: List<ModelEntry>): List<String> =
     entries.map { it.id }

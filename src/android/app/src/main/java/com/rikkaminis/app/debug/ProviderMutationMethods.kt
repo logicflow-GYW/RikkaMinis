@@ -518,9 +518,17 @@ internal object ProviderMutationMethods {
                 if (params.isNull("contextWindow")) null else params.optInt("contextWindow").takeIf { it > 0 }
             } else current.overrides.contextWindow,
         )
-        val newHidden = if (params.has("isHidden")) params.optBoolean("isHidden", current.isHidden) else current.isHidden
+        // [model-catalog-split] `isHidden` is a frozen legacy field: the entry
+        // table is selection-only, so no row may carry isHidden = true. The
+        // parameter keeps its name (RPC compatibility) but its meaning is now
+        // the selection alias — `true` unselects the entry (removes it from
+        // the selected set), `false` is a no-op for an entry that is by
+        // definition already selected. The pre-split behaviour (persisting
+        // copy(isHidden = newHidden)) is forbidden: it would mint a hidden row
+        // the migration removes and no write path may reintroduce.
+        val unselectRequested = params.has("isHidden") && params.optBoolean("isHidden", current.isHidden)
 
-        val updated = current.copy(baseModel = newModel, overrides = newOverrides, isHidden = newHidden)
+        val updated = current.copy(baseModel = newModel, overrides = newOverrides)
         // [da1023-C] updateEntry returns the canonical persisted id (null when
         // the write was rejected fail-closed) — report the persisted entry,
         // not the pre-persist copy whose uuid no longer matches the row.
@@ -528,6 +536,14 @@ internal object ProviderMutationMethods {
             ?: throw RPCException(-32602, "Entry update rejected (blank or colliding model id): $entryId")
         val persisted = repo.config.value.modelEntries.firstOrNull { it.id == persistedId }
             ?: updated.copy(uuid = persistedId)
+        if (unselectRequested) {
+            // Removal (not a hide) — the entry leaves the selected set.
+            repo.unselectEntry(entryId)
+            return entryToJson(persisted).apply {
+                put("removed", true)
+                put("unselected", true)
+            }
+        }
         return entryToJson(persisted)
     }
 
@@ -542,7 +558,7 @@ internal object ProviderMutationMethods {
         val current = repo.config.value.modelEntries.firstOrNull { it.id == entryId }
             ?: throw RPCException(-32602, "Entry not found: $entryId")
         if (!current.isCustom) {
-            throw RPCException(-32602, "Built-in entries can't be deleted — set isHidden=true via provider.models.update instead")
+            throw RPCException(-32602, "Built-in entries can't be deleted — set isHidden=true via provider.models.update instead (legacy alias: unselects the entry)")
         }
         repo.removeEntry(entryId)
         return JSONObject().apply {

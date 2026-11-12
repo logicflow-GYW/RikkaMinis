@@ -21,11 +21,22 @@ import com.rikkaminis.app.provider.ModelsDevApi
  * Exposes ModelEntry overrides under `models.<entryUUID>.…`. Mirrors
  * iOS `ModelsCollection`.
  *
+ * [model-catalog-split] The entry table is selection-only: it holds the
+ * models the user selected (plus custom entries), not a catalog copy.
+ * `isHidden` is a frozen legacy field — no row carries `isHidden = true`
+ * after the one-shot migration — so `set models.<id>.isHidden true` is
+ * now an *unselect* alias: it removes the entry from the selected set
+ * (the same action the management sheet performs), and `false` is a
+ * no-op. The writer must never persist `copy(isHidden = true)` back
+ * into the table: that would mint a hidden row and break the
+ * selection-only invariant (see [decideHiddenWrite]).
+ *
  * `add` creates a custom entry (`isCustom = true`). `remove` is allowed
- * only for those custom entries — API-reported models can be hidden
- * (`isHidden = true`) but never deleted, since the same id may
- * reappear on the next refresh and any prior hide/override should
- * resume.
+ * only for those custom entries — API-reported models are unselected
+ * via the `isHidden = true` alias (never deleted outright, since the
+ * same id can be re-selected from the remote catalog later; the alias
+ * also covers built-in entries, which `provider.models.remove` still
+ * refuses to delete).
  */
 class ModelsCollection(
     private val repo: ProviderRepository,
@@ -33,7 +44,7 @@ class ModelsCollection(
     override val basePath: String get() = "models"
     override val displayName: String get() = "LLM models"
     override val description: String get() =
-        "Per-model overrides (display name, max output tokens, hidden flag, modalities, context window) and custom-model add/remove."
+        "Per-model overrides (display name, max output tokens, selection via the legacy isHidden alias, modalities, context window) and custom-model add/remove."
     override val addable: Boolean get() = true
     override val removable: Boolean get() = true
     override val risk: ConfigRisk get() = ConfigRisk.SENSITIVE
@@ -152,8 +163,13 @@ class ModelsCollection(
     override fun remove(id: String) {
         val entry = entry(id) ?: throw ConfigError.UnknownPath("models.$id")
         if (!entry.isCustom) {
+            // [model-catalog-split] The suggested alias below really does
+            // remove the entry now (isHidden=true → unselect), so the hint
+            // stays truthful. API-reported entries can also be unselected
+            // from the management sheet, whose path bypasses this custom-only
+            // gate (provider.models.remove's confirm semantics are unchanged).
             throw ConfigError.PermissionDenied(
-                "Only custom-added models can be removed; use `set models.$id.isHidden true` for API-reported models"
+                "Only custom-added models can be removed; use `set models.$id.isHidden true` to unselect API-reported models (legacy alias — also available via provider.models.remove)"
             )
         }
         repo.removeEntry(id)
@@ -252,18 +268,25 @@ class ModelsCollection(
     private fun isHiddenField(id: String): ConfigField =
         ClosureField(
             path = "models.$id.isHidden",
-            displayName = "Hidden",
-            description = "When true, the model is excluded from pickers and agent loop.",
+            displayName = "Selected (legacy isHidden)",
+            description = "Selection flag: true removes the model from the selected set (legacy alias for unselect; catalog-split tables never store hidden rows), false is a no-op for an already-selected model.",
             valueSchema = ConfigSchema.Bool,
             risk = ConfigRisk.SENSITIVE,
             revertable = true,
             reader = {
                 val e = entry(id) ?: return@ClosureField ConfigValue.Null
+                // Legacy field, migrated to false everywhere — report what the
+                // row actually stores, never a fabricated "selected" value.
                 ConfigValue.Bool(e.isHidden)
             },
             writer = { v ->
                 val b = (v as? ConfigValue.Bool)?.value ?: throw ConfigError.TypeMismatch("bool")
-                mutate(id) { it.copy(isHidden = b) }
+                when (decideHiddenWrite(entry(id), b)) {
+                    HiddenWriteAction.UNSELECT -> repo.unselectEntry(id)
+                    HiddenWriteAction.NOOP -> {}
+                    HiddenWriteAction.ERROR_UNKNOWN_ID ->
+                        throw ConfigError.UnknownPath("models.$id")
+                }
             },
         )
 
@@ -492,3 +515,27 @@ class ModelsCollection(
  */
 internal fun ModelEntry.withSupportsReasoningOverride(value: Boolean): ModelEntry =
     copy(overrides = overrides.copy(supportsReasoning = value))
+
+/**
+ * [model-catalog-split] The write transformation behind
+ * `models.<id>.isHidden` — extracted as a pure function so the
+ * selection-alias semantics are testable without a repository.
+ *
+ * Under the selection-only entry table, `isHidden = true` must translate to
+ * an UNSELECT (the row leaves the table; the management sheet's action), and
+ * `false` is a NOOP — the entry is by definition already selected. The
+ * pre-split behaviour (`copy(isHidden = b)` written back) is FORBIDDEN: it
+ * would mint a `isHidden = true` row, which the one-shot migration removes
+ * and no write path may reintroduce.
+ *
+ * An unknown id maps to [HiddenWriteAction.ERROR_UNKNOWN_ID] instead of
+ * throwing here so the caller keeps control of the error surface (the
+ * collection throws `ConfigError.UnknownPath`, matching the pre-split
+ * `mutate` behaviour exactly).
+ */
+internal enum class HiddenWriteAction { UNSELECT, NOOP, ERROR_UNKNOWN_ID }
+
+internal fun decideHiddenWrite(currentEntry: ModelEntry?, newValue: Boolean): HiddenWriteAction {
+    if (currentEntry == null) return HiddenWriteAction.ERROR_UNKNOWN_ID
+    return if (newValue) HiddenWriteAction.UNSELECT else HiddenWriteAction.NOOP
+}
