@@ -40,6 +40,32 @@ internal fun decideSelectionOnlyKeep(
         providerInstanceIdIsSystemVoice
 
 /**
+ * [review1112-p1-2] Whether one IMPORTED row (a backup's `models[]` element)
+ * may be written into the selection-only entry table.
+ *
+ * This is the restore-side twin of [decideSelectionOnlyKeep], and it exists
+ * because the rule was applied on only ONE of the two restore paths: the
+ * OpenMinis compat converter drops hidden non-custom rows
+ * (`decideLegacyHiddenImportKeep`), while the native backup importer
+ * (`ProviderRepository.parseImportedModelEntries`) wrote `isHidden` through
+ * verbatim. A backup taken on the pre-split build carries one hidden row per
+ * catalog model (the old refresh inserted every remote row that way), so
+ * restoring it re-minted exactly the rows the one-shot migration deletes —
+ * and the migration's `prefs` gate has already flipped, so it never runs
+ * again.
+ *
+ * The result is the same split-brain the selection-only migration removed:
+ * the row is invisible to every `!isHidden` reader (model picker, group sheet,
+ * agent-loop sheet) while the Manage sheet — which reads the full set — still
+ * shows it as selected, and the next backup silently drops it.
+ *
+ * A hidden CUSTOM row is kept: the user authored it, and the migration keeps
+ * custom entries too. A non-hidden row is always kept (it is a selection).
+ */
+internal fun decideImportedRowKeep(isHidden: Boolean, isCustom: Boolean): Boolean =
+    !isHidden || isCustom
+
+/**
  * Result of reconciling ONE selected entry against a fresh catalog row:
  * [changed] is false when the catalog does not list this id (leave the entry
  * alone — a vendor dropping a model must not delete the user's selection) or

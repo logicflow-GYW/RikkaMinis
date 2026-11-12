@@ -1697,6 +1697,26 @@ class ProviderRepository(private val context: Context) {
         return instance.isEnabled
     }
 
+    /**
+     * [review1112-p2] LEGACY / PRODUCTION-DEAD. The refresh path no longer
+     * calls this — [refreshModels] publishes the remote catalog to
+     * [remoteCatalogs] and reconciles only the user's selections, so nothing
+     * rebuilds `modelEntries` from a `/v1/models` response any more.
+     *
+     * Do NOT delete it in a drive-by: it is still the pinned subject of five
+     * source-text tests (custom-identity carry-forward, the voice-modality
+     * heal, the pin/per-device cascade, the snapshot isolation), and those
+     * assertions document contracts that the CURRENT writers must also honour.
+     * Retiring it is its own change: move each assertion onto its live owner
+     * first, then delete. Until then it must keep compiling and keep behaving
+     * exactly as the tests describe.
+     *
+     * Note it still writes `isHidden = prior?.isHidden ?: true` — the exact
+     * shape that used to fill the table with hidden catalog rows. That is
+     * harmless only because no production caller remains; if this is ever
+     * re-wired, it must be updated to the selection-only contract
+     * ([decideImportedRowKeep] / [reconcileSelectedEntry]) in the same change.
+     */
     fun replaceEntries(instanceId: String, models: List<LLMModel>) = synchronized(configLock) {
         ensureConfigLoaded()
         // Hot path for concurrent autoRefreshModels coroutines (one per
@@ -2861,23 +2881,42 @@ class ProviderRepository(private val context: Context) {
             return RemoteCatalogState(error = "Provider not found")
         }
         markRemoteCatalogLoading(instanceId)
-        val result = refreshModels(instance, forceRefresh = forceRefresh)
-        // refreshModels already published the models/error through the
-        // publishRemoteCatalog* helpers; re-read the published state.
-        val published = _remoteCatalogs.value[instanceId] ?: RemoteCatalogState()
-        // The legacy result enum folds "empty fetch" into PRESERVED/FAILURE —
-        // surface that as an error message on the catalog too.
-        if (published.models.isEmpty() && published.error == null) {
-            publishRemoteCatalogFailure(
-                instanceId,
-                when (result) {
-                    ModelRefreshResult.NO_KEY -> "No API key configured"
-                    else -> "No models returned"
-                },
-            )
-            return _remoteCatalogs.value[instanceId] ?: RemoteCatalogState()
+        // [review1112-p2] `loading` must be cleared on EVERY exit, including the
+        // throw path. Without the finally, an exception out of refreshModels
+        // (corrupt instance config, a saveConfig failure, a fetcher that throws
+        // outside its own catch) left `loading = true` forever: the sheet then
+        // shows the progress bar permanently AND its auto-fetch guard
+        // (`pre.isEmpty() && !pre.loading && pre.fetchedAt == 0`) never fires
+        // again, so the catalog could never be fetched for that provider until
+        // the app restarted.
+        try {
+            val result = refreshModels(instance, forceRefresh = forceRefresh)
+            // refreshModels already published the models/error through the
+            // publishRemoteCatalog* helpers; re-read the published state.
+            val published = _remoteCatalogs.value[instanceId] ?: RemoteCatalogState()
+            // The legacy result enum folds "empty fetch" into PRESERVED/FAILURE —
+            // surface that as an error message on the catalog too.
+            if (published.models.isEmpty() && published.error == null) {
+                publishRemoteCatalogFailure(
+                    instanceId,
+                    when (result) {
+                        ModelRefreshResult.NO_KEY -> "No API key configured"
+                        else -> "No models returned"
+                    },
+                )
+                return _remoteCatalogs.value[instanceId] ?: RemoteCatalogState()
+            }
+            return published
+        } finally {
+            // Idempotent: publishRemoteCatalog* already set loading = false on
+            // the success/failure paths; this only matters when neither ran.
+            val current = _remoteCatalogs.value[instanceId]
+            if (current != null && current.loading) {
+                _remoteCatalogs.value = _remoteCatalogs.value.toMutableMap().apply {
+                    put(instanceId, current.copy(loading = false))
+                }
+            }
         }
-        return published
     }
 
     /**
@@ -3285,24 +3324,66 @@ class ProviderRepository(private val context: Context) {
     }
 
     /**
+     * [review1112-p1-2] One parsed backup row plus the index of the `models[]`
+     * element it came from. See [parseImportedModelEntriesWithSourceIndex] for
+     * why the index must survive filtering.
+     */
+    private data class ImportedModelEntry(val sourceIndex: Int, val entry: ModelEntry)
+
+    /**
      * [T-backup-dedup] Parse the `models` array of an exported provider JSON
      * into [ModelEntry]s bound to [instanceId]. Shared by [importInstanceJSON]
      * (which replaces the instance's entries wholesale) and
      * [mergeImportInstanceJSON] (which upserts models missing from an existing
      * instance). Returns an empty list when the payload carries no models.
      */
-    private fun parseImportedModelEntries(dict: JSONObject, instanceId: String): List<ModelEntry> {
+    private fun parseImportedModelEntries(dict: JSONObject, instanceId: String): List<ModelEntry> =
+        parseImportedModelEntriesWithSourceIndex(dict, instanceId).map { it.entry }
+
+    /**
+     * [review1112-p1-2] Same parse as [parseImportedModelEntries], but each
+     * entry keeps the index of the `models[]` element it came from.
+     *
+     * The index matters because the backup layer pairs `_entryIds` with the
+     * `models` array POSITIONALLY (`ConfigBackup` → [mergeImportInstanceJSON],
+     * which reads `srcEntryIds.getOrNull(i)` against the parsed list). Dropping
+     * rows from the parsed list without carrying the source index would shift
+     * every later pairing by one and remap model-group members onto the wrong
+     * entries — a worse defect than the hidden rows being filtered.
+     *
+     * Rows that may not enter a selection-only table are skipped here (see
+     * [decideImportedRowKeep]); callers that need the positional pairing must
+     * use the `sourceIndex` on each returned row rather than its position in
+     * the returned list.
+     */
+    private fun parseImportedModelEntriesWithSourceIndex(
+        dict: JSONObject,
+        instanceId: String,
+    ): List<ImportedModelEntry> {
         val models = dict.optJSONArray("models") ?: return emptyList()
         val providerTypeRaw = dict.optString("providerType", "").ifEmpty { return emptyList() }
         val providerType = try { ProviderType.valueOf(providerTypeRaw) } catch (_: Exception) { return emptyList() }
-        val entries = mutableListOf<ModelEntry>()
+        val entries = mutableListOf<ImportedModelEntry>()
         for (i in 0 until models.length()) {
             val m = models.getJSONObject(i)
             val modelId = m.optString("modelId", "")
             if (modelId.isEmpty()) continue
             val displayName = m.optString("displayName", modelId)
             val isCustom = m.optBoolean("isCustom", false)
+            // [review1112-p1-2] A pre-split backup carries one `isHidden = true`
+            // row per catalog model. Writing those back re-mints the rows the
+            // one-shot migration deletes (and whose prefs gate has already
+            // flipped), so they are dropped here — same rule the OpenMinis
+            // compat importer applies via `decideLegacyHiddenImportKeep`.
             val isHidden = m.optBoolean("isHidden", false)
+            if (!decideImportedRowKeep(isHidden = isHidden, isCustom = isCustom)) {
+                android.util.Log.i(
+                    "ProviderRepo",
+                    "[ModelList] import skipped legacy hidden catalog row $modelId " +
+                        "(selection-only table; not a user selection)",
+                )
+                continue
+            }
             val contextWindow = if (m.has("contextWindow")) m.optInt("contextWindow").takeIf { it > 0 } else null
             val maxOutputTokens = if (m.has("maxOutputTokens")) m.optInt("maxOutputTokens").takeIf { it > 0 } else null
             val supportsReasoning = if (m.has("supportsReasoning")) m.optBoolean("supportsReasoning") else null
@@ -3371,19 +3452,24 @@ class ProviderRepository(private val context: Context) {
             } else {
                 ModelOverrides()
             }
-            entries.add(ModelEntry(
-                providerInstanceId = instanceId,
-                baseModel = model,
-                overrides = overrides,
-                isCustom = isCustom,
-                isHidden = isHidden,
-                // [T-fix-backup-field-evap] Restore metadata lost on the old
-                // backup path: costTier (feeds RoutingStrategy.cheapestFirst —
-                // losing it silently re-ranked every entry as "most expensive")
-                // and userModifiedAt (user-edit timestamp).
-                costTier = costTier,
-                userModifiedAt = userModifiedAt,
-            ))
+            entries.add(
+                ImportedModelEntry(
+                    sourceIndex = i,
+                    entry = ModelEntry(
+                        providerInstanceId = instanceId,
+                        baseModel = model,
+                        overrides = overrides,
+                        isCustom = isCustom,
+                        isHidden = isHidden,
+                        // [T-fix-backup-field-evap] Restore metadata lost on the old
+                        // backup path: costTier (feeds RoutingStrategy.cheapestFirst —
+                        // losing it silently re-ranked every entry as "most expensive")
+                        // and userModifiedAt (user-edit timestamp).
+                        costTier = costTier,
+                        userModifiedAt = userModifiedAt,
+                    ),
+                ),
+            )
         }
         return entries
     }
@@ -3472,11 +3558,16 @@ class ProviderRepository(private val context: Context) {
         val updated = applyImportInstanceFields(existing, fields)
         if (updated != existing) updateInstance(updated)
 
-        val entries = parseImportedModelEntries(dict, existing.id)
+        val entries = parseImportedModelEntriesWithSourceIndex(dict, existing.id)
         val entryMap = HashMap<String, String>()
-        for (i in entries.indices) {
-            val srcId = srcEntryIds.getOrNull(i) ?: ""
-            val entry = entries[i]
+        for (parsed in entries) {
+            // [review1112-p1-2] Pair `_entryIds` by the row's ORIGINAL index in
+            // the backup's `models` array, not by its position in this
+            // (filtered) list. Rows the selection-only rule drops are gone from
+            // the list, so positional pairing would shift every later mapping
+            // by one and point model-group members at the wrong entries.
+            val srcId = srcEntryIds.getOrNull(parsed.sourceIndex) ?: ""
+            val entry = parsed.entry
             val hit = _config.value.modelEntries.firstOrNull {
                 it.providerInstanceId == existing.id && it.baseModel.id == entry.baseModel.id
             }

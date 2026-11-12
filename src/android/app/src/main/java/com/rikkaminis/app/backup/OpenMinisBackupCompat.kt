@@ -1488,8 +1488,15 @@ internal fun secretsCarryCredentials(secrets: JSONObject?): Boolean {
  * through a restore. Custom entries are user assets: imported even when
  * hidden (the migration keeps them as well).
  *
- * Extracted as a pure function so the rule is JVM-testable without an
- * [org.json.JSONObject] or the converter's surrounding state.
+ * [review1112-p1-2] DELEGATES to [com.rikkaminis.app.data.repository.
+ * decideImportedRowKeep] instead of carrying its own copy of the expression.
+ * The defect this fixes was two restore paths, one rule, only one of them
+ * updated — a second literal here would let the same divergence happen again
+ * silently. Kept as a named alias because this is the name the compat
+ * converter's call sites and its tests read.
  */
 internal fun decideLegacyHiddenImportKeep(isHidden: Boolean, isCustom: Boolean): Boolean =
-    !isHidden || isCustom
+    com.rikkaminis.app.data.repository.decideImportedRowKeep(
+        isHidden = isHidden,
+        isCustom = isCustom,
+    )

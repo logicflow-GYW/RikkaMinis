@@ -264,14 +264,25 @@ data class LLMModel(
             if (lid.contains("deepseek")) return 128_000
             // [T-model-defaults-1112] Optimistic default for unknown ids: most
             // current-generation models ship ≥256K context (models.dev sample,
-            // 2026-11-12: 68% of 8830 declared rows are ≥256K, the modal value
-            // is 1M), so 128K under-used real capacity on the majority while a
-            // too-large guess merely trips a provider 400 — which the
-            // compaction self-heal (`isContextTooLargeError` halving retry in
-            // AgentLoopEngine / CompactOrchestration) recovers from. 1M is the
-            // mode of the declared distribution, not a round lucky number.
-            // The guess is still marked HEURISTIC (see contextWindowSource) so
-            // TokenUsageSheet labels it as a guess.
+            // 2026-11-12: 68% of 8831 declared rows are ≥256K, the modal value
+            // is 1M), so 128K under-used real capacity on the majority.
+            //
+            // [review1112-p1-5] The cost of the opposite error — guessing too
+            // LARGE — is a provider 400, and the comment here used to claim the
+            // "compaction self-heal (`isContextTooLargeError` halving retry in
+            // AgentLoopEngine / CompactOrchestration)" absorbed it. That was
+            // false: the halving retry only ever ran inside the summariser, and
+            // the preflight budget reads this same over-estimated window, so it
+            // passed the check that should have caught the guess. The claim is
+            // true now — `ContextOvershootRetry` in AgentLoopEngine trims the
+            // history and re-sends the turn once on a corroborated
+            // context-too-large failure. Keep the two together: if that retry
+            // is ever removed, this default has to go back to a conservative
+            // value in the same change.
+            //
+            // 1M is the mode of the declared distribution, not a round lucky
+            // number. The guess is still marked HEURISTIC (see
+            // contextWindowSource) so TokenUsageSheet labels it as a guess.
             return 1_000_000
         }
 
