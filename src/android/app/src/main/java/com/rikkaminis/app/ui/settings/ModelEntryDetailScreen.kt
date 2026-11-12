@@ -69,6 +69,18 @@ fun ModelEntryDetailScreen(
     val instance = config.instances.find { it.id == instanceId }
     val context = LocalContext.current
 
+    // [selection-only-ui-writer-1112] Set when the user removed this entry
+    // from the selection set. The write makes the row disappear, and the
+    // `entry == null` branch below would fire its own onBack() — two pops
+    // for one tap. Mirrors ProviderDetailScreen's `deleted` flag.
+    //
+    // Declared BEFORE the null check: Kotlin resolves local declarations in
+    // source order, so a `remember` declared after the early-return branch
+    // is not in scope inside it (CI #43215338745: `Unresolved reference
+    // 'removedFromSelection'`). Keyed on entryId (not entry.id) because
+    // `entry` is null in that branch.
+    var removedFromSelection by remember(entryId) { mutableStateOf(false) }
+
     if (entry == null) {
         // [S6-composition-back] onBack() during composition is a Compose
         // anti-pattern (re-fires on every recomposition of this branch) —
@@ -91,11 +103,6 @@ fun ModelEntryDetailScreen(
     // so a refused rename looked exactly like a saved one: the screen popped
     // and the user's edit was gone with no signal at all. Stay put and say so.
     var saveError by remember(entry.id) { mutableStateOf<String?>(null) }
-    // [selection-only-ui-writer-1112] Set when the user removed this entry
-    // from the selection set. The write makes the row disappear, and the
-    // `entry == null` branch below would fire its own onBack() — two pops
-    // for one tap. Mirrors ProviderDetailScreen's `deleted` flag.
-    var removedFromSelection by remember(entry.id) { mutableStateOf(false) }
 
     // [da1026-C] Every editable field below is keyed on (entry identity, the
     // exact sources its initial value derives from). A keyless `remember`
