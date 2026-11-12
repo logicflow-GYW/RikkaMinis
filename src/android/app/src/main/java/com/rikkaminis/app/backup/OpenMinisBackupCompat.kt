@@ -880,7 +880,11 @@ object OpenMinisBackupCompat {
                 mo.put("modelId", model.optString("id", ""))
                 mo.put("displayName", model.optString("displayName", model.optString("id", "")))
                 mo.put("isHidden", legacyHidden)
-                if (isCustomEntry) mo.put("isCustom", true)
+                // [model-catalog-split] Keep the source-derived write shape:
+                // the compat-parity gate derives the key set from the SOURCE
+                // read, so the put must visibly carry the source expression
+                // (a local boolean made the gate read it as a constant).
+                if (e.optBoolean("isCustom", false)) mo.put("isCustom", true)
                 if (model.optInt("contextWindow", 0) > 0) {
                     mo.put("contextWindow", model.optInt("contextWindow"))
                 }

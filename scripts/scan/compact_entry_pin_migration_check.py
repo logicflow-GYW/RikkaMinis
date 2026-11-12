@@ -740,27 +740,36 @@ def check_entry_id_continuity(cc, rel):
 
 
 def check_refresh_handoff(cc, rel):
-    """Arm 11 — the list handed to `replaceEntries` must be the fetched list.
+    """Arm 11 — the list handed to the store must be the fetched list.
 
-    `replaceEntries(instance.id, emptyList())` is a successful refresh that
-    deletes every non-custom entry of the instance (and the pin with it). The
-    cache gate judges the fetch call; this arm judges the handoff.
+    A handoff of a constant EMPTY list is a successful refresh that deletes
+    every non-custom entry of the instance (and the pin with it). The cache
+    gate judges the fetch call; this arm judges the handoff.
+
+    [model-catalog-split] The store moved: the refresh path hands the fetched
+    list to `publishRemoteCatalog(` (the runtime catalog) and to
+    `reconcileSelectedEntries(` (the metadata-only reconcile of the user's
+    selections) — it no longer calls `replaceEntries(`, whose full-table
+    rebuild deleted rows the vendor stopped listing. Either hop counts.
     """
     out = []
     body, base = body_of(cc, "fun refreshModels(")
     if body is None:
         return [(rel, 0, "11", "fun refreshModels( not found — gate ROT")]
-    call_re = re.compile(r"(?<![\w.])replaceEntries\s*\(")
+    call_re = re.compile(
+        r"(?<![\w.])(replaceEntries|publishRemoteCatalog|reconcileSelectedEntries)\s*\(")
     calls = [m for m in call_re.finditer(body) if not re.search(r"\bfun\s+$", body[:m.start()])]
     if not calls:
         return [(rel, line_of(cc, base), "11",
-                 "refreshModels never stores the fetched models through "
-                 "replaceEntries( — re-anchor arm 11")]
+                 "refreshModels never stores the fetched models through a store "
+                 "hop (publishRemoteCatalog / reconcileSelectedEntries / "
+                 "replaceEntries) — re-anchor arm 11")]
     for m in calls:
+        fn = m.group(1)
         args = call_args(body, m.end() - 1)
         if len(args) < 2:
             out.append((rel, line_of(cc, m.start()), "11",
-                        "cannot read both arguments of replaceEntries( — fail-closed"))
+                        "cannot read both arguments of %s( — fail-closed" % fn))
             continue
         a, b = args[1]
         value = body[a:b].strip()
@@ -768,9 +777,9 @@ def check_refresh_handoff(cc, rel):
         pos = line_of(cc, m.start())
         if EMPTY_LITERAL_RE.match(flat):
             out.append((rel, pos, "11",
-                        "refreshModels hands replaceEntries a constant EMPTY list (`%s`) — "
+                        "refreshModels hands %s a constant EMPTY list (`%s`) — "
                         "every successful refresh wipes the instance's entries and prunes "
-                        "the pin" % value[:60]))
+                        "the pin" % (fn, value[:60])))
             continue
         ok = False
         for src in value_sources(value):
@@ -786,9 +795,9 @@ def check_refresh_handoff(cc, rel):
                     break
         if not ok:
             out.append((rel, pos, "11",
-                        "the list handed to replaceEntries (`%s`) does not derive from the "
+                        "the list handed to %s (`%s`) does not derive from the "
                         "fetchModels result — fail-closed: re-anchor arm 11"
-                        % re.sub(r"\s+", " ", value).strip()[:70]))
+                        % (fn, re.sub(r"\s+", " ", value).strip()[:70])))
     return out
 
 
@@ -1045,7 +1054,8 @@ PR_OK = """class ProviderRepository(private val context: Context) {
             instance, apiKey, isThirdParty, forceRefresh, context,
         )
         if (models.isNotEmpty()) {
-            replaceEntries(instance.id, models)
+            publishRemoteCatalog(instance.id, models, error = null)
+            reconcileSelectedEntries(instance.id, models)
         }
     }
 
@@ -1379,8 +1389,8 @@ PR_W_R3_NO_PRIOR_ID = PR_OK.replace(
 
 # W13: the fetch is green everywhere and the handoff drops its result.
 PR_W_R3_EMPTY_HANDOFF = PR_OK.replace(
-    "            replaceEntries(instance.id, models)",
-    "            replaceEntries(instance.id, emptyList())")
+    "            publishRemoteCatalog(instance.id, models, error = null)",
+    "            publishRemoteCatalog(instance.id, emptyList(), error = null)")
 
 # W14: the migration call, the anchors and the `compactModelEntryId = migrated`
 # spelling all survive; `migrated` is re-bound to the CURRENT pin.
