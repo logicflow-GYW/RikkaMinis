@@ -3026,6 +3026,30 @@ MODEL_DEFAULTS_GATES = [
 ]
 
 
+# [gateway-context-1112] The fetched-model context-window chain: the endpoint's
+# own /v1/models metadata is read, it outranks the models.dev registry, the
+# registry lookup falls back to the vendor-stripped id, there is ONE
+# context-window heuristic, and the prefilled guess is not pinned as an
+# override. Internal fixtures only — the gate mutates copies of the six
+# tracked files.
+GATEWAY_CONTEXT_GATES = [
+    ("gateway_context_metadata_check",
+     "GATEWAY_CONTEXT_METADATA_SELFTEST=PASS", (), (REPO_ROOT,)),
+]
+
+
+def test_gateway_context_gates():
+    print("━━━ gateway-context-1112 endpoint metadata precedence (selftest teeth + real tree) ━━━")
+    for script, marker, st_extra, real_args in GATEWAY_CONTEXT_GATES:
+        argv = [sys.executable, os.path.join(SCRIPT_DIR, script + ".py")] + list(st_extra) + ["--selftest"]
+        proc = subprocess.run(argv, capture_output=True, text=True)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        check("%s selftest has teeth (%s)" % (script, marker),
+              proc.returncode == 0 and marker in out, out[-280:])
+        rc, out = run_scanner(script + ".py", *real_args)
+        check("%s real tree green" % script, rc == 0, out[-280:])
+
+
 def test_model_defaults_gates():
     print("━━━ model-defaults-1112 fetched-model capability chain (selftest teeth + real tree) ━━━")
     for script, marker, st_extra, real_args in MODEL_DEFAULTS_GATES:
@@ -3388,6 +3412,7 @@ TEST_ORDER = (
     "test_da1025_gates",
     "test_w1027_storage_budget",
     "test_model_defaults_gates",
+    "test_gateway_context_gates",
     "test_da1026_gates",
     "test_auto_approve_gates",
     "test_primitive_selftests",

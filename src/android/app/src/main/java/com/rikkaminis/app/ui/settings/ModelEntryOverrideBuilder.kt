@@ -2,6 +2,7 @@ package com.rikkaminis.app.ui.settings
 
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelOverrides
+import com.rikkaminis.app.data.model.inferContextWindowTokens
 import com.rikkaminis.app.data.model.normalizeModalityName
 
 /**
@@ -73,7 +74,11 @@ internal fun buildModelEntryOverrides(
     return previous.copy(
         displayName = displayName.trim().takeIf { it.isNotEmpty() && it != baseModel.displayName },
         maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
-        contextWindow = contextWindowText.trim().toIntOrNull()?.takeIf { it > 0 },
+        contextWindow = resolveContextWindowOverride(
+            text = contextWindowText,
+            baseModel = baseModel,
+            previous = previous,
+        ),
         // supportsReasoning: persist only when user diverged from base.
         supportsReasoning = thinkingEnabled.takeIf { it != (baseModel.supportsReasoning ?: false) },
         // Modality lists: persist only when the user-edited set differs from
@@ -82,6 +87,51 @@ internal fun buildModelEntryOverrides(
         inputModalities = if (newInputs.toSet() != baseInputs.toSet()) newInputs else null,
         outputModalities = if (newOutputs.toSet() != baseOutputs.toSet()) newOutputs else null,
     )
+}
+
+/**
+ * [gateway-context-1112] Decide the `contextWindow` override for a save.
+ *
+ * The screen PREFILLS the field with a guess when no real value is known
+ * anywhere (no user override, nothing from the endpoint, nothing in the
+ * models.dev registry) — see `ModelEntryDetailScreen`'s
+ * `inferContextWindowTokens(baseModel)` fallback. Writing that guess into
+ * the override would PIN it: an override beats every source, so the guess
+ * would outrank the number the endpoint later reports for the same model, and
+ * the entry could never track the real window again. That is the same
+ * "freeze today's value" defect the modality fields had (da1023-B defect 4).
+ *
+ * So the override is written only when the value carries USER INTENT:
+ *
+ *  - blank / non-positive → null (the user cleared the field);
+ *  - equal to the value already in `previous` → keep it verbatim (the user
+ *    did not change their own override);
+ *  - equal to the base model's real window → null (inherit it — the base
+ *    already carries it, and an equal override would freeze it);
+ *  - equal to the heuristic guess while the base has NO real window → null
+ *    (this is the untouched prefill, not an edit);
+ *  - anything else → the typed value (a genuine edit).
+ *
+ * The last two rules are what keeps the prefilled guess out of the
+ * persisted row, so the endpoint's own number wins the moment it arrives.
+ */
+internal fun resolveContextWindowOverride(
+    text: String,
+    baseModel: LLMModel,
+    previous: ModelOverrides,
+): Int? {
+    val parsed = text.trim().toIntOrNull()?.takeIf { it > 0 } ?: return null
+    val previousValue = previous.contextWindow
+    if (previousValue != null && parsed == previousValue) return parsed
+    val baseValue = baseModel.contextWindow?.takeIf { it > 0 }
+    if (baseValue != null) {
+        // Same as the base → inherit, do not freeze.
+        return if (parsed == baseValue) null else parsed
+    }
+    // No real value on the base: the only thing the screen could have
+    // pre-filled is the shape guess. Untouched → inherit (null); edited → pin.
+    val guess = inferContextWindowTokens(baseModel)
+    return if (parsed == guess) null else parsed
 }
 
 /**
