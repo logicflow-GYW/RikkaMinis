@@ -27,7 +27,7 @@ jobs:
   #
   # [ci/speed] This used to be the first step of the single build job, which
   # bought "a gate failure costs ~3 minutes, not ~12". That ordering is given
-  # up here on purpose: the 113 gates have been green run after run, so the
+  # up here on purpose: the 114 gates have been green run after run, so the
   # common case paid their full 178s as pure latency in front of everything
   # else. In the job split they run BESIDE the two heavy jobs instead.
   # If gate failures ever become frequent again, the revert is: fold this job
@@ -55,7 +55,7 @@ jobs:
           # this build stamps its artifacts green.
           #
           # [ci/speed] Measured on run 41367085524: this step is 182s, of which
-          # 121s is test_scan.py and 63s is the 113 gates. The fixtures only
+          # 121s is test_scan.py and 63s is the 114 gates. The fixtures only
           # re-prove the SCANNERS; a scanner can lose teeth only if
           # scripts/scan/** moved in this push, and on every other push the
           # gates above have already run over this exact tree. So: run the
@@ -90,7 +90,7 @@ jobs:
             printf '%s\n' "$CHANGED"
             python3 scripts/scan/test_scan.py --jobs 4
           else
-            echo "::notice::scripts/scan/** untouched in this push — skipping the fixture self-test (~121s); scan.sh ran all 113 gates over this tree"
+            echo "::notice::scripts/scan/** untouched in this push — skipping the fixture self-test (~121s); scan.sh ran all 114 gates over this tree"
           fi
 
   # ────────────────────────────────────────────────────────────────────────

@@ -12,6 +12,9 @@ import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.LLMUsage
 import com.rikkaminis.app.data.model.ThinkingLevel
+import com.rikkaminis.app.data.model.acceptsImageInput
+import com.rikkaminis.app.data.model.ImageInputDecision
+import com.rikkaminis.app.data.model.imageInputDecision
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.ProviderBoundary
 import com.rikkaminis.app.provider.TOOL_LOG_INPUT_STEP_CHARS
@@ -2072,7 +2075,22 @@ class OpenAIProvider constructor(
         // server returns "400 unknown variant `image_url`". Decided once
         // here so the structured-contentParts loop and the legacy
         // imageParts loop below stay consistent.
-        val supportsImages = "image" in (model.inputModalities ?: emptyList())
+        //
+        // [model-defaults-1112] The decision is now the shared tri-state
+        // (LLMModel.imageInputDecision): declared-vision → send, declared
+        // text-only → placeholder, unknown → placeholder for a KNOWN vision
+        // family (relay rows without an architecture block) and placeholder +
+        // a named log line otherwise, so the case is measurable instead of
+        // silent. Never "send and see" for UNKNOWN: the image part would stay
+        // in history and brick every later turn of the conversation.
+        val supportsImages = model.acceptsImageInput
+        if (!supportsImages && model.imageInputDecision == ImageInputDecision.UNKNOWN) {
+            android.util.Log.i(
+                "OpenAIProvider",
+                "[model-defaults] image→placeholder reason=undeclared-input-modalities model=${model.id} " +
+                    "provider=${model.provider} — declare the model's image input (Settings → model detail) to send it",
+            )
+        }
         // Defense-in-depth: strip orphan tool_use/tool_result pairing before
         // serialization (upstream history construction is the first line).
         // OpenAI rejects an unanswered `tool_calls` entry (no following
@@ -3079,7 +3097,8 @@ class OpenAIProvider constructor(
         // keeping the two paths symmetric prevents future regressions when
         // a non-vision model gets routed through Responses (e.g. via
         // forceResponsesAPI on a custom provider).
-        val supportsImages = "image" in (model.inputModalities ?: emptyList())
+        // [model-defaults-1112] Shared tri-state decision — see buildRequestBody.
+        val supportsImages = model.acceptsImageInput
         // Defense-in-depth: strip orphan tool_use/tool_result pairing before
         // serialization (same rationale as buildRequestBody — the Responses
         // API rejects an unanswered function_call and a function_call_output

@@ -28,6 +28,15 @@ object ModelsDevApi {
     private const val TAG = "ModelsDevApi"
     private const val SOURCE_URL = "https://models.dev/api.json"
     private const val CACHE_TTL_MS = 48 * 3600 * 1000L // 48 hours
+    // [model-defaults-1112] Sanity floor for a downloaded registry: refuse to
+    // install/overwrite with anything under this many providers. models.dev
+    // currently serves 235 (measured 2026-11-12); a degraded answer — a CDN
+    // error page that happens to parse, a rate-limited stub, a partial export —
+    // would otherwise replace a perfectly good disk cache, and on a device that
+    // cannot reach models.dev reliably that is a one-way door: the registry is
+    // the ONLY source of context-window / modality / reasoning defaults for
+    // fetched models. rikkahub guards the same path with MIN_CATALOG_SIZE.
+    private const val MIN_REGISTRY_PROVIDERS = 100
 
     // Provider-key mapping for enrichment lookups (matches iOS)
     //
@@ -365,9 +374,29 @@ object ModelsDevApi {
 
     private fun refreshFromNetwork() {
         try {
-            val request = Request.Builder().url(SOURCE_URL).build()
+            // [model-defaults-1112] Conditional GET: the registry is ~6 MB, it only
+            // changes a few times a day, and this runs in the background every 48 h
+            // (plus once on first cold start, see the F-206 note in loadRegistry).
+            // Without an ETag every refresh re-downloads the whole document on a
+            // mobile connection; with it, an unchanged document costs a 304.
+            val etagFile = getEtagFile()
+            val previousEtag = etagFile?.takeIf { it.exists() }?.readText()?.trim()?.ifEmpty { null }
+            val request = Request.Builder()
+                .url(SOURCE_URL)
+                .apply { if (previousEtag != null) header("If-None-Match", previousEtag) }
+                .build()
             val response = client.newCall(request).execute()
             try {
+                if (response.code == 304) {
+                    // Not modified since the last success. The in-memory/disk copy
+                    // stays authoritative; stamp the timestamp so the 48h window
+                    // restarts (otherwise we would re-validate on every launch).
+                    synchronized(this) {
+                        if (cachedRegistry != null) cacheTimestamp = System.currentTimeMillis()
+                    }
+                    Log.d(TAG, "models.dev not modified (304)")
+                    return
+                }
                 if (!response.isSuccessful) {
                     Log.e(TAG, "models.dev HTTP error: ${response.code}")
                     return
@@ -375,14 +404,27 @@ object ModelsDevApi {
                 val body = response.body?.string() ?: return
 
                 val parsed = parseRegistry(body)
-                if (parsed != null) {
-                    synchronized(this) {
-                        cachedRegistry = parsed
-                        cacheTimestamp = System.currentTimeMillis()
-                    }
-                    saveDiskCache(body)
-                    Log.d(TAG, "Background-refreshed models.dev registry: ${parsed.size} providers")
+                if (parsed == null) {
+                    Log.e(TAG, "models.dev payload did not parse as a registry — keeping the previous copy")
+                    return
                 }
+                // [model-defaults-1112] Never let a degraded payload overwrite a
+                // usable copy — see MIN_REGISTRY_PROVIDERS.
+                if (parsed.size < MIN_REGISTRY_PROVIDERS) {
+                    Log.e(
+                        TAG,
+                        "models.dev registry suspiciously small (${parsed.size} providers < " +
+                            "$MIN_REGISTRY_PROVIDERS) — keeping the previous copy",
+                    )
+                    return
+                }
+                synchronized(this) {
+                    cachedRegistry = parsed
+                    cacheTimestamp = System.currentTimeMillis()
+                }
+                saveDiskCache(body)
+                runCatching { etagFile?.writeText(response.header("ETag").orEmpty()) }
+                Log.d(TAG, "Background-refreshed models.dev registry: ${parsed.size} providers")
             } finally {
                 // [fix/audit-s4l1] close on all paths — previously a null body
                 // (204 no-content) returned early WITHOUT close, leaking the
@@ -546,6 +588,14 @@ object ModelsDevApi {
         return File(dir, "api.json")
     }
 
+    /** [model-defaults-1112] ETag of the last successful refresh, for If-None-Match. */
+    private fun getEtagFile(): File? {
+        val ctx = appContext ?: return null
+        val dir = File(ctx.cacheDir, "models-dev-cache")
+        if (!dir.exists()) dir.mkdirs()
+        return File(dir, "api.etag")
+    }
+
     private fun loadDiskCache(): Pair<Map<String, ProviderEntry>, Long>? {
         val file = getCacheFile() ?: return null
         if (!file.exists()) return null
@@ -561,7 +611,23 @@ object ModelsDevApi {
     private fun saveDiskCache(jsonStr: String) {
         val file = getCacheFile() ?: return
         try {
-            file.writeText(jsonStr)
+            // [model-defaults-1112] Atomic replace: write a sibling tmp file, then
+            // rename over the target. The previous `file.writeText` truncated in
+            // place, so a process kill (or a failed disk write) mid-call left a
+            // partial JSON at the canonical path — and loadDiskCache's parse
+            // failure then returned null, wiping the ONLY copy of the registry on
+            // a device whose network cannot reach models.dev (timeout observed on
+            // device 2026-11-10). A torn cache file is not a recoverable state
+            // when the network is the only other source.
+            val tmp = File(file.parentFile, file.name + ".tmp")
+            tmp.writeText(jsonStr)
+            if (!tmp.renameTo(file)) {
+                // Rename across filesystems / a pre-existing target: fall back to
+                // a copy, still never truncating the live file before the new
+                // bytes are complete.
+                tmp.copyTo(file, overwrite = true)
+                tmp.delete()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save disk cache: ${e.message}")
         }

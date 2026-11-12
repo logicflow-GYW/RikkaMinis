@@ -34,12 +34,11 @@ data class LLMModel(
     /**
      * Where the effective context window actually comes from. For models
      * without a real `contextWindow` value, [contextWindowTokens] falls back
-     * to an id-based heuristic guess — and a 1M-context model whose metadata
-     * wasn't reported (custom/router/image-output/obscure ids) silently lands
-     * on the 128K guess, which both UNDER-triggers nothing (safe) but also
-     * caps offload/compaction judgment at ⅛ of real capacity (wastes paid
-     * context). We surface the source so the UI can mark guesses as guesses
-     * and steer the user to correct them.
+     * to an id-based heuristic guess, and a wrong guess costs something in
+     * BOTH directions: too small caps offload/compaction judgment below real
+     * capacity (paid context goes unused), too large reaches a provider
+     * 400 — which is why the guess is surfaced (EXPLICIT vs HEURISTIC) so the
+     * UI can mark it as a guess and steer the user to correct it.
      *
      * [contextWindowSource] is meant to be read on a *user-override-resolved*
      * model (i.e. `ModelEntry.model`, which folds `ModelOverrides.contextWindow`
@@ -263,19 +262,31 @@ data class LLMModel(
             if (lid.contains("o3") || lid.contains("o4")) return 200_000
             if (lid.contains("codex")) return 200_000
             if (lid.contains("deepseek")) return 128_000
-            // Default: assume a modern long-context model rather than 64K so the
-            // group context-limit slider doesn't collapse to a single stop.
-            return 128_000
+            // [T-model-defaults-1112] Optimistic default for unknown ids: most
+            // current-generation models ship ≥256K context (models.dev sample,
+            // 2026-11-12: 68% of 8830 declared rows are ≥256K, the modal value
+            // is 1M), so 128K under-used real capacity on the majority while a
+            // too-large guess merely trips a provider 400 — which the
+            // compaction self-heal (`isContextTooLargeError` halving retry in
+            // AgentLoopEngine / CompactOrchestration) recovers from. 1M is the
+            // mode of the declared distribution, not a round lucky number.
+            // The guess is still marked HEURISTIC (see contextWindowSource) so
+            // TokenUsageSheet labels it as a guess.
+            return 1_000_000
         }
 
     /**
      * Capability hint appended to the system prompt so the model knows exactly
      * what it can natively consume vs what it must route through shell tools.
-     * Returns `null` for fully-multimodal models (no hint needed). Matches the
-     * iOS `capabilityPromptFragment` wording so Android/iOS chats are identical
-     * when routed through the same model.
+     * Returns `null` for fully-multimodal models — and for models whose input
+     * modalities are UNKNOWN (see [acceptsImageInput]): asserting "you cannot
+     * natively process images" on a model that never declared its inputs is
+     * what made an undeclared vision relay answer "I can't see the image".
+     * Matches the iOS `capabilityPromptFragment` wording so Android/iOS chats
+     * are identical when routed through the same model.
      */
     fun capabilityPromptFragment(): String? {
+        if (inputModalities.normalizeModalities() == null) return null
         val inputs = inputModalities?.map { it.lowercase() } ?: emptyList()
         val hasImage = "image" in inputs
         val hasPdf = "pdf" in inputs
@@ -341,6 +352,88 @@ fun String.normalizeModalityName(): String =
 
 fun List<String>?.normalizeModalities(): List<String>? =
     this?.map { it.normalizeModalityName() }?.distinct()?.takeIf { it.isNotEmpty() }
+
+/**
+ * [model-defaults-1112] Why an image part ends up as an image or as a text
+ * placeholder — the single decision point for all three providers.
+ */
+enum class ImageInputDecision {
+    /** The model declares `image` in its input modalities. */
+    NATIVE,
+
+    /** Nothing declared, but the id belongs to a family that is vision-capable. */
+    FAMILY_HINT,
+
+    /** The model declares input modalities and `image` is NOT among them. */
+    DECLARED_TEXT_ONLY,
+
+    /** Nothing declared and no family signal — capability genuinely unknown. */
+    UNKNOWN,
+}
+
+/**
+ * Families whose models accept images but whose relay/`/v1/models` row may
+ * carry no `architecture` block (and may predate the models.dev row). Positive
+ * signals only — this must never widen a DECLARED text-only model, see
+ * [imageInputDecision].
+ */
+internal fun looksLikeVisionFamily(modelId: String): Boolean {
+    val id = modelId.lowercase()
+    return when {
+        // OpenAI: every gpt-4o/4.1/5.x and the o-series accept images.
+        id.contains("gpt-4o") || id.contains("gpt-4.1") || id.contains("gpt-5") -> true
+        id.startsWith("o3") || id.startsWith("o4") || id.contains("-o3") || id.contains("-o4") -> true
+        // Anthropic: 3.x and later are multimodal (2.x is text-only).
+        id.contains("claude") && !id.contains("claude-2") && !id.contains("claude-instant") -> true
+        // Google: Gemini 1.0 Pro was text-only; everything since accepts images.
+        id.contains("gemini") && !id.contains("1.0") -> true
+        // Open-weight / gateway vision families.
+        id.contains("-vl") || id.contains("vl-") || id.contains("vision") -> true
+        id.contains("glm-4v") || id.contains("glm-4.5v") || id.contains("glm-5v") -> true
+        id.contains("llava") || id.contains("pixtral") || id.contains("internvl") -> true
+        id.contains("minicpm-v") || id.contains("mimo-vl") || id.contains("step-1v") -> true
+        id.contains("grok-2-vision") || id.contains("grok-4") -> true
+        else -> false
+    }
+}
+
+/**
+ * [model-defaults-1112] The image-input decision for this model.
+ *
+ * "Not declared" is NOT "declared no", but it also must not be silently read as
+ * "yes": an undeclared text-only endpoint answers 400 `unknown variant
+ * image_url` / `unknown variant image`, and there is no strip-images-and-retry
+ * path — the image part stays in the conversation history, so every later turn
+ * would 400 as well. That is why the UNKNOWN branch degrades to the placeholder
+ * (conversation stays usable) while [FAMILY_HINT] is allowed through: a known
+ * vision family on a relay is the common real case (the relay's `/v1/models`
+ * reports no `architecture`), and the family signal is the evidence that makes
+ * sending safe.
+ *
+ * Consumers: `OpenAIProvider` (both request builders), `AnthropicProvider`,
+ * `GeminiProvider`. They share this property so the three cannot drift — they
+ * did drift from `ChatViewModel.currentModelSupportsImages`, which is lenient
+ * (`?: true`) because the ATTACH affordance should not be locked by unknown
+ * metadata.
+ */
+val LLMModel.imageInputDecision: ImageInputDecision
+    get() {
+        val declared = inputModalities.normalizeModalities()
+        if (declared != null) {
+            return if (declared.any { it.equals("image", ignoreCase = true) }) {
+                ImageInputDecision.NATIVE
+            } else {
+                ImageInputDecision.DECLARED_TEXT_ONLY
+            }
+        }
+        return if (looksLikeVisionFamily(id)) ImageInputDecision.FAMILY_HINT else ImageInputDecision.UNKNOWN
+    }
+
+/** True when an `image` part may be put on the wire for this model. */
+val LLMModel.acceptsImageInput: Boolean
+    get() = imageInputDecision.let {
+        it == ImageInputDecision.NATIVE || it == ImageInputDecision.FAMILY_HINT
+    }
 
 /**
  * Canonical direction-suffixed modality names, in emission order. This is the

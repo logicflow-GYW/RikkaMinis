@@ -3017,6 +3017,27 @@ STORAGE_BUDGET_GATES = [
 ]
 
 
+# model-defaults-1112: the fetched-model capability chain (image tri-state
+# owner / cache-path re-enrich / registry floor+304+atomic write). Internal
+# fixtures only — the gate mutates copies of the ten tracked files.
+MODEL_DEFAULTS_GATES = [
+    ("model_defaults_capability_source_check",
+     "MODEL_DEFAULTS_CAPABILITY_SOURCE_SELFTEST=PASS", (), (REPO_ROOT,)),
+]
+
+
+def test_model_defaults_gates():
+    print("━━━ model-defaults-1112 fetched-model capability chain (selftest teeth + real tree) ━━━")
+    for script, marker, st_extra, real_args in MODEL_DEFAULTS_GATES:
+        argv = [sys.executable, os.path.join(SCRIPT_DIR, script + ".py")] + list(st_extra) + ["--selftest"]
+        proc = subprocess.run(argv, capture_output=True, text=True)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        check("%s selftest has teeth (%s)" % (script, marker),
+              proc.returncode == 0 and marker in out, out[-280:])
+        rc, out = run_scanner(script + ".py", *real_args)
+        check("%s real tree green" % script, rc == 0, out[-280:])
+
+
 def test_w1027_storage_budget():
     print("━━━ W-1027 C storage budget loop (selftest teeth + real tree) ━━━")
     for script, marker, st_extra, real_args in STORAGE_BUDGET_GATES:
@@ -3366,6 +3387,7 @@ TEST_ORDER = (
     "test_da1024_gates",
     "test_da1025_gates",
     "test_w1027_storage_budget",
+    "test_model_defaults_gates",
     "test_da1026_gates",
     "test_auto_approve_gates",
     "test_primitive_selftests",

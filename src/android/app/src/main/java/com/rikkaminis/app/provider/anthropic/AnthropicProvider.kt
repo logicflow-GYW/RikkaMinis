@@ -8,6 +8,9 @@ import com.rikkaminis.app.data.model.LLMError
 import com.rikkaminis.app.data.model.parseRetryAfterMs
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
+import com.rikkaminis.app.data.model.acceptsImageInput
+import com.rikkaminis.app.data.model.ImageInputDecision
+import com.rikkaminis.app.data.model.imageInputDecision
 import com.rikkaminis.app.provider.LegacyMediaPlan
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
@@ -860,7 +863,15 @@ class AnthropicProvider(
         // cannot be sent an image block, so image parts are downgraded to a
         // text placeholder below instead of letting the upstream answer 400
         // `unknown variant image`.
-        val supportsImages = "image" in (model.inputModalities ?: emptyList())
+        // [model-defaults-1112] Shared tri-state (declared-vision / known vision
+        // family / declared text-only / unknown) — see LLMModel.imageInputDecision.
+        val supportsImages = model.acceptsImageInput
+        if (!supportsImages && model.imageInputDecision == ImageInputDecision.UNKNOWN) {
+            android.util.Log.i(
+                "AnthropicProvider",
+                "[model-defaults] image→placeholder reason=undeclared-input-modalities model=${model.id}",
+            )
+        }
         val messagesArray = JSONArray()
         for ((index, msg) in messages.withIndex()) {
             val obj = JSONObject()

@@ -22,10 +22,12 @@ import org.json.JSONObject
  * not internal state, so any refactor that reintroduces an empty block flips
  * them red.
  *
- * claudeHaiku45 carries no `inputModalities`, so the provider treats it as
- * non-vision and every image arm emits the [VISION_UNSUPPORTED_PLACEHOLDER]
- * text block. That is the arm asserted below — it needs no image bytes on the
- * wire, and it proves the carrier was consumed.
+ * [model-defaults-1112] The fixture model pins `inputModalities = ["text"]`
+ * (DECLARED text-only) so the provider treats it as non-vision by contract and
+ * every image arm emits the [VISION_UNSUPPORTED_PLACEHOLDER] text block —
+ * absent metadata would now fall to the vision-family hint (claude id) and
+ * send the image. That is the arm asserted below — it needs no image bytes on
+ * the wire, and it proves the carrier was consumed.
  */
 class AnthropicContentBlocksWireTest {
 
@@ -40,7 +42,7 @@ class AnthropicContentBlocksWireTest {
         server.start()
         provider = AnthropicProvider(
             apiKey = "test-key",
-            model = LLMModel.claudeHaiku45,
+            model = LLMModel.claudeHaiku45.copy(inputModalities = listOf("text")),
             basePath = server.url("/").toString().trimEnd('/'),
         )
     }

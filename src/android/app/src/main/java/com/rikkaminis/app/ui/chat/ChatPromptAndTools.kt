@@ -2178,7 +2178,15 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded(force: Boolean = false) 
             // models where OFF is still a no-op (e.g. Qwen3, which thinks by
             // default), keep the T334 budget bump so it can finish thinking
             // and still emit the JSON. Unified with regenerateTitle's ladder.
-            val titleMaxTokens = if (provider.model.supportsReasoning == true) 2048 else 100
+            // [model-defaults-1112] `!= false`, not `== true`: the headroom exists
+            // so a model that thinks by default (Qwen3 — OFF is a no-op there)
+            // can finish its hidden thinking and still emit the title JSON.
+            // An UNDECLARED reasoning model (relay row, registry unreachable)
+            // failed the strict gate and got 100 tokens — truncated thinking,
+            // broken title — exactly the null-semantics family this branch
+            // fixes. Lenient costs nothing: maxTokens is a ceiling, a
+            // non-reasoning model never reaches it.
+            val titleMaxTokens = if (provider.model.supportsReasoning != false) 2048 else 100
             val titleInstance = provider.instanceContext ?: run {
                 // Cannot dispatch a provider-created title call without an
                 // instance — surface as a typed error (never in-process).

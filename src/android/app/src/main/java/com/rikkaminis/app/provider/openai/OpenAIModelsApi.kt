@@ -68,9 +68,19 @@ object OpenAIModelsApi {
             // override existed would still carry models.dev's under-declared tier set
             // and cap the picker, so the correction is re-applied on the cache path too
             // (it is a no-op for every host we have no measurement for).
+            // [model-defaults-1112] Re-enrich on the cache read path. Rows are
+            // saved post-enrich, but a cache entry written while the models.dev
+            // registry was unavailable (fresh install: loadRegistry's null branch
+            // returns before the background refresh lands — on-device timeouts
+            // observed 2026-11-10) stays un-enriched for the whole 7-day
+            // ProviderModelsCache TTL, and every reader of those rows then sees
+            // null contextWindow / maxOutputTokens / reasoning / modalities.
+            // enrichModels is `dev ?: existing` per field (idempotent) and the
+            // network path applies it anyway, so this only makes the two paths
+            // agree instead of letting cache age decide the model's capabilities.
             cache.load(ctx, cacheKey)?.let {
                 return@withContext ModelsDevApi.applyGatewayEffortTruth(
-                    it.withProviderName(isCustomBase, providerName), baseURL
+                    ModelsDevApi.enrichModels(it.withProviderName(isCustomBase, providerName)), baseURL
                 )
             }
         }

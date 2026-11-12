@@ -41,12 +41,21 @@ object StreamTimeouts {
 
 /**
  * [T264] The placeholder text emitted in place of an image part when the
- * target model declares no `image` input modality. One literal, so the three
+ * target model does not accept image input. One literal, so the three
  * providers cannot drift apart — OpenAIProvider carried this string inline in
  * three places before this file existed.
+ *
+ * [model-defaults-1112] Reworded to name the CAUSE and the REMEDY. The old
+ * wording read as a verdict on the model ("does not support vision"), which is
+ * wrong in the unknown-metadata case: nothing was declared, the image was
+ * withheld by OUR gate, and the fix is a user action (declare image input, or
+ * refresh the model list so the registry lands). The model sees this string as
+ * a text part, so it can relay the remedy to the user verbatim.
  */
 const val VISION_UNSUPPORTED_PLACEHOLDER =
-    "[Image attached but this model does not support vision input]"
+    "[An image was attached but withheld: this model does not declare image input. " +
+        "If the model actually supports vision, enable image input for it in the model settings " +
+        "or refresh its provider's model list]"
 
 /**
  * [T264 / §27a] Decide what to emit for an image part.
