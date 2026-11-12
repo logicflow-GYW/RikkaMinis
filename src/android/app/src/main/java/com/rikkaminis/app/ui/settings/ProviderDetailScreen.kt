@@ -192,6 +192,13 @@ fun ProviderDetailScreen(
     // `visibleEntries` lives on the repo and filters the same StateFlow-backed
     // list, so selection changes in the manager sheet update this list
     // reactively with zero extra wiring.
+    // [model-catalog-split] Remote catalog observation: refreshRemoteCatalog
+    // publishes here (memory; the 7-day disk cache stays the persistence
+    // layer). Declared BEFORE the two remember blocks below that use it as a
+    // key — Kotlin locals are order-sensitive, and the CI build red'd on
+    // exactly this ordering (Unresolved reference 'remoteCatalogs').
+    val remoteCatalogs by providerRepository.remoteCatalogs.collectAsState()
+    val remoteCatalog = remoteCatalogs[instanceId] ?: RemoteCatalogState()
     val entries = remember(instanceId, config, remoteCatalogs) {
         providerRepository.visibleEntries(instanceId)
     }
@@ -204,14 +211,6 @@ fun ProviderDetailScreen(
     val allEntries = remember(instanceId, config, remoteCatalogs) {
         providerRepository.entriesFor(instanceId)
     }
-    // [model-catalog-split] Remote catalog observation: refreshRemoteCatalog
-    // publishes here (memory; the 7-day disk cache stays the persistence
-    // layer). Feeds the "Manage All Models" subtitle, and is a remember key
-    // below so the subtitle updates the moment a refresh publishes a new
-    // state — without this the row kept a stale "Not fetched yet" until an
-    // unrelated config change recomposed the screen.
-    val remoteCatalogs by providerRepository.remoteCatalogs.collectAsState()
-    val remoteCatalog = remoteCatalogs[instanceId] ?: RemoteCatalogState()
     var isRefreshing by remember { mutableStateOf(false) }
 
     val exportContext = androidx.compose.ui.platform.LocalContext.current
