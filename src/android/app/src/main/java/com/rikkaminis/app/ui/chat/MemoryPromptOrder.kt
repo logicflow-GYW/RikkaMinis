@@ -54,6 +54,18 @@ internal object MemoryPromptOrder {
     fun orderInVolatileTail(all: List<Fragment>): List<Fragment> =
         all.filter { it.key in VOLATILE }.sortedBy { VOLATILE.indexOf(it.key) }
 
+    /**
+     * Sub-agent context assembly: standing fragments in order, then the
+     * volatile tail. The sub-agent has NO "Runtime context:" anchor (its
+     * skill-instructions head must stay byte-stable instead), so the daily
+     * fragment rides LAST rather than being dropped. The plain
+     * [orderInStandingRegion] previously used at this call site FILTERS by
+     * membership and silently discarded DAILY_MEMORY — the sub-agent lost
+     * its recent memory on every dispatch (probe-reproduced, then fixed).
+     */
+    fun orderForSubagentContext(all: List<Fragment>): List<Fragment> =
+        orderInStandingRegion(all) + orderInVolatileTail(all)
+
     /** Joins fragments the way buildSystemPrompt does: "\n\n" between blocks. */
     fun join(fragments: List<Fragment>): String =
         fragments.joinToString("\n\n") { it.text }

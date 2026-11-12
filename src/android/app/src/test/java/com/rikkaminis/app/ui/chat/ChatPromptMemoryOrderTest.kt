@@ -188,4 +188,64 @@ class ChatPromptMemoryOrderTest {
         assertEquals("", MemoryPromptOrder.join(MemoryPromptOrder.orderInStandingRegion(onlyDaily)))
         assertEquals("D", MemoryPromptOrder.join(MemoryPromptOrder.orderInVolatileTail(onlyDaily)))
     }
+
+    // ── 8. Sub-agent context assembly ──────────────────────────────────────
+    // Regression: the sub-agent call site originally routed EVERYTHING through
+    // orderInStandingRegion, whose membership filter silently dropped
+    // DAILY_MEMORY (the sub-agent has no "Runtime context:" anchor to emit it
+    // after). Probe-reproduced on 2026-11-12; these three tests pin the fix.
+    // Fixture note: the sub-agent call site adds only SKILL/GLOBAL/ROLLUP/
+    // DAILY — never ROLLUP_SIZE_HINT — so use a production-shaped set here.
+
+    private val subagentAll = all.filter { it.key != MemoryPromptOrder.Key.ROLLUP_SIZE_HINT }
+
+    @Test
+    fun subagentContext_includesDailyMemory() {
+        val keys = MemoryPromptOrder.orderForSubagentContext(subagentAll).map { it.key }
+        assertTrue(
+            "DAILY_MEMORY dropped from sub-agent context — the sub-agent just lost its recent memory",
+            MemoryPromptOrder.Key.DAILY_MEMORY in keys,
+        )
+    }
+
+    @Test
+    fun subagentContext_dailyRidesLast() {
+        val keys = MemoryPromptOrder.orderForSubagentContext(subagentAll).map { it.key }
+        assertEquals(
+            listOf(
+                MemoryPromptOrder.Key.SKILL,
+                MemoryPromptOrder.Key.GLOBAL_MEMORY,
+                MemoryPromptOrder.Key.ROLLUP,
+                MemoryPromptOrder.Key.DAILY_MEMORY,
+            ),
+            keys,
+        )
+    }
+
+    @Test
+    fun subagentContext_memoryWrite_keepsHeadByteStable() {
+        // The sub-agent's cache invariant: its prompt head (skill + global +
+        // rollup + separator) stays byte-stable across a memory_write; only
+        // the trailing daily fragment carries new bytes. Both full contexts
+        // must therefore start with the same literal head, while differing
+        // overall (negative control).
+        val head = "SKILL-BODY\n\nGLOBAL-BODY\n\nROLLUP-BODY\n\n"
+        val before = MemoryPromptOrder.join(
+            MemoryPromptOrder.orderForSubagentContext(subagentAll),
+        )
+        val after = MemoryPromptOrder.join(
+            MemoryPromptOrder.orderForSubagentContext(
+                subagentAll.map {
+                    if (it.key == MemoryPromptOrder.Key.DAILY_MEMORY) {
+                        it.copy(text = it.text + "\n<!-- 2026-11-12 12:00:00 -->\n## new memory entry")
+                    } else {
+                        it
+                    }
+                },
+            ),
+        )
+        assertTrue("head bytes moved across a memory_write", before.startsWith(head))
+        assertTrue("head bytes moved across a memory_write", after.startsWith(head))
+        assertTrue("volatile tail did not change (ordering would be pointless)", before != after)
+    }
 }

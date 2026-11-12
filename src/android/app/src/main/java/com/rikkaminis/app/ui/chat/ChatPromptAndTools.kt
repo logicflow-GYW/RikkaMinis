@@ -525,7 +525,10 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     // [fix/memcache-prefix-split] Stable→volatile ordering: global + rollup
     // (slow-changing) first, daily log (changes on EVERY memory_write) LAST
     // so the sub-agent's prefix cache survives memory writes too. Order
-    // defined once in MemoryPromptOrder — keep buildSystemPrompt in sync.
+    // defined once in MemoryPromptOrder. Use orderForSubagentContext, NOT
+    // orderInStandingRegion: the sub-agent has no Runtime-context anchor, so
+    // the daily fragment must ride LAST — the standing-region filter would
+    // silently drop it (probe-reproduced regression of this very branch).
     val subagentContext = buildList {
         skillRepository?.skillPromptFragment(activeSessionId)?.let {
             add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.SKILL, it))
@@ -541,7 +544,7 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
                 add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.DAILY_MEMORY, it))
             }
         }
-    }.let(MemoryPromptOrder::orderInStandingRegion).map { it.text }
+    }.let(MemoryPromptOrder::orderForSubagentContext).map { it.text }
     val systemPrompt = SubagentSkill.buildSystemPrompt(skill, subagentContext)
     val provider = currentProvider ?: return ToolExecutionResult(
         "Error: No active provider available", false, toolTitle = title,
