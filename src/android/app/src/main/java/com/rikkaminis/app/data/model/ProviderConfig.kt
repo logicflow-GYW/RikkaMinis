@@ -392,6 +392,20 @@ data class ModelEntry(
     val isCustom: Boolean = false,
     val isHidden: Boolean = false,
     val uuid: String = UUID.randomUUID().toString(),
+    /**
+     * [field-identity-1113] Provenance stamp: epoch millis of the last write
+     * that came from a user gesture; `null` when the entry has only ever
+     * carried catalog/backup values.
+     *
+     * Writer rule: [com.rikkaminis.app.data.repository.ProviderRepository.updateEntry]
+     * stamps `now` unless the caller states the values came from a file
+     * (`stampUserModified = false` — only the restore path does that).
+     *
+     * Reader contract: it must round-trip byte-identical so a repeated restore
+     * stays a no-op in `mergeImportedEntryOntoLocal`. Nothing reads it for
+     * display, ordering or arbitration, and it answers a different question
+     * than [isUserModified].
+     */
     val userModifiedAt: Long? = null,
     /**
      * [T-recovery] Optional cost tier used by groups with
