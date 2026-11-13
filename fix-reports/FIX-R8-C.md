@@ -275,7 +275,61 @@ PRE 臂 18 条红的分布（逐条可复跑）：C-F01 5 条 · C-F03 2 条 · 
 
 ### 5.1 CI 结论（收口回填）
 
-<!-- CI_RESULT -->
+**run `43509802835`**（https://github.com/logicflow-GYW/RikkaMinis/actions/runs/43509802835）
+· **`head_sha` = `632e8f001b70531b27fc0fd5c5048784604a9a42` = 本地 HEAD 逐字符一致** ✅
+· `status = completed` / `conclusion = success`
+
+| job | id | 结论 | 日志证据（逐条搜到，不只看绿） |
+|---|---|---|---|
+| unit-tests | `132176954359` | success | `BUILD SUCCESSFUL in 6m 20s`；**`PASSED$` 行 9017 条**（`grep -c`）；本支 7 个测试类全部在册且逐条 PASSED：`ToolCallResiduePolicyTest`(26) · `ParallelToolBatchBlocksTest`(9) · `PasteTextBufferTest`(36) · `PastedTextBufferMarkerTest`(7) · `MarkdownClipboardInlineTest`(15) · `ChatViewModelMentionSelectTest`(5) · `PasteFoldWiringTest`(11) |
+| scan-gate | `132176953499` | success | **`Summary: 115 passed, 0 failed`**（`[115/115]` 全跑）；`chat_ui_interaction_check` → `CHAT-UI-INTERACTION GATE OK`；`grep FAILED` 无非-PASSED 命中 |
+| lint | `132176954020` | success | — |
+| build-apk | `132176954198` | success | — |
+| publish | `132182878087` | success | — |
+
+**★ 夹具本次未跑（必须写明，不能拿「CI 绿」顶替）**：本支 **零改动** `scripts/scan/**`，日志里实际输出是
+
+```
+##[notice]scripts/scan/** untouched in this push — skipping the fixture self-test (~121s); scan.sh ran all 115 gates over this tree
+```
+
+所以**本批不能声称「夹具全绿」**——只能说「115 个门全部跑过 + 单测全绿」。这与 GLOBAL「CI 绿 ≠ 证据存在」的机制描述一致，是**预期行为**而非缺陷。
+
+**判读陷阱机械复核**（本次再次实证：源码行会被 `grep` 命中，必须按前缀区分）：
+
+```
+scanners moved 实际输出（^2026.*##[notice]） = 0
+untouched     实际输出（^2026.*##[notice]） = 1
+```
+
+`sg.log:159` / `:163` 是 workflow 脚本里两行 `echo "::notice::…"` **源码**，`:1087` 才是实际输出。按实际输出判定：本批走 skip 分支。
+
+**新增用例逐条在册（不是「有测试文件」而是「断言真跑」）**：
+
+```
+ToolCallResiduePolicyTest > a bare less-than in prose does not swallow the following call markup PASSED
+ToolCallResiduePolicyTest > a bare less-than in prose keeps the sentence when the residue has a closer PASSED
+ToolCallResiduePolicyTest > a fenced example after a prose less-than stays untouched PASSED
+ToolCallResiduePolicyTest > an inline code span between the prose less-than and a real residue keeps the prose PASSED
+ToolCallResiduePolicyTest > a dsml envelope after a prose less-than is still stripped whole PASSED
+ToolCallResiduePolicyTest > a lone less-than with no tag after it is not a residue PASSED
+ParallelToolBatchBlocksTest > a call that inserts a block cannot roll a sibling's edit back PASSED
+ParallelToolBatchBlocksTest > a call that removes a block cannot roll a sibling's edit back PASSED
+ChatViewModelMentionSelectTest > the upper bound is exclusive PASSED
+ChatViewModelMentionSelectTest > an anchor equal to the text length is rejected PASSED
+ChatViewModelMentionSelectTest > selectMention routes through the pure guard instead of its own comparison PASSED
+MarkdownClipboardInlineTest > a dunder name inside inline code survives the copy PASSED
+MarkdownClipboardInlineTest > an index-and-call expression inside inline code survives the copy PASSED
+MarkdownClipboardInlineTest > a snake_case identifier inside inline code keeps its underscores PASSED
+PastedTextBufferMarkerTest > a detached block id does not make a hand-typed marker expandable PASSED
+```
+
+**既有臂回归在册**（C-F01 改动后的关键几条，全部 PASSED）：`markup inside inline code is a quote` · `markup inside a fenced code block…` · `dsml envelope inside a code fence passes through untouched` · `dsml envelope with unresolvable param names is a resique` · `strip removes the whole dsml envelope and keeps surrounding prose` · `a 30k code-heavy scan stays far under the regression gate`。
+
+### 5.2 停止节点
+
+**分支 CI 绿 = 确定性停止节点，已达成。未合并 main、未 rebase。**
+合并 main 是独立动作，起手权在用户（本支有 `.kt` 验证面，属「非纯文本例外」）。
 
 ---
 
