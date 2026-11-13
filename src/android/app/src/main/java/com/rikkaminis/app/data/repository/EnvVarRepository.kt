@@ -19,7 +19,10 @@ import java.util.UUID
  * Values stored in EncryptedSharedPreferences (AES256-GCM).
  * Mirrors iOS EnvVarStore.
  */
-class EnvVarRepository(private val context: Context) {
+class EnvVarRepository(
+    private val context: Context,
+    private val encryptedPrefsOverride: SharedPreferences? = null,
+) {
 
     companion object {
         private const val TAG = "EnvVarRepository"
@@ -76,8 +79,10 @@ class EnvVarRepository(private val context: Context) {
 
 
     private val encryptedPrefs: SharedPreferences by lazy {
-        // T-android-keystore-aead-fail: self-healing wrapper.
-        com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(context, ENCRYPTED_PREFS_NAME)
+        encryptedPrefsOverride ?: run {
+            // T-android-keystore-aead-fail: self-healing wrapper.
+            com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(context, ENCRYPTED_PREFS_NAME)
+        }
     }
 
     private val metadataFile: File
@@ -152,6 +157,17 @@ class EnvVarRepository(private val context: Context) {
         encryptedPrefs.edit().putString(normalizedKey, sanitizeValue(newValue)).apply()
         saveMetadata()
         Log.i(TAG, "Updated env var: ${current.key} → $normalizedKey")
+        return true
+    }
+
+    /** Update only non-secret metadata; encrypted values are never read or rewritten. */
+    fun updateNote(id: String, newNote: String, newGroup: String? = null): Boolean {
+        val current = _entries.value.find { it.id == id } ?: return false
+        _entries.value = _entries.value.map {
+            if (it.id == id) it.copy(note = newNote.trim(), group = (newGroup ?: it.group).trim()) else it
+        }
+        saveMetadata()
+        Log.i(TAG, "Updated env var metadata: ${current.key}")
         return true
     }
 

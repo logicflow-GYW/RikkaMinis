@@ -107,16 +107,17 @@ class EnvVarsCollection(
                 val s = (v as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("string")
                 val e = repo.entries.value.firstOrNull { it.key == key }
                     ?: throw ConfigError.UnknownPath("envvars.$key")
-                // Update via a value-preserving path: read existing value
-                // back out of encrypted prefs, then write the new note
-                // alongside it. The repo's [update] keeps the secret
-                // in place when the same key is provided.
-                val currentValue = repo.getValue(e.key) ?: ""
-                // [T-envvar-group-sync] pass the entry's existing group
-                // through: update()'s newGroup parameter defaults to ""
-                // (clear), so an unqualified note write would silently
-                // flatten the user's grouping label.
-                repo.update(e.id, e.key, currentValue, s, e.group)
+                // Metadata-only: if encrypted prefs is unavailable or the
+                // key has no stored value, a note edit must never synthesize
+                // an empty secret. A readable value can still use the normal
+                // update path so key validation and value sanitization remain
+                // centralized there.
+                val currentValue = repo.getValue(e.key)
+                if (currentValue == null) {
+                    repo.updateNote(e.id, s, e.group)
+                } else {
+                    repo.update(e.id, e.key, currentValue, s, e.group)
+                }
             },
         )
 
