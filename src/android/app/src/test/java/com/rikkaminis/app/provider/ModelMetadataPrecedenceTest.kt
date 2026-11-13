@@ -158,9 +158,18 @@ class ModelMetadataPrecedenceTest {
     }
 
     @Test
-    fun `only the first segment is removed`() {
-        // models.dev ids can themselves contain a slash (moonshotai/kimi-k3),
-        // so the remainder must be kept whole.
+    fun `a multi-level vendor prefix is peeled down to the bare id`() {
+        // [INCR-1113 F-04] A relay in front of a gateway doubles the prefix.
+        // One strip per lookup left `anthropic/claude-sonnet-4`, which is not
+        // a models.dev key either — so every segment is peeled.
+        assertEquals("claude-sonnet-4", registryLookupId("openrouter/anthropic/claude-sonnet-4"))
+        assertEquals("glm-5.3-flash", registryLookupId("a/b/c/glm-5.3-flash"))
+    }
+
+    @Test
+    fun `a single-slash id keeps behaving as before`() {
+        // models.dev ids can themselves contain a slash (moonshotai/kimi-k3);
+        // with one slash the peeled answer is the same as before the change.
         assertEquals("kimi-k3", registryLookupId("moonshotai/kimi-k3"))
     }
 

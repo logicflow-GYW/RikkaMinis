@@ -95,9 +95,25 @@ internal data class SelectionReconcileResult(
  * layer up: the endpoint is authoritative when it speaks, silence is not an
  * assertion.
  *
- * `emptyList()` is NOT silence — it is an affirmative "text only" declaration
- * and is kept. Only `null` means "no opinion". (Conflating the two is the
- * same identity-overload this family is about; see LRN-20261112-FLDROLE.)
+ * **`emptyList()` is ALSO silence — there is exactly ONE reading of "no
+ * modalities" here, and it is "no opinion".** Two independent facts force it:
+ *
+ *  1. `List<String>?.normalizeModalities()` folds an empty list back to
+ *     `null` (`takeIf { it.isNotEmpty() }`), and EVERY consumer
+ *     (`imageInputDecision`, `acceptsImageInput`, `capabilityPromptFragment`,
+ *     `directionalModalities`) goes through it — so an `emptyList()` stored on
+ *     a model reads as `null` anyway;
+ *  2. the cross-process hop decodes a MISSING key into `emptyList()`
+ *     (`jsonStrList(arr) = if (arr == null) emptyList() else …` in
+ *     `ModelExecutionService`), so "the endpoint said nothing" arrives here as
+ *     an empty list, not as `null`.
+ *
+ * Reading an empty list as an affirmative "text only" declaration would
+ * therefore turn EVERY model that crossed the worker boundary into
+ * `DECLARED_TEXT_ONLY`. The only affirmative form is a NON-empty list — e.g.
+ * `["text"]`. (An earlier revision of this KDoc claimed the opposite; the
+ * claim was unreachable in production and wrong at the boundary. See
+ * LRN-20261112-FLDROLE for the identity-overload family it belongs to.)
  *
  * A `displayName` equal to the row's own `id` is ALSO silence, not a name:
  * every parser defaults the missing name to the id (`optString("name", id)`,
@@ -108,6 +124,21 @@ internal data class SelectionReconcileResult(
  *
  * `id` and `provider` come from the fresh row: the caller matched them by id,
  * so a different id here would mean the caller passed the wrong row.
+ *
+ * ponytail: the fresh row is taken as ENDPOINT testimony, but nothing marks
+ * which of its fields the endpoint actually reported — `*ModelsApi` runs
+ * `enrichModels` BEFORE this merge, so a models.dev value can arrive here
+ * wearing the endpoint's authority and overwrite a real value the entry already
+ * held (observed shape: a 960K gateway row became 200K after a refresh
+ * because the endpoint was silent and the registry spoke). Not fixed here:
+ * the honest fix is a per-field provenance stamp on [LLMModel] (four-layer
+ * field addition) or reconciling against the UN-enriched row, both wider than
+ * this branch.
+ * 天花板: any endpoint that reports a SUBSET of the fields it used to report
+ * will have the missing ones replaced by registry values on the next refresh.
+ * 升级触发: a user reports "after refreshing, the window shrank / a capability
+ * disappeared" — then add provenance (or reconcile pre-enrichment), not
+ * another guard here.
  */
 internal fun mergeCatalogRow(existing: LLMModel, fresh: LLMModel): LLMModel = fresh.copy(
     displayName = fresh.displayName.takeIf { it.isNotBlank() && it != fresh.id }
@@ -118,8 +149,12 @@ internal fun mergeCatalogRow(existing: LLMModel, fresh: LLMModel): LLMModel = fr
     interleavedReasoningField = fresh.interleavedReasoningField ?: existing.interleavedReasoningField,
     reasoningEffortValues = fresh.reasoningEffortValues ?: existing.reasoningEffortValues,
     declaresNoEffortTiers = fresh.declaresNoEffortTiers ?: existing.declaresNoEffortTiers,
-    inputModalities = fresh.inputModalities ?: existing.inputModalities,
-    outputModalities = fresh.outputModalities ?: existing.outputModalities,
+    // [INCR-1113 F-01] `emptyList()` is silence, not an assertion — see the
+    // KDoc above. Folding it to `null` here means a row that crosses the
+    // worker boundary (where a missing key decodes to `emptyList()`) can never
+    // wipe a capability the entry already carries.
+    inputModalities = fresh.inputModalities?.takeIf { it.isNotEmpty() } ?: existing.inputModalities,
+    outputModalities = fresh.outputModalities?.takeIf { it.isNotEmpty() } ?: existing.outputModalities,
 )
 
 internal fun reconcileSelectedEntry(

@@ -3233,8 +3233,37 @@ class ProviderRepository(private val context: Context) {
      * Import a provider from exported JSON. Returns the new instance label on success.
      * - Auto-renames on label conflict
      * - Decodes base64-encoded API key (falls back to plain text)
+     *
+     * [INCR-1113 F-02] Pass [entryIdMapOut] to also receive the
+     * `源entryId → 新entryId` map for the entries this import created. The
+     * backup restore path needs it to remap model group members / agent-loop
+     * bindings / the compact pin; the four UI / share / debug callers do not,
+     * and keep calling with the single-argument form.
+     *
+     * The map exists because the CALLER used to derive it POSITIONALLY
+     * (`ConfigBackup` paired the backup's `_entryIds` with
+     * `orderedEntryIds(newInstanceId)` index by index), which silently breaks
+     * whenever the parse drops a row: `parseImportedModelEntries` filters out
+     * pre-split `isHidden && !isCustom` catalog rows, so a backup taken before
+     * the selection-only migration restored a SHORTER entry list than
+     * `_entryIds` — and from the first dropped row on every later pairing
+     * pointed at the wrong entry (group members / agent-loop bindings / the
+     * compact pin landed on the wrong model or dangled). Pairing here uses each
+     * row's ORIGINAL `models[]` index ([ImportedModelEntry.sourceIndex]), so a
+     * dropped row simply contributes no mapping and every surviving row keeps
+     * its own id.
+     *
+     * (Kept as an optional parameter rather than moved to a new
+     * `importInstanceJSONWithEntryMap` entry point on purpose: this name is the
+     * anchor `provider_import_id_roundtrip` arm 6 walks to prove the append
+     * path still decodes through the shared [readImportInstanceFields] seam —
+     * moving the body out from under the name made that gate scan an empty
+     * wrapper. Same lesson the [parseImportedModelEntries] KDoc records.)
      */
-    fun importInstanceJSON(jsonStr: String): String? {
+    fun importInstanceJSON(
+        jsonStr: String,
+        entryIdMapOut: MutableMap<String, String>? = null,
+    ): String? {
         ensureConfigLoaded()
         val dict = try { JSONObject(jsonStr) } catch (_: Exception) { return null }
         val providerTypeRaw = dict.optString("providerType", "").ifEmpty { return null }
@@ -3299,7 +3328,12 @@ class ProviderRepository(private val context: Context) {
         importInstanceCredentials(dict, instance)
 
         // Import models (replace built-in defaults)
-        val importedEntries = parseImportedModelEntriesPlain(dict, instance.id)
+        // [INCR-1113 F-02] The index-carrying parse, so each restored row can
+        // be paired with the BACKUP's entry id at its ORIGINAL `models[]`
+        // index instead of by position in this filtered list.
+        val imported = parseImportedModelEntries(dict, instance.id)
+        val srcEntryIds = readSrcEntryIds(dict)
+        val importedEntries = imported.map { it.entry }
         if (importedEntries.isNotEmpty()) {
             // Import replaces built-in entries directly (not via replaceEntries which takes LLMModel list)
             synchronized(configLock) {
@@ -3307,6 +3341,27 @@ class ProviderRepository(private val context: Context) {
                 cfg.modelEntries.removeAll { it.providerInstanceId == instance.id }
                 cfg.modelEntries.addAll(importedEntries)
                 saveConfig(cfg)
+            }
+        }
+        // Built AFTER the write, off the ids the canonicalization settled on
+        // (`saveConfig` rewrites every uuid to the composite key), so the map
+        // answers the same shape every other entry-id reference uses.
+        if (entryIdMapOut != null) {
+            entryIdMapOut.putAll(
+                pairEntryIdsById(
+                    srcEntryIds = srcEntryIds,
+                    sourceIndexes = imported.map { it.sourceIndex },
+                    resolvedIds = imported.map {
+                        compositeEntryKey(instance.id, it.entry.baseModel.id)
+                    },
+                )
+            )
+            if (srcEntryIds.isNotEmpty() && srcEntryIds.size != imported.size) {
+                android.util.Log.i(
+                    "ProviderRepo",
+                    "[ModelList] import: skipped ${srcEntryIds.size - imported.size} " +
+                        "filtered row(s) kept out of the id map",
+                )
             }
         }
 
@@ -3341,24 +3396,6 @@ class ProviderRepository(private val context: Context) {
      * why the index must survive filtering.
      */
     private data class ImportedModelEntry(val sourceIndex: Int, val entry: ModelEntry)
-
-    /**
-     * [T-backup-dedup] Parse the `models` array of an exported provider JSON
-     * into [ModelEntry]s bound to [instanceId]. Shared by [importInstanceJSON]
-     * (which replaces the instance's entries wholesale) and
-     * [mergeImportInstanceJSON] (which upserts models missing from an existing
-     * instance). Returns an empty list when the payload carries no models.
-     *
-     * [review1112-p1-2] Rows that may not enter a selection-only table are
-     * skipped (see [decideImportedRowKeep]); callers that pair `_entryIds`
-     * positionally must use [parseImportedModelEntries] instead, whose
-     * rows carry their original `models[]` index.
-     */
-    private fun parseImportedModelEntriesPlain(
-        dict: JSONObject,
-        instanceId: String,
-    ): List<ModelEntry> =
-        parseImportedModelEntries(dict, instanceId).map { it.entry }
 
     /**
      * [review1112-p1-2] The `models[]`-index-carrying form of the parse.
