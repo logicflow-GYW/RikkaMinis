@@ -1932,12 +1932,24 @@ class ProviderRepository(private val context: Context) {
     //   - false = a restore wrote the backup's values onto the entry → the
     //             backup's own userModifiedAt must survive (see
     //             [mergeImportedEntryOntoLocal]'s restore-is-restore contract).
-    // Stamping a restore with "now" quietly broke two things: the merge's no-op
-    // short-circuit (`restored == local` can never hold once the local carries
-    // t_import while the backup carries null/t_backup, so every re-import
-    // rewrote every hit), and [shadowVoiceProviders]' arbitration (restoring
-    // instance A pushed its mostRecentModified past instance B's genuine edit,
-    // stealing the voice-provider slot).
+    // Stamping a restore with "now" breaks the merge's no-op short-circuit:
+    // `restored == local` can never hold once the local carries t_import while
+    // the backup carries null/t_backup, so every re-import rewrites every hit.
+    //
+    // [field-identity-1113] The OTHER half of the original rationale — that a
+    // stamp stole [shadowVoiceProviders]' arbitration — has no live consumer
+    // today: the Voice Services shadow view that read it was deleted on
+    // 2026-08-04, so `shadowVoiceProviders()` has had zero production callers
+    // since (see its KDoc). That conflict is DORMANT, not resolved — the
+    // arbitration predicate is still in the file and revives with the view.
+    // What is actually true today is narrower: this field has one writer rule
+    // (above) and one live reader contract — it must round-trip unchanged so a
+    // repeated restore stays a no-op. No UI reads it; nothing sorts on it.
+    //
+    // Rule for a NEW write path (this is why the flag is not an accident):
+    // provenance decides it. Values that came from a user gesture take the
+    // default; values that came from a file/backup pass `false`. If neither
+    // reading fits what you are storing, this field is the wrong carrier.
     fun updateEntry(entry: ModelEntry, stampUserModified: Boolean = true): String? = synchronized(configLock) {
         ensureConfigLoaded()
         val config = mutationSnapshot(_config.value)
@@ -3605,9 +3617,11 @@ class ProviderRepository(private val context: Context) {
                 // it, which defeated the no-op short-circuit above on the
                 // second import (the local entry carried t_import while the
                 // backup carried null/t_backup, so `restored == local` could
-                // never hold again) and let a restore of one instance jump
-                // shadowVoiceProviders' mostRecentModified arbitration over a
-                // genuinely edited sibling.
+                // never hold again).
+                // [field-identity-1113] The original note also blamed a stolen
+                // shadowVoiceProviders mostRecentModified arbitration; that
+                // consumer was deleted 2026-08-04, so today the no-op
+                // short-circuit is the ONLY reason this must not stamp.
                 val updated = mergeImportedEntryOntoLocal(hit, entry)
                 if (updated == null) hit.id else (updateEntry(updated, stampUserModified = false) ?: hit.id)
             } else {
@@ -3800,11 +3814,11 @@ internal fun applyImportInstanceFields(base: ProviderInstance, f: ImportInstance
  *  - [ModelEntry.userModifiedAt] rides the backup like every other field
  *    ([fix/dv21-a3 A-03]) — it is NOT restamped with "now" by the writer. The
  *    restored value is what makes a second import of the same backup a true
- *    no-op (`restored == local` above), and a fresh stamp would push this
- *    instance's [shadowVoiceProviders] arbitration past a sibling the user
- *    really edited. The write face honors it through [updateEntry]'s
- *    `stampUserModified = false` mode; the UI editor path keeps the default
- *    (true).
+ *    no-op (`restored == local` above) — that is the only live reason the
+ *    stamp must not fire ([field-identity-1113]: the shadowVoiceProviders
+ *    arbitration this used to cite was deleted 2026-08-04). The write face
+ *    honors it through [updateEntry]'s `stampUserModified = false` mode; the
+ *    UI editor path keeps the default (true).
  *  - A no-op merge returns null: nothing to write, the caller keeps the
  *    existing id. That is the unchanged "identical restore does not touch the
  *    entry" behavior.
