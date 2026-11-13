@@ -194,8 +194,6 @@ class MountedFoldersStore(private val context: Context) {
             "sdk=${Build.VERSION.SDK_INT} readGranted=$read writeGranted=$write legacyView=$legacy"
         }
     }
-        }
-    }
 
     suspend fun remove(id: String): Boolean = mutex.withLock {
         val before = _entries.value
