@@ -661,7 +661,18 @@ object PRootKernel {
             else -> {
                 val granted = context.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
                     android.content.pm.PackageManager.PERMISSION_GRANTED
-                "sdk=$sdk legacyStorageGranted=$granted legacyExtStorageOptIn=${Environment.isExternalStorageLegacy()}"
+                // Environment.isExternalStorageLegacy() is API 29 (Q), but this
+                // `else` branch covers sdk < 30 — i.e. API 26-28, where the
+                // method does not exist. Same NoSuchMethodError as
+                // MountedFoldersStore.storageDiag (lint NewApi, 2026-11-13);
+                // that one runs on the mount path, this one on every
+                // applyMountedFoldersSnapshot() log line.
+                "sdk=$sdk legacyStorageGranted=$granted legacyExtStorageOptIn=" +
+                    (if (sdk >= Build.VERSION_CODES.Q) {
+                        Environment.isExternalStorageLegacy().toString()
+                    } else {
+                        "n/a(<Q)"
+                    })
             }
         }
     }

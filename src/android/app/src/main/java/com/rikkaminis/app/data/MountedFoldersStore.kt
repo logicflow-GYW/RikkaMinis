@@ -175,7 +175,19 @@ class MountedFoldersStore(private val context: Context) {
                 android.content.pm.PackageManager.PERMISSION_GRANTED
             val write = context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
-            "sdk=$sdk readGranted=$read writeGranted=$write legacyView=${Environment.isExternalStorageLegacy()}"
+            // Environment.isExternalStorageLegacy() is API 29 (Q). This branch
+            // is sdk < 30, so it is reached on API 26-28 where the method does
+            // not exist — calling it there throws NoSuchMethodError, and this
+            // function is called from a log line AFTER the entry was already
+            // persisted and BEFORE add() returns, with no try around it. Net
+            // effect on API 26-28: mounting a folder appears to do nothing.
+            // (Lint: NewApi, caught only after lint was wired up 2026-11-13.)
+            "sdk=$sdk readGranted=$read writeGranted=$write legacyView=" +
+                (if (sdk >= Build.VERSION_CODES.Q) {
+                    Environment.isExternalStorageLegacy().toString()
+                } else {
+                    "n/a(<Q)"
+                })
         }
     }
 
