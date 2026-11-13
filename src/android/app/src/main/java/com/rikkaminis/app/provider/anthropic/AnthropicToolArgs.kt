@@ -101,19 +101,34 @@ internal class AnthropicToolBlock {
  * `tool_use` block.
  *
  * The delta buffer always wins; [initialInput] is only the fallback for a
- * block that streamed no delta. The two are never concatenated — a relay that
- * sends both would otherwise yield invalid JSON.
+ * block that streamed no delta — where "no delta" includes a delta of `{}`
+ * (R8-B B-F07): an empty argument object carries nothing, so letting it win
+ * over the announcement silently dropped every announced parameter. The two
+ * are never concatenated — a relay that sends both would otherwise yield
+ * invalid JSON.
  */
 internal fun resolveAnthropicToolArgs(deltaBuffer: String, initialInput: JSONObject?): JSONObject {
-    if (deltaBuffer.isEmpty() && initialInput != null) {
-        return try {
-            JSONObject(initialInput.toString())
-        } catch (_: Exception) {
-            JSONObject()
-        }
-    }
+    // [R8-B B-F07] `"{}"` is not "arguments arrived": a relay that announces the
+    // block with the real `input` and then streams an empty delta object used to
+    // take the delta branch, parse `{}` and DISCARD the announced parameters — the
+    // tool then ran parameterless and was rejected by preflight.
+    //
+    // Narrow on purpose: only a delta that PARSES to an empty object (or is
+    // blank) counts as "no arguments". An UNPARSABLE buffer keeps the documented
+    // behaviour below (degrade to `{}` so the truncated stream still reaches the
+    // JSON-repair / preflight path) — falling back to `initialInput` there would
+    // hide a truncated stream behind stale arguments.
+    val parsed = runCatching { JSONObject(deltaBuffer) }.getOrNull()
+    // Real arguments arrived: they win.
+    if (parsed != null && parsed.length() > 0) return parsed
+    // Unparsable non-blank buffer: keep the documented degrade so a truncated
+    // stream still reaches JSON repair / preflight instead of silently taking
+    // the announced arguments.
+    if (parsed == null && deltaBuffer.isNotBlank()) return JSONObject()
+    // Blank buffer or `{}`: no arguments streamed — the announcement is all we have.
+    if (initialInput == null) return JSONObject()
     return try {
-        JSONObject(deltaBuffer)
+        JSONObject(initialInput.toString())
     } catch (_: Exception) {
         JSONObject()
     }

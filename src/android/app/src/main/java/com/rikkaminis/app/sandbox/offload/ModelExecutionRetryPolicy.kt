@@ -98,14 +98,37 @@ internal object ModelExecutionRetryPolicy {
         errorCode != null && errorCode in RETRYABLE_CODES
 
     /**
-     * @param attemptsMade dispatches already performed for this request (>= 1).
+     * @param attemptsMade dispatches already performed for this request (>= 1),
+     *   counted across BOTH budgets — it is the typed-rejection budget's clock.
      * @param errorCode [errorCodeOf] of the last attempt's result.
      * @param workerDied the last attempt ended in a CONFIRMED worker death with
      *   no result at all ([ModelExecutionDispatcher.dispatchOnce] evidence).
+     * @param workerDeathAttempts confirmed worker deaths among the dispatches
+     *   made so far, INCLUDING the one being decided. Kept separate from
+     *   [attemptsMade] on purpose (R8-B B-F01): the two budgets answer
+     *   different questions ("may I re-dispatch a pre-provider rejection?" vs
+     *   "may I re-dispatch onto a fresh process?") and sharing one counter made
+     *   the death budget expire early.
+     *
+     *   The field failure the split fixes: user replaces a quota-exhausted key →
+     *   dispatch #1 writes `stale_key_cache` (typed rejection) → dispatch #2 hits
+     *   the poisoned worker while it self-reaps, so it dies with no result. With a
+     *   shared counter that second attempt reads `2 < 2 == false` and gives up —
+     *   yet dispatch #3 is exactly the one that would have landed on the fresh
+     *   process and read the new key. The typed rejection is not a death, so it
+     *   must not spend the death budget.
+     *
+     *   A required parameter, not a defaulted one: a default would let a caller
+     *   silently keep the old shared-counter behaviour, which is the bug.
      */
-    fun decide(attemptsMade: Int, errorCode: String?, workerDied: Boolean): Decision {
+    fun decide(
+        attemptsMade: Int,
+        errorCode: String?,
+        workerDied: Boolean,
+        workerDeathAttempts: Int,
+    ): Decision {
         if (workerDied) {
-            return if (attemptsMade < WORKER_DEATH_ATTEMPTS) Decision.RetryAfter(0L)
+            return if (workerDeathAttempts < WORKER_DEATH_ATTEMPTS) Decision.RetryAfter(0L)
             else Decision.GiveUp
         }
         if (!isRetryableCode(errorCode)) return Decision.GiveUp
@@ -124,7 +147,10 @@ internal data class ModelDispatchAttempt(val resultJson: String?, val workerDied
  * real worker.
  *
  * Termination is structural: [ModelExecutionRetryPolicy.decide] can only
- * answer `RetryAfter` while `attemptsMade` grows, and both branches cap it.
+ * answer `RetryAfter` while the counter that guards the answering branch is
+ * still under its own cap (`attemptsMade` for typed rejections,
+ * `workerDeathAttempts` for confirmed deaths), and each loop iteration
+ * advances the one that applies.
  *
  * @param attempt performs one dispatch (real: `dispatchOnce` + Context).
  * @param waitBeforeRetry injected so tests record the delay instead of
@@ -139,16 +165,30 @@ internal suspend fun dispatchWithRetry(
     onRetry: (attemptsMade: Int, errorCode: String?, delayMs: Long) -> Unit = { _, _, _ -> },
 ): ModelDispatchAttempt {
     var attemptsMade = 1
+    // Confirmed worker deaths so far (this first attempt included when it died).
+    // Separate from [attemptsMade]: see [ModelExecutionRetryPolicy.decide].
+    var workerDeaths = 0
     var outcome = attempt()
+    if (outcome.workerDied) workerDeaths++
     while (true) {
         val code = ModelExecutionRetryPolicy.errorCodeOf(outcome.resultJson)
-        when (val d = ModelExecutionRetryPolicy.decide(attemptsMade, code, outcome.workerDied)) {
+        when (
+            val d = ModelExecutionRetryPolicy.decide(
+                attemptsMade = attemptsMade,
+                errorCode = code,
+                workerDied = outcome.workerDied,
+                workerDeathAttempts = workerDeaths,
+            )
+        ) {
             is ModelExecutionRetryPolicy.Decision.GiveUp -> return outcome
             is ModelExecutionRetryPolicy.Decision.RetryAfter -> {
                 onRetry(attemptsMade, code, d.delayMs)
                 waitBeforeRetry(d.delayMs)
                 outcome = attempt()
                 attemptsMade++
+                // Count the death of the attempt we just made — otherwise the
+                // death budget would only ever be spent once.
+                if (outcome.workerDied) workerDeaths++
             }
         }
     }

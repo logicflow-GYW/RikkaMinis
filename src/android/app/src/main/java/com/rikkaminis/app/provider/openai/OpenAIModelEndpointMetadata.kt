@@ -1,5 +1,6 @@
 package com.rikkaminis.app.provider.openai
 
+import com.rikkaminis.app.provider.safeOptString
 import org.json.JSONObject
 
 /**
@@ -81,8 +82,22 @@ internal fun parseOpenAIModelEndpointMetadata(obj: JSONObject): OpenAIModelEndpo
         // read as one.
         obj.optJSONObject("top_provider")?.optInt("max_completion_tokens") ?: 0,
     )
-    val displayName = obj.optString("name").takeIf { it.isNotBlank() }
-        ?: obj.optString("display_name").takeIf { it.isNotBlank() }
+    // [R8-B B-F04 后半] On Android, `optString(key)` returns the LITERAL "null"
+    // when the key exists with a JSON null value (it only returns "" for a missing
+    // key), so `{"name":null,"display_name":"Hy4"}` used to answer "null" —
+    // `isNotBlank()` is true for that string, the `?:` fallback never fired, and
+    // the model picker showed a model literally named "null".
+    //
+    // Reuses [safeOptString], the repo's single answer to this platform quirk
+    // (JsonExt.kt), rather than minting a second reader: absence and explicit null
+    // both come back as "" and fall through to `display_name`.
+    //
+    // NOTE for the test: the Maven `org.json` used by JVM unit tests does NOT
+    // reproduce the quirk (measured: `optString` on a JSON null returns ""), so
+    // behaviour alone cannot pin this fix — the shape assertion in
+    // OpenAIEndpointMetadataDisplayNameTest is the discriminator.
+    val displayName = obj.safeOptString("name").takeIf { it.isNotBlank() }
+        ?: obj.safeOptString("display_name").takeIf { it.isNotBlank() }
 
     return OpenAIModelEndpointMetadata(
         contextWindow = contextWindow,

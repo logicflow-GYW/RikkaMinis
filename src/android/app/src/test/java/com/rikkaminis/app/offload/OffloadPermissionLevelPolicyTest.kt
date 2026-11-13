@@ -54,13 +54,37 @@ class OffloadPermissionLevelPolicyTest {
 
     @Test
     fun privilegedLiftsToBypassOnlyWithItsOwnFlag() {
+        // [R8-1114 A-F10] The privileged sub-flag is an overlay OF the mode: the
+        // master switch must be on as well. The old expectation (master off +
+        // sub-flag on → BYPASS) was the defect.
         assertEquals(
             PermissionLevel.BYPASS,
-            OffloadPermissionLevelPolicy.resolve(null, PermissionLevel.NOT_ALLOWED, true, false, true),
+            OffloadPermissionLevelPolicy.resolve(null, PermissionLevel.NOT_ALLOWED, true, true, true),
         )
         assertEquals(
             PermissionLevel.NOT_ALLOWED,
-            OffloadPermissionLevelPolicy.resolve(null, PermissionLevel.NOT_ALLOWED, true, false, false),
+            OffloadPermissionLevelPolicy.resolve(null, PermissionLevel.NOT_ALLOWED, true, true, false),
+        )
+        assertEquals(
+            PermissionLevel.NOT_ALLOWED,
+            OffloadPermissionLevelPolicy.resolve(null, PermissionLevel.NOT_ALLOWED, true, false, true),
+        )
+    }
+
+    // [R8-1114 A-F10] Master switch off must beat the privileged sub-flag —
+    // otherwise the mode is "half on" and a privileged CLI is auto-approved
+    // while the user believes auto-approve is off.
+    @Test
+    fun privilegedFlagDoesNotOverrideAMasterSwitchThatIsOff() {
+        assertEquals(
+            PermissionLevel.NOT_ALLOWED,
+            OffloadPermissionLevelPolicy.resolve(
+                storedLevel = null,
+                defaultLevel = PermissionLevel.NOT_ALLOWED,
+                isPrivilegedTool = true,
+                autoApproveEnabled = false,
+                privilegedToolsEnabled = true,
+            ),
         )
     }
 

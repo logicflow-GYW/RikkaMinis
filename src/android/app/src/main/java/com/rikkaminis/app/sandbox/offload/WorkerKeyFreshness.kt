@@ -86,41 +86,74 @@ object WorkerKeyFreshness {
 
     private const val SECRETS_PREFS_NAME = "provider_secrets"
 
-    /** Captured once per worker process; 0 = not yet captured. */
-    @Volatile
-    private var baselineMtimeMs: Long = 0L
+    /**
+     * "This process has not captured a baseline yet." Distinct from every real
+     * mtime, including [NO_SECRETS_FILE_MTIME] (R8-B B-F02).
+     */
+    private const val NOT_CAPTURED = -1L
 
-    /** Capture the prefs file mtime as the process-start baseline (idempotent). */
+    /**
+     * The baseline for "the secrets file did not exist when this worker was
+     * born". A real mtime is always > 0, so the two states stay distinguishable
+     * — collapsing them is exactly the bug this constant exists to prevent.
+     */
+    private const val NO_SECRETS_FILE_MTIME = 0L
+
+    /** Captured once per worker process; [NOT_CAPTURED] until then. */
+    @Volatile
+    private var baselineMtimeMs: Long = NOT_CAPTURED
+
+    /**
+     * Capture the prefs file mtime as the process-start baseline (idempotent).
+     *
+     * A MISSING file is captured as [NO_SECRETS_FILE_MTIME], not as "not
+     * captured". The difference is the whole point (R8-B B-F02): a worker that
+     * is born before the user has ever saved a key used to record 0, and
+     * [isStale] treats a 0 baseline as "nothing to compare" — so the first save
+     * (file appears, mtime = T1) looked unchanged, the baseline stayed 0
+     * forever, and every later request kept serving the no-key cache. With the
+     * explicit sentinel, "file appeared after birth" reads as
+     * [NO_SECRETS_FILE_MTIME] → T1 = a forward rewrite = stale = die and let the
+     * retry spawn a process that reads the new key.
+     */
     fun captureBaseline(dataDir: File) {
-        if (baselineMtimeMs == 0L) {
+        if (baselineMtimeMs == NOT_CAPTURED) {
             baselineMtimeMs = secretsFile(dataDir).lastModified()
         }
     }
 
     /**
      * Decide whether the provider_secrets file has been rewritten in a way
-     * the worker must react to. Three cases:
+     * the worker must react to. Cases:
      *
-     *   1. Normal forward rewrite: currentMtime > baselineMs → STALE (existing
-     *      behavior, the user's complaint path).
-     *   2. OS clock skew / RTC drift: currentMtime is at least
+     *   1. No baseline captured yet ([NOT_CAPTURED]) → NOT stale: nothing to
+     *      compare against.
+     *   2. Baseline captured while the file was ABSENT ([NO_SECRETS_FILE_MTIME])
+     *      → stale as soon as the file exists. The first-ever save is a change
+     *      this process must not miss (R8-B B-F02).
+     *   3. Normal forward rewrite: currentMtime > baselineMs → STALE (the
+     *      user's complaint path).
+     *   4. OS clock skew / RTC drift: currentMtime is at least
      *      [CLOCK_SKEW_GRACE_MS] BELOW baselineMs → treat as STALE so the
      *      worker re-captures the baseline on next request and the retry
      *      spawns a fresh process that reads the new key on its first-ever
      *      prefs load.
-     *   3. Same-time / small backwards drift (< grace): NOT stale — the
-     *      cached key matches disk, no need to die.
+     *   5. Same-time / small backwards drift (< grace) → NOT stale: the cached
+     *      key matches disk, no need to die.
+     *   6. A file that is GONE now (currentMtime == 0) while the baseline saw
+     *      one → NOT stale: a deletion is not a new key, and dying would only
+     *      re-read the same absence.
      *
      * The grace is conservative: 1s of backwards drift is normal filesystem
      * jitter (ext4 / f2fs mtime resolution, sdcardfs re-mount after reboot),
      * not an actual clock event.
-     *
-     * A missing file (mtime == 0) is never stale: nothing was written yet, so
-     * the in-memory default (no key) matches disk. A baseline of 0 (not
-     * captured) is likewise never stale.
      */
     fun isStale(baselineMs: Long, currentMtimeMs: Long): Boolean {
-        if (baselineMs <= 0L) return false
+        if (baselineMs == NOT_CAPTURED) return false
+        // Born before the file existed: its appearance IS the change.
+        if (baselineMs == NO_SECRETS_FILE_MTIME) return currentMtimeMs > 0L
+        // File gone now (deleted / not yet recreated): not a new key.
+        if (currentMtimeMs == 0L) return false
         if (currentMtimeMs > baselineMs) return true
         return currentMtimeMs < baselineMs - CLOCK_SKEW_GRACE_MS
     }
@@ -135,6 +168,6 @@ object WorkerKeyFreshness {
 
     /** Test hook: reset the captured baseline. Production never calls this. */
     fun resetForTests() {
-        baselineMtimeMs = 0L
+        baselineMtimeMs = NOT_CAPTURED
     }
 }

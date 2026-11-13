@@ -58,6 +58,11 @@ only lexer/AST/value-flow used here, and each criterion was moved from
 Fail-closed: a source the lexer refuses, or a call whose statement cannot be
 attributed, is a violation — never a skip. Zero calls stays C3's business.
 
+  8. [R8-1114 A-F10] the privileged overlay in OffloadPermissionLevelPolicy.resolve
+     must consult the SAME master switch as the sensitive one (C8) — a sub-flag
+     that lifts a NOT_ALLOWED privileged tool while auto-approve is OFF is a
+     bypass, not a feature.
+
 Run:  python3 scripts/scan/auto_approve_bypass_check.py <repo-root>
       python3 scripts/scan/auto_approve_bypass_check.py --selftest
 Exit: 0 = all criteria hold, 1 = violation found (prints which).
@@ -80,6 +85,7 @@ from _kotlin_valueflow import (brace_depth, contains_ident, expr_end,
 
 CONFIG_BRIDGE = "src/android/app/src/main/java/com/rikkaminis/app/config/ConfigBridge.kt"
 PERM_MANAGER = "src/android/app/src/main/java/com/rikkaminis/app/offload/OffloadPermissionManager.kt"
+PERM_POLICY = "src/android/app/src/main/java/com/rikkaminis/app/offload/OffloadPermissionLevelPolicy.kt"
 CONFIG_REGISTRY = "src/android/app/src/main/java/com/rikkaminis/app/config/ConfigRegistry.kt"
 CONFIG_BUILTINS = "src/android/app/src/main/java/com/rikkaminis/app/config/ConfigBuiltins.kt"
 
@@ -408,6 +414,51 @@ def check_risk_tags(lit, code):
 
 
 
+def check_privileged_overlay(policy_code):
+    """C8 — [R8-1114 A-F10] the privileged overlay is an overlay OF the mode.
+
+    `resolve()` has two sub-switches and they must answer to the SAME master
+    switch. The sensitive switch was gated by `autoApproveEnabled` while the
+    privileged one was not, so with auto-approve OFF (the user believes nothing
+    is auto-approved) a privileged CLI (`a11y_cli` / `shizuku_cli`) still
+    resolved to BYPASS — the two halves of one mode disagreed.
+
+    The criterion is about the CONDITION's identifiers, not about a spelling:
+    every live `if` that reads `privilegedToolsEnabled` must also read
+    `autoApproveEnabled` and `isPrivilegedTool`. A missing overlay is a
+    violation too (fail-closed): silently deleting the privileged lift would
+    otherwise pass every other criterion.
+    """
+    body = function_body(policy_code, "resolve")
+    if body is None:
+        return ["C8: OffloadPermissionLevelPolicy.resolve not found — the privileged "
+                "overlay cannot be judged (fail-closed)"]
+    text = policy_code[body[0]:body[1]]
+    v = []
+    found = 0
+    for cond, _t_start, _t_end, _e_start, _e_end in if_blocks(text):
+        if not contains_ident(cond, "privilegedToolsEnabled"):
+            continue
+        found += 1
+        if not contains_ident(cond, "autoApproveEnabled"):
+            v.append(
+                "C8: the privileged overlay condition `%s` does not consult "
+                "autoApproveEnabled — the master switch OFF still lifts a privileged "
+                "tool to BYPASS (a11y_cli / shizuku_cli drive other apps and read the "
+                "screen)" % cond.strip()[:90])
+        if not contains_ident(cond, "isPrivilegedTool"):
+            v.append(
+                "C8: the privileged overlay condition `%s` does not check "
+                "isPrivilegedTool — the privileged sub-flag would lift ordinary "
+                "NOT_ALLOWED rows too" % cond.strip()[:90])
+    if found == 0:
+        v.append(
+            "C8: resolve() has no live `if` reading privilegedToolsEnabled — the "
+            "privileged overlay vanished (either dead code or a deleted feature); "
+            "fail-closed, since a silent removal is indistinguishable from a bypass")
+    return v
+
+
 def check_policy_consult(batch_body):
     """C1 — the auto-approve verdict must DECIDE the confirmation.
 
@@ -665,6 +716,12 @@ def _check(root):
     except LexFail as exc:
         failures.append("C7: %s" % exc)
 
+    # --- Criterion 8: the privileged overlay must answer the master switch ---
+    try:
+        failures.extend(check_privileged_overlay(view(root, PERM_POLICY)))
+    except LexFail as exc:
+        failures.append("C8: %s" % exc)
+
     # --- Criterion 4: the mode must be invisible to the agent's config surface
     for name, path in (("ConfigRegistry", CONFIG_REGISTRY), ("ConfigBuiltins", CONFIG_BUILTINS)):
         src = view(root, path)
@@ -887,6 +944,30 @@ ARMS = {
                 ConfirmOutcome.Approved(resolvedItems)""",
         )],
     ),
+    # [R8-1114 A-F10] C8: the privileged sub-flag stops answering the master
+    # switch — the exact pre-fix shape (privileged CLI lifted while
+    # auto-approve is off).
+    "privileged_overlay_ignores_master": (
+        PERM_POLICY,
+        [(
+            "            autoApproveEnabled && privilegedToolsEnabled) {",
+            "            privilegedToolsEnabled) {",
+        )],
+    ),
+    # C8 sibling: the privileged overlay disappears entirely. Every other
+    # criterion stays green (the policy call is still consulted and returned),
+    # so only C8 can catch a silent feature removal.
+    "privileged_overlay_removed": (
+        PERM_POLICY,
+        [(
+            """        if (defaultLevel == PermissionLevel.NOT_ALLOWED && isPrivilegedTool &&
+            autoApproveEnabled && privilegedToolsEnabled) {
+            return PermissionLevel.BYPASS
+        }
+""",
+            "",
+        )],
+    ),
 }
 
 SELFTEST_TAGS = {
@@ -910,6 +991,8 @@ SELFTEST_TAGS = {
     "risk_unknown_token": "AUTO_APPROVE_BYPASS_SELFTEST risk_unknown_token arm: OK",
     "risk_pinned_path_missing": "AUTO_APPROVE_BYPASS_SELFTEST risk_pinned_path_missing arm: OK",
     "risk_new_group_family_safe": "AUTO_APPROVE_BYPASS_SELFTEST risk_new_group_family_safe arm: OK",
+    "privileged_overlay_ignores_master": "AUTO_APPROVE_BYPASS_SELFTEST privileged_overlay_ignores_master arm: OK",
+    "privileged_overlay_removed": "AUTO_APPROVE_BYPASS_SELFTEST privileged_overlay_removed arm: OK",
 }
 
 # arm name -> expected violation count (exact). 0 = accepted spelling.
@@ -939,6 +1022,10 @@ ARM_EXPECT = [
     ("risk_unknown_token", 1),
     ("risk_pinned_path_missing", 1),
     ("risk_new_group_family_safe", 1),
+    # [R8-1114 A-F10] C8 arms: one condition missing the master switch, one
+    # overlay deleted outright (both fail-closed).
+    ("privileged_overlay_ignores_master", 1),
+    ("privileged_overlay_removed", 1),
 ]
 
 
@@ -1011,7 +1098,7 @@ def main():
         for f in failures:
             print("  -", f)
         return 1
-    print("AUTO_APPROVE_BYPASS_CHECK: OK (all 5 criteria hold)")
+    print("AUTO_APPROVE_BYPASS_CHECK: OK (all 8 criteria hold)")
     return 0
 
 

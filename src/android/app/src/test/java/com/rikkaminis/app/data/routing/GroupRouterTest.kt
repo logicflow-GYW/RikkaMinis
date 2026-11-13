@@ -130,11 +130,11 @@ class GroupRouterTest {
         )
     }
 
-    @Test fun fallbackOrder_noAnchorNoMatch_startsFromIndexOne() {
+    @Test fun fallbackOrder_noAnchorNoMatch_startsFromIndexZero() {
         val router = routerWithClock()
         val g = group("a", "b", "c")
         assertEquals(
-            listOf("b", "c"),
+            listOf("a", "b", "c"),
             router.fallbackOrder(g, activeEntryId = null, primaryModelId = "unknown", modelIdOf = { null }),
         )
     }
@@ -327,6 +327,31 @@ class GroupRouterTest {
         val g = group("a", "b", strategy = RoutingStrategy.cheapestFirst)
         val members = listOf(member("a", costTier = 3), member("b", costTier = 0))
         assertEquals("a", router.select(g, members, preferredEntryId = "a"))
+    }
+
+    // [R8-1114 A-F04] An unusable preferred member must not short-circuit the
+    // strategy — it falls through to cheapestFirst instead of "first usable".
+    @Test fun cheapestFirst_unusablePreferredFallsThroughToStrategy() {
+        val router = routerWithClock()
+        val g = group("a", "b", "c", strategy = RoutingStrategy.cheapestFirst)
+        val members = listOf(
+            member("a", costTier = 3),
+            member("b", costTier = 2),
+            member("c", costTier = 0),
+        )
+        router.recordResult("a", RouteOutcome.AuthError) // preferred is dead
+        assertEquals("c", router.select(g, members, preferredEntryId = "a"))
+    }
+
+    // [R8-1114 A-F04] With no anchor and no modelId match, the fallback chain
+    // starts at index 0 — the old `offset in 1..` loop made members[0]
+    // unreachable.
+    @Test fun fallbackOrder_noAnchor_containsFirstMember() {
+        val router = routerWithClock()
+        val g = group("a", "b", "c")
+        val order = router.fallbackOrder(g, activeEntryId = null, primaryModelId = "unknown", modelIdOf = { null })
+        assertEquals(listOf("a", "b", "c"), order)
+        assertTrue("members[0] must be reachable", order.contains("a"))
     }
 
     @Test fun cheapestFirst_skipsUnhealthyMembers() {

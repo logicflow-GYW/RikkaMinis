@@ -72,6 +72,34 @@ object ToolLoopScope {
         "am start",
     )
 
+    /**
+     * Shell command prefixes that only READ the screen. A managed read feeds [Signal.Reread] and
+     * bypasses the Repeat window, which is what the class KDoc promises ("repeating `git log` is
+     * not a loop") — a `ui dump` poll is the same kind of read.
+     *
+     * Matched per TOKEN, not by raw `startsWith`, so `android-a11y-cli ui dump` cannot swallow an
+     * unrelated subcommand that merely shares the prefix. Everything that moves the screen
+     * (`tap` / `input` / `scroll` / `gesture` / `dialog dismiss` / `service …`), and anything
+     * opaque (`android-shizuku-cli exec`, `am start`), stays on the write side.
+     */
+    val SHELL_READ_PREFIXES: List<String> = listOf(
+        "android-a11y-cli ui dump",
+        "android-a11y-cli ui find",
+        "android-a11y-cli ui info",
+        "android-a11y-cli ui node",
+        "android-a11y-cli ui screenshot",
+        "android-a11y-cli extract",
+        "android-a11y-cli wait",
+        "android-a11y-cli event",
+        "android-a11y-cli notify",
+        "android-a11y-cli dialog detect",
+        "android-a11y-cli service status",
+        "android-a11y-cli service ping",
+        "android-a11y-cli --version",
+    )
+
+    private val WHITESPACE = Regex("\\s+")
+
     /** Keyword table for [Decision.outward] — Chinese and English, Chinese first for readability. */
     val OUTWARD_KEYWORDS: List<String> = listOf(
         "发送", "发布", "提交", "关注", "购买", "支付",
@@ -136,9 +164,12 @@ object ToolLoopScope {
 
             "shell_execute" -> {
                 val command = stringArg(args, "command").trimStart()
+                val managed = SHELL_GUARDED_PREFIXES.any { command.startsWith(it) }
                 Decision(
-                    managed = SHELL_GUARDED_PREFIXES.any { command.startsWith(it) },
-                    read = false,
+                    managed = managed,
+                    // [R8-1114 A-F05] Read-only screen pokes (a11y dump / screenshot / extract /
+                    // wait) must not be judged as Repeat-looping writes.
+                    read = managed && isReadOnlyShellCommand(command),
                     outward = false,
                 )
             }
@@ -266,6 +297,19 @@ object ToolLoopScope {
 
     private fun stringArg(args: JsonObject, key: String): String =
         (args[key] as? JsonPrimitive)?.content.orEmpty()
+
+    /**
+     * Token-normalized prefix test: `android-a11y-cli   ui    dump` and
+     * `android-a11y-cli ui dump --depth 3` both read as `android-a11y-cli ui dump`.
+     * A command that only shares the raw prefix (e.g. `android-a11y-cli ui dumper`)
+     * does not match.
+     */
+    private fun isReadOnlyShellCommand(command: String): Boolean {
+        val normalized = command.trim().replace(WHITESPACE, " ")
+        return SHELL_READ_PREFIXES.any { prefix ->
+            normalized == prefix || normalized.startsWith("$prefix ")
+        }
+    }
 
     private fun parseArgs(argsJson: String): JsonObject =
         runCatching { Json.parseToJsonElement(argsJson) }.getOrNull() as? JsonObject ?: JsonObject(emptyMap())

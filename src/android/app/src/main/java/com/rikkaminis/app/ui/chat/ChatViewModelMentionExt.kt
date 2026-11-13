@@ -116,14 +116,29 @@ internal fun ChatViewModel.executeSelectedMention(
 }
 
 /**
+ * [r8-C-F04] True when [anchor] can still address a character in a text of
+ * [textLength] UTF-16 units.
+ *
+ * The upper bound is EXCLUSIVE: `anchor == textLength` means the `@` that opened
+ * the picker is no longer in the field (the text shrank between the menu opening
+ * and the tap), so the replacement span `anchor + 1` would start past the end
+ * and `substring` would throw `StringIndexOutOfBoundsException` on the main
+ * thread. Pulled out of [selectMention] so the boundary is JVM-testable — the
+ * ViewModel itself needs a Context and cannot be built in a unit test.
+ */
+internal fun mentionSpanIsValid(anchor: Int, textLength: Int): Boolean =
+    anchor >= 0 && anchor < textLength
+
+/**
  * Replace the active `@<token>` in [currentText] with `@<linuxPath> ` and
  * return the new text + caret position. The caller writes both back into
  * its TextFieldValue so the cursor lands right after the inserted space
  * — exactly mirroring iOS [AIChatViewModel.selectMention] which sets
  * `inputText` and `pendingCaret` in lockstep.
  *
- * If the menu is not open the call is a no-op and returns the original
- * (text, caret).
+ * If the menu is not open — or the anchor no longer addresses a character in
+ * [currentText] ([mentionSpanIsValid]) — the call is a no-op and returns the
+ * original (text, caret).
  */
 internal fun ChatViewModel.selectMention(
     entry: FileMentionIndex.Entry,
@@ -131,7 +146,7 @@ internal fun ChatViewModel.selectMention(
     currentCaret: Int,
 ): Pair<String, Int> {
     val anchor = _mentionAnchor.value
-    if (anchor < 0 || anchor > currentText.length) {
+    if (!mentionSpanIsValid(anchor, currentText.length)) {
         dismissMentionMenu()
         return currentText to currentCaret
     }

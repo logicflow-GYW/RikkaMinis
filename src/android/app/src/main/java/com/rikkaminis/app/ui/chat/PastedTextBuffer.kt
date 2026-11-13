@@ -183,7 +183,13 @@ fun unexpandedPasteMarkers(
     buffer: List<PastedText>,
 ): List<String> {
     if (text.isEmpty() || !text.contains('#')) return emptyList()
-    val known = buffer.mapTo(HashSet()) { it.id }
+    // [r8-C-F07] "Known" = the set [expandPastePlaceholders] can actually
+    // resolve. A DETACHED entry (`inlineMarker = false`) has no literal in the
+    // composer and the expander skips it, so counting its id as known let a
+    // hand-typed `[Pasted#1]` pass the gate and then ship verbatim (with the
+    // block appended again at the end). The gate is the fail-closed side: when
+    // the two disagree it must report, not wave through.
+    val known = buffer.asSequence().filter { it.inlineMarker }.mapTo(HashSet()) { it.id }
     val out = LinkedHashSet<String>()
     for (match in PASTE_PLACEHOLDER_REGEX.findAll(text)) {
         val id = match.groupValues[1].toIntOrNull()

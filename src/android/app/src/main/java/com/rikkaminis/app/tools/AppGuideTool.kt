@@ -67,14 +67,25 @@ object AppGuideTool {
         val entry = index.find(query)
             ?: return ToolExecutionResult(missMessage(query, index), false, toolTitle = toolTitle)
 
-        val body = readPackBody(context.assets, entry.id)
+        val raw = readPackBody(context.assets, entry.id)
             ?: return ToolExecutionResult(
                 "Error: guide '${entry.id}' matched but its body could not be read " +
                     "($APP_KNOWLEDGE_ASSETS_DIR/${entry.id}/APP.md).",
                 false,
                 toolTitle = toolTitle,
             )
-        return ToolExecutionResult(renderAppKnowledge(entry, body), true, toolTitle = toolTitle)
+        // [R8-1114 A-F01] The index path already parses every pack, so the hit
+        // path must hand the model the SAME body. Passing the raw file shipped
+        // the YAML frontmatter (`---` / `name:` / `aliases:`) to the model —
+        // one parse, two shapes. Reuse the parser instead of stripping here.
+        val pack = parseAppKnowledgePack(entry.id, raw)
+            ?: return ToolExecutionResult(
+                "Error: guide '${entry.id}' matched but its frontmatter could not be parsed " +
+                    "($APP_KNOWLEDGE_ASSETS_DIR/${entry.id}/APP.md).",
+                false,
+                toolTitle = toolTitle,
+            )
+        return ToolExecutionResult(renderAppKnowledge(entry, pack.body), true, toolTitle = toolTitle)
     }
 
     /** Index over every parseable pack; an empty asset dir yields an empty index. */
