@@ -15,9 +15,11 @@ import com.rikkaminis.app.offload.OffloadPermissionManager.PermissionLevel
  *     "I turned that one OFF" meaningful while the mode is on.
  *  2. `ASK_ONCE` + master switch ON → `BYPASS`. This is the everyday case the
  *     mode exists for.
- *  3. `NOT_ALLOWED` + privileged tool + its own sub-flag ON → `BYPASS`.
- *     Privileged CLIs (`a11y_cli`, `shizuku_cli`) are kept on a separate flag
- *     because they drive other apps and read on-screen content.
+ *  3. `NOT_ALLOWED` + privileged tool + master switch ON + its own sub-flag ON →
+ *     `BYPASS`. Privileged CLIs (`a11y_cli`, `shizuku_cli`) are kept on a
+ *     separate flag because they drive other apps and read on-screen content,
+ *     but that flag is an OVERLAY of the mode, not a second mode: with the
+ *     master switch off nothing is auto-approved, privileged tools included.
  *  4. Anything else → the registry default.
  *
  * Note what is deliberately absent: there is no path from the master switch to
@@ -37,7 +39,8 @@ internal object OffloadPermissionLevelPolicy {
         if (defaultLevel == PermissionLevel.ASK_ONCE && autoApproveEnabled) {
             return PermissionLevel.BYPASS
         }
-        if (defaultLevel == PermissionLevel.NOT_ALLOWED && isPrivilegedTool && privilegedToolsEnabled) {
+        if (defaultLevel == PermissionLevel.NOT_ALLOWED && isPrivilegedTool &&
+            autoApproveEnabled && privilegedToolsEnabled) {
             return PermissionLevel.BYPASS
         }
         return defaultLevel
