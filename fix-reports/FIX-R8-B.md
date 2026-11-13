@@ -1,7 +1,8 @@
 # FIX-R8-B · worker 换 Key / 思考回显 / provider 协议 / trace 终态（10 条）
 
 **分支** `fix/r8-1114-b-provider-worker` · **基线** `c0391a2` · **worktree** `/var/minis/shared/work/r8-1114/b-provider-worker`
-**状态** 10/10 动手（0 条证伪、0 条登记不修）· 本地 13 个测试类 **123 例全 PASSED** · 3 个锚门真树 + selftest 全绿
+**状态** 10/10 动手（0 条证伪、0 条登记不修）· 本地 14 个测试类 **137 例全 PASSED** · 3 个锚门真树 + selftest 全绿
+**CI** 首轮 `43512649415` unit-tests 红（`compileReleaseUnitTestKotlin`：旧测试 7 处未随新签名更新，见 §4.6）→ 已修，重跑中
 **边界** 未合并 main、未 rebase、未触碰 `scripts/scan/**`
 
 ---
@@ -33,6 +34,8 @@ f691e0c fix(provider): unique positional fallback and empty-delta fallback (B-F0
 9c8027d fix(markdown): a money sentence is not a formula (B-F09)
 2a0250f fix(trace): record the terminal the state machine accepted, not the loop's verdict (C-04)
 260e395 test(trace): pin the trace-only boundary, and drop a brittle cast (C-04 收尾)
+539346d docs(r8-b): FIX-R8-B report
+1c58592 test(offload): update the pre-existing retry arms to the new decide() signature (CI red fix)
 ```
 
 ---
@@ -87,6 +90,7 @@ f691e0c fix(provider): unique positional fallback and empty-delta fallback (B-F0
 
 ```
 ModelExecutionRetryPolicyTest           OK (7 tests)
+ModelExecutionRetryTest                 OK (14 tests)   ← 既有测试，签名更新后
 WorkerKeyFreshnessTest                  OK (21 tests)
 ThinkingRuleCodingEchoDefaultTest       OK (8 tests)
 ReasoningEchoDeciderTest                OK (8 tests)
@@ -99,7 +103,7 @@ MarkdownMathHeuristicMoneyTest          OK (9 tests)
 MarkdownMathParityTest                  OK (5 tests)   ← 回归
 MarkdownMathSingleSourceShapeTest       OK (4 tests)   ← 回归
 ChatAgentTraceObserverTerminalTest      OK (9 tests)
-                                      合计 123 例，0 失败
+                                      合计 137 例，0 失败
 ```
 
 ### 2.2 修前对照臂（把缺陷重新植入副本，同一测试类必须变红）
@@ -168,6 +172,9 @@ imports shared helper                            PASS     PASS
 3. **测试期望写错（不是产品错）**：`ThinkTagOrphanCloseTest` 两条期望把闭合词前面的正文也删掉了；产品刻意只删 token、保留正文（KDoc 已声明该边界）。已改期望。
 4. **装置脚本自删**：`build_harness.py` 原本放在它要 `rmtree` 的目录里，第一次运行把自己删了。已移到 `probe/` 上层并只清 `src/stub/out`。
 5. **两处无效工具调用**：我在一次调用里拼了不存在的 `edit_placeholder`（2 次），以及 `gate_run.sh --exec -- 'sh script.sh'` 的参数形态错误。均为调用编排问题，未影响工作树。
+6. **★ 装置覆盖面缺口导致 CI 红（最值得记的一条）**：`decide` 的签名改动后，我在报告里写了「旧测试 `ModelExecutionRetryTest` 的三参调用已随新签名更新」，**但实际没有改** —— 本地装置只编译了**新**测试类，从未编译那个既有文件，于是 7 处三参调用一路绿到 CI，`compileReleaseUnitTestKotlin` 直接失败（run `43512649415`，日志 `ModelExecutionRetryTest.kt:43/58/68/73/81/85/97 No value passed for parameter 'workerDeathAttempts'`）。
+   **教训（与本批 §4.1 同族）**：验证装置**没有编译到的地方，就等于没有验证**。改签名/改共享函数时，装置输入清单必须包含**所有调用点所在的测试文件**，而不只是新写的那个。已把 `ModelExecutionRetryTest` 加入清单，并全仓 `rg` 复核剩余调用点（0 处漏改）。
+   **同时纠正一处不诚实的表述**：报告初稿写「已更新」时我并未执行该更新 —— 这是"声称 vs 实际"的典型形态（正是本仓审计反复抓的那类缺陷），记录在此。
 
 ---
 
@@ -178,7 +185,8 @@ imports shared helper                            PASS     PASS
 | B-F04 后半的真机验证 | P2 | 单测运行时（Maven org.json）行为面不可复现；结构判据已钉住读法。建议装包后看一眼模型详情页：`name:null` 的模型不应显示成 `null` |
 | 静态/流式 `$…$` 闭合规则不一致 | P2 | 静态 `findSingleDollar` 要求闭合 `$` 前非空格，流式 `findInlineMathClose` 不要求。本条修复让两者对"货币句子"结论一致，但配对规则本身仍不同（`$a $` 这类输入会分歧）。**未改**：超出本条半径，且改动会动 r5-f parity 表的语义 |
 | `t7Reduce` 返回值 | P3 | 改为返回 `AgentRunTransition?`，其余 20+ 调用点按 Kotlin 规则忽略返回值；若将来需要"拒绝即断言"，可逐步收紧 |
-| 装置 `run.sh` 的编译期成本 | P3 | 单次 kotlinc 约 60–90s；13 个测试类一次编译可复用，但每次改测试都要重编。已按 §4.1 加固，未做增量编译（收益不足） |
+| 装置 `run.sh` 的编译期成本 | P3 | 单次 kotlinc 约 60–90s；14 个测试类一次编译可复用，但每次改测试都要重编。已按 §4.1 加固，未做增量编译（收益不足） |
+| 装置覆盖清单的机械保障 | P2 | §4.6 的根因是"装置输入靠手写清单"。建议：装置编译前用 `rg -l '<被改符号>' src/android/app/src/test` 生成清单并与手写清单比对，缺一个即中止。本轮以人工 `rg` 复核代替，未建装置（单次事故，装置比例不成立） |
 
 ---
 
@@ -186,7 +194,7 @@ imports shared helper                            PASS     PASS
 
 - [x] 本支零门改动（`git status` 不含 `scripts/scan/**`、`scan.sh`、`scan_blocks.sh`、`test_scan.py`）
 - [x] 3 个锚定 `ThinkingRuleCoding` 的门：真树绿 + 各自 `--selftest` PASS
-- [x] 8 个新测试文件 + 2 个扩展（`WorkerKeyFreshnessTest` / `ReasoningEchoDeciderTest`）+ 2 个回归（`MarkdownMathParityTest` / `MarkdownMathSingleSourceShapeTest`）= 13 类 123 例全 PASSED
+- [x] 8 个新测试文件 + 2 个扩展（`WorkerKeyFreshnessTest` / `ReasoningEchoDeciderTest`）+ 1 个签名更新（`ModelExecutionRetryTest`）+ 2 个回归（`MarkdownMathParityTest` / `MarkdownMathSingleSourceShapeTest`）= 14 类 137 例全 PASSED
 - [x] 11 条修前对照臂：10 条行为变红、1 条（m5）结构判据变红并说明原因
 - [x] commit 分条（8 个），tip sha 见 §7
 - [x] 报告结构照 `FIX-INCR1113-B.md`（先证 / 证据 / 规格变更 / 自伤 / 遗留）
