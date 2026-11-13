@@ -500,7 +500,7 @@ jobs:
   lint-probe:
     if: ${{ inputs.lint_probe == true }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 50
     permissions:
       contents: read
     steps:
@@ -519,18 +519,52 @@ jobs:
         with:
           packages: 'platform-tools'
 
-      # Lint needs the compile classpath (and KSP output), not the native
-      # prebuilts: ExternalNativeBuild is disabled in this project and the .so
-      # files are vendored under jniLibs — so no NDK / proot build here.
-      - name: Run :app:lintDebug (report only)
+      # Matrix probe. Round 1 (run 43406670614) established that plain
+      # `:app:lintDebug` dies the same way lintVital does — three analyze tasks
+      # aborted with IncompatibleClassChangeError, two of them inside AGP's OWN
+      # bundled detectors (NonNullableMutableLiveDataDetector,
+      # RememberInCompositionDetector) and one in FrequentlyChangingValueDetector.
+      # ICCE on a companion-scope method is the signature of two versions of the
+      # same lint-checks class on the classpath, which in practice means the K2
+      # UAST path in AGP 8.7 + Kotlin 2.1.
+      #
+      # So: try the cheapest known lever first, then the version override.
+      # Each attempt wipes the lint intermediates so a crash cannot be
+      # "reused" as a cached success, and each is independently report-only.
+      - name: Probe lint configurations
         shell: bash
         run: |
           cd src/android
           set +e
-          ./gradlew :app:lintDebug --stacktrace \
-            -Dorg.gradle.jvmargs=-Xmx6144m 2>&1 | tee /tmp/lint-gradle.log
-          code=${PIPESTATUS[0]}
-          echo "GRADLE_EXIT=$code" | tee -a "$GITHUB_ENV"
+          : > /tmp/probe-summary.txt
+          attempt() {
+            name="$1"; shift
+            echo "===== ATTEMPT: $name =====" | tee -a /tmp/probe-summary.txt
+            echo "flags: $*" | tee -a /tmp/probe-summary.txt
+            rm -rf app/build/intermediates/lint* app/build/reports/lint-results-* 2>/dev/null
+            ./gradlew :app:lintDebug --stacktrace "$@" \
+              -Dorg.gradle.jvmargs=-Xmx6144m > "/tmp/lint-$name.log" 2>&1
+            code=$?
+            if ls app/build/reports/lint-results-*.xml >/dev/null 2>&1; then
+              mkdir -p "/tmp/report-$name"
+              cp app/build/reports/lint-results-* "/tmp/report-$name/" 2>/dev/null
+              echo "exit=$code REPORT=YES" | tee -a /tmp/probe-summary.txt
+              return 0
+            fi
+            echo "exit=$code REPORT=no" | tee -a /tmp/probe-summary.txt
+            grep -m1 -o "IncompatibleClassChangeError:[A-Za-z]*\|NoSuchMethodError:[A-Za-z]*\|UnsupportedClassVersionError" "/tmp/lint-$name.log" \
+              | tee -a /tmp/probe-summary.txt
+            return 1
+          }
+
+          # Ordered cheapest-first. Property names verified to exist in
+          # gradle-8.7.3.jar (OptionalBooleanOption holds "android.lint.useK2Uast";
+          # AndroidLintTask reads "android.experimental.lint.version"), so a miss
+          # here means the lever did not help, not that the flag was ignored.
+          attempt k2uast-off   -Pandroid.lint.useK2Uast=false && exit 0
+          attempt lint-31.8.0  -Pandroid.experimental.lint.version=31.8.0 && exit 0
+          attempt lint-31.9.0  -Pandroid.experimental.lint.version=31.9.0 && exit 0
+          attempt k2-off-319   -Pandroid.lint.useK2Uast=false -Pandroid.experimental.lint.version=31.9.0 && exit 0
           exit 0
 
       - name: Summarize findings
@@ -541,15 +575,21 @@ jobs:
           import os, sys, glob, xml.etree.ElementTree as ET
           from collections import Counter
 
-          cands = sorted(glob.glob("src/android/app/build/reports/lint-results-*.xml"))
           print("## Lint probe\n")
-          print(f"gradle exit: `{os.environ.get('GRADLE_EXIT', 'unknown')}`")
+          if os.path.exists("/tmp/probe-summary.txt"):
+              print("```")
+              print(open("/tmp/probe-summary.txt").read().strip())
+              print("```\n")
+
+          cands = sorted(glob.glob("/tmp/report-*/*.xml"))
           if not cands:
-              print("\n**no lint XML report produced** — the task most likely crashed "
-                    "before the report stage. See `lint-gradle.log` in the artifact.")
+              print("\n**no configuration produced a lint XML report.** "
+                    "Every attempt crashed before the report stage — read the "
+                    "`lint-<attempt>.log` files in the artifact.")
               sys.exit(0)
+
           path = cands[0]
-          print(f"report: `{path}`\n")
+          print(f"winning config report: `{path}`\n")
           root = ET.parse(path).getroot()
           issues = root.findall("issue")
           sev = Counter(i.get("severity") for i in issues)
@@ -581,7 +621,7 @@ jobs:
                       shown += 1
           PY
 
-      - name: Upload lint report
+      - name: Upload lint reports and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -589,10 +629,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           path: |
-            src/android/app/build/reports/lint-results-*.html
-            src/android/app/build/reports/lint-results-*.xml
-            src/android/app/build/reports/lint-results-*.txt
-            /tmp/lint-gradle.log
+            /tmp/probe-summary.txt
+            /tmp/lint-*.log
+            /tmp/report-*/*
 
   # ────────────────────────────────────────────────────────────────────────
   # job 4/4 — publish.
