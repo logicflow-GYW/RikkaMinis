@@ -3,16 +3,16 @@
 > **这是档案的「主题视角」**。同一批条目，换一根轴来读：
 > - `rikkaminis-dev-history.md` — 时间轴（这天发生了什么）
 > - `rikkaminis-dev-history-INDEX.md` — 按天索引（快速跳转）
-> - **本文件** — 主题轴（这件事的完整历史，跨 92 天）
+> - **本文件** — 主题轴（这件事的完整历史，跨 101 天）
 >
 > 由 `skills/dev-history-sync/scripts/build_sagas.py` 从档案自动生成，可重复执行。
 
-- 覆盖范围：2026-08-03 ～ 2026-11-02，共 92 天
-- 条目总数：2550（源文件：rikkaminis-dev-history.md）
+- 覆盖范围：2026-08-03 ～ 2026-11-13，共 101 天
+- 条目总数：2597（源文件：rikkaminis-dev-history.md）
 - 主题数：25
-- 未归入任何主题：204 条（8%，列在文末）
-- 归入 ≥4 个主题（说明规则偏松）：262 条
-- 标 `↳` 的条目是**推断归属**：标题里没有主题词（「X 完成 / X 收尾」这类收尾条目，主题词在**上一条**里），由「12 小时内最近一条有主题的条目」继承而来，共 144 条。
+- 未归入任何主题：212 条（8%，列在文末）
+- 归入 ≥4 个主题（说明规则偏松）：265 条
+- 标 `↳` 的条目是**推断归属**：标题里没有主题词（「X 完成 / X 收尾」这类收尾条目，主题词在**上一条**里），由「12 小时内最近一条有主题的条目」继承而来，共 145 条。
 
 ### 怎么读
 
@@ -33,25 +33,25 @@
 | 4 | 沙箱 / rootfs / PRoot / 终端 | 158 | 08-03 ～ 11-01 | 稳定 |
 | 5 | fastio offload / syscall 税 | 42 | 08-20 ～ 10-27 | 已合并 main |
 | 6 | 流式回答中断 / 恢复 / 取消 | 205 | 08-03 ～ 11-02 | 已闭环 |
-| 7 | 思考 / 推理泄漏 | 99 | 08-08 ～ 10-29 | 已闭环 |
-| 8 | 上下文压缩 / 记忆 / 预算 | 225 | 08-06 ～ 10-30 | 稳定 |
-| 9 | Provider / 模型组 / 负载均衡 | 167 | 08-04 ～ 10-29 | 已闭环 |
-| 10 | 备份 / 多端同步 | 210 | 08-03 ～ 11-02 | 收敛 |
+| 7 | 思考 / 推理泄漏 | 101 | 08-08 ～ 11-12 | 已闭环 |
+| 8 | 上下文压缩 / 记忆 / 预算 | 228 | 08-06 ～ 11-12 | 稳定 |
+| 9 | Provider / 模型组 / 负载均衡 | 172 | 08-04 ～ 11-12 | 已闭环 |
+| 10 | 备份 / 多端同步 | 218 | 08-03 ～ 11-13 | 收敛 |
 | 11 | 渲染性能 / Markdown / 长会话卡顿 | 141 | 08-05 ～ 10-30 | 已闭环 + 持续加固 |
-| 12 | 审计 / 整改（多轮） | 395 | 08-03 ～ 10-30 | 常态机制 |
-| 13 | 门见证 / 对抗审 / 材料包 | 140 | 09-19 ～ 10-29 | 常态机制 |
-| 14 | 多会话并行协作 / 派发 / 交接 | 867 | 08-04 ～ 11-02 | 成熟 |
-| 15 | CI / 构建 / 发布流水线 | 852 | 08-03 ～ 11-02 | 稳定 |
-| 16 | 开发档案 / 记忆 / 工具链 | 212 | 08-03 ～ 11-01 | 常态维护 |
-| 17 | 会话 / 导航 / 抽屉交互 | 182 | 08-03 ～ 10-30 | 已闭环 |
-| 18 | 平台适配 / 通知 / 图标 / 权限 | 107 | 08-03 ～ 11-01 | 部分放弃 |
-| 19 | 国际化 / 文案 / 本地化 | 36 | 08-04 ～ 10-31 | 已闭环 |
-| 20 | 上游 / 生态吸收 / 开源 | 110 | 08-03 ～ 11-02 | 常态 |
-| 21 | UI 组件 / 设置页 / 交互微调 | 135 | 08-04 ～ 11-01 | 持续 |
-| 22 | Token 用量 / 成本统计 | 93 | 08-05 ～ 11-02 | 已闭环 |
-| 23 | 人格 / Soul / 提示词 / 技能体系 | 189 | 08-04 ～ 11-01 | 稳定 |
+| 12 | 审计 / 整改（多轮） | 398 | 08-03 ～ 11-12 | 常态机制 |
+| 13 | 门见证 / 对抗审 / 材料包 | 141 | 09-19 ～ 11-05 | 常态机制 |
+| 14 | 多会话并行协作 / 派发 / 交接 | 880 | 08-04 ～ 11-12 | 成熟 |
+| 15 | CI / 构建 / 发布流水线 | 859 | 08-03 ～ 11-13 | 稳定 |
+| 16 | 开发档案 / 记忆 / 工具链 | 213 | 08-03 ～ 11-04 | 常态维护 |
+| 17 | 会话 / 导航 / 抽屉交互 | 183 | 08-03 ～ 11-12 | 已闭环 |
+| 18 | 平台适配 / 通知 / 图标 / 权限 | 108 | 08-03 ～ 11-09 | 部分放弃 |
+| 19 | 国际化 / 文案 / 本地化 | 40 | 08-04 ～ 11-12 | 已闭环 |
+| 20 | 上游 / 生态吸收 / 开源 | 116 | 08-03 ～ 11-12 | 常态 |
+| 21 | UI 组件 / 设置页 / 交互微调 | 139 | 08-04 ～ 11-12 | 持续 |
+| 22 | Token 用量 / 成本统计 | 94 | 08-05 ～ 11-12 | 已闭环 |
+| 23 | 人格 / Soul / 提示词 / 技能体系 | 193 | 08-04 ～ 11-12 | 稳定 |
 | 24 | 语音 / 多模态输入 | 66 | 08-03 ～ 10-31 | 低优先级维护 |
-| 25 | 被否掉的方向（决策记录） | 52 | 08-04 ～ 10-30 | 持续累积 |
+| 25 | 被否掉的方向（决策记录） | 53 | 08-04 ～ 11-11 | 持续累积 |
 
 ---
 
@@ -814,7 +814,7 @@
 
 ## 7. 思考 / 推理泄漏
 
-**跨度** 2026-08-08 ～ 2026-10-29 · **99 条** · **状态** 已闭环（09-12 打包合并；同类新方言需重新进表）
+**跨度** 2026-08-08 ～ 2026-11-12 · **101 条** · **状态** 已闭环（09-12 打包合并；同类新方言需重新进表）
 
 **叙事**：08-14 思考折叠框缺失（模型组中转站场景）→ 08-18 「思考跑进正文」+ 断流诊断 → 08-20 thinking 级别无效 → 09-04 thinking-rules-port + 思考字段决策键 → 09-05 thinking-gap-close（审计出 2 HIGH）→ 09-11/12 **think 泄漏实锤：中转站 `<think>` 标签不在解析表**。核心难点：泄漏来自**上游 provider 的方言差异**，不是我们自己的解析 bug。
 
@@ -919,10 +919,12 @@
 | 10-26 10:13 | B6-t07 收口：modeluse_proto_single_source + thinking_rule_editor_preserve 两门 13 条见证全 CAUGHT（分支 `fix/b6-modeluse-thinkrule` @ 门提交 `ae0cdce9c` + 报告 `12e879c00`，CI #2703 绿，停分支） | 基线 e145ec961（= main 6ac77c6b2 + 共享 _kotlin_valueflow）。门提交 ae0cdce9c（2 文件 +1237/−719，生产 .kt 0 行、scan.sh/test_sc… |
 | 10-26 19:06 | R3-t15 收口：anthropic_thinking_budget + thinking_wiring 两门补缝（7 条跨门缝见证全 CAUGHT，CI #2733 绿，停分支） | 支线 fix/r3-thinking-wiring @ 6bcb84cf4（门提交 3110d6e29），基线 main f0f14d46d。改动面 = 2 个门脚本 +912/−95，生产 .kt 0 行，scan.s… |
 | 10-29 22:50 | TASK-R5-E1 收口：OpenAI 生图下载校验 + SSE 计数器同源 + 顶层图片挂载（分支 `fix/r5e-openai` @ 绿 `03e4459e`，CI #2924 `40890556458` success 21.2min，停分支） | 基线 main 35509888。只改 provider/openai/OpenAIProvider.kt（+274/−60 首版，后经修正）+ 新增 R5E1OpenAIImageContractTest.kt（6 例… |
+| 11-12 17:18 | 「拉取到的模型的默认值」链路核查 + rikkahub 对照（2026-11-12） | 用户问：远端拉取的模型，其思考能力 / 多模态 / 上下文大小的默认值有没有处理。结论=有，四层链；但有 3 个缺口，且本机已能取到证据。 |
+| 11-12 18:52 | fix/model-defaults-1112 完成 — 分支 CI 绿，未合并 main（2026-11-12） | 停止节点达成：分支 fix/model-defaults-1112 @ fb957295，CI run 43202489016 四 job success（scan-gate / unit-tests / build-a… |
 
 ## 8. 上下文压缩 / 记忆 / 预算
 
-**跨度** 2026-08-06 ～ 2026-10-30 · **225 条** · **状态** 稳定（09-12 差距清单收敛：D1 攒着、D3/D4/D5 归档不吸收）
+**跨度** 2026-08-06 ～ 2026-11-12 · **228 条** · **状态** 稳定（09-12 差距清单收敛：D1 攒着、D3/D4/D5 归档不吸收）
 
 **叙事**：08-05 RAG v1 实验 → 08-06 经验记忆模块（实施→审查→修复→**08-07 整体摘除**）→ 08-12 上下文压缩引擎 T5 → 08-14 切片无清洗 + summary 注入 tool_result（400 报错）→ 08-16 动态预算 → 08-18 上下文窗口来源治理 → 08-31 memory facts + 语义索引 → 09-12 A1 Prompt Cache 调查（**结论：本地已是上游超集，无需移植**）。一条「先做、再摘、再重做」的螺旋线。
 
@@ -1153,10 +1155,13 @@
 | 10-30 00:17 | TASK-A 症状归因收口：三条真机症状全部成立但站位大改（P1×1 / P2×3），并顺手修回被覆盖的台账 | 背景：六轮"按目录读代码"审计已饱和（R5 两包 16 条 0 high、3 证伪、2 dead code），改为从真机日志反查代码。派 1 支会话子代理（minis-sessions-cli send --async，… |
 | 10-30 11:06 | LOOP-1030 四支合并 main 完成：main `039c9ab2` + main CI 绿（Publish 真执行，release v1.0.0+2939），分支/worktree 清零 | 用户令：「把那些都处理了，然后再合并」→ 两条剩余 P1（R1-b 报告来源、R3 压缩净收益）修完 + 四支并集 + 合 main 全链路走完。 |
 | 10-30 17:34 | DOC-REFRESH 收口：签名轮换后的文档过时事实全面刷新（分支 `docs/refresh-stale-facts-1030` @ 绿 `e8f8469f`，CI `41031253588` success 21.7min，停分支等放行） | 用户触发：「我去看了仓库里的那些文档，发现很多东西好像过时了，更新一下。比如 release 的 debug 签名说明」。 |
+| 11-12 11:00 | fix/memcache-prefix-split 落地（2026-11-12，P1 记忆块分离已修） | 分支 fix/memcache-prefix-split @ a05030f42cfafe57ce07aab7ca022f5b4459d25a，CI run 43144110297 success 且 head_sha … |
+| 11-12 11:45 | fix/memcache-prefix-split 审查抓到 P0 并修复、已合并 main（2026-11-12） | 用户令「检查云端分支，有问题修，没问题合并」。分支 a05030f（memory_write 不打穿 prompt cache 前缀）审查发现真 P0 次生问题：子代理注入点把全部 5 类片段走 orderInStand… |
+| 11-12 11:53 | 真机端到端验证：子代理 daily 注入修复（2026-11-12） | 新构建 versionName=1.0.0+3010 / lastUpdateTime 2026-11-12 11:46:23（main a8a5a90 产物，dumpsys 实证）。 |
 
 ## 9. Provider / 模型组 / 负载均衡
 
-**跨度** 2026-08-04 ～ 2026-10-29 · **167 条** · **状态** 已闭环（09-12 收尾；负载均衡语义已在代码级核实为「生效但语义与用户预期不同」）
+**跨度** 2026-08-04 ～ 2026-11-12 · **172 条** · **状态** 已闭环（09-12 收尾；负载均衡语义已在代码级核实为「生效但语义与用户预期不同」）
 
 **叙事**：08-04 loadBalance 轮转游标不前进 → 08-08 模型组 recovery 策略 → 08-14 模型组策略重构 P1–P4 + 思考折叠（中转站）→ 08-15 模型切换无缝（cancel+restart）→ 09-04 思考字段决策键（tokenrhythm 报错）→ 09-06 负载均衡请求级改造 → 09-11 多密钥轮换 + Groq 免费档不可用 → 09-12 「负载均衡像回退模式」**第二次**被报（08-04 同款问题）。**同一现象两次立项**，说明第一次的修法没解释清语义。
 
@@ -1329,10 +1334,15 @@
 | 10-28 13:40 | TASK-FIX-3 收口：B-1 provider 坏行被固化删除（分支 `fix/p1028-provider-corrupt-row` @ 绿 `7011e6e0`，报告 `bcdd8464`，CI #2807 success 17m04s，停分支）—— 2026-10-28 | 基线 main 12bdcebb。改动面 4 文件 +501/−16（ProviderConfigMapping.kt +87、ProviderConfigDao.kt +23、ProviderRepository.kt… |
 | 10-28 19:27 | TASK-W3 收口：Provider/存储/沙箱三条见证固化为门判据（分支 `fix/meta1028-w3-provider-gates`，绿 sha `eb5c8e46`，CI `40676464259` success 16min，停分支） | 基线 main bfb5b0e6。改动面 3 个门脚本 +1028/−7 + 报告，生产 .kt 零改动，scan.sh/test_scan.py/scan_blocks.sh 零触碰，门 113 / 夹具 349 不变… |
 | 10-29 02:30 | TASK-R3-A 收口：B08 provider 线 11 项修复（分支 `fix/r3-b08-provider` @ 绿 `181b41e8`，报告 `65fb8d05`，CI run `40742217153` #2858 success 18m52s，停分支） | 基线 main 2103729f。改动面 23 文件 +1456/−68（生产 12 + 测试 10）+ 报告 250 行。scripts/scan/、scan.sh、test_scan.py、backup/、ui/ 零… |
+| 11-12 14:20 | 模型列表分表重构（model-catalog-split）进行中 — 2026-11-12 | 用户验证需求：模型列表模块体感怪 → 根因 = 手动刷新走 7 天磁盘缓存不联网（真机日志 13:50 三次 "SUCCESS_API" 5-15ms、gateway 127.0.0.1:8790 已 ConnectEx… |
+| 11-12 14:59 | ↳ FIX-B（model-catalog-split B 支）完成 @ 9a2a384 | work-b 树 feat/model-catalog-split，commit 9a2a384，未 push（收口归主会话）。改动 4 文件 +591/−144： |
+| 11-12 16:41 | 模型列表分表重构（第3档）完成 — 分支 CI 绿，未合并 main（2026-11-12） | 用户令「直接做第3档，工程大就用子代理」。分支 feat/model-catalog-split @ 49904445c023510ae4fd8afa9c3f8ab074be4023，CI #3015 全绿（build-… |
+| 11-12 16:57 | 模型列表分表重构已合并 main（2026-11-12，用户令「合并」） | feat/model-catalog-split → main merge commit f63d02d（--no-ff），已推送。main CI 双 workflow 全绿：Scan Gate 43185745363 … |
+| 11-12 20:28 | 复盘发现的问题已修：F-01 UI 写路径 + 规则层冲突 + 两条教训入规则库（2026-11-12 晚） | 用户令：「本地跑全量夹具成本太高，所以用最新的那个方案来，冲突的进行处理修改，发现的问题也一起修了。」 |
 
 ## 10. 备份 / 多端同步
 
-**跨度** 2026-08-03 ～ 2026-11-02 · **210 条** · **状态** 收敛（多端同步已砍除，自动备份按「资产」语义保留）
+**跨度** 2026-08-03 ～ 2026-11-13 · **218 条** · **状态** 收敛（多端同步已砍除，自动备份按「资产」语义保留）
 
 **叙事**：08-04 WebDAV 备份把 main 编译弄坏 + 导入去重 → 08-09 备份并发 OOM → 08-10 多端自动同步 → 08-11 流量审计（用户发现方案欠考虑）→ 降本 + 合并守卫 → 08-13 备份模块审计 7 项 → 08-28 方案 C 重构 → 09-08 **产品哲学定调：资产 vs 副产品** + 自动备份 A+B + auto/ 目录分离 → 09-09 多端同步砍除。**从「做」到「砍」只用了一个月，中间靠一次流量审计转弯。**
 
@@ -1548,6 +1558,14 @@
 | 10-30 19:53 | 小号 fork (***ALT_USER***/RikkaMinis) CI 编译失败修复：缺 release 签名密钥（2026-10-30） | 症状：fork main 的 Build RikkaMinis Android APK 在 step 12 Restore release signing keystore 红。 |
 | 11-01 00:51 | 7 天窗口独立审查收口（2026-10-31，分支 `fix/composer-paste-lifecycle` @ 绿 `3e2eb39d`，CI `41219869545` success 16.5min，停分支未合 main） | 用户令：把「为什么还会犯、如何预防」写进技能；把审查窗口扩到 7 天；查出来的就修，工程量大用子代理，但注意「每多开一个子代理，门禁夹具成本线性增加、可能相互干扰」。 |
 | 11-02 02:26 | §RHUB-1102：rikkahub 同步功能面投 RikkaMinis（2026-11-02） | 背景：主号 rikkahub fork 同步完（master 4537bbf2，CI 绿），用户问「有什么是这个应用能吸收的，过一下那些门」。核查基线 RikkaMinis main 108280cd。 |
+| 11-12 10:35 | tall-1997/OpenMinis-Linux「可抄清单」核查（2026-11-12，接上条收尾期核查） | 方法：浅克隆双方 main 到 shared/work/copycheck-1112/{oml,rmk}（oml 80.9M/rmk 129.6M），对他 wave1-5 + #325 候选做符号级双树对照 + 语义读源… |
+| 11-12 16:41 | 模型列表分表重构（第3档）完成 — 分支 CI 绿，未合并 main（2026-11-12） | 用户令「直接做第3档，工程大就用子代理」。分支 feat/model-catalog-split @ 49904445c023510ae4fd8afa9c3f8ab074be4023，CI #3015 全绿（build-… |
+| 11-12 16:57 | 模型列表分表重构已合并 main（2026-11-12，用户令「合并」） | feat/model-catalog-split → main merge commit f63d02d（--no-ff），已推送。main CI 双 workflow 全绿：Scan Gate 43185745363 … |
+| 11-12 19:41 | 2026-11-12 全量改动复盘审查（用户令「把今天的修改都检查一遍」） | 对象：43e57e0→e74361a，14 commit / 3 批（memcache / model-catalog-split / model-defaults）/ 42 文件 / +3179−413 / diff … |
+| 11-12 20:28 | 复盘发现的问题已修：F-01 UI 写路径 + 规则层冲突 + 两条教训入规则库（2026-11-12 晚） | 用户令：「本地跑全量夹具成本太高，所以用最新的那个方案来，冲突的进行处理修改，发现的问题也一起修了。」 |
+| 11-12 20:42 | 合并收口：fix/selection-only-ui-writer-1112 → main（2026-11-12 晚，用户令「合并吧」） | merge commit f77e916（--no-ff，parents = e74361a + c3f9d8e）。 |
+| 11-13 00:29 | fix/review1112-p1s 落地 — 2026-11-12 审查修复（分支 CI 绿，未合并） | 分支 fix/review1112-p1s @ 4d0f36f5（3 commits：77bd74c 五条修复 + cb78f00 CI 红修复 + 4d0f36f 测试同步）。 |
+| 11-13 01:01 | fix/review1112-p1s 已合并 main — 2026-11-12（用户令「合并」） | merge commit 451170a（--no-ff，parents = 72e7f61 + bbdbc1f），父数 = 2 ✓， |
 
 ## 11. 渲染性能 / Markdown / 长会话卡顿
 
@@ -1701,7 +1719,7 @@
 
 ## 12. 审计 / 整改（多轮）
 
-**跨度** 2026-08-03 ～ 2026-10-30 · **395 条** · **状态** 常态机制（已固化为 security-audit-checklist / four-way-sync-check 等 skill）
+**跨度** 2026-08-03 ～ 2026-11-12 · **398 条** · **状态** 常态机制（已固化为 security-audit-checklist / four-way-sync-check 等 skill）
 
 **叙事**：08-05 首次全量代码审查 → 08-16 系统性审计 → 08-18 RC1–RC17 两轮整改（多会话并行）→ 08-26/27 模块审计批 → 09-02 bug-hunt 四会话 → 09-04 diff 驱动定向审计 → 09-09 全局第二轮 T1–T12 → 09-13 完善度横向扫描 → 09-14 度量存活度 → 09-15 七轴 sweep。**审计是本项目最稳定的工程节奏**：每次改动后必有一次独立审计，且审计本身产出纪律（skill）。
 
@@ -2102,10 +2120,13 @@
 | 10-30 07:24 | R1 环族（内存治理环）五边审计收口 — 2026-10-30 | 报告 shared/work/loop-audit-1030/reports/R1-memory.md（112 行），探针 loop-audit-1030/probe/r1_.py 5 个。代码树 witness-102… |
 | 10-30 07:39 | LOOP-1030 收口：三族闭环审计全部 L2，抓到一个 P0 candidate（半截回答永久丢失）+ 打脸自己的影子水线 | 派发：3 会话子代理并行（R1 e609ba98 / R2 c188a884 / R3 7b10ba64），任务书 shared/work/loop-audit-1030/tasks/，方法文件重建为自包含 METHOD… |
 | 10-30 16:54 | 「又多又少」体感 = 审计-修复型工作的固有形状（2026-10-30 用户提问） | 用户问「今天都干了什么？为什么有一种又多又少的感觉，两种都有」。 |
+| 11-06 00:05 | RHUB-1105 双仓差分审计批次收口（2026-11-05） | 输入：外部审计报告 shared/work/meta-audit/reports/r6/Rhub_Protocol_1105_Audit_Report.md（形态 B 货架 findings，6 条）。基线 RikkaM… |
+| 11-08 14:00 | 工作遗留数据清理（2026-11-08） | 回收 ~2.9 GB：/var/minis/shared 2.2G → 214M，沙箱 /root 885M → 7.3M，shared/work 1.9G → 164M。 |
+| 11-12 22:03 | CI 扫描门因「分母硬编码漏改」整链假红 — 已根治（2026-11-12） | 事故：分支 fix/gateway-context-metadata-1112 加了第 115 个扫描门，把 scan_blocks.sh 的 115 个 header 分母从 114 改成 115，但漏改了 scan_… |
 
 ## 13. 门见证 / 对抗审 / 材料包
 
-**跨度** 2026-09-19 ～ 2026-10-29 · **140 条** · **状态** 常态机制（门证伪→补强闭环；材料货架化后按包并发外发）
+**跨度** 2026-09-19 ～ 2026-11-05 · **141 条** · **状态** 常态机制（门证伪→补强闭环；材料货架化后按包并发外发）
 
 **叙事**：10-20 背景包 v17 + 提问模板 v14-A/B（首次双报告实战复盘）→ 10-21 v20/v17（配额换代：命中质量四问）→ 10-23 v27 单任务版（额度只有一份）→ **10-24 门见证第四轮定案：宽扫优先（25 门/席 × zip 形态，用户两次纠正「教条」）** → 10-25 wide1–4 波 49/50 门被证伪并补强 + 第五/六/七批材料（两轮覆盖账 63+28=91 闭合）→ 10-26 第三轮 157 条见证 / 51 门、22 支派发 → **10-27 第四面对抗审：外部模型给 witness patch（门绿+单测绿+行为坏），12/12 BLIND_CONFIRMED** → 10-28 材料货架化（13 包自包含覆盖全库 654 文件 / 23.5 万行）。**专职问题从「代码有 bug 吗」变成「门是不是瞎的」**——外部席位负责找缝，本仓负责机械复证（实锤 / 已抓 / 需人工三分类）与补强。
 
@@ -2251,10 +2272,11 @@
 | 10-28 19:46 | TASK-META1028-W1 收口：8 条「门盲」见证固化为可判红判据（分支 `fix/meta1028-w1-backup-gates` @ 绿 `7d1103e6`，报告 `d5dde52e`，CI `40678202539` success，停分支等放行） | 基线 main bfb5b0e6。改动面 = 3 个门脚本 +1072/−10，生产 .kt 0 行，scripts/scan/{scan.sh,test_scan.py,_kotlin_} 零触碰（避免与并行支撞公共资… |
 | 10-28 21:38 | 技能固化：meta-audit-witness v2.0.0（两形态流水线，2026-10-28 晚，用户拍板「现这一套比上一版顺畅」） | 改动面：/var/minis/skills/meta-audit-witness/：SKILL.md 7.9KB→13KB（v1.0.0 门见证单形态 → v2.0.0 两形态）、新增 scripts/verify_fi… |
 | 10-29 15:49 | 纠错：审计任务书的定档在挂载里，不在 shared/work（2026-10-29 15:5x，用户指出） | 我错了一次：准备 R5 材料时我判定"任务书随 shared 清空事故丢了"（依据是 /var/minis/shared/work/batch-1028b/gen_shelf.py 等施工物没了），于是从头写了个新格式生… |
+| 11-05 23:36 | FIX-E：修被证伪的门（truncated_call_guard_check 4 条 selftest 臂失牙，2026-11-05） | 分支 fix/rhub1105-gate-selftest @ 绿 CI 提交 b5cbbf356dca6def7f9371ce6fa5c8d03477ab53（CI run 42050636222 / #3005 su… |
 
 ## 14. 多会话并行协作 / 派发 / 交接
 
-**跨度** 2026-08-04 ～ 2026-11-02 · **867 条** · **状态** 成熟（skill: task-dispatch / git-parallel-collaboration / rikkaminis-dev-methodology）
+**跨度** 2026-08-04 ～ 2026-11-12 · **880 条** · **状态** 成熟（skill: task-dispatch / git-parallel-collaboration / rikkaminis-dev-methodology）
 
 **叙事**：08-07 多对话框并发操作同一 worktree 翻车（native OOM 修复）→ 08-12 多任务并行推进模式确立 → 08-15 T1–T10 十会话派发（平衡点施工）→ 08-18 RC 整改凭编号领取 → 08-22 小号 TF-A..TF-J → 08-23 bug-hunt 五会话 → 09-13 两条纪律固化：**每会话独立 clone 绝不共享 .git** + **两分支同基各一 commit 时第二个必须 rebase**。
 
@@ -3127,10 +3149,23 @@
 | 11-02 08:47 | FEAT-INTERNAL-USAGE-LEDGER 合入 main 收口（2026-11-02 00:41） | 用户令：「合并」→ 走三项核查后 --no-ff 合入。 |
 | 11-02 20:56 | CI-WALLCLOCK 第二步：四 job 并行（#2989，616s），预测错在「复用 vs 冷构建」 | 交付：perf/ci-parallel-jobs @ b1395a94（= s1b + 拆分提交），CI #2989 success，净改动仍只 .github/workflows/build-apk.yml，未合 ma… |
 | 11-02 21:14 | CI-WALLCLOCK 收口：合入 main 并验证（#2991，944s → 640s，−32%） | 合并：perf/ci-parallel-jobs → main --no-ff，merge commit 22c47976。合并前核查三项齐全（head_sha b1395a94 逐字符一致 / 净改动只 build-a… |
+| 11-04 19:00 | CMFA 结果框合入 main 收口（2026-11-04 18:5x，merge commit `7ac4a78`） | 合并：main ← fix/cf-result-viewbox，--no-ff，merge commit 7ac4a78（f27f59e..7ac4a78）。远端分支 DELETE 204 + 本地 -D + prune… |
+| 11-05 02:24 | /responses 400 根因翻转 + 修复收口（2026-11-05，分支 `fix/responses-replay-item-id` @ `7b0c5f66`） | 根因（与原报告相反，最值钱的一条）：agentrouter.org（Azure 多资源中继，限流错误明写 in eastus2）报 400 The requested item was created under a d… |
+| 11-05 03:06 | /responses item-id 修复：审查 + 补强 + 合并 main 收口（2026-11-05） | 分支 fix/responses-replay-item-id（7b0c5f66 → 8f4871fe），已合 main = merge commit 96df97f4（--no-ff），main CI run 4189… |
+| 11-05 18:00 | Gemini 签名修复：真机新包验真 + 行为验证收口（2026-11-05 晚） | 用户「应用已更新，包含刚刚的修改，开始验证」。核实结果：设备上装的确实是含修复的包。 |
+| 11-05 18:52 | Gemini thoughtSignature 分支合入 main 收口（2026-11-05） | 用户「合并」= 明确放行。走 §6.5 合并前核查（机械捆绑 verify_branch.sh exit 0，核对时刻 2026-11-05T10:36:53Z：scan.sh 113 passed, 0 failed、… |
+| 11-06 00:05 | RHUB-1105 双仓差分审计批次收口（2026-11-05） | 输入：外部审计报告 shared/work/meta-audit/reports/r6/Rhub_Protocol_1105_Audit_Report.md（形态 B 货架 findings，6 条）。基线 RikkaM… |
+| 11-06 00:45 | RHUB-1105 批次合并 main 收口（2026-11-06 00:2x） | 合并：main ← integration/rhub1105，--no-ff，merge commit 43e57e0d52762afa2187299f66f1c5fc4d270e4e（parents 00dc003a … |
+| 11-12 11:53 | 真机端到端验证：子代理 daily 注入修复（2026-11-12） | 新构建 versionName=1.0.0+3010 / lastUpdateTime 2026-11-12 11:46:23（main a8a5a90 产物，dumpsys 实证）。 |
+| 11-12 20:28 | 复盘发现的问题已修：F-01 UI 写路径 + 规则层冲突 + 两条教训入规则库（2026-11-12 晚） | 用户令：「本地跑全量夹具成本太高，所以用最新的那个方案来，冲突的进行处理修改，发现的问题也一起修了。」 |
+| 11-12 20:42 | 合并收口：fix/selection-only-ui-writer-1112 → main（2026-11-12 晚，用户令「合并吧」） | merge commit f77e916（--no-ff，parents = e74361a + c3f9d8e）。 |
+| 11-12 21:16 | 合并收口：fix/i18n-backfill-1112 → main（2026-11-12 晚，用户令「也处理了吧」） | merge commit a97cc0b（--no-ff，parents = f77e916 + 9df0497），父数 = 2 ✓， |
+| 11-12 22:17 | fix/gateway-context-metadata-1112 收口 — 分支 CI 绿（2026-11-12 晚） | 分支 fix/gateway-context-metadata-1112 @ f69a6b5aab4e（2 commits：a40ecc8 模型元数据修复 + f69a6b5 扫描驱动分母根治）。 |
+| 11-12 22:31 | 合并收口：fix/gateway-context-metadata-1112 → main（2026-11-12 晚，用户令「合并」） | merge commit 72e7f61（--no-ff，parents = a97cc0b + f69a6b5），父数 = 2 ✓（GLOBAL 合并形态判据）。 |
 
 ## 15. CI / 构建 / 发布流水线
 
-**跨度** 2026-08-03 ～ 2026-11-02 · **852 条** · **状态** 稳定（Publish 步骤已加 `if: refs/heads/main` 门控）
+**跨度** 2026-08-03 ～ 2026-11-13 · **859 条** · **状态** 稳定（Publish 步骤已加 `if: refs/heads/main` 门控）
 
 **叙事**：08-04 main 编译被 WebDAV 提交弄坏（连红 4 个 run）→ 08-05 android-latest 被分支构建污染 → workflow 门控修复 → 08-17 **CI 缓存恢复旧 native .so**（Tier 0 真 bug）→ 08-24 gh_ci_wait.sh 工具化 + 重复构建幂等守卫 → 09-10 语法门 grep 大小写坑 → 09-14 workflow_dispatch 并发竞态。**「CI 绿 ≠ 逻辑对」这条纪律就是从这条 saga 长出来的。**
 
@@ -3988,10 +4023,17 @@
 | 11-02 20:10 | CI-WALLCLOCK：main 构建 944s → 701s（−26%），三臂对照实测（2026-11-02） | 用户令：CI 15–20 分钟太长，能否把「两块验证 + 一块构建」并行。→ 先用 #2983 日志逐 step 计时（parse_steps.py），再动。 |
 | 11-02 20:56 | CI-WALLCLOCK 第二步：四 job 并行（#2989，616s），预测错在「复用 vs 冷构建」 | 交付：perf/ci-parallel-jobs @ b1395a94（= s1b + 拆分提交），CI #2989 success，净改动仍只 .github/workflows/build-apk.yml，未合 ma… |
 | 11-02 21:14 | CI-WALLCLOCK 收口：合入 main 并验证（#2991，944s → 640s，−32%） | 合并：perf/ci-parallel-jobs → main --no-ff，merge commit 22c47976。合并前核查三项齐全（head_sha b1395a94 逐字符一致 / 净改动只 build-a… |
+| 11-04 18:40 | CMFA 优选结果改为文本框展示（2026-11-04，分支 `fix/cf-result-viewbox` @ `5af1f9e`，CI #41815000207 success，未合 main） | 用户反馈两件事：①「点一下就写剪贴板」不对，应该打开一个框把测出来的东西放框里，自己看、自己复制；②实测「测试没成功，但上传成功了」⇒ 补传部分暂时不管（重试上传行保持现状，不再投入）。 |
+| 11-05 20:38 | FIX-C：Gemini 流式漏检 promptFeedback.blockReason（2026-11-05，分支 fix/rhub1105-gemini-blockreason，CI 绿，未合 main） | F-04 → 先证（红）→ 修法 → 证据 → CI run id + head_sha |
+| 11-12 16:41 | 模型列表分表重构（第3档）完成 — 分支 CI 绿，未合并 main（2026-11-12） | 用户令「直接做第3档，工程大就用子代理」。分支 feat/model-catalog-split @ 49904445c023510ae4fd8afa9c3f8ab074be4023，CI #3015 全绿（build-… |
+| 11-12 18:52 | fix/model-defaults-1112 完成 — 分支 CI 绿，未合并 main（2026-11-12） | 停止节点达成：分支 fix/model-defaults-1112 @ fb957295，CI run 43202489016 四 job success（scan-gate / unit-tests / build-a… |
+| 11-12 22:03 | CI 扫描门因「分母硬编码漏改」整链假红 — 已根治（2026-11-12） | 事故：分支 fix/gateway-context-metadata-1112 加了第 115 个扫描门，把 scan_blocks.sh 的 115 个 header 分母从 114 改成 115，但漏改了 scan_… |
+| 11-12 22:17 | fix/gateway-context-metadata-1112 收口 — 分支 CI 绿（2026-11-12 晚） | 分支 fix/gateway-context-metadata-1112 @ f69a6b5aab4e（2 commits：a40ecc8 模型元数据修复 + f69a6b5 扫描驱动分母根治）。 |
+| 11-13 00:29 | fix/review1112-p1s 落地 — 2026-11-12 审查修复（分支 CI 绿，未合并） | 分支 fix/review1112-p1s @ 4d0f36f5（3 commits：77bd74c 五条修复 + cb78f00 CI 红修复 + 4d0f36f 测试同步）。 |
 
 ## 16. 开发档案 / 记忆 / 工具链
 
-**跨度** 2026-08-03 ～ 2026-11-01 · **212 条** · **状态** 常态维护（skill: dev-history-sync，每次 dev 会话收尾同步）
+**跨度** 2026-08-03 ～ 2026-11-04 · **213 条** · **状态** 常态维护（skill: dev-history-sync，每次 dev 会话收尾同步）
 
 **叙事**：08-06 经验记忆引擎概念 → 08-08 三平台技能架构固化 → 08-14 档案首次从记忆重建 → 08-16/24/09-04/05/07/08/10/12/13/14 反复重建（**每次重建都在修解析器或脱敏规则**）→ 09-06 知识图谱 + MCP memory → 09-14 日志「可消费性」诊断 → 09-15 sanitize 头部刷新固化。**档案本身是被反复施工的产物，不是一次性导出。**
 
@@ -4209,10 +4251,11 @@
 | 10-29 03:02 | TASK-R3-G 收口：B11 tools/speech/a11y/mcp 9 条（分支 `fix/r3-b11-tools` @ 绿 `57c5a410`，报告 `8fc3ea31`，CI `40747076507` success 14.9 min，停分支） | 基线 main 2103729f。9 笔提交，生产 10 文件 + 测试 12 文件（改 7 新增 5）+731/−79；scripts/scan/ 零触碰，门 113 / 夹具 349 不变。 |
 | 10-30 08:41 | LOOP-1030 两条修复收口：#1 影子水线 R1-g + #2 取消死语义 M2（2026-10-30，两支 CI 全绿停分支） | 1 fix/symptom-a-diagnostics @ e393cfb8：影子水线从 1s tick 挪到准入采样点（observeShadowAtAdmission，与真档 levelFor 同一读数，零额外 IO… |
 | 11-01 21:40 | TREND-1101：Medium「284K Ascent」文章核实 + i-have-adhd 技能落地（2026-11-01） | 用户令：丢来 Medium 文章（Baozilla Tech Daily #66，GitHub 星数日报），「去研究一下这东西，看看对我们有什么用」。 |
+| 11-04 14:17 | 开发档案三件套更新至 2026-11-04（用户「文档有一段时间没更新了」） | 落后读数：本地挂载停在 10-28（2423 条），云端 docs/dev-history/ 停 10-27（2369 条），README 更旧（10-24 / 2221 条）——隔 7 天。 |
 
 ## 17. 会话 / 导航 / 抽屉交互
 
-**跨度** 2026-08-03 ～ 2026-10-30 · **182 条** · **状态** 已闭环（09-01 后未再复现）
+**跨度** 2026-08-03 ～ 2026-11-12 · **183 条** · **状态** 已闭环（09-01 后未再复现）
 
 **叙事**：08-03 空对话残留 → 08-04 左滑历史抽屉 + 新建对话弹窗 → 08-06 系统返回不进 SESSION_LIST + 双击返回 → 08-07 重启后进列表页而非新会话 → 08-18 RC10 深链路径穿越 → 09-01 launch-resume 导航修复 → 09-13 冷打开空白。**「打开应用后我在哪」这个问题被修了 6 次**，每次都是不同的入口（返回键 / 重启 / 深链 / 冷启）。
 
@@ -4400,10 +4443,11 @@
 | 10-29 18:26 | TASK-R5-D3 收口：卡顿自愈改由看门狗正常心跳分支完成（分支 `fix/r5-d3-hang-heal` @ 绿 `e946ec0e`，报告 `7b2ce6d3`，CI `40853836266` success 21.7 min，停分支） | 基线 main f3def6ce。生产 1 文件（diagnostics/HangDetector.kt +61/−8）+ 测试 1 文件（286 行）。scripts/scan/ 零触碰；只点名跑了提到 src/tes… |
 | 10-29 18:43 | TASK-R5-D2 收口：导航与崩溃包 3 项（分支 `fix/r5-d2-nav-crashpkg` @ 绿 `55157e50`，报告 `2a748328`，CI #2904 `40856282281` success 22.1min，停分支） | 基线 main f3def6ce。4 生产文件 +210/−10 + 2 新测试类（各 8 例）。门脚本 / scan.sh / test_scan.py 零触碰，门 113 / 夹具 349 与基线一致。无新增字符串（… |
 | 10-30 08:41 | LOOP-1030 两条修复收口：#1 影子水线 R1-g + #2 取消死语义 M2（2026-10-30，两支 CI 全绿停分支） | 1 fix/symptom-a-diagnostics @ e393cfb8：影子水线从 1s tick 挪到准入采样点（observeShadowAtAdmission，与真档 levelFor 同一读数，零额外 IO… |
+| 11-12 17:18 | 「拉取到的模型的默认值」链路核查 + rikkahub 对照（2026-11-12） | 用户问：远端拉取的模型，其思考能力 / 多模态 / 上下文大小的默认值有没有处理。结论=有，四层链；但有 3 个缺口，且本机已能取到证据。 |
 
 ## 18. 平台适配 / 通知 / 图标 / 权限
 
-**跨度** 2026-08-03 ～ 2026-11-01 · **107 条** · **状态** 部分放弃（灵动岛需申请小米白名单；其余已闭环）
+**跨度** 2026-08-03 ～ 2026-11-09 · **108 条** · **状态** 部分放弃（灵动岛需申请小米白名单；其余已闭环）
 
 **叙事**：08-05 小米灵动岛适配 → **卡平台白名单，已废弃回滚** → 08-07 通知震动被 MIUI 掐死 → 改直驱 Vibrator → 08-08 灵动岛焦点通知**再次砍掉** → 08-10 图标跟随系统主题 → 08-22 双 appid 共存 → 09-10 包名迁移 com.openminis.app → com.rikkaminis.app → 09-13 图标极简重设计**放弃并全部回滚** → 09-15 HangDetector 前台门控（HyperOS 冻结后台）。**平台层是本项目「努力最多、成功最少」的一层。**
 
@@ -4516,10 +4560,11 @@
 | 10-29 09:21 | TASK-R4-U 收口：B13 nav-ui/生命周期/通知/内存 7 条（分支 `fix/r4-b13-lifecycle` @ 绿 `6540eb6e`，CI #2874 `40797486769` success 13.4min，停分支） | 基线 main 2103729f。执行期间 /var/minis/shared/work 被反复清空（08:11/08:14/08:17），首次 worktree + 未提交改动全丢；改在 per-session /va… |
 | 10-30 19:53 | 小号 fork (***ALT_USER***/RikkaMinis) CI 编译失败修复：缺 release 签名密钥（2026-10-30） | 症状：fork main 的 Build RikkaMinis Android APK 在 step 12 Restore release signing keystore 红。 |
 | 11-01 10:15 | 盘点 tall-1997/OpenMinis-Linux（同源 fork）：可抄清单 + A1 实测移植（2026-11-01） | 对象：tall-1997/OpenMinis-Linux（fork of OpenMinis/OpenMinis，GPL-3.0，包名 com.openminis.linux，启动器 Minis Ultra）。2026-… |
+| 11-09 12:42 | 自动签到：真机闭环验证通过 + PR #13（2026-11-09） | 真机最终证据（Redmi Note 12 Turbo / A15，release 包 @ 6401a7c）： |
 
 ## 19. 国际化 / 文案 / 本地化
 
-**跨度** 2026-08-04 ～ 2026-10-31 · **36 条** · **状态** 已闭环（08-28 全量 i18n 改造合并 main）
+**跨度** 2026-08-04 ～ 2026-11-12 · **40 条** · **状态** 已闭环（08-28 全量 i18n 改造合并 main）
 
 **叙事**：08-07 剔除法语文档 values-fr → 08-28 收尾加固三任务（ChatViewModel i18n + chat 组件 + 外围 i18n）→ **语言切换跳回聊天 bug**（两轮：一次误判，一次最终根因）→ 09-15 七语言字符串同步纪律（搬运大段代码后必须对照 strings.xml 清干净）。
 
@@ -4561,10 +4606,14 @@
 | 10-28 21:44 | TASK-E6 收口：设置屏两文件 B06 F-12/F-13（分支 `fix/meta1028-e6-settings-b` @ 绿 `2628d8ce`，CI `40694700743` success 20.7min，停分支） | 基线 main bfb5b0e6。改动面 13 文件（生产 3 .kt + 2 新测试 + 7 份 strings.xml + 报告），scripts/scan/ 零触碰。 |
 | 10-29 23:02 | TASK-R5-G1 收口：配置/Debug RPC 面三条（分支 `fix/r5e-config-rpc` @ 绿 `7bb2c423`，CI `40893519882` success 22.2min，停分支未合 main） | 基线 main 35509888。两次提交：45cd127f（实现）+ 7bb2c423（修编译红）+ ce402398（报告，绿后提交，7bb2c423..HEAD 仅报告）。改动面 4 生产 +340/−68（Con… |
 | 10-31 20:10 | TASK-IME 收口：输入法语音听写守卫（拖动不再收键盘），分支 CI 绿即停（2026-10-31） | 任务：上游 OpenMinis #472 搬运——ChatScreen 的 LaunchedEffect(isUserDragging) 在拖动时 keyboardController?.hide() 会终止 IME 语… |
+| 11-12 16:57 | 模型列表分表重构已合并 main（2026-11-12，用户令「合并」） | feat/model-catalog-split → main merge commit f63d02d（--no-ff），已推送。main CI 双 workflow 全绿：Scan Gate 43185745363 … |
+| 11-12 19:41 | 2026-11-12 全量改动复盘审查（用户令「把今天的修改都检查一遍」） | 对象：43e57e0→e74361a，14 commit / 3 批（memcache / model-catalog-split / model-defaults）/ 42 文件 / +3179−413 / diff … |
+| 11-12 20:28 | 复盘发现的问题已修：F-01 UI 写路径 + 规则层冲突 + 两条教训入规则库（2026-11-12 晚） | 用户令：「本地跑全量夹具成本太高，所以用最新的那个方案来，冲突的进行处理修改，发现的问题也一起修了。」 |
+| 11-12 21:16 | 合并收口：fix/i18n-backfill-1112 → main（2026-11-12 晚，用户令「也处理了吧」） | merge commit a97cc0b（--no-ff，parents = f77e916 + 9df0497），父数 = 2 ✓， |
 
 ## 20. 上游 / 生态吸收 / 开源
 
-**跨度** 2026-08-03 ～ 2026-11-02 · **110 条** · **状态** 常态（每轮吸收都有「不做」清单，比「做」清单更重要）
+**跨度** 2026-08-03 ～ 2026-11-12 · **116 条** · **状态** 常态（每轮吸收都有「不做」清单，比「做」清单更重要）
 
 **叙事**：08-03 OpenMinis fork 起步 → 08-04 改名 RikkaMinis（OpenMinis 核 + RikkaHub 皮）→ 08-11 上游降级三件套 → 08-25 rikkahub 流畅性吸收 A–E → 08-31 LiteLLM 成本层 + facts → 09-06 Hermes Tier-1 harness → 09-07 Operit 吸收三件 → 09-12 差距清单收敛（D3/D4/D5 归档不吸收）→ 09-14/15 生态调查报告。**「吸收」有明确门槛：只吸收能接进现有边的东西，接不进的归档。**
 
@@ -4680,10 +4729,16 @@
 | 11-01 11:52 | OML-1101 收口：三支吸收合入 main（2026-11-01） | 用户令：合并 → 三项核查后 --no-ff 合入。 |
 | 11-02 02:26 | §RHUB-1102：rikkahub 同步功能面投 RikkaMinis（2026-11-02） | 背景：主号 rikkahub fork 同步完（master 4537bbf2，CI 绿），用户问「有什么是这个应用能吸收的，过一下那些门」。核查基线 RikkaMinis main 108280cd。 |
 | 11-02 16:29 | 调查 tall-1997/OpenMinis-Linux（11-02，用户质疑"大杂烩+可靠性差+构建 3 倍慢"） | 方法：API 全量元数据 + 300 提交（10-05→11-02）+ 30 条 run 逐 job 耗时 + 浅克隆 2513 文件统计。报告 shared/investigate-oml-1102/REPORT.md… |
+| 11-05 00:28 | /responses 模式对比调查（2026-11-05，报告 shared/work/responses-api-comparison/REPORT.md） | 用户报「同一站点 rikkahub 顺、RikkaMinis 烂」，要求对比两仓 /responses 处理。克隆：rikkahub upstream/master 903e058b @ shared/work/rikk… |
+| 11-07 22:42 | RikkaMinis fork 以来改动量实测（2026-11-07 调查） | 口径：fork 点 = OpenMinis/OpenMinis 3b9015e2（2026-07-25 上游末提交，GitHub compare 的 merge_base 确认）；终点 main 43e57e0d（11-… |
+| 11-08 22:57 | fork 偏离度/强度量化（2026-11-07 追加，同口径对照上游） | 方法：GitHub trees API 拉两棵树（RikkaMinis @3b9015e2→43e57e0d，OpenMinis 上游 @3b9015e2→main），逐 blob sha+size 比对（truncat… |
+| 11-12 10:03 | tall-1997/OpenMinis-Linux 收尾期核查（2026-11-12） | 用户感觉「到收尾阶段了」，核查结论：是，已进入工程收敛期，但尾巴没收完。 |
+| 11-12 10:35 | tall-1997/OpenMinis-Linux「可抄清单」核查（2026-11-12，接上条收尾期核查） | 方法：浅克隆双方 main 到 shared/work/copycheck-1112/{oml,rmk}（oml 80.9M/rmk 129.6M），对他 wave1-5 + #325 候选做符号级双树对照 + 语义读源… |
+| 11-12 17:18 | 「拉取到的模型的默认值」链路核查 + rikkahub 对照（2026-11-12） | 用户问：远端拉取的模型，其思考能力 / 多模态 / 上下文大小的默认值有没有处理。结论=有，四层链；但有 3 个缺口，且本机已能取到证据。 |
 
 ## 21. UI 组件 / 设置页 / 交互微调
 
-**跨度** 2026-08-04 ～ 2026-11-01 · **135 条** · **状态** 持续（09-12 参数化面板已合并 main）
+**跨度** 2026-08-04 ～ 2026-11-12 · **139 条** · **状态** 持续（09-12 参数化面板已合并 main）
 
 **叙事**：贯穿全程的「小改动流」：08-04 设置页去箭头 + Chat Menu 三项 + 模型组拖拽排序 → 08-05 底部工具条可配置化（含 footer 按钮失效两轮定位）→ 08-08 移除冗余返回按钮 → 08-09 提供商详情页 v2 重构 → 08-14 聊天体验微调 + 回合组折叠 → 09-12 chat-tuning-panel 参数化。**这类改动单看都不重要，但它们占了档案的相当比例——产品的手感就是这么磨出来的。**
 
@@ -4824,10 +4879,14 @@
 | 10-30 15:12 | FIXWAVE-1030C E 收口：文件列表「未来时间戳显示成星期名」（分支 `fix/fw-file-date-future` @ 绿 `ac488650`，CI `41016258010` success 20.3min，报告 `a2aa9520`，停分支未合 main） | 来源：任务书 fixwave-1030c/tasks/E-date.md。基线 main 039c9ab2。改动面 2 文件 +288/−14（生产 FileBrowserViewModel.kt +93/−14、新 F… |
 | 10-31 22:58 | 独立审查：粘贴折叠二次修（2026-10-31 深夜） | 用户要求"看看有没有犯之前的毛病"（不派发子代理，单会话完成）。审查对象 main d5041bc2（= be4ad67e merge dv1031 + b8adf823 粘贴 UX 修）。报告 /var/minis/s… |
 | 11-01 00:51 | 7 天窗口独立审查收口（2026-10-31，分支 `fix/composer-paste-lifecycle` @ 绿 `3e2eb39d`，CI `41219869545` success 16.5min，停分支未合 main） | 用户令：把「为什么还会犯、如何预防」写进技能；把审查窗口扩到 7 天；查出来的就修，工程量大用子代理，但注意「每多开一个子代理，门禁夹具成本线性增加、可能相互干扰」。 |
+| 11-12 14:20 | 模型列表分表重构（model-catalog-split）进行中 — 2026-11-12 | 用户验证需求：模型列表模块体感怪 → 根因 = 手动刷新走 7 天磁盘缓存不联网（真机日志 13:50 三次 "SUCCESS_API" 5-15ms、gateway 127.0.0.1:8790 已 ConnectEx… |
+| 11-12 14:59 | ↳ FIX-B（model-catalog-split B 支）完成 @ 9a2a384 | work-b 树 feat/model-catalog-split，commit 9a2a384，未 push（收口归主会话）。改动 4 文件 +591/−144： |
+| 11-12 16:41 | 模型列表分表重构（第3档）完成 — 分支 CI 绿，未合并 main（2026-11-12） | 用户令「直接做第3档，工程大就用子代理」。分支 feat/model-catalog-split @ 49904445c023510ae4fd8afa9c3f8ab074be4023，CI #3015 全绿（build-… |
+| 11-12 16:57 | 模型列表分表重构已合并 main（2026-11-12，用户令「合并」） | feat/model-catalog-split → main merge commit f63d02d（--no-ff），已推送。main CI 双 workflow 全绿：Scan Gate 43185745363 … |
 
 ## 22. Token 用量 / 成本统计
 
-**跨度** 2026-08-05 ～ 2026-11-02 · **93 条** · **状态** 已闭环（09-09 实时用量 + 预算上限；09-12 parseUsage 修复合并）
+**跨度** 2026-08-05 ～ 2026-11-12 · **94 条** · **状态** 已闭环（09-09 实时用量 + 预算上限；09-12 parseUsage 修复合并）
 
 **叙事**：08-06 TokenUsageSheet 补缓存命中率 → 08-08 双重扣减 + Gemini cache 修复 → 08-25 用量统计优化 A+B → 08-31 LiteLLM 成本层 V2（JSON 价格表 + 用户可编辑）→ **09-12 parseUsage 双重扣减再次出现**（同族复发）。
 
@@ -4926,10 +4985,11 @@
 | 11-02 04:24 | FEAT-INTERNAL-USAGE-LEDGER 收口：内部 LLM 调用成本台账（分支 `fix/internal-usage-events` @ `e19452c2`，CI #2982 success，停分支未合 main） | 用户令链：「rikkahub 上游同步吸收判定」→「按你的建议来，动手吧」= 实现唯一 P1 真缺口（压缩/标题/快速测试的 token 不入账，统计页对中转站账单系统性少报）。 |
 | 11-02 08:36 | AUDIT-USAGE-LEDGER：内部 LLM 成本台账独立审查（2026-11-02，对象 main 108280cd..c9a7a2fc） | 结论：无 P1/P2 新毛病。对照常见毛病清单逐项过：四处同步（迁移/Entity/DAO/降级全齐，MIGRATION_14_15 列集与 entity 逐列一致 10 列）、同族三调用点全接线（Compact:745… |
 | 11-02 08:47 | FEAT-INTERNAL-USAGE-LEDGER 合入 main 收口（2026-11-02 00:41） | 用户令：「合并」→ 走三项核查后 --no-ff 合入。 |
+| 11-12 18:52 | fix/model-defaults-1112 完成 — 分支 CI 绿，未合并 main（2026-11-12） | 停止节点达成：分支 fix/model-defaults-1112 @ fb957295，CI run 43202489016 四 job success（scan-gate / unit-tests / build-a… |
 
 ## 23. 人格 / Soul / 提示词 / 技能体系
 
-**跨度** 2026-08-04 ～ 2026-11-01 · **189 条** · **状态** 稳定（技能体系已固化为 12+ 个 skill，跨会话持久）
+**跨度** 2026-08-04 ～ 2026-11-12 · **193 条** · **状态** 稳定（技能体系已固化为 12+ 个 skill，跨会话持久）
 
 **叙事**：08-07 soul.lang 接线 → 08-08 三平台技能架构 + 内置集成显示修复 → 08-09 Soul 默认人格名对齐 → 08-18 RC 整改含技能模块 → 08-26 人格(Soul)模块审计加固 + 技能/权限模块审计 → 08-29/09-04 subagent 跨会话派发 → 09-07 规则体系对照复杂度五纪律。**「给 agent 定语言 + 定运行时 + 定验证框架」这条主线在应用内的投影。**
 
@@ -5124,6 +5184,10 @@
 | 11-01 11:02 | TASK-KNOWLEDGE 收口：app 知识包 + `app_guide`（分支 `feat/app-knowledge-pack` @ `b40875b6`，CI `41266044570` success 21.7min，停分支未合 main） | 交付：9 文件 +669/−0。4 份 assets/app_knowledge/<id>/APP.md（wechat/alipay/taobao/android-settings，各四段正文）+ agent/AppKn… |
 | 11-01 11:52 | TASK-REVIEW dv1101 收口：三支合并后分支审查（2026-11-01） | 对象：main 8c965705（merge integration/dv1101：tool-loop guard / app_guide / host-status，19 文件 +2217）。报告 /var/minis… |
 | 11-01 21:40 | TREND-1101：Medium「284K Ascent」文章核实 + i-have-adhd 技能落地（2026-11-01） | 用户令：丢来 Medium 文章（Baozilla Tech Daily #66，GitHub 星数日报），「去研究一下这东西，看看对我们有什么用」。 |
+| 11-11 20:37 | 插件式脚本执行器构想（未拍板） | 用户在思考将提示词技能与可运行程序以插件/扩展形式联动：AI 可制作脚本，用户从应用内或长按快捷方式一键运行，目标是减少依赖 Termux 的手动操作。建议概念分层：Skill=agent 指令/知识；Action=固定… |
+| 11-12 11:45 | fix/memcache-prefix-split 审查抓到 P0 并修复、已合并 main（2026-11-12） | 用户令「检查云端分支，有问题修，没问题合并」。分支 a05030f（memory_write 不打穿 prompt cache 前缀）审查发现真 P0 次生问题：子代理注入点把全部 5 类片段走 orderInStand… |
+| 11-12 11:53 | 真机端到端验证：子代理 daily 注入修复（2026-11-12） | 新构建 versionName=1.0.0+3010 / lastUpdateTime 2026-11-12 11:46:23（main a8a5a90 产物，dumpsys 实证）。 |
+| 11-12 11:55 | 真机验证补记（2026-11-12 收尾） | memory OFF→ON 全循环完成：OFF 负对照干净（A/C/E 全 NO，33 skills 仍在）→ 切回 ON 后主会话 memory_write 工具立即恢复（门控实证）→ 子代理探针 A/C/E 全 YE… |
 
 ## 24. 语音 / 多模态输入
 
@@ -5202,7 +5266,7 @@
 
 ## 25. 被否掉的方向（决策记录）
 
-**跨度** 2026-08-04 ～ 2026-10-30 · **52 条** · **状态** 持续累积（每条否决都带触发条件，可被未来重新打开）
+**跨度** 2026-08-04 ～ 2026-11-11 · **53 条** · **状态** 持续累积（每条否决都带触发条件，可被未来重新打开）
 
 **叙事**：08-07 多智能体协作 → **否掉** / 08-07 经验记忆模块 → **摘除** / 08-08 聊天模式 → **不加** / 08-08 灵动岛 → **砍掉** / 08-15 自动接力方案 → **不做** / 09-05 provider knobs + 连接测试 → **摘除** / 09-11 Obsidian 式插件系统 → **不做** / 09-13 图标重设计 → **放弃并回滚** / 09-14 U7 胶囊暂停 → **撤回（带触发条件）** / 09-14 U1..U11 中 8 项 → **归档不吸收**。**这份清单和「做了什么」同等重要**：它记录了边界是怎么被划出来的。
 
@@ -5260,6 +5324,7 @@
 | 10-16 10:07 | FIX-D 收口：deep-audit-1016 执行闸门三件——4a heavy permit 泄漏回滚 + 4b runInterruptible 可取消等待 + 4c 主线程 GC 分发（fix/da1016-exec-gate @ edb45cbd，CI #2158 绿，停在分支） | 任务：读 shared/work/deep-audit-1016/fix-tasks/FIX-D.md 立刻执行（基线 main 04e74c53）。报告 fix-reports/FIX-D.md；装置 fix-d/pr… |
 | 10-18 14:03 | FIX-A 交付：deep-audit-1026 ISSUE-01（ConcurrencyPrefs 缺重预热监听 + 陈旧缓存回滚，P1）—— `fix/da1026-prefs-priming` @ `cf5c8fd`，CI #2281 绿，停在分支 | 任务书 shared/work/deep-audit-1026/fix-tasks/FIX-A.md（COMMON 实读自上级目录）；报告 fix-reports/FIX-A.md（149 行 8 节无 TODO）；装置… |
 | 10-30 13:39 | FIX-FW-DEAD-SHUTDOWN-LEVER 收口：删掉「内存压力→回收 :modelservice」死杠杆（分支 `fix/fw-dead-shutdown-lever` @ 绿 `0faf65d0`，CI `41007282401` success 22.0min，停分支未合 main） | 来源：LOOP-1030 R2 W5（L0「建议删」），任务书 fixwave-1030b/tasks/B-dead-shutdown-lever.md。基线 main 039c9ab2。 |
+| 11-11 20:44 | 交互入口频率门固化 + §ENTRY-FREQ 负决策（2026-11-11） | GLOBAL.md 新增「交互入口频率门」（第 53 行，修复门之后）：判据 = 频率 × 摩擦 > 装置成本，且低频一律否决；三类门分工表（一阶门=agent 能力 / 修复门=既有缺陷 / 入口门=用户的手）明确不许… |
 
 ---
 
@@ -5474,3 +5539,11 @@
 | 10-29 08:59 | TASK-R4-S 进度：B12-b 诊断面六条全落地（分支 fix/r4-b12-diag，2026-10-29 09:0x） |
 | 11-01 10:44 | 门禁/夹具「每次都要提醒」→ 机制化（2026-11-01） |
 | 11-02 08:49 | 2026-11-02 08:49:13 |
+| 11-04 21:38 | OpenCode Console 个人 API Key 实测定性（2026-11-04） |
+| 11-05 17:50 | /responses 同族第二例：Gemini thoughtSignature 缺失（2026-11-05，P0 已修分支，未合 main） |
+| 11-05 18:34 | Gemini thoughtSignature 分支独立审查（2026-11-05，报告 `shared/work/review-gemini-thoughtsig-1105/REPORT.md`） |
+| 11-05 20:33 | Rhub-1105 F-03：Anthropic content_block_start 初始 tool_use.input 丢失（已修，分支未合 main） |
+| 11-09 12:15 | 自动签到真机验证抓到真 bug（2026-11-09） |
+| 11-11 00:56 | Nullgram WSProxy 自建部署调查（2026-11-11） |
+| 11-12 19:07 | fix/model-defaults-1112 已合并 main + 「全量夹具云端跑」写入 GLOBAL（2026-11-12） |
+| 11-12 21:17 | 本地网关 8790 模型上下文「全是 128K」定性（2026-11-12，只调查未改代码） |
