@@ -1,0 +1,459 @@
+<?xml version='1.0' encoding='utf-8'?>
+<issues format="6" by="lint 8.9.0">
+    <issue id="MissingPermission" severity="Error" message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`" category="Correctness" priority="9" summary="Missing Permissions">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/notification/BackgroundTaskNotifier.kt" line="192" column="17" />
+    </issue>
+    <issue id="ApplySharedPref" severity="Warning" message="Consider using `apply()` instead; `commit` writes its data to persistent storage immediately, whereas `apply` will handle it in the background" category="Correctness" priority="6" summary="Use `apply()` on `SharedPreferences`">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/data/repository/ProviderRepository.kt" line="3071" column="68" />
+    </issue>
+    <issue id="ApplySharedPref" severity="Warning" message="Consider using `apply()` instead; `commit` writes its data to persistent storage immediately, whereas `apply` will handle it in the background" category="Correctness" priority="6" summary="Use `apply()` on `SharedPreferences`">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/data/repository/ProviderRepository.kt" line="3079" column="60" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/service/AgentForegroundService.kt" line="766" column="26" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatAssistantMessageUI.kt" line="672" column="27" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatAssistantMessageUI.kt" line="673" column="14" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatAssistantMessageUI.kt" line="921" column="31" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatAssistantMessageUI.kt" line="922" column="18" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatFormattingUtils.kt" line="74" column="24" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatFormattingUtils.kt" line="75" column="25" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatShellExecution.kt" line="150" column="45" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatToolDetailUI.kt" line="1562" column="26" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/DeviceOffloadHandler.kt" line="127" column="43" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/DeviceOffloadHandler.kt" line="128" column="42" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/DeviceOffloadHandler.kt" line="129" column="42" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/DeviceOffloadHandler.kt" line="134" column="33" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/DeviceOffloadHandler.kt" line="135" column="34" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/PayloadSizePolicy.kt" line="102" column="33" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/PayloadSizePolicy.kt" line="104" column="33" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/PayloadSizePolicy.kt" line="105" column="16" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/PhotosOffloadHandler.kt" line="1199" column="35" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/PhotosOffloadHandler.kt" line="1208" column="41" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/PhotosOffloadHandler.kt" line="1267" column="45" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/components/QuickTestSheet.kt" line="326" column="21" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/SpeechOffloadHandler.kt" line="392" column="86" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/SystemResourceMonitor.kt" line="246" column="9" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/SystemResourceMonitor.kt" line="250" column="29" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/SystemResourceMonitor.kt" line="252" column="16" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/TokenUsageSheet.kt" line="179" column="82" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/TokenUsageSheet.kt" line="234" column="24" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/TokenUsageSheet.kt" line="235" column="20" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/UsageStatsScreen.kt" line="166" column="111" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/UsageStatsScreen.kt" line="414" column="84" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/UsageStatsScreen.kt" line="456" column="23" />
+    </issue>
+    <issue id="DefaultLocale" severity="Warning" message="Implicitly using the default locale is a common source of bugs: Use `String.format(Locale, ...)` instead" category="Correctness" priority="6" summary="Implied default locale in case conversion">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/UsageStatsScreen.kt" line="460" column="14" />
+    </issue>
+    <issue id="InlinedApi" severity="Warning" message="Field requires API level 33 (current min is 26): `android.content.pm.PackageInstaller#PACKAGE_SOURCE_LOCAL_FILE`" category="Correctness" priority="6" summary="Using inlined constants on older versions">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/accessibility/RestrictedSettingsManager.kt" line="169" column="26" />
+    </issue>
+    <issue id="InlinedApi" severity="Warning" message="Field requires API level 33 (current min is 26): `android.content.pm.PackageInstaller#PACKAGE_SOURCE_DOWNLOADED_FILE`" category="Correctness" priority="6" summary="Using inlined constants on older versions">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/accessibility/RestrictedSettingsManager.kt" line="170" column="30" />
+    </issue>
+    <issue id="OldTargetApi" severity="Warning" message="Not targeting the latest versions of Android; compatibility modes apply. Consider testing and updating this version. Consult the `android.os.Build.VERSION_CODES` javadoc for details." category="Correctness" priority="6" summary="Target SDK attribute is not targeting latest version">
+        <location file="src/android/app/build.gradle.kts" line="64" column="9" />
+    </issue>
+    <issue id="PrivateApi" severity="Warning" message="Accessing internal APIs via reflection is not supported and may not work on all devices or in the future" category="Correctness" priority="6" summary="Using Private APIs">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/OsCompat.kt" line="44" column="23" />
+    </issue>
+    <issue id="SdCardPath" severity="Warning" message="Do not hardcode &quot;`/data/`&quot;; use `Context.getFilesDir().getPath()` instead" category="Correctness" priority="6" summary="Hardcoded reference to `/sdcard`">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/debug/DebugMethodRegistry.kt" line="353" column="37" />
+    </issue>
+    <issue id="UnusedAttribute" severity="Warning" message="Attribute `preserveLegacyExternalStorage` is only used in API level 30 and higher (current min is 26)" category="Correctness" priority="6" summary="Attribute unused on older versions">
+        <location file="src/android/app/src/main/AndroidManifest.xml" line="168" column="9" />
+    </issue>
+    <issue id="UnusedAttribute" severity="Warning" message="Attribute `localeConfig` is only used in API level 33 and higher (current min is 26)" category="Correctness" priority="6" summary="Attribute unused on older versions">
+        <location file="src/android/app/src/main/AndroidManifest.xml" line="174" column="9" />
+    </issue>
+    <issue id="UnusedAttribute" severity="Warning" message="Attribute `canTakeScreenshot` is only used in API level 30 and higher (current min is 26)" category="Correctness" priority="6" summary="Attribute unused on older versions">
+        <location file="src/android/app/src/main/res/xml/minis_accessibility_service.xml" line="8" column="5" />
+    </issue>
+    <issue id="AppBundleLocaleChanges" severity="Warning" message="Found dynamic locale changes, but did not find corresponding Play Core library calls for downloading languages and splitting by language is not disabled in the `bundle` configuration" category="Correctness" priority="5" summary="App Bundle handling of runtime locale changes">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/i18n/LocaleWrap.kt" line="54" column="13" />
+    </issue>
+    <issue id="BatteryLife" severity="Warning" message="Use of `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` violates the Play Store Content Policy regarding acceptable use cases, as described in https://developer.android.com/training/monitoring-device-state/doze-standby.html" category="Correctness" priority="5" summary="Battery Life Issues">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/power/PowerOptimizationManager.kt" line="67" column="38" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.core:core-ktx than 1.15.0 is available: 1.19.1" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="307" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.lifecycle:lifecycle-runtime-ktx than 2.8.7 is available: 2.11.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="308" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.lifecycle:lifecycle-viewmodel-compose than 2.8.7 is available: 2.11.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="309" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.lifecycle:lifecycle-process than 2.8.7 is available: 2.11.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="312" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.activity:activity-compose than 1.9.3 is available: 1.13.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="313" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.exifinterface:exifinterface than 1.3.7 is available: 1.4.2" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="314" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.navigation:navigation-compose than 2.8.5 is available: 2.10.2" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="317" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.room:room-runtime than 2.6.1 is available: 2.8.5" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="320" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.room:room-ktx than 2.6.1 is available: 2.8.5" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="321" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.room:room-compiler than 2.6.1 is available: 2.8.5" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="322" column="9" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.security:security-crypto than 1.1.0-alpha06 is available: 1.1.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="327" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.browser:browser than 1.8.0 is available: 1.10.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="344" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.webkit:webkit than 1.12.1 is available: 1.18.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="350" column="20" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.test:runner than 1.6.2 is available: 1.7.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="402" column="31" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.test:rules than 1.6.1 is available: 1.7.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="403" column="31" />
+    </issue>
+    <issue id="GradleDependency" severity="Warning" message="A newer version of androidx.test.ext:junit than 1.2.1 is available: 1.3.0" category="Correctness" priority="4" summary="Obsolete Gradle Dependency">
+        <location file="src/android/app/build.gradle.kts" line="404" column="31" />
+    </issue>
+    <issue id="RestrictedApi" severity="Error" message="ViewModelStore.keys can only be called from within the same library group (referenced groupId=`androidx.lifecycle` from groupId=`Minis`)" category="Correctness" priority="4" summary="Restricted API">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModelStore.kt" line="104" column="27" />
+    </issue>
+    <issue id="RestrictedApi" severity="Error" message="ViewModelStore.get can only be called from within the same library group (referenced groupId=`androidx.lifecycle` from groupId=`Minis`)" category="Correctness" priority="4" summary="Restricted API">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModelStore.kt" line="105" column="28" />
+    </issue>
+    <issue id="ConfigurationScreenWidthHeight" severity="Warning" message="Using Configuration.screenWidthDp instead of LocalWindowInfo.current.containerSize" category="Correctness" priority="3" summary="Using Configuration.screenWidthDp/screenHeightDp instead of LocalWindowInfo.current.containerSize">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatAssistantMessageUI.kt" line="825" column="42" />
+    </issue>
+    <issue id="ConfigurationScreenWidthHeight" severity="Warning" message="Using Configuration.screenWidthDp instead of LocalWindowInfo.current.containerSize" category="Correctness" priority="3" summary="Using Configuration.screenWidthDp/screenHeightDp instead of LocalWindowInfo.current.containerSize">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatUserMessageUI.kt" line="277" column="46" />
+    </issue>
+    <issue id="ConfigurationScreenWidthHeight" severity="Warning" message="Using Configuration.screenHeightDp instead of LocalWindowInfo.current.containerSize" category="Correctness" priority="3" summary="Using Configuration.screenWidthDp/screenHeightDp instead of LocalWindowInfo.current.containerSize">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/StandardChatSheet.kt" line="75" column="24" />
+    </issue>
+    <issue id="LocalContextResourcesRead" severity="Warning" message="Reading Resources using LocalContext.current.resources" category="Correctness" priority="3" summary="Reading Resources using LocalContext.current.resources">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FilePreviewScreen.kt" line="635" column="29" />
+    </issue>
+    <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be named modifier" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/AgentLoopModelsScreen.kt" line="341" column="5" />
+    </issue>
+    <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be the first optional parameter" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatAssistantMessageUI.kt" line="884" column="5" />
+    </issue>
+    <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be the first optional parameter" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatComposerWidgets.kt" line="565" column="5" />
+    </issue>
+    <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be the first optional parameter" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/markdown/MarkdownText.kt" line="535" column="5" />
+    </issue>
+    <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be named modifier" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/ModelGroupsScreen.kt" line="583" column="5" />
+    </issue>
+    <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be named modifier" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/ProviderListScreen.kt" line="470" column="5" />
+    </issue>
+    <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be named modifier" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/ReorderableCardRow.kt" line="140" column="5" />
+    </issue>
+    <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be the first optional parameter" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/SettingsComponents.kt" line="170" column="5" />
+    </issue>
+    <issue id="SwitchIntDef" severity="Warning" message="Don't use a constant here; expected one of: `SpeechRecognizer.ERROR_AUDIO`, `SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT`, `SpeechRecognizer.ERROR_CANNOT_LISTEN_TO_DOWNLOAD_EVENTS`, `SpeechRecognizer.ERROR_CLIENT`, `SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS`, `SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED`, `SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE`, `SpeechRecognizer.ERROR_NETWORK`, `SpeechRecognizer.ERROR_NETWORK_TIMEOUT`, `SpeechRecognizer.ERROR_NO_MATCH`, `SpeechRecognizer.ERROR_RECOGNIZER_BUSY`, `SpeechRecognizer.ERROR_SERVER`, `SpeechRecognizer.ERROR_SERVER_DISCONNECTED`, `SpeechRecognizer.ERROR_SPEECH_TIMEOUT`, `SpeechRecognizer.ERROR_TOO_MANY_REQUESTS`" category="Correctness" priority="3" summary="Missing @IntDef in Switch">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/SpeechOffloadHandler.kt" line="418" column="25" />
+    </issue>
+    <issue id="Typos" severity="Warning" message="Repeated word &quot;der&quot; in message: possible typo" category="Correctness:Messages" priority="7" summary="Spelling error">
+        <location file="src/android/app/src/main/res/values-de/strings.xml" line="1348" column="71" />
+    </issue>
+    <issue id="Typos" severity="Warning" message="&quot;in Folge&quot; is a common misspelling; did you mean &quot;infolge&quot;?" category="Correctness:Messages" priority="7" summary="Spelling error">
+        <location file="src/android/app/src/main/res/values-de/strings.xml" line="1642" column="64" />
+    </issue>
+    <issue id="Typos" severity="Warning" message="&quot;seit dem&quot; is a common misspelling; did you mean &quot;seitdem&quot;?" category="Correctness:Messages" priority="7" summary="Spelling error">
+        <location file="src/android/app/src/main/res/values-de/strings.xml" line="1699" column="104" />
+    </issue>
+    <issue id="Typos" severity="Warning" message="Repeated word &quot;die&quot; in message: possible typo" category="Correctness:Messages" priority="7" summary="Spelling error">
+        <location file="src/android/app/src/main/res/values-de/strings.xml" line="1710" column="220" />
+    </issue>
+    <issue id="Typos" severity="Warning" message="&quot;ok&quot; is usually capitalized as &quot;OK&quot;" category="Correctness:Messages" priority="7" summary="Spelling error">
+        <location file="src/android/app/src/main/res/values/strings.xml" line="1763" column="48" />
+    </issue>
+    <issue id="UnusedQuantity" severity="Warning" message="For language &quot;ja&quot; (Japanese) the following quantities are not relevant: `one`" category="Correctness:Messages" priority="3" summary="Unused quantity translations">
+        <location file="src/android/app/src/main/res/values-ja/strings.xml" line="40" column="5" />
+    </issue>
+    <issue id="UnusedQuantity" severity="Warning" message="For language &quot;ko&quot; (Korean) the following quantities are not relevant: `one`" category="Correctness:Messages" priority="3" summary="Unused quantity translations">
+        <location file="src/android/app/src/main/res/values-ko/strings.xml" line="40" column="5" />
+    </issue>
+    <issue id="UnusedQuantity" severity="Warning" message="For language &quot;zh&quot; (Chinese) the following quantities are not relevant: `one`" category="Correctness:Messages" priority="3" summary="Unused quantity translations">
+        <location file="src/android/app/src/main/res/values-zh/strings.xml" line="52" column="5" />
+    </issue>
+    <issue id="UnusedQuantity" severity="Warning" message="For language &quot;zh&quot; (Chinese) the following quantities are not relevant: `one`" category="Correctness:Messages" priority="3" summary="Unused quantity translations">
+        <location file="src/android/app/src/main/res/values-zh-rTW/strings.xml" line="1443" column="5" />
+    </issue>
+    <issue id="ChromeOsAbiSupport" severity="Warning" message="Missing x86_64 ABI support for ChromeOS" category="Correctness:Chrome OS" priority="4" summary="Missing ABI Support for ChromeOS">
+        <location file="src/android/app/build.gradle.kts" line="94" column="27" />
+    </issue>
+    <issue id="SetWorldReadable" severity="Warning" message="Setting file permissions to world-readable can be risky, review carefully" category="Security" priority="6" summary="`File.setReadable()` used to make file world-readable">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/HostStatusSnapshot.kt" line="203" column="13" />
+    </issue>
+    <issue id="SetWorldReadable" severity="Warning" message="Setting file permissions to world-readable can be risky, review carefully" category="Security" priority="6" summary="`File.setReadable()` used to make file world-readable">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/HostStatusSnapshot.kt" line="209" column="17" />
+    </issue>
+    <issue id="SetWorldReadable" severity="Warning" message="Setting file permissions to world-readable can be risky, review carefully" category="Security" priority="6" summary="`File.setReadable()` used to make file world-readable">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/RootfsManager.kt" line="1171" column="13" />
+    </issue>
+    <issue id="AcceptsUserCertificates" severity="Warning" message="The Network Security Configuration allows the use of user certificates in the release version of your app" category="Security" priority="5" summary="Allowing User Certificates">
+        <location file="src/android/app/src/main/res/xml/network_security_config.xml" line="16" column="13" />
+    </issue>
+    <issue id="InsecureBaseConfiguration" severity="Warning" message="Insecure Base Configuration" category="Security" priority="5" summary="Insecure Base Configuration">
+        <location file="src/android/app/src/main/res/xml/network_security_config.xml" line="7" column="45" />
+    </issue>
+    <issue id="WakelockTimeout" severity="Warning" message="Provide a timeout when requesting a wakelock with `PowerManager.Wakelock.acquire(long timeout)`. This will ensure the OS will cleanup any wakelocks that last longer than you intend, and will save your user's battery." category="Performance" priority="9" summary="Using wakeLock without timeout">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/service/AgentForegroundService.kt" line="647" column="17" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/service/AgentForegroundService.kt" line="70" column="17" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/service/AgentForegroundService.kt" line="280" column="21" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/service/AgentForegroundService.kt" line="671" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/offload/AlarmOffloadManager.kt" line="69" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/BackgroundSettingsScreen.kt" line="99" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/BackgroundSettingsScreen.kt" line="114" column="21" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/notification/BackgroundTaskNotifier.kt" line="251" column="17" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/notification/BackgroundTaskNotifier.kt" line="327" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/notification/BackgroundTaskNotifier.kt" line="343" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/notification/ConfigConfirmNotifier.kt" line="114" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/debug/DebugRPCHandler.kt" line="265" column="17" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/debug/DebugScreenshotRing.kt" line="87" column="17" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/i18n/LocaleWrap.kt" line="51" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/data/MountedFoldersStore.kt" line="489" column="23" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/NotificationOffloadHandler.kt" line="82" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/NotificationOffloadHandler.kt" line="443" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 29" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/PhotosOffloadHandler.kt" line="1290" column="44" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/power/PowerOptimizationManager.kt" line="48" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/power/PowerOptimizationManager.kt" line="65" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/webapp/ShortcutPinner.kt" line="35" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/notification/StorageBudgetNotifier.kt" line="87" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/service/ToolOverlayController.kt" line="172" column="9" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/service/ToolOverlayController.kt" line="264" column="24" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is always &gt;= 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/data/UpdateChecker.kt" line="583" column="20" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="Unnecessary; `SDK_INT` is never &lt; 26" category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/data/UpdateChecker.kt" line="596" column="13" />
+    </issue>
+    <issue id="ObsoleteSdkInt" severity="Warning" message="This folder configuration (`v26`) is unnecessary; `minSdkVersion` is 26. Merge all the resources in this folder into `mipmap-anydpi`." category="Performance" priority="6" summary="Obsolete SDK_INT Version Check">
+        <location file="src/android/app/src/main/res/mipmap-anydpi-v26" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields (static reference to `BrowserHistoryStore` which has field `context` pointing to `Context`); this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/browser/BrowserHistory.kt" line="34" column="9" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="This field leaks a context object" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModel.kt" line="84" column="5" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields (static reference to `EnvVarRepository` which has field `context` pointing to `Context`); this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/data/EnvVarRedactor.kt" line="32" column="5" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields (static reference to `EnvVarRepository` which has field `context` pointing to `Context`); this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/ExecutionCoordinator.kt" line="237" column="5" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields; this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FilePreviewScreen.kt" line="1519" column="1" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields (static reference to `KatexWebViewPool` which has field `webView` pointing to `WebView`); this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/KatexWebViewPool.kt" line="42" column="1" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields; this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/KatexWebViewPool.kt" line="77" column="5" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields (static reference to `PRootKernel` which has field `bootContext` pointing to `Context`); this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/PRootKernel.kt" line="22" column="1" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields (static reference to `RootfsManager` which has field `context` pointing to `Context`); this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/PRootKernel.kt" line="64" column="5" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields; this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/PRootKernel.kt" line="66" column="5" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields (static reference to `MountedFoldersStore` which has field `context` pointing to `Context`); this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/PRootKernel.kt" line="418" column="5" />
+    </issue>
+    <issue id="StaticFieldLeak" severity="Warning" message="Do not place Android context classes in static fields (static reference to `RootfsManager` which has field `context` pointing to `Context`); this is a memory leak" category="Performance" priority="6" summary="Static Field Leaks">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/RootfsManager.kt" line="1364" column="9" />
+    </issue>
+    <issue id="UnusedResources" severity="Warning" message="The resource `R.string.provider_detail_refresh_success_api` appears to be unused" category="Performance" priority="3" summary="Unused resources">
+        <location file="src/android/app/src/main/res/values/strings.xml" line="1002" column="13" />
+    </issue>
+    <issue id="UnusedResources" severity="Warning" message="The resource `R.string.provider_detail_refresh_no_key` appears to be unused" category="Performance" priority="3" summary="Unused resources">
+        <location file="src/android/app/src/main/res/values/strings.xml" line="1003" column="13" />
+    </issue>
+    <issue id="UnusedResources" severity="Warning" message="The resource `R.string.provider_detail_refresh_preserved` appears to be unused" category="Performance" priority="3" summary="Unused resources">
+        <location file="src/android/app/src/main/res/values/strings.xml" line="1004" column="13" />
+    </issue>
+    <issue id="UnusedResources" severity="Warning" message="The resource `R.string.provider_detail_refresh_failed` appears to be unused" category="Performance" priority="3" summary="Unused resources">
+        <location file="src/android/app/src/main/res/values/strings.xml" line="1005" column="13" />
+    </issue>
+    <issue id="UsableSpace" severity="Warning" message="Consider also using `StorageManager#getAllocatableBytes` and `allocateBytes` which will consider clearable cached data" category="Performance" priority="3" summary="Using getUsableSpace()">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/RootfsManager.kt" line="144" column="48" />
+    </issue>
+    <issue id="UseOfNonLambdaOffsetOverload" severity="Warning" message="State backed values should use the lambda overload of Modifier.offset" category="Performance" priority="3" summary="Modifier.offset{ } is preferred over Modifier.offset() for `State` backed arguments.">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatIndicators.kt" line="89" column="37" />
+    </issue>
+    <issue id="IconLauncherShape" severity="Warning" message="Launcher icons should not fill every pixel of their square region; see the design guide for details" category="Usability:Icons" priority="6" summary="The launcher icon shape should use a distinct silhouette">
+        <location file="src/android/app/src/main/res/mipmap-hdpi/ic_launcher.png" />
+    </issue>
+    <issue id="IconLauncherShape" severity="Warning" message="Launcher icons should not fill every pixel of their square region; see the design guide for details" category="Usability:Icons" priority="6" summary="The launcher icon shape should use a distinct silhouette">
+        <location file="src/android/app/src/main/res/mipmap-mdpi/ic_launcher.png" />
+    </issue>
+    <issue id="IconLauncherShape" severity="Warning" message="Launcher icons should not fill every pixel of their square region; see the design guide for details" category="Usability:Icons" priority="6" summary="The launcher icon shape should use a distinct silhouette">
+        <location file="src/android/app/src/main/res/mipmap-xhdpi/ic_launcher.png" />
+    </issue>
+    <issue id="IconLauncherShape" severity="Warning" message="Launcher icons should not fill every pixel of their square region; see the design guide for details" category="Usability:Icons" priority="6" summary="The launcher icon shape should use a distinct silhouette">
+        <location file="src/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png" />
+    </issue>
+    <issue id="IconLauncherShape" severity="Warning" message="Launcher icons should not fill every pixel of their square region; see the design guide for details" category="Usability:Icons" priority="6" summary="The launcher icon shape should use a distinct silhouette">
+        <location file="src/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" />
+    </issue>
+    <issue id="ClickableViewAccessibility" severity="Warning" message="`onTouch` lambda should call `View#performClick` when a click is detected" category="Accessibility" priority="6" summary="Accessibility in Custom Views">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/service/ToolOverlayController.kt" line="649" column="35" />
+    </issue>
+    <issue id="ClickableViewAccessibility" severity="Warning" message="Custom view ``WebView`` has `setOnTouchListener` called on it but does not override `performClick`" category="Accessibility" priority="6" summary="Accessibility in Custom Views">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/webapp/WebAppActivity.kt" line="362" column="21" />
+    </issue>
+    <issue id="ClickableViewAccessibility" severity="Warning" message="`onTouch` lambda should call `View#performClick` when a click is detected" category="Accessibility" priority="6" summary="Accessibility in Custom Views">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/webapp/WebAppActivity.kt" line="362" column="43" />
+    </issue>
+    <issue id="ClickableViewAccessibility" severity="Warning" message="Custom view ``WebView`` has `setOnTouchListener` called on it but does not override `performClick`" category="Accessibility" priority="6" summary="Accessibility in Custom Views">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewFullscreenScreen.kt" line="196" column="21" />
+    </issue>
+    <issue id="ClickableViewAccessibility" severity="Warning" message="`onTouch` lambda should call `View#performClick` when a click is detected" category="Accessibility" priority="6" summary="Accessibility in Custom Views">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/preview/WebPreviewFullscreenScreen.kt" line="196" column="43" />
+    </issue>
+    <issue id="ConstantLocale" severity="Warning" message="Assigning `Locale.getDefault()` to a final static field is suspicious; this code will not work correctly if the user changes locale while the app is running" category="Internationalization" priority="6" summary="Constant Locale">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/BackupSettingsScreen.kt" line="2488" column="53" />
+    </issue>
+    <issue id="ConstantLocale" severity="Warning" message="Assigning `Locale.getDefault()` to a final static field is suspicious; this code will not work correctly if the user changes locale while the app is running" category="Internationalization" priority="6" summary="Constant Locale">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FileBrowserViewModel.kt" line="319" column="64" />
+    </issue>
+    <issue id="ConstantLocale" severity="Warning" message="Assigning `Locale.getDefault()` to a final static field is suspicious; this code will not work correctly if the user changes locale while the app is running" category="Internationalization" priority="6" summary="Constant Locale">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FileBrowserViewModel.kt" line="320" column="65" />
+    </issue>
+    <issue id="ConstantLocale" severity="Warning" message="Assigning `Locale.getDefault()` to a final static field is suspicious; this code will not work correctly if the user changes locale while the app is running" category="Internationalization" priority="6" summary="Constant Locale">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FileBrowserViewModel.kt" line="321" column="74" />
+    </issue>
+    <issue id="ConstantLocale" severity="Warning" message="Assigning `Locale.getDefault()` to a final static field is suspicious; this code will not work correctly if the user changes locale while the app is running" category="Internationalization" priority="6" summary="Constant Locale">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/sandbox/FileBrowserViewModel.kt" line="808" column="67" />
+    </issue>
+    <issue id="ConstantLocale" severity="Warning" message="Assigning `Locale.getDefault()` to a final static field is suspicious; this code will not work correctly if the user changes locale while the app is running" category="Internationalization" priority="6" summary="Constant Locale">
+        <location file="src/android/app/src/main/java/com/rikkaminis/app/speech/SpeechRecognitionManager.kt" line="42" column="44" />
+    </issue>
+</issues>

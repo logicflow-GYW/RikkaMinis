@@ -654,14 +654,27 @@ object PRootKernel {
      * (HarmonyOS/EMUI) it's whether legacy READ_EXTERNAL_STORAGE was granted.
      */
     private fun storageAccessDiag(context: Context): String {
-        val sdk = Build.VERSION.SDK_INT
+        // Inline Build.VERSION.SDK_INT comparisons: lint's NewApi detector does
+        // not follow an SDK level hoisted into a local val, so `val sdk = ...`
+        // makes every guarded call below read as unguarded.
         return when {
-            sdk >= Build.VERSION_CODES.R ->
-                "sdk=$sdk allFilesAccess=${Environment.isExternalStorageManager()}"
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                "sdk=${Build.VERSION.SDK_INT} allFilesAccess=${Environment.isExternalStorageManager()}"
             else -> {
                 val granted = context.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
                     android.content.pm.PackageManager.PERMISSION_GRANTED
-                "sdk=$sdk legacyStorageGranted=$granted legacyExtStorageOptIn=${Environment.isExternalStorageLegacy()}"
+                // isExternalStorageLegacy() is API 29 (Q), but this branch
+                // covers sdk < 30 — i.e. API 26-28, where the method does not
+                // exist. Same NoSuchMethodError as MountedFoldersStore's
+                // storageDiag (lint NewApi, 2026-11-13); that one runs on the
+                // mount path, this one on every applyMountedFoldersSnapshot()
+                // log line.
+                val legacy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    Environment.isExternalStorageLegacy().toString()
+                } else {
+                    "n/a(<Q)"
+                }
+                "sdk=${Build.VERSION.SDK_INT} legacyStorageGranted=$granted legacyExtStorageOptIn=$legacy"
             }
         }
     }

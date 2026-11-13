@@ -167,15 +167,31 @@ class MountedFoldersStore(private val context: Context) {
      * process still holds the legacy storage view.
      */
     private fun storageDiag(context: Context): String {
-        val sdk = Build.VERSION.SDK_INT
-        return if (sdk >= Build.VERSION_CODES.R) {
-            "sdk=$sdk allFilesAccess=${Environment.isExternalStorageManager()}"
+        // Direct Build.VERSION.SDK_INT comparisons on purpose: lint's NewApi
+        // detector does not track an SDK level hoisted into a local val, so
+        // `val sdk = Build.VERSION.SDK_INT; if (sdk >= R)` reads as unguarded
+        // and both calls below get flagged. Comparing inline is what makes the
+        // guard visible to the analyzer.
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            "sdk=${Build.VERSION.SDK_INT} allFilesAccess=${Environment.isExternalStorageManager()}"
         } else {
             val read = context.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
             val write = context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
-            "sdk=$sdk readGranted=$read writeGranted=$write legacyView=${Environment.isExternalStorageLegacy()}"
+            // isExternalStorageLegacy() is API 29 (Q), but this branch covers
+            // sdk < 30 — i.e. API 26-28, where the method does not exist.
+            // Calling it there throws NoSuchMethodError, and this function is
+            // invoked from a log line AFTER the entry was already persisted and
+            // BEFORE add() returns, with no try around it. Net effect on API
+            // 26-28: mounting a folder appears to do nothing.
+            // (Lint: NewApi — caught only once lint was wired up, 2026-11-13.)
+            val legacy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                Environment.isExternalStorageLegacy().toString()
+            } else {
+                "n/a(<Q)"
+            }
+            "sdk=${Build.VERSION.SDK_INT} readGranted=$read writeGranted=$write legacyView=$legacy"
         }
     }
 

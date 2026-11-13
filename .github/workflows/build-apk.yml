@@ -467,6 +467,114 @@ jobs:
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────────────
+  # job 4/5 — Android Lint (debug variant).
+  #
+  # WHY IT DID NOT EXIST BEFORE: `lint { checkReleaseBuilds = false }` in
+  # app/build.gradle.kts carried a comment claiming "debug-build lint coverage
+  # is unaffected". It was false and had never been tested — no CI job ran lint
+  # at all. Measured 2026-11-13 over three probe rounds (runs 43406670614 /
+  # 43408220558 / 43409353597):
+  #   * bare `:app:lintDebug` crashes with IncompatibleClassChangeError in all
+  #     three analyze tasks;
+  #   * `-Pandroid.lint.useK2Uast=false` does not help;
+  #   * `-Pandroid.experimental.lint.version=8.9.0` (AGP-style numbering, i.e.
+  #     lint 31.9.0) runs clean. That override is what makes this job possible.
+  #
+  # Gating model: lint-baseline.xml records the 522 issues the tree already
+  # had, so this job fails ONLY on findings introduced after the baseline.
+  # Style-only families (UseKtx / AutoboxingStateCreation / PluralsCandidate /
+  # Typography*) are disabled in build.gradle.kts — 340+ warnings with zero
+  # correctness value would drown the signal.
+  #
+  # Parallel to the other jobs on purpose: measured 5m58s cold, which would be
+  # pure added latency if it sat in front of the build.
+  # ────────────────────────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      # No NDK / proot / native build: ExternalNativeBuild is disabled in this
+      # project and the .so files are vendored under jniLibs. Lint needs the
+      # compile classpath and KSP output only.
+      - name: Run :app:lintDebug
+        run: |
+          cd src/android
+          ./gradlew :app:lintDebug \
+            -Pandroid.experimental.lint.version=8.9.0 \
+            -Dorg.gradle.jvmargs=-Xmx6144m \
+            --stacktrace
+
+      - name: Summarize findings
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, os, sys, xml.etree.ElementTree as ET
+          from collections import Counter
+
+          print("## Android Lint (debug)\n")
+          cands = sorted(glob.glob("src/android/app/build/reports/lint-results-debug.xml"))
+          if not cands:
+              print("**no report produced** — the analyze task probably crashed. "
+                    "Check the gradle log above.")
+              sys.exit(0)
+
+          root = ET.parse(cands[0]).getroot()
+          issues = root.findall("issue")
+          sev = Counter(i.get("severity") for i in issues)
+          ids = Counter(i.get("id") for i in issues)
+          print(f"total issues reported: **{len(issues)}** "
+                f"(baselined ones are excluded from the gate)\n")
+          print("| severity | count |\n|---|---|")
+          for k, v in sev.most_common():
+              print(f"| {k} | {v} |")
+          print("\n| id | count |\n|---|---|")
+          for k, v in ids.most_common(20):
+              print(f"| `{k}` | {v} |")
+
+          # Non-baselined findings are the only thing that fails the job; list
+          # them explicitly so the red check says WHAT broke, not just "lint".
+          new = [i for i in issues if i.get("severity") == "Error"]
+          if new:
+              print(f"\n### {len(new)} error-severity finding(s)\n")
+              for i in new[:20]:
+                  loc = i.find("location")
+                  f = (loc.get("file") if loc is not None else "?").replace(
+                      os.environ.get("GITHUB_WORKSPACE", "") + "/", "")
+                  ln = loc.get("line") if loc is not None else ""
+                  print(f"- **{i.get('id')}** `{f}:{ln}` — {(i.get('message') or '')[:160]}")
+          PY
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            src/android/app/build/reports/lint-results-debug.html
+            src/android/app/build/reports/lint-results-debug.xml
+            src/android/app/build/reports/lint-results-debug.txt
+
+  # ────────────────────────────────────────────────────────────────────────
   # job 4/4 — publish.
   #
   # `needs:` is the fail-fast: any of the three failing skips this job, so a
@@ -480,7 +588,7 @@ jobs:
   # the rolling tag and replacing the release asset need.
   # ────────────────────────────────────────────────────────────────────────
   publish:
-    needs: [scan-gate, unit-tests, build-apk]
+    needs: [scan-gate, unit-tests, build-apk, lint]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

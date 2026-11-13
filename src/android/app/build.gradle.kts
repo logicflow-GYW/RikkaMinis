@@ -245,17 +245,60 @@ android {
     }
 
     lint {
-        // AGP 8.x ships a NonNullableMutableLiveData detector that throws
-        // IncompatibleClassChangeError on Kotlin source during
-        // lintVitalAnalyzeRelease, regardless of whether the project uses
-        // LiveData (this project does not). The crash happens in the
-        // detector's dispatch phase — before the configured `disable` list
-        // is consulted — so disabling the rule alone is not enough.
-        // checkReleaseBuilds=false skips lintVitalAnalyzeRelease entirely;
-        // debug-build lint coverage is unaffected. Re-enable once AGP ships
-        // a fixed detector (tracked at issuetracker.google.com/388538014).
+        // ── History (read this before touching the lines below) ──────────────
+        // The comment that used to live here claimed:
+        //   "checkReleaseBuilds=false skips lintVitalAnalyzeRelease entirely;
+        //    debug-build lint coverage is unaffected."
+        // That claim was FALSE and had never been tested. Measured 2026-11-13
+        // (three CI probe rounds, runs 43406670614 / 43408220558 / 43409353597):
+        //   * plain `:app:lintDebug` crashes exactly like lintVital did — all
+        //     three analyze tasks (Debug / DebugUnitTest / DebugAndroidTest)
+        //     abort with IncompatibleClassChangeError.
+        //   * `disable += "NonNullableMutableLiveData"` never helped: the crash
+        //     trace shows that detector still executing, so it is not the cause.
+        //   * the real cause is a VERSION MISMATCH: compose-runtime-lint 1.9.x
+        //     emits detectors that call the Kotlin K2 Analysis API
+        //     (KaPropertyGetterSymbol), which AGP 8.7.3's bundled lint 31.7.3
+        //     does not implement. A classpath audit proved only ONE artifact
+        //     carries that class, so it is not duplicate-class pollution.
+        //   * override with an AGP-STYLE version runs clean: `8.9.0` => lint
+        //     31.9.0. (The property adds 23 to the major; passing `31.9.0`
+        //     resolves lint-gradle:54.9.0 and fails to resolve at all.)
+        //
+        // Release path is still unlinted on purpose: checkReleaseBuilds stays
+        // false until lintVital is verified on this tree, so a release build
+        // cannot be broken by an analyzer crash. Debug lint is the channel
+        // that now actually runs (see .github/workflows/build-apk.yml).
         checkReleaseBuilds = false
-        disable += "NonNullableMutableLiveData"
+        // NonNullableMutableLiveData no longer exists in lint 31.9.0 (the
+        // version this project now runs): keeping the disable entry made lint
+        // emit `UnknownIssueId` for it. Removed rather than kept "just in
+        // case" — an id that no longer exists cannot crash anything.
+
+        // Baseline: the tree had 522 issues when lint was first run
+        // (15 Error / 415 Warning / 92 Information). Gating on all of them
+        // would be a permanently red check that nobody reads, so: record them
+        // once, then fail ONLY on new findings.
+        baseline = file("lint-baseline.xml")
+        abortOnError = true
+        warningsAsErrors = false
+        checkDependencies = false
+
+        // Style-only families with zero correctness value on this codebase.
+        // 183 UseKtx + 92 AutoboxingStateCreation + 51 PluralsCandidate were
+        // the three biggest warning buckets; rewriting `apply{}` into `use{}`
+        // or moving Int state into mutableIntStateOf() changes nothing a user
+        // can observe. Correctness / security / performance / i18n stay on.
+        disable += listOf(
+            "UseKtx",
+            "AutoboxingStateCreation",
+            "PluralsCandidate",
+            // Purely cosmetic typography preferences (dashes / fractions /
+            // ellipsis glyphs) — 21 + 7 + 2 hits, all in UI copy.
+            "TypographyDashes",
+            "TypographyFractions",
+            "TypographyEllipsis",
+        )
     }
 }
 
