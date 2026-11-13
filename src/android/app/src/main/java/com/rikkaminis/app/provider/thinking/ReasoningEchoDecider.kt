@@ -95,11 +95,16 @@ object ReasoningEchoDecider {
         ReasoningEchoPolicy.Timing.AFTER_TOOL_USE_ONLY ->
             if (hasToolCalls) echoUnconditionally(captured)
             else legacy(captured, legacyGate, legacyPlaceholder)
-        // Gateways that validate once thinking is ACTIVE (nous): gate the whole rule on
-        // the legacy capture gate, but never on the AUTO/placeholder distinction.
-        ReasoningEchoPolicy.Timing.EVERY_TURN ->
-            if (legacyGate) echoUnconditionally(captured)
-            else legacy(captured, legacyGate, legacyPlaceholder)
+        // Gateways that validate once thinking is ACTIVE (nous): the tier means
+        // EVERY turn, so it must not inherit the local capture gate. [R8-B B-F05
+        // ②] It used to fall back to `legacy(...)` when `legacyGate` was false,
+        // i.e. a tier named EVERY_TURN could still produce OMIT — the name was a
+        // lie and a gateway that validates unconditionally still 400'd on turns
+        // where the local thinking level happened to be OFF/AUTO. Paired with the
+        // fail-closed decode in [ThinkingRuleCoding.decodeEcho] (a corrupt rule
+        // can no longer BECOME this tier by accident): one half alone would make
+        // bad data noisier, the two together make the tier honest.
+        ReasoningEchoPolicy.Timing.EVERY_TURN -> echoUnconditionally(captured)
     }
 
     private fun echoUnconditionally(captured: String?): Action =
