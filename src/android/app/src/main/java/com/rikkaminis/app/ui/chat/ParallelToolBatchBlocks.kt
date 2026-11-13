@@ -64,10 +64,16 @@ internal object ParallelToolBatchBlocks {
         val indexById = HashMap<String, Int>(baseline.size)
         baseline.forEachIndexed { i, block -> if (!indexById.containsKey(block.id)) indexById[block.id] = i }
         for (worked in perCall) {
-            for ((i, edited) in worked.withIndex()) {
-                val base = baseline.getOrNull(i) ?: continue
-                if (edited == base) continue          // this call did not touch the block
+            // [r8-C-F03] Baseline AND target are both read by id. Reading the
+            // baseline by POSITION (`baseline.getOrNull(i)`) contradicted the
+            // KDoc two lines above: one call that inserted or removed a block
+            // shifted every later entry, so an untouched block compared unequal
+            // to the wrong baseline entry, looked "edited", and wrote its stale
+            // copy back over a sibling's real edit.
+            for (edited in worked) {
                 val target = indexById[edited.id] ?: continue
+                val base = baseline[target]
+                if (edited == base) continue          // this call did not touch the block
                 if (shared[target] != edited) shared[target] = edited
             }
         }
