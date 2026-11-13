@@ -32,6 +32,15 @@ internal data class ResponsesToolCallAccumulator(
  * Priority: `item_id` → `call_id` → `output_index`. The first two are exact
  * identity; the third is positional and therefore only consulted when the
  * server did not identify the item at all.
+ *
+ * [R8-B B-F06] The positional fallback must be UNIQUE. A relay that omits both
+ * ids and runs two tools concurrently can report the same `output_index` for
+ * both (or leave several accumulators at the default), and the old
+ * `firstOrNull` then attached a frame's arguments to whichever block happened to
+ * be first in the map — silently corrupting one tool's arguments with another's.
+ * Not pairing is recoverable (the call arrives complete at
+ * `response.output_item.done`); pairing wrongly is not. So: exactly one match
+ * wins, zero or several return null.
  */
 internal fun resolveResponsesAccumulator(
     accumulators: Collection<ResponsesToolCallAccumulator>,
@@ -41,4 +50,5 @@ internal fun resolveResponsesAccumulator(
 ): ResponsesToolCallAccumulator? =
     accumulators.firstOrNull { itemId.isNotEmpty() && it.itemId == itemId }
         ?: accumulators.firstOrNull { callId.isNotEmpty() && it.callId == callId }
-        ?: accumulators.firstOrNull { outputIndex >= 0 && it.outputIndex == outputIndex }
+        ?: if (outputIndex < 0) null
+           else accumulators.filter { it.outputIndex == outputIndex }.singleOrNull()

@@ -62,6 +62,47 @@ class OpenAIResponsesStreamFixTest {
         assertNull(resolveResponsesAccumulator(listOf(acc), "", "", -1))
     }
 
+    // ---------------- [R8-B B-F06] the positional fallback must be unique ----------------
+
+    @Test
+    fun `an ambiguous output index resolves to nothing instead of the wrong block`() {
+        // A relay that omits both ids AND reports the same output_index for two
+        // concurrent tools (or leaves several at the default) used to be answered
+        // by `firstOrNull` — i.e. one tool's streamed arguments were attached to
+        // whichever block happened to be first. Not pairing is recoverable (the
+        // call arrives complete at `response.output_item.done`); pairing wrongly
+        // silently corrupts a tool call.
+        val a = ResponsesToolCallAccumulator(callId = "", name = "shell", itemId = "", outputIndex = 4)
+        val b = ResponsesToolCallAccumulator(callId = "", name = "read_file", itemId = "", outputIndex = 4)
+        assertNull(resolveResponsesAccumulator(listOf(a, b), "", "", 4))
+    }
+
+    @Test
+    fun `a defaulted unknown index is not a shared bucket`() {
+        // Both still at the data-class default (-1): asking positionally with -1
+        // must not collapse onto the first of them.
+        val a = ResponsesToolCallAccumulator(callId = "", name = "shell")
+        val b = ResponsesToolCallAccumulator(callId = "", name = "read_file")
+        assertNull(resolveResponsesAccumulator(listOf(a, b), "", "", -1))
+    }
+
+    @Test
+    fun `a unique output index still pairs`() {
+        val wanted = ResponsesToolCallAccumulator(callId = "", name = "shell", itemId = "", outputIndex = 4)
+        val other = ResponsesToolCallAccumulator(callId = "", name = "read_file", itemId = "", outputIndex = 5)
+        assertEquals(wanted, resolveResponsesAccumulator(listOf(wanted, other), "", "", 4))
+    }
+
+    @Test
+    fun `an exact id still wins over an ambiguous index`() {
+        // Uniqueness only governs the positional LAST resort — identity may never
+        // be overridden by position.
+        val a = ResponsesToolCallAccumulator(callId = "call_a", name = "shell", itemId = "fc_a", outputIndex = 4)
+        val b = ResponsesToolCallAccumulator(callId = "call_b", name = "read_file", itemId = "fc_b", outputIndex = 4)
+        assertEquals("call_b", resolveResponsesAccumulator(listOf(a, b), "", "call_b", 4)!!.callId)
+        assertEquals("call_a", resolveResponsesAccumulator(listOf(a, b), "fc_a", "", 4)!!.callId)
+    }
+
     // ---------------- production wiring ----------------
 
     @Test
