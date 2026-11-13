@@ -1,6 +1,7 @@
 package com.rikkaminis.app.agent
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -168,5 +169,71 @@ class AppKnowledgeTest {
         assertTrue("frontmatter must not reach the model", !rendered.contains("aliases:"))
         assertTrue("empty index still yields a message", AppKnowledgeIndex(emptyList()).availableList().isEmpty())
         assertTrue(index.availableList().contains("wechat (微信, com.tencent.mm)"))
+    }
+
+    // [R8-1114 A-F01] The HIT path must render the parsed body, not the raw
+    // file: the tool hands `parseAppKnowledgePack(id, raw).body` to the
+    // renderer, so a pack with frontmatter can never leak `---` / `name:` /
+    // `aliases:` into the tool result.
+    @Test
+    fun renderedPackBodyCarriesNoFrontmatter() {
+        val pack = requireNotNull(parseAppKnowledgePack("wechat", wechat))
+        val rendered = renderAppKnowledge(pack.entry, pack.body)
+        assertFalse("first rendered line must not be a fence", rendered.lines().first().trim() == "---")
+        assertFalse("frontmatter field leaked", rendered.contains("name: wechat"))
+        assertFalse("frontmatter field leaked", rendered.contains("aliases:"))
+        // The header legitimately says "packages: com.tencent.mm"; what must not
+        // appear is the YAML LIST form of the frontmatter line.
+        assertFalse("frontmatter list leaked", rendered.contains("[\"com.tencent.mm\"]"))
+        assertTrue("the actual body must survive", rendered.contains("## 页面结构"))
+    }
+
+    // [R8-1114 A-F01] Wiring, as source shape: the HIT path is Context-bound
+    // (`context.assets`), so it cannot be executed here — the house pattern
+    // (ScreenshotCaptureShapeTest / BrowserSessionBindingTest) reads the shipped
+    // source, and every assertion carries an in-test negative control.
+    @Test
+    fun appGuideHitPathRendersTheParsedBody() {
+        val source = readRepoFile("src/android/app/src/main/java/com/rikkaminis/app/tools/AppGuideTool.kt")
+        assertTrue("hit path must render the parsed pack body", acceptsHitPath(source))
+        // Negative control: the pre-fix shape (raw text straight into the
+        // renderer) must be rejected by the same probe.
+        val legacy = source.replace(
+            "renderAppKnowledge(entry, pack.body)",
+            "renderAppKnowledge(entry, raw)",
+        )
+        assertTrue("the negative control must actually change the source", legacy != source)
+        assertFalse("the raw-text shape must be rejected", acceptsHitPath(legacy))
+    }
+
+    private fun acceptsHitPath(source: String): Boolean {
+        val hit = source.substringAfter("val raw = readPackBody(", "")
+        if (hit.isEmpty()) return false
+        val tail = hit.substringAfter("val pack = parseAppKnowledgePack(", "")
+        if (tail.isEmpty()) return false
+        return tail.contains("renderAppKnowledge(entry, pack.body)")
+    }
+
+    private fun readRepoFile(relative: String): String {
+        // Three launch points: repo root (sandbox probe), src/android (Gradle
+        // module), src/android/app (Gradle unit-test working dir).
+        val candidates = listOf(
+            relative,
+            relative.removePrefix("src/android/"),
+            relative.removePrefix("src/android/app/"),
+        )
+        val start = System.getProperty("repo.root")?.let { java.io.File(it) }
+            ?: java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        var dir: java.io.File? = start
+        while (dir != null) {
+            for (candidate in candidates) {
+                val f = java.io.File(dir, candidate)
+                if (f.exists()) return f.readText()
+            }
+            dir = dir.parentFile
+        }
+        throw java.io.FileNotFoundException(
+            "$relative not found from ${start.absolutePath}",
+        )
     }
 }
