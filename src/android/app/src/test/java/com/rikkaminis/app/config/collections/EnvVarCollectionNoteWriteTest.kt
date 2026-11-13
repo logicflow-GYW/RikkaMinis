@@ -36,7 +36,7 @@ class EnvVarCollectionNoteWriteTest {
             "[{\"id\":\"entry-1\",\"key\":\"FOO\",\"note\":\"old\",\"group\":\"ops\",\"createdAt\":1}]",
         )
         val prefs = FakeSharedPreferences()
-        val repo = EnvVarRepository(StubContext(filesDir), prefs)
+        val repo = EnvVarRepository.withPrefs(StubContext(filesDir), prefs)
         val note = EnvVarsCollection(repo).fields("FOO").single { it.path.endsWith(".note") }
 
         note.write(ConfigValue.Str("rotated later"))

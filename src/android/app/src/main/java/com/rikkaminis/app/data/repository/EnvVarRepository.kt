@@ -19,12 +19,23 @@ import java.util.UUID
  * Values stored in EncryptedSharedPreferences (AES256-GCM).
  * Mirrors iOS EnvVarStore.
  */
-class EnvVarRepository(
+class EnvVarRepository private constructor(
     private val context: Context,
-    private val encryptedPrefsOverride: SharedPreferences? = null,
+    private val encryptedPrefsOverride: SharedPreferences?,
 ) {
+    constructor(context: Context) : this(context, null)
 
     companion object {
+        /**
+         * Test seam: lets a JVM test drive the real repository against an
+         * in-memory store. Deliberately NOT a public constructor — this class
+         * owns env-var SECRETS, and a public "pass me any SharedPreferences"
+         * parameter would let production code swap the encrypted store for a
+         * plaintext one by accident.
+         */
+        internal fun withPrefs(context: Context, prefs: SharedPreferences): EnvVarRepository =
+            EnvVarRepository(context, prefs)
+
         private const val TAG = "EnvVarRepository"
         private const val METADATA_FILE = "env-vars.json"
 
