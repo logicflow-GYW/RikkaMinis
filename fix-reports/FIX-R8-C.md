@@ -275,17 +275,19 @@ PRE 臂 18 条红的分布（逐条可复跑）：C-F01 5 条 · C-F03 2 条 · 
 
 ### 5.1 CI 结论（收口回填）
 
-**run `43509802835`**（https://github.com/logicflow-GYW/RikkaMinis/actions/runs/43509802835）
-· **`head_sha` = `632e8f001b70531b27fc0fd5c5048784604a9a42` = 本地 HEAD 逐字符一致** ✅
+**最终 run `43511930289`**（https://github.com/logicflow-GYW/RikkaMinis/actions/runs/43511930289）
+· **`head_sha` = `9ce09cfda051a1f8d7802c57470a1709ab407460` = 本地 HEAD 逐字符一致** ✅
 · `status = completed` / `conclusion = success`
 
 | job | id | 结论 | 日志证据（逐条搜到，不只看绿） |
 |---|---|---|---|
-| unit-tests | `132176954359` | success | `BUILD SUCCESSFUL in 6m 20s`；**`PASSED$` 行 9017 条**（`grep -c`）；本支 7 个测试类全部在册且逐条 PASSED：`ToolCallResiduePolicyTest`(26) · `ParallelToolBatchBlocksTest`(9) · `PasteTextBufferTest`(36) · `PastedTextBufferMarkerTest`(7) · `MarkdownClipboardInlineTest`(15) · `ChatViewModelMentionSelectTest`(5) · `PasteFoldWiringTest`(11) |
-| scan-gate | `132176953499` | success | **`Summary: 115 passed, 0 failed`**（`[115/115]` 全跑）；`chat_ui_interaction_check` → `CHAT-UI-INTERACTION GATE OK`；`grep FAILED` 无非-PASSED 命中 |
-| lint | `132176954020` | success | — |
-| build-apk | `132176954198` | success | — |
-| publish | `132182878087` | success | — |
+| unit-tests | `132184084805` | success | `BUILD SUCCESSFUL in 5m 25s`；**`PASSED$` 行 9017 条**（`grep -c`）；本支 7 个测试类全部在册且逐条 PASSED：`ToolCallResiduePolicyTest`(26) · `ParallelToolBatchBlocksTest`(9) · `PasteTextBufferTest`(36) · `PastedTextBufferMarkerTest`(7) · `MarkdownClipboardInlineTest`(15) · `ChatViewModelMentionSelectTest`(5) · `PasteFoldWiringTest`(11) |
+| scan-gate | `132184084611` | success | **`Summary: 115 passed, 0 failed`**（`[115/115]` 全跑）；`chat_ui_interaction_check` → `CHAT-UI-INTERACTION GATE OK`；`grep FAILED` 无非-PASSED 命中 |
+| lint | `132184084080` | success | — |
+| build-apk | `132184084798` | success | — |
+| publish | `132188789933` | success | — |
+
+> 前一轮 run `43509802835`（head `632e8f0`，代码提交 tip）同样五 job 全绿、9017 PASSED、115/115 门；本轮只是把报告回填的文档提交也过一遍 CI，两次读数一致。
 
 **★ 夹具本次未跑（必须写明，不能拿「CI 绿」顶替）**：本支 **零改动** `scripts/scan/**`，日志里实际输出是
 
