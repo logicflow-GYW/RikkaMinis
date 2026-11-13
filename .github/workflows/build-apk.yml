@@ -9,6 +9,17 @@ on:
       - 'deps/**'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
+    inputs:
+      # PROBE-ONLY (branch ci/lint-probe-1113). AGP lint has never run in this
+      # repo: build.gradle.kts sets `checkReleaseBuilds = false` because a
+      # NonNullableMutableLiveData detector crashes lintVitalAnalyzeRelease,
+      # and the comment claims debug lint is unaffected — untested.
+      # true → run ONLY the lint job (skips gates/tests/build/publish);
+      # false/absent → today's behavior, byte for byte.
+      lint_probe:
+        description: 'Run :app:lintDebug only (report, no gate)'
+        type: boolean
+        default: false
 
 # [audit-RC6] Serialize overlapping builds of the SAME ref. The release path
 # replaces the rolling android-latest asset in place (same tag every build), so
@@ -34,6 +45,8 @@ jobs:
   # back to the head of build-apk's steps.
   # ────────────────────────────────────────────────────────────────────────
   scan-gate:
+    # PROBE-ONLY guard: see the lint_probe input at the top of this file.
+    if: ${{ inputs.lint_probe != true }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -102,6 +115,8 @@ jobs:
   # three native builds belong to job 3 alone.
   # ────────────────────────────────────────────────────────────────────────
   unit-tests:
+    # PROBE-ONLY guard: see the lint_probe input at the top of this file.
+    if: ${{ inputs.lint_probe != true }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -184,6 +199,8 @@ jobs:
   # write token lives in job 4).
   # ────────────────────────────────────────────────────────────────────────
   build-apk:
+    # PROBE-ONLY guard: see the lint_probe input at the top of this file.
+    if: ${{ inputs.lint_probe != true }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -467,6 +484,117 @@ jobs:
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────────────
+  # PROBE job (branch ci/lint-probe-1113 only — NOT a gate, NOT for main).
+  #
+  # `lint { checkReleaseBuilds = false }` in app/build.gradle.kts exists
+  # because AGP 8.x's NonNullableMutableLiveData detector throws
+  # IncompatibleClassChangeError inside lintVitalAnalyzeRelease. That switch
+  # only kills the VITAL path; the ordinary `lintDebug` task is a different
+  # task graph and is (per the same comment) unaffected — but no CI job has
+  # ever run it, so nobody knows. This job finds out, once, cheaply.
+  #
+  # It never fails the run: the gradle exit code is printed and exported,
+  # the XML report is summarized into the step summary, artifacts uploaded.
+  # Decision (baseline + abortOnError, or drop the idea) comes AFTER.
+  # ────────────────────────────────────────────────────────────────────────
+  lint-probe:
+    if: ${{ inputs.lint_probe == true }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      # Lint needs the compile classpath (and KSP output), not the native
+      # prebuilts: ExternalNativeBuild is disabled in this project and the .so
+      # files are vendored under jniLibs — so no NDK / proot build here.
+      - name: Run :app:lintDebug (report only)
+        shell: bash
+        run: |
+          cd src/android
+          set +e
+          ./gradlew :app:lintDebug --stacktrace \
+            -Dorg.gradle.jvmargs=-Xmx6144m 2>&1 | tee /tmp/lint-gradle.log
+          code=${PIPESTATUS[0]}
+          echo "GRADLE_EXIT=$code" | tee -a "$GITHUB_ENV"
+          exit 0
+
+      - name: Summarize findings
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os, sys, glob, xml.etree.ElementTree as ET
+          from collections import Counter
+
+          cands = sorted(glob.glob("src/android/app/build/reports/lint-results-*.xml"))
+          print("## Lint probe\n")
+          print(f"gradle exit: `{os.environ.get('GRADLE_EXIT', 'unknown')}`")
+          if not cands:
+              print("\n**no lint XML report produced** — the task most likely crashed "
+                    "before the report stage. See `lint-gradle.log` in the artifact.")
+              sys.exit(0)
+          path = cands[0]
+          print(f"report: `{path}`\n")
+          root = ET.parse(path).getroot()
+          issues = root.findall("issue")
+          sev = Counter(i.get("severity") for i in issues)
+          ids = Counter(i.get("id") for i in issues)
+          cats = Counter()
+          for i in issues:
+              c = i.find("category")
+              cats[c.get("id") if c is not None else "?"] += 1
+          print(f"total issues: **{len(issues)}**\n")
+          print("| severity | count |\n|---|---|")
+          for k, v in sev.most_common():
+              print(f"| {k} | {v} |")
+          print("\n| category | count |\n|---|---|")
+          for k, v in cats.most_common():
+              print(f"| {k} | {v} |")
+          print("\ntop 30 issue ids:\n```")
+          for k, v in ids.most_common(30):
+              print(f"{v:5d}  {k}")
+          print("```\n\nsamples of the 5 most frequent ids:")
+          for k, _ in ids.most_common(5):
+              print(f"\n**{k}**")
+              shown = 0
+              for i in issues:
+                  if i.get("id") == k and shown < 3:
+                      loc = i.find("location")
+                      f = loc.get("file") if loc is not None else "?"
+                      ln = loc.get("line") if loc is not None else ""
+                      print(f"- `{f}:{ln}` {i.get('message')}")
+                      shown += 1
+          PY
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-probe-report
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            src/android/app/build/reports/lint-results-*.html
+            src/android/app/build/reports/lint-results-*.xml
+            src/android/app/build/reports/lint-results-*.txt
+            /tmp/lint-gradle.log
+
+  # ────────────────────────────────────────────────────────────────────────
   # job 4/4 — publish.
   #
   # `needs:` is the fail-fast: any of the three failing skips this job, so a
@@ -481,6 +609,8 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────
   publish:
     needs: [scan-gate, unit-tests, build-apk]
+    # PROBE-ONLY guard: see the lint_probe input at the top of this file.
+    if: ${{ inputs.lint_probe != true }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
