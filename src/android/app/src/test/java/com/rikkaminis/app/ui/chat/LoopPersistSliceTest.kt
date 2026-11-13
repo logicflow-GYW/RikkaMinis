@@ -105,7 +105,9 @@ class LoopPersistSliceTest {
             "one rollback site per recovery path (context-overshoot / transient-retry / " +
                 "provider-fallback); a missing role means a failed attempt's partial blocks " +
                 "would survive into the retried turn",
-            listOf("context-overshoot", "transient-retry", "provider-fallback"),
+            // Alphabetical — the actual list is `.sorted()` so the assertion cannot
+            // depend on the order the sites happen to appear in the file.
+            listOf("context-overshoot", "provider-fallback", "transient-retry"),
             rollbackRoles(code).sorted(),
         )
         // …and no rollback may use the run-scoped index instead.
