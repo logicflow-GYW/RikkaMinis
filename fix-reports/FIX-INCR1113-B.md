@@ -182,12 +182,53 @@ OK (2 tests)
 
 ## 5 CI
 
-| 项 | 值 |
-|---|---|
-| run | `43443967050`（Build RikkaMinis Android APK） |
-| head_sha | `439dd415d073fabf2ea605e65c39ae31afdb6b8a` |
-| 与分支 tip | **逐字符一致** |
-| 结果 | 见下（dispatch 后状态） |
+**run `43445034805`（https://github.com/logicflow-GYW/RikkaMinis/actions/runs/43445034805）五 job 全 success**
+· head_sha `3ab13473b46c` = 分支 tip 逐字符一致
+
+| job | id | 结论 | 日志证据（逐条搜到，不只看绿） |
+|---|---|---|---|
+| unit-tests | `131959934512` | success | `BUILD SUCCESSFUL in 5m 58s`；**8961 PASSED / 0 FAILED**（`grep -c " PASSED$"` = 8961）；4 个本支测试类逐条在册：`ContextOvershootRetryTest` 20 例、`LargeContentGuardStreamEndLatchTest` 2 例、`LoopPersistSliceTest` 6 例（含 `every recovery path rolls back its own partial blocks PASSED`）、`SystemPromptSegmentOrderTest` 6 例 |
+| scan-gate | `131959938977` | success | **`Summary: 115 passed, 0 failed`** + 115 个 `[N/115]` header 全在；`##[notice]scanners moved in this push — running the fixture self-test`（本支改了 `scripts/scan/` ⇒ 夹具**真跑**）+ **`✅ ALL 356 CASES PASS`**；`✅ loop_persist_slice_check selftest has teeth (...)` + `✅ loop_persist_slice_check real tree green` 两行都在册 |
+| lint | `131959936883` | success | `BUILD SUCCESSFUL in 6m 14s` |
+| build-apk | `131960001687` | success | `BUILD SUCCESSFUL in 8m 44s` |
+| publish | `131964605439` | success | — |
+
+**★ 夹具计数未变（356）却新增了 2 条 selftest 臂** —— 因为 `test_scan.py` 的 `DA1016_GATES` 对 `loop_persist_slice_check` 只做「标记字符串命中 + 真树绿」两项检查，不枚举该门内部的夹具数；门的臂数增长（27 → 29）体现在门自己的 `--selftest` 输出里（`violating fixtures red: 29 / 29`），不在 `test_scan.py` 的用例总数里。这是既有设计（门内臂数由门自证），不是本支漏注册。
+
+**★ 判读陷阱复核**：`sg3.log:159` / `:163` 两行 `echo "::notice::..."` 是 **workflow 脚本源码**，`:1087` 的 `##[notice]` 才是**实际输出**。按实际输出判定：本批走了「夹具真跑」分支，不是 skip 分支。同族陷阱（`grep FAILED` 命中 `PASSED` 子串）本次实测 0 命中。
+
+### 5.1 途中被 CI 抓住的一次自伤（诚实记录）
+
+第一次 dispatch（run `43443967050`，head `439dd41`）unit-tests **红**：
+
+```
+LoopPersistSliceTest > every recovery path rolls back its own partial blocks FAILED
+    java.lang.AssertionError: expected:<[context-overshoot, transient-retry, provider-fallback]>
+                               but was:<[context-overshoot, provider-fallback, transient-retry]>
+```
+
+**是我的断言写错了，不是代码错了**：被测侧是 `rollbackRoles(code).sorted()`（字典序），期望值我按**语义顺序**（overshoot / transient / fallback）写的。修正提交 `3ab1347` 只改期望值的排列，并加了注释说明「被测侧是 sorted，断言不能依赖文件里的出现顺序」。
+
+**这条值得记一笔**：门/测试真的在跑，而且抓的是「新写的断言自身有错」——不是走过场。
+
+### 5.2 另一个红：`FastioSearchTest`，与本支无关（既有 flaky）
+
+第二次 run（`43445034805` 的**第一次** attempt）unit-tests 红在：
+
+```
+FastioSearchTest > the file that fills the budget is the last entry charged FAILED
+    java.lang.AssertionError: expected:<1> but was:<2>
+        at FastioSearchTest.kt:275   →  assertEquals(1L, out.filesScanned)
+```
+
+**归因（四源取证，不是"重跑就好了"）**：
+
+1. **本支零改动**：`git diff --stat 4402b69..HEAD -- .../sandbox/` = **0 行**；`FastioSearch.kt` 与 `FastioSearchTest.kt` 在 `439dd41` 与 `3ab1347` 两个 sha 上的 blob hash **完全相同**（`577ecbd2…` / `84bad109…`）。
+2. **同一份源码，前一次 PASSED**：run `43443967050` 的 unit-tests 日志里该用例是 `PASSED`（`ut.log:10599`），run `43445034805` 第一次 attempt 是 `FAILED`（`ut2.log:10603`）。**同一二进制、同一用例，结论翻转 ⇒ 非确定性**。
+3. **本地 30 轮复现全绿**：把 `FastioSearch.kt` 抽成独立 JVM 工程（`EntryBudget` / `charge` 用真实现拷过来），同一 fixture 跑 30 轮，`failures=0 / 30`。
+4. **根因在测试自身的假设**：用例注释写「Whichever file the walk reaches first fills the budget」，然后硬断言 `filesScanned == 1L`。但 `Files.walkFileTree` **不保证兄弟节点的访问顺序**（底层 `readdir` 顺序，ext4/tmpfs 上不稳定）。若走的是 `sub/` 先于 `a.txt`/`b.txt`：`sub` 先 `preVisitDirectory` 计 1、`c.txt` 不匹配（`filesScanned` +1）、然后才读到第一个 `hit` 文件——`filesScanned` 就是 2。断言把「顺序无关的性质」写成了「顺序相关的具体值」。
+
+**处置**：本支**不改**它（半径纪律：不在本支触发路径上，且改它会动到本支未碰的文件、把无关改动混进本支 diff）。已重跑 failed job，第二次 attempt 全绿（本次 run 的 success 来自 attempt 2）。**建议主会话登记 backlog**：`FastioSearchTest.kt:275` 的 `assertEquals(1L, out.filesScanned)` 应改为顺序无关断言（例如 `assertTrue(out.filesScanned <= 2)` + 单独断言「capped 后不再进入任何目录」），触发条件 = 该用例再次在 CI 红；判据见本条 §8 第 3 项。
 
 ## 6 残留风险
 
@@ -228,3 +269,4 @@ java -cp <test-out>:<jars> org.junit.runner.JUnitCore LargeContentGuardStreamEnd
 
 1. **`androidTest` 不在 CI 执行** —— `unit-tests` job 只跑 `./gradlew test`，`src/androidTest/**` 的 40+ 个 Compose/仪器测试从不运行。影响：任何以 instrumented test 形式存在的保护都是装饰。触发条件：需要一条 UI 行为证据时；方案：CI 加 emulator job（成本高）或把可源码化的断言迁到 JVM（本支 F-08 采用的做法）。
 2. **`legacy/LegacyFlatChatBuilder.kt` 的 `AssistantThinking` 构造点** —— 该行是死代码，但删除它会改动 `FROZEN_LEGACY_SYMBOLS` 的冻结契约（`legacy_pipeline_guard` 双向检查），属于"dead module 的整体退役"决策，不是本条的半径。
+3. **`FastioSearchTest.kt:275` 的顺序依赖断言** —— 见 §5.2。既有 flaky，与本支无关，四源取证已定性。建议登记 P2：修法是把它拆成「顺序无关的上界」+「capped 后不再下探」两条断言。触发条件：该用例再次在 CI 红（本次已发生 1 次，属"发生过一次"）。
