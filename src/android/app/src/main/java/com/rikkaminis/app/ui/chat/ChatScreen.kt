@@ -236,6 +236,15 @@ fun ChatScreen(
     val messages by viewModel.uiMessages.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
+    // Read once here, at the top of the composition, and pass it into the
+    // LazyColumn item scope below. Reading a StateFlow's `.value` inside an
+    // item is not observable: recomposition is not subscribed to the flow, so
+    // a thinking-level change could leave a legacy row (messageThinkingLevel
+    // == null) rendering against a stale level until something else
+    // invalidated it. collectAsState at this level makes every affected row
+    // recompose. (Lint: StateFlowValueCalledInComposition flagged the old
+    // read at the AssistantThinking branch.)
+    val currentThinkingLevel by viewModel.thinkingLevel.collectAsState()
     // [feat/provider-exec-concurrency] Queue position for the active stream
     // (-1 = not queued). Rendered by TypingIndicator as "queued behind N".
     val queueWaitingAhead by viewModel.queueWaitingAhead.collectAsState()
@@ -3977,7 +3986,7 @@ fun ChatScreen(
                                 // legacy DB-restored messages (snapshot=null)
                                 // follow the chat's current level.
                                 val effectiveLevel = item.messageThinkingLevel
-                                    ?: viewModel.thinkingLevel.value
+                                    ?: currentThinkingLevel
                                 if (effectiveLevel.isEnabled) {
                                     // [T-android-thinking-auto-collapse] Use
                                     // `isLastBlockOverall` (not `isLast` =

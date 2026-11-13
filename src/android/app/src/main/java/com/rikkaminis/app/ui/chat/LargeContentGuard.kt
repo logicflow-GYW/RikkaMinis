@@ -19,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -245,14 +246,21 @@ internal fun LargeContentGuard(
             // [T-android-content-perf-diag] Log the degrade with a structural
             // fingerprint (once per ~2K growth) so a hang report shows exactly
             // what shape the tail had. Only summarize the tail window we scan.
-            remember(content.length / 2000) {
+            //
+            // LaunchedEffect, not `remember(key) { ...; Unit }`: the log is a
+            // side effect, and remember's lambda runs during composition (main
+            // thread, inside the frame budget), whereas an effect runs after
+            // composition commits. Same "once per key" semantics — the key
+            // change disposes the old effect and starts a new one — but the
+            // content summary no longer competes with layout for the frame.
+            // (Lint: RememberReturnType flagged the old shape.)
+            LaunchedEffect(content.length / 2000) {
                 val s = com.rikkaminis.app.diagnostics.ContentDiag.summarize(content)
                 AppLogger.info(
                     "Perf",
                     "[Perf][ContentDiag] stream-degrade key=$stableKey breaker=$breakerActive " +
                         "threshold=$STREAM_DEGRADE_CHARS ${s.asLogFields()}",
                 )
-                Unit
             }
             DegradedStreamingTail(content)
             return
@@ -267,13 +275,15 @@ internal fun LargeContentGuard(
         // markdown parse). Fires once via the wasDegraded latch.
         if (!isStreaming && wasDegraded.value) {
             wasDegraded.value = false
-            remember(stableKey, content.length) {
+            // LaunchedEffect, not `remember(key) { ...; Unit }` — see the
+            // stream-degrade log above for why. Keyed identically, so it still
+            // fires once per (stableKey, content.length).
+            LaunchedEffect(stableKey, content.length) {
                 val s = com.rikkaminis.app.diagnostics.ContentDiag.summarize(content)
                 AppLogger.info(
                     "Perf",
                     "[Perf][ContentDiag] stream-end-swap key=$stableKey ${s.asLogFields()}",
                 )
-                Unit
             }
         }
         // [T-android-content-perf-diag] Register this body as the currently-
@@ -298,13 +308,15 @@ internal fun LargeContentGuard(
 
     var expanded by rememberSaveable(stableKey) { mutableStateOf(false) }
 
-    // Diagnostic — emitted on first composition per large block.
-    remember(stableKey) {
+    // Diagnostic — emitted once per large block.
+    // LaunchedEffect, not `remember(stableKey) { ...; Unit }`: same key
+    // semantics, but the log happens after composition instead of inside it.
+    // (Lint: RememberReturnType flagged the old shape.)
+    LaunchedEffect(stableKey) {
         AppLogger.info(
             "LargeContentGuard",
             "collapse key=$stableKey chars=${content.length} threshold=$LARGE_MESSAGE_THRESHOLD_CHARS",
         )
-        Unit
     }
 
     if (expanded) {

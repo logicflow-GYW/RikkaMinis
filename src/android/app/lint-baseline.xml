@@ -225,18 +225,6 @@
     <issue id="ModifierParameter" severity="Warning" message="Modifier parameter should be the first optional parameter" category="Correctness" priority="3" summary="Guidelines for Modifier parameters in a Composable function">
         <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/settings/SettingsComponents.kt" line="170" column="5" />
     </issue>
-    <issue id="RememberReturnType" severity="Error" message="`remember` calls must not return `Unit`" category="Correctness" priority="3" summary="`remember` calls must not return `Unit`">
-        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/LargeContentGuard.kt" line="248" column="13" />
-    </issue>
-    <issue id="RememberReturnType" severity="Error" message="`remember` calls must not return `Unit`" category="Correctness" priority="3" summary="`remember` calls must not return `Unit`">
-        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/LargeContentGuard.kt" line="270" column="13" />
-    </issue>
-    <issue id="RememberReturnType" severity="Error" message="`remember` calls must not return `Unit`" category="Correctness" priority="3" summary="`remember` calls must not return `Unit`">
-        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/LargeContentGuard.kt" line="302" column="5" />
-    </issue>
-    <issue id="StateFlowValueCalledInComposition" severity="Error" message="StateFlow.value should not be called within composition" category="Correctness" priority="3" summary="StateFlow.value should not be called within composition">
-        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt" line="3980" column="64" />
-    </issue>
     <issue id="SwitchIntDef" severity="Warning" message="Don't use a constant here; expected one of: `SpeechRecognizer.ERROR_AUDIO`, `SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT`, `SpeechRecognizer.ERROR_CANNOT_LISTEN_TO_DOWNLOAD_EVENTS`, `SpeechRecognizer.ERROR_CLIENT`, `SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS`, `SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED`, `SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE`, `SpeechRecognizer.ERROR_NETWORK`, `SpeechRecognizer.ERROR_NETWORK_TIMEOUT`, `SpeechRecognizer.ERROR_NO_MATCH`, `SpeechRecognizer.ERROR_RECOGNIZER_BUSY`, `SpeechRecognizer.ERROR_SERVER`, `SpeechRecognizer.ERROR_SERVER_DISCONNECTED`, `SpeechRecognizer.ERROR_SPEECH_TIMEOUT`, `SpeechRecognizer.ERROR_TOO_MANY_REQUESTS`" category="Correctness" priority="3" summary="Missing @IntDef in Switch">
         <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/SpeechOffloadHandler.kt" line="418" column="25" />
     </issue>
