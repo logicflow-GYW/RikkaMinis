@@ -108,18 +108,17 @@ internal fun decideConfigSource(
  * @param liveMirror `prefs.getString("config", null)` AFTER the commit — pass the
  *   read-back value, never the intended one, or the whole point is lost.
  * @return the hash to store, or null when there is no mirror to name (null makes
- *   the next load take the re-import branch rather than trust a hash that names
- *   nothing).
+ *   the next load take the DB branch instead of trusting a hash that names
+ *   nothing — the mirror may simply not exist yet, e.g. a degraded prefs store
+ *   or a first save whose commit was rejected).
  */
 internal fun decideSyncHash(
     intendedMirror: String,
     liveMirror: String?,
 ): String? = when {
-    // The committed value is what we asked for (or prefs reports nothing yet —
-    // a SharedPreferences that lies about a successful commit is not something
-    // we can defend against here; hash the intended string and let the load
-    // path's re-import branch arbitrate).
-    liveMirror == null -> hashJsonMirror(intendedMirror)
+    // Nothing landed in prefs: there is no mirror for this hash to name, so the
+    // token is deleted rather than pointed at a string that never existed.
+    liveMirror == null -> null
     else -> hashJsonMirror(liveMirror)
 }
 
