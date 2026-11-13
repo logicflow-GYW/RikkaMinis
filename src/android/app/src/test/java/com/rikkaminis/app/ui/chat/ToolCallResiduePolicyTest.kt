@@ -184,6 +184,66 @@ class ToolCallResiduePolicyTest {
         assertTrue("a 30k code-heavy scan took ${ms} ms — the quadratic shape is back", ms < 2_000)
     }
 
+    // ── [r8-C-F01] a bare `<` in prose must not swallow what follows ────────
+
+    /**
+     * The scanner used to take the FIRST `>` after a `<`, whatever sat in
+     * between. Prose such as `a < 0` therefore glued itself onto the next real
+     * call tag: `nameValueOf` found `name="shell_execute"` inside the glued
+     * body, the residue was reported at the PROSE `<`, and `stripResidue`
+     * deleted everything from that character to the tag — the user's sentence
+     * disappeared and the markup survived.
+     */
+    @Test
+    fun `a bare less-than in prose does not swallow the following call markup`() {
+        val text = "a < 0 and later <invoke name=\"shell_execute\">"
+        assertEquals("a < 0 and later ", ToolCallResiduePolicy.stripResidue(text, TOOLS))
+    }
+
+    @Test
+    fun `a bare less-than in prose keeps the sentence when the residue has a closer`() {
+        val text = "when a < 0 the rule holds.\n" + resique("shell_execute")
+        assertEquals("when a < 0 the rule holds.\n", ToolCallResiduePolicy.stripResidue(text, TOOLS))
+    }
+
+    /**
+     * The fence opens AFTER the prose `<`, so the backtick parity at the prose
+     * position was still even when the glued candidate was judged — and the
+     * jump past the glued span skipped the fence entirely. Both halves are the
+     * same defect: the code-region state must be carried across the abandoned
+     * candidate.
+     */
+    @Test
+    fun `a fenced example after a prose less-than stays untouched`() {
+        val text = "note: a < 0 holds.\n```xml\n" + resique("shell_execute") + "\n```\n"
+        assertTrue(!ToolCallResiduePolicy.hasResidue(text, TOOLS))
+        assertEquals(text, ToolCallResiduePolicy.stripResidue(text, TOOLS))
+    }
+
+    @Test
+    fun `an inline code span between the prose less-than and a real residue keeps the prose`() {
+        val text = "x < 1 while `flag` is set, then <invoke name=\"shell_execute\">"
+        assertEquals(
+            "x < 1 while `flag` is set, then ",
+            ToolCallResiduePolicy.stripResidue(text, TOOLS),
+        )
+    }
+
+    /** A lone `<` with no markup after it is ordinary text, before and after. */
+    @Test
+    fun `a lone less-than with no tag after it is not a residue`() {
+        val text = "a < b and c > d"
+        assertTrue(!ToolCallResiduePolicy.hasResidue(text, TOOLS))
+        assertEquals(text, ToolCallResiduePolicy.stripResidue(text, TOOLS))
+    }
+
+    /** The DSML envelope must still be eaten WHOLE when prose precedes it. */
+    @Test
+    fun `a dsml envelope after a prose less-than is still stripped whole`() {
+        val text = "ratio < 1 means shrink.\n" + dsmlLeak()
+        assertEquals("ratio < 1 means shrink.\n", ToolCallResiduePolicy.stripResidue(text, TOOLS))
+    }
+
     @Test
     fun `a resique at the tail of a big code text is still found and stripped`() {
         // Correctness at scale: the single-pass rewrite must still find a call
