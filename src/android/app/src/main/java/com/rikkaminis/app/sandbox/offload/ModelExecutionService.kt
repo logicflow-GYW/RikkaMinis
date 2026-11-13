@@ -338,6 +338,12 @@ class ModelExecutionService : Service() {
             kotlinx.coroutines.runBlocking {
                 // ── TF-I: identity registration, OUTSIDE the mutex ──
                 ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.REQUEST_THREAD_START, runId = runId)
+                // [lint] NewApi false positive: Application.getProcessName() is
+                // API 28 and this is a minSdk 26 app, but runCatching catches
+                // Throwable, so on API 26-27 the NoSuchMethodError becomes null
+                // and the `?: "modelservice"` fallback takes over. Lint does not
+                // model runCatching as a version guard.
+                @Suppress("NewApi")
                 val processName = runCatching { android.app.Application.getProcessName() }
                     .getOrNull() ?: "modelservice"
                 val procState = ModelExecutionRunDir.readProcIdentity(android.os.Process.myPid())

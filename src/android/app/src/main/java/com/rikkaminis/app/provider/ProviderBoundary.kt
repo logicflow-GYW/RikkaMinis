@@ -57,6 +57,11 @@ object ProviderBoundary {
     var bypassForTests: Boolean = false
 
     /** The current process name, or null when running under a JVM unit test. */
+    // [lint] NewApi false positive: Application.getProcessName() is API 28 on a
+    // minSdk 26 app, but runCatching catches Throwable — on API 26-27 the
+    // NoSuchMethodError is swallowed and this returns null, which is exactly
+    // the contract the KDoc above documents (and what callers already handle).
+    @Suppress("NewApi")
     fun currentProcessName(): String? =
         overrideProcessName ?: runCatching { Application.getProcessName() }.getOrNull()
 

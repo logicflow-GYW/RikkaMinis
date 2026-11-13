@@ -160,6 +160,16 @@ internal class MinisMarkdownTextToolbar(
             // (dv22-A6 A-06: Q+ `clearPrimaryClip()`, API 26–28 the empty-string
             // write). One decision, two callers.
             val snapshot = original
+            // [lint] NewApi false positive, deliberately suppressed rather
+            // than restructured: the guard is real but lives one call away.
+            // `clipboardRestoreAction` is a pure decision function (JVM-tested
+            // in ClipboardRestorePlan.kt) that returns CLEAR_PLATFORM only when
+            // atLeastQ is true, and atLeastQ is `SDK_INT >= Q(29)`. clearPrimaryClip
+            // needs 28, so it is unreachable below 29. Lint cannot follow the
+            // guard through the pure function, so it reports the call as bare.
+            // Rewriting the `when` to inline the version check would duplicate
+            // the decision the pure function exists to own.
+            @Suppress("NewApi")
             runCatching {
                 when (clipboardRestoreAction(
                     hadOriginal = snapshot != null,
