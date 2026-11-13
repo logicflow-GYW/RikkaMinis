@@ -171,4 +171,123 @@ class SelectionOnlyEntryRulesTest {
         assertTrue(result.merged.isCustom)
         assertEquals(999, result.merged.baseModel.contextWindow)
     }
+
+    // ── [field-identity P2-E] a sparse catalog row must not DEGRADE ──────
+    //
+    // The pre-fix `entry.copy(baseModel = fresh)` treated every catalog row as
+    // complete. A relay answering `{id}` only wiped the entry's known
+    // capabilities. These pin the "silence is not an assertion" rule.
+
+    @Test
+    fun `catalog row that reports nothing does not erase known capabilities`() {
+        // The entry already knows: 200K window, reasoning on, sees images.
+        val existing = LLMModel(
+            id = "m1",
+            displayName = "Pretty Name",
+            provider = "TestVendor",
+            contextWindow = 200_000,
+            maxOutputTokens = 8_000,
+            supportsReasoning = true,
+            inputModalities = listOf("text", "image"),
+            outputModalities = listOf("text"),
+        )
+        val e = entry(modelId = "m1", baseModel = existing)
+        // The relay answers `{id}` and nothing else.
+        val sparse = LLMModel(id = "m1", displayName = "m1", provider = "TestVendor")
+
+        val result = reconcileSelectedEntry(e, freshCatalogRow = sparse)
+
+        assertFalse(result.changed)
+        assertEquals(200_000, result.merged.baseModel.contextWindow)
+        assertEquals(8_000, result.merged.baseModel.maxOutputTokens)
+        assertEquals(true, result.merged.baseModel.supportsReasoning)
+        assertEquals(listOf("text", "image"), result.merged.baseModel.inputModalities)
+        assertEquals(listOf("text"), result.merged.baseModel.outputModalities)
+        assertEquals("Pretty Name", result.merged.baseModel.displayName)
+    }
+
+    @Test
+    fun `a single dropped field degrades only that field`() {
+        val existing = LLMModel(
+            id = "m1",
+            displayName = "m1",
+            provider = "TestVendor",
+            contextWindow = 200_000,
+            supportsReasoning = true,
+            inputModalities = listOf("text", "image"),
+        )
+        val e = entry(modelId = "m1", baseModel = existing)
+        // Fresh row moved the window up but forgot the modality list.
+        val fresh = LLMModel(
+            id = "m1",
+            displayName = "m1",
+            provider = "TestVendor",
+            contextWindow = 1_000_000,
+            supportsReasoning = true,
+        )
+
+        val result = reconcileSelectedEntry(e, freshCatalogRow = fresh)
+
+        assertTrue(result.changed)
+        assertEquals(1_000_000, result.merged.baseModel.contextWindow)
+        // The dropped field keeps the value the entry already had:
+        assertEquals(listOf("text", "image"), result.merged.baseModel.inputModalities)
+    }
+
+    @Test
+    fun `an empty modality list is an assertion, not silence`() {
+        // `emptyList()` means "text only" — an endpoint saying that must win
+        // over a stale `[text, image]`, unlike `null` which means "no opinion".
+        val existing = LLMModel(
+            id = "m1",
+            displayName = "m1",
+            provider = "TestVendor",
+            inputModalities = listOf("text", "image"),
+        )
+        val e = entry(modelId = "m1", baseModel = existing)
+        val fresh = LLMModel(
+            id = "m1",
+            displayName = "m1",
+            provider = "TestVendor",
+            inputModalities = emptyList(),
+        )
+
+        val result = reconcileSelectedEntry(e, freshCatalogRow = fresh)
+
+        assertTrue(result.changed)
+        assertEquals(emptyList<String>(), result.merged.baseModel.inputModalities)
+    }
+
+    @Test
+    fun `a blank display name does not overwrite a real one`() {
+        val existing = LLMModel(
+            id = "m1",
+            displayName = "Pretty Name",
+            provider = "TestVendor",
+        )
+        val e = entry(modelId = "m1", baseModel = existing)
+        val fresh = LLMModel(id = "m1", displayName = "", provider = "TestVendor")
+
+        val result = reconcileSelectedEntry(e, freshCatalogRow = fresh)
+
+        assertFalse(result.changed)
+        assertEquals("Pretty Name", result.merged.baseModel.displayName)
+    }
+
+    @Test
+    fun `declaresNoEffortTiers survives a sparse refresh`() {
+        // Nullable Boolean: null means "unknown", not "no".
+        val existing = LLMModel(
+            id = "m1",
+            displayName = "m1",
+            provider = "TestVendor",
+            declaresNoEffortTiers = true,
+        )
+        val e = entry(modelId = "m1", baseModel = existing)
+        val fresh = LLMModel(id = "m1", displayName = "m1", provider = "TestVendor")
+
+        val result = reconcileSelectedEntry(e, freshCatalogRow = fresh)
+
+        assertEquals(true, result.merged.baseModel.declaresNoEffortTiers)
+    }
 }
