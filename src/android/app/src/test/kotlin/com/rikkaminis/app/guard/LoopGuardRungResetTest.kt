@@ -3,6 +3,7 @@ package com.rikkaminis.app.guard
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -50,6 +51,52 @@ class LoopGuardRungResetTest {
         assertNotNull("the 3rd repeat after eviction must remind again", third)
         assertEquals(Signal.Repeat, third!!.first)
         assertEquals(3, third.second)
+    }
+
+    @Test
+    fun aPartialFallReAnnouncesTheRungWhenItClimbsBack() {
+        val guard = LoopGuard()
+        val sig = signature("100 200")
+
+        fun windowCount(): Int =
+            guard.storedSignatures().takeLast(LoopGuard.COUNT_WINDOW).count { it == sig }
+
+        // Climb to rung 6 with fillers in between, so the count falls gradually
+        // instead of dropping to zero.
+        var atSix: Pair<Signal, Int>? = null
+        for (i in 1..6) {
+            val hit = guard.record(sig, ok = true, outcome = Outcome.Effective)
+            if (i == 6) atSix = hit
+            guard.record("filler-$i", ok = true, outcome = Outcome.Effective)
+        }
+        assertEquals("the 6th repeat must remind", 6, atSix?.second)
+
+        // Push the window until the count is back at the FIRST rung. The
+        // signature never leaves the window, so this is the "watermark must
+        // follow the count DOWN" branch (not the eviction branch).
+        var pushed = 0
+        while (windowCount() > Signal.Repeat.ladder.first() && pushed < 40) {
+            guard.record("push-${pushed++}", ok = true, outcome = Outcome.Effective)
+        }
+        assertEquals("the count must have fallen to the first rung", 3, windowCount())
+
+        // Climb back: a monotonic watermark (6) would stay silent until the hard
+        // stop at 12 — the model would be refused with no reminder in between.
+        // The re-announcement must therefore land on rung 6 itself.
+        var reAnnounced: Pair<Signal, Int>? = null
+        var climbed = 0
+        while (reAnnounced == null && climbed < 20) {
+            val hit = guard.record(sig, ok = true, outcome = Outcome.Effective)
+            if (hit != null) reAnnounced = hit
+            climbed++
+        }
+        assertNotNull("a re-climb after a partial fall must remind again", reAnnounced)
+        assertEquals(Signal.Repeat, reAnnounced!!.first)
+        assertEquals(
+            "the reminder must land on rung 6, not only at the hard stop",
+            Signal.Repeat.ladder[1],
+            reAnnounced.second,
+        )
     }
 
     @Test
