@@ -104,6 +104,11 @@ class FileMentionIndex(
         val fresh = now - lastScanAt < cacheTtlMs
         if (sameSession && fresh && _entries.value.isNotEmpty()) return
 
+        if (!sameSession) {
+            // The old session's paths must disappear synchronously when the
+            // menu switches sessions; the replacement scan publishes in stages.
+            _entries.value = emptyList()
+        }
         lastScanSessionId = sessionId
         lastScanAt = now
         val token = UUID.randomUUID()
@@ -191,7 +196,7 @@ class FileMentionIndex(
                 publish(token, collected)
             }
         } finally {
-            _isScanning.value = false
+            if (currentScanToken == token) _isScanning.value = false
         }
     }
 
