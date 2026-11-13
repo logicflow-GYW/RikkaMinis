@@ -111,15 +111,6 @@
     <issue id="InlinedApi" severity="Warning" message="Field requires API level 33 (current min is 26): `android.content.pm.PackageInstaller#PACKAGE_SOURCE_DOWNLOADED_FILE`" category="Correctness" priority="6" summary="Using inlined constants on older versions">
         <location file="src/android/app/src/main/java/com/rikkaminis/app/accessibility/RestrictedSettingsManager.kt" line="170" column="30" />
     </issue>
-    <issue id="NewApi" severity="Error" message="Call requires API level 28 (current min is 26): `android.content.ClipboardManager#clearPrimaryClip`" category="Correctness" priority="6" summary="Calling new methods on older versions">
-        <location file="src/android/app/src/main/java/com/rikkaminis/app/ui/chat/MinisMarkdownTextToolbar.kt" line="171" column="28" />
-    </issue>
-    <issue id="NewApi" severity="Error" message="Call requires API level 28 (current min is 26): `android.app.Application#getProcessName`" category="Correctness" priority="6" summary="Calling new methods on older versions">
-        <location file="src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/ModelExecutionService.kt" line="341" column="73" />
-    </issue>
-    <issue id="NewApi" severity="Error" message="Call requires API level 28 (current min is 26): `android.app.Application#getProcessName`" category="Correctness" priority="6" summary="Calling new methods on older versions">
-        <location file="src/android/app/src/main/java/com/rikkaminis/app/provider/ProviderBoundary.kt" line="61" column="58" />
-    </issue>
     <issue id="OldTargetApi" severity="Warning" message="Not targeting the latest versions of Android; compatibility modes apply. Consider testing and updating this version. Consult the `android.os.Build.VERSION_CODES` javadoc for details." category="Correctness" priority="6" summary="Target SDK attribute is not targeting latest version">
         <location file="src/android/app/build.gradle.kts" line="64" column="9" />
     </issue>
