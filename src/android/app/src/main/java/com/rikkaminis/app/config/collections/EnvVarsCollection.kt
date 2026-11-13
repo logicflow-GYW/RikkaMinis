@@ -138,14 +138,17 @@ class EnvVarsCollection(
                 val s = (v as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("string")
                 val e = repo.entries.value.firstOrNull { it.key == key }
                     ?: throw ConfigError.UnknownPath("envvars.$key")
-                // Update via a value-preserving path: read existing value
-                // back out of encrypted prefs, then write the new group
-                // alongside it. The note rides through untouched and the
-                // repo's [update] keeps the secret in place when the same
-                // key is provided. An empty string clears the group
-                // (update()'s explicit-"" branch).
-                val currentValue = repo.getValue(e.key) ?: ""
-                repo.update(e.id, e.key, currentValue, e.note, s)
+                // [R8-1114 A-F02] Same rule as the note writer: metadata-only.
+                // A null read means prefs holds no value for this key (metadata
+                // without a secret, or a keystore-degraded store), and writing
+                // `""` through update() would replace a real secret with an
+                // empty one. An empty string still clears the GROUP here.
+                val currentValue = repo.getValue(e.key)
+                if (currentValue == null) {
+                    repo.updateNote(e.id, e.note, s)
+                } else {
+                    repo.update(e.id, e.key, currentValue, e.note, s)
+                }
             },
         )
 }
