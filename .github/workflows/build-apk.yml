@@ -519,18 +519,70 @@ jobs:
         with:
           packages: 'platform-tools'
 
-      # Matrix probe. Round 1 (run 43406670614) established that plain
-      # `:app:lintDebug` dies the same way lintVital does — three analyze tasks
-      # aborted with IncompatibleClassChangeError, two of them inside AGP's OWN
-      # bundled detectors (NonNullableMutableLiveDataDetector,
-      # RememberInCompositionDetector) and one in FrequentlyChangingValueDetector.
-      # ICCE on a companion-scope method is the signature of two versions of the
-      # same lint-checks class on the classpath, which in practice means the K2
-      # UAST path in AGP 8.7 + Kotlin 2.1.
+      # ROUND 3. What rounds 1-2 established (runs 43406670614, 43408220558):
       #
-      # So: try the cheapest known lever first, then the version override.
-      # Each attempt wipes the lint intermediates so a crash cannot be
-      # "reused" as a cached success, and each is independently report-only.
+      #  * plain `:app:lintDebug` crashes exactly like lintVital did — three
+      #    analyze tasks abort with IncompatibleClassChangeError. So the
+      #    build.gradle.kts comment "debug-build lint coverage is unaffected"
+      #    is FALSE; nothing has ever run lint here.
+      #  * `disable += "NonNullableMutableLiveData"` does not help: the trace
+      #    shows that detector still executing, so the crash precedes the
+      #    disable list.
+      #  * `-Pandroid.lint.useK2Uast=false` does not help (same ICCE).
+      #  * `-Pandroid.experimental.lint.version=31.9.0` was MY misreading: AGP
+      #    adds 23 to the major, so it resolved lint-gradle:54.9.0 and died on
+      #    "Could not find". The property wants an AGP-style version — 8.9.0
+      #    means lint 31.9.0.
+      #
+      # So round 3 does two things: audit WHICH jars carry the crashing class
+      # (the ICCE signature is a duplicate-class/mixed-version load), and try
+      # the lint override with correct version numbering.
+      - name: Audit which lint jars carry the crashing detector
+        shell: bash
+        run: |
+          cd src/android
+          # Populate the dependency cache without a full compile.
+          ./gradlew :app:dependencies --configuration debugRuntimeClasspath -q \
+            > /tmp/deps-debug.txt 2>&1 || true
+          python3 - <<'PY' | tee /tmp/classpath-audit.txt
+          import glob, hashlib, os, zipfile, io
+          TARGET = "androidx/compose/runtime/lint/RememberInCompositionDetectorKt.class"
+          roots = [os.path.expanduser("~/.gradle/caches/modules-2/files-2.1")]
+          jars = []
+          for root in roots:
+              for pat in ("**/*.aar", "**/*.jar"):
+                  jars.extend(glob.glob(os.path.join(root, pat), recursive=True))
+          print(f"scanning {len(jars)} artifacts in the gradle cache")
+          hits = []
+          for path in jars:
+              try:
+                  if path.endswith(".aar"):
+                      with zipfile.ZipFile(path) as aar:
+                          if "lint.jar" not in aar.namelist():
+                              continue
+                          data = aar.read("lint.jar")
+                      with zipfile.ZipFile(io.BytesIO(data)) as lj:
+                          if TARGET not in lj.namelist():
+                              continue
+                          digest = hashlib.sha256(lj.read(TARGET)).hexdigest()[:16]
+                          hits.append((path, "lint.jar", digest))
+                  else:
+                      with zipfile.ZipFile(path) as j:
+                          if TARGET not in j.namelist():
+                              continue
+                          digest = hashlib.sha256(j.read(TARGET)).hexdigest()[:16]
+                          hits.append((path, "jar", digest))
+              except Exception:
+                  continue
+          print(f"\nartifacts carrying {TARGET}: {len(hits)}")
+          for path, kind, digest in hits:
+              # Trim the sha1 path segment so the line stays readable.
+              parts = path.split(os.sep)
+              label = "/".join(parts[-4:-1]) if len(parts) > 4 else path
+              print(f"  {digest}  {kind:9s} {label}")
+          print(f"\ndistinct byte-copies: {len({h[2] for h in hits})}")
+          PY
+
       - name: Probe lint configurations
         shell: bash
         run: |
@@ -552,19 +604,15 @@ jobs:
               return 0
             fi
             echo "exit=$code REPORT=no" | tee -a /tmp/probe-summary.txt
-            grep -m1 -o "IncompatibleClassChangeError:[A-Za-z]*\|NoSuchMethodError:[A-Za-z]*\|UnsupportedClassVersionError" "/tmp/lint-$name.log" \
-              | tee -a /tmp/probe-summary.txt
+            grep -m1 -oE "IncompatibleClassChangeError:[A-Za-z]*|NoSuchMethodError:[A-Za-z]*|Could not find [^ ]+|UnsupportedClassVersionError" \
+              "/tmp/lint-$name.log" | tee -a /tmp/probe-summary.txt
             return 1
           }
 
-          # Ordered cheapest-first. Property names verified to exist in
-          # gradle-8.7.3.jar (OptionalBooleanOption holds "android.lint.useK2Uast";
-          # AndroidLintTask reads "android.experimental.lint.version"), so a miss
-          # here means the lever did not help, not that the flag was ignored.
-          attempt k2uast-off   -Pandroid.lint.useK2Uast=false && exit 0
-          attempt lint-31.8.0  -Pandroid.experimental.lint.version=31.8.0 && exit 0
-          attempt lint-31.9.0  -Pandroid.experimental.lint.version=31.9.0 && exit 0
-          attempt k2-off-319   -Pandroid.lint.useK2Uast=false -Pandroid.experimental.lint.version=31.9.0 && exit 0
+          # AGP-style version numbers (AGP 8.N.P ↔ lint 31.N.P).
+          attempt lint-8.9.0   -Pandroid.experimental.lint.version=8.9.0 && exit 0
+          attempt lint-8.13.2  -Pandroid.experimental.lint.version=8.13.2 && exit 0
+          attempt k2off-8.13.2 -Pandroid.lint.useK2Uast=false -Pandroid.experimental.lint.version=8.13.2 && exit 0
           exit 0
 
       - name: Summarize findings
@@ -576,7 +624,13 @@ jobs:
           from collections import Counter
 
           print("## Lint probe\n")
+          if os.path.exists("/tmp/classpath-audit.txt"):
+              print("### which jars carry the crashing detector\n")
+              print("```")
+              print(open("/tmp/classpath-audit.txt").read().strip())
+              print("```\n")
           if os.path.exists("/tmp/probe-summary.txt"):
+              print("### attempts\n")
               print("```")
               print(open("/tmp/probe-summary.txt").read().strip())
               print("```\n")
@@ -584,8 +638,7 @@ jobs:
           cands = sorted(glob.glob("/tmp/report-*/*.xml"))
           if not cands:
               print("\n**no configuration produced a lint XML report.** "
-                    "Every attempt crashed before the report stage — read the "
-                    "`lint-<attempt>.log` files in the artifact.")
+                    "Read the `lint-<attempt>.log` files in the artifact.")
               sys.exit(0)
 
           path = cands[0]
@@ -630,6 +683,8 @@ jobs:
           retention-days: 14
           path: |
             /tmp/probe-summary.txt
+            /tmp/classpath-audit.txt
+            /tmp/deps-debug.txt
             /tmp/lint-*.log
             /tmp/report-*/*
 
