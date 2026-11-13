@@ -258,22 +258,33 @@ class FastioSearchTest {
 
     @Test
     fun `the file that fills the budget is the last entry charged`() {
+        // [INCR-1113-A] ORDER-INDEPENDENT FIXTURE. The previous shape put the
+        // budget-filling files AND a sibling subdirectory directly under the
+        // root and assumed the walk reached `a.txt` before `sub`. `Files.walkFileTree`
+        // enumerates a directory in the filesystem's own order (creation order
+        // on tmpfs, HASHED on ext4), so on the CI runner `sub` sometimes came
+        // first: c.txt was scanned (filesScanned=2), then a.txt filled the
+        // budget — `expected:<1> but was:<2>`. Measured on GitHub run 3048
+        // (`FastioSearchTest.kt:275`).
+        //
+        // Now the root holds ONLY a subdirectory and the two budget-filling
+        // files live inside it: whatever order they are enumerated in, the
+        // FIRST of them fills the budget and the second is never opened.
         val root = Files.createTempDirectory("fastio-grep-stop")
-        Files.write(root.resolve("a.txt"), "hit\nhit\nhit\n".toByteArray())
-        Files.write(root.resolve("b.txt"), "hit\nhit\nhit\n".toByteArray())
         val sub = Files.createDirectory(root.resolve("sub"))
-        Files.write(sub.resolve("c.txt"), "nothing\n".toByteArray())
+        Files.write(sub.resolve("a.txt"), "hit\nhit\nhit\n".toByteArray())
+        Files.write(sub.resolve("b.txt"), "hit\nhit\nhit\n".toByteArray())
         val out = GrepOutcome()
 
         grepTree(root, "/ws", Regex("hit"), limit = 2, maxEntries = 1_000, out = out)
 
-        // Whichever file the walk reaches first fills the budget; whatever came
-        // next — a sibling file or a subdirectory — is never entered, so the
-        // only charged entries are the root and that one file.
+        // Charged: the root, the subdirectory, and the one file that filled the
+        // budget. The other file is never opened, and no further entry is
+        // charged — that is the property this test owns.
         assertEquals(2, out.matches.size)
         assertTrue(out.matchesCapped)
         assertEquals(1L, out.filesScanned)
-        assertEquals(2L, out.visited)
+        assertEquals(3L, out.visited)
         assertFalse(out.truncated)
     }
 

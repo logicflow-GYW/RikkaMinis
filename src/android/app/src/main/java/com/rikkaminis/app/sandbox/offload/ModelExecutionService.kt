@@ -6,6 +6,8 @@ import android.os.IBinder
 import android.util.Base64
 import android.util.Log
 import com.rikkaminis.app.data.model.LLMStreamChunk
+import com.rikkaminis.app.provider.readProcessName
+import com.rikkaminis.app.provider.readProcCmdlineName
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -338,15 +340,20 @@ class ModelExecutionService : Service() {
             kotlinx.coroutines.runBlocking {
                 // ── TF-I: identity registration, OUTSIDE the mutex ──
                 ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.REQUEST_THREAD_START, runId = runId)
-                // [lint] NewApi false positive: Application.getProcessName() is
-                // API 28 and this is a minSdk 26 app, but runCatching catches
-                // Throwable, so on API 26-27 the NoSuchMethodError becomes null
-                // and the `?: "modelservice"` fallback takes over. Lint does not
-                // model runCatching as a version guard.
-                @Suppress("NewApi")
-                val processName = runCatching { android.app.Application.getProcessName() }
-                    .getOrNull() ?: "modelservice"
+                // [INCR-1113 F-09] Same resolver the runtime guard uses, so the
+                // two views of "who am I" cannot disagree: API 28+ answers from
+                // `Application.getProcessName()`, API 26–27 falls back to
+                // `/proc/self/cmdline` (which is exactly what the identity probe
+                // below reads). The old code fell back to the bare literal
+                // `"modelservice"` — no package prefix — while `readProcIdentity`
+                // reported `com.rikkaminis.app:modelservice`, and the mismatch
+                // showed up in every "worker died?" attribution log.
                 val procState = ModelExecutionRunDir.readProcIdentity(android.os.Process.myPid())
+                @Suppress("NewApi")
+                val processName = readProcessName(
+                    getProcessName = { android.app.Application.getProcessName() },
+                    readCmdline = { readProcCmdlineName() },
+                ) ?: procState.identity?.processName ?: "modelservice"
                 ModelExecutionRunDir.writeWorkerPid(
                     dir,
                     ModelExecutionRunDir.WorkerProcessRef(

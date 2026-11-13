@@ -1390,38 +1390,22 @@ object ConfigBackup {
                             if (oldEid.isNotEmpty()) entryIdMap[oldEid] = newEid
                         }
                     } else {
-                        val instancesBefore = providerRepo.instances.map { it.id }.toSet()
-                        resolvedLabel = providerRepo.importInstanceJSON(obj.toString())
-                        if (resolvedLabel != null) {
-                            // Identify the instance importInstanceJSON just
-                            // created (the one id that wasn't present before)
-                            // and pair its entries to the source uuids
-                            // positionally — orderedEntryIds mirrors the export
-                            // ordering exactly.
-                            val newId = providerRepo.instances
-                                .map { it.id }
-                                .firstOrNull { it !in instancesBefore }
-                            if (newId != null && srcEntryIds.isNotEmpty()) {
-                                val newEntryIds = orderedEntryIds(providerRepo, newId)
-                                val n = minOf(srcEntryIds.size, newEntryIds.size)
-                                for (k in 0 until n) {
-                                    val oldEid = srcEntryIds[k]
-                                    if (oldEid.isNotEmpty()) entryIdMap[oldEid] = newEntryIds[k]
-                                }
-                                if (srcEntryIds.size != newEntryIds.size) {
-                                    // Non-fatal: model set differs from when the
-                                    // backup was taken (a model was
-                                    // hidden/added since). Groups referencing
-                                    // the unmapped entries will report them.
-                                    Log.w(
-                                        TAG,
-                                        "import: provider \"$resolvedLabel\" entry count " +
-                                            "${srcEntryIds.size}→${newEntryIds.size}; " +
-                                            "some group members may not remap"
-                                    )
-                                }
-                            }
-                        }
+                        // [INCR-1113 F-02] The append path fills the id map
+                        // itself, pairing each restored row with the backup's
+                        // `_entryIds` by its ORIGINAL `models[]` index. The
+                        // positional derivation this replaces (`orderedEntryIds`
+                        // vs `_entryIds`, index by index) was wrong whenever the
+                        // parse dropped a row: a pre-split backup carries hidden
+                        // catalog rows that the selection-only rule filters out,
+                        // so the restored list was shorter than `_entryIds` and
+                        // every pairing after the first dropped row pointed at
+                        // the wrong entry — model group members, agent-loop
+                        // bindings and the compact pin landed on the wrong model
+                        // or dangled.
+                        resolvedLabel = providerRepo.importInstanceJSON(
+                            obj.toString(),
+                            entryIdMapOut = entryIdMap,
+                        )
                     }
                     if (resolvedLabel == null) {
                         skipped.add("provider \"$label\": import rejected")

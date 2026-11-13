@@ -3,6 +3,7 @@ package com.rikkaminis.app.data.repository
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ModelOverrides
+import com.rikkaminis.app.data.model.normalizeModalities
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -235,9 +236,13 @@ class SelectionOnlyEntryRulesTest {
     }
 
     @Test
-    fun `an empty modality list is an assertion, not silence`() {
-        // `emptyList()` means "text only" — an endpoint saying that must win
-        // over a stale `[text, image]`, unlike `null` which means "no opinion".
+    fun `an empty modality list is silence, not an assertion`() {
+        // [INCR-1113 F-01] `emptyList()` means "no opinion", exactly like
+        // `null` — see `mergeCatalogRow`'s KDoc for the two facts that force
+        // it (normalizeModalities folds empty→null; the cross-process hop
+        // decodes a missing key into emptyList). An earlier revision of this
+        // test asserted the opposite, i.e. it pinned a contract the rest of
+        // the app contradicts.
         val existing = LLMModel(
             id = "m1",
             displayName = "m1",
@@ -254,8 +259,13 @@ class SelectionOnlyEntryRulesTest {
 
         val result = reconcileSelectedEntry(e, freshCatalogRow = fresh)
 
-        assertTrue(result.changed)
-        assertEquals(emptyList<String>(), result.merged.baseModel.inputModalities)
+        // The entry keeps what it had — an empty list is not a downgrade order.
+        assertFalse(result.changed)
+        assertEquals(listOf("text", "image"), result.merged.baseModel.inputModalities)
+
+        // ...and the cross-process reading is pinned mechanically: a missing
+        // key decodes to `emptyList()`, which normalizes to `null` = silence.
+        assertEquals(null, emptyList<String>().normalizeModalities())
     }
 
     @Test

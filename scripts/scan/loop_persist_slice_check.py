@@ -20,7 +20,9 @@ Two indices live side by side in `runAgentLoop` and must not be collapsed:
 Rules enforced here:
   R1 every `buildTurnParts(loopState.allToolBlocks, X, toolInputMap)` call site
      passes `loopState.unpersistedBlockStart` (never `turnStartBlockIndex`);
-  R2 rollback keeps the per-turn index (exactly two sites);
+  R2 rollback keeps the per-turn index, and EVERY recovery role has one
+     (context-overshoot / transient-retry / provider-fallback) — named, not
+     counted, so a deleted path is reported by name and a new path is not red;
   R3 per-turn visibility keeps the per-turn index;
   R4 the no-tool terminal advances the unpersisted index inside its success
      guard (`if (persistedRowId != null) {`), and that advance is REACHABLE;
@@ -106,6 +108,26 @@ ACCESSOR_HEAD = re.compile(r"\s*(?:(?:private|internal|public|protected)\s+)?(ge
 
 SLICE_FUN = "buildTurnParts"
 ROLLBACK_FUN = "rollbackTurnBlocksTo"
+
+# [incr1113 F-05] The recovery paths that MUST roll back a failed attempt's
+# partial blocks. Each entry is (role name, marker substrings) — a rollback site
+# belongs to a role when its enclosing branch's condition or body carries any of
+# the markers. Markers are chosen from the identifiers that DEFINE the path, not
+# from prose: a branch keeps them when the code is re-spelled or moved, and
+# loses them when the path is deleted.
+#
+# Deliberately not line numbers and not a count: the count rule could not tell
+# "one path disappeared" from "another path was added" (3 sites, floor 2 — delete
+# any one and the gate stayed green), and pinning the exact number would make
+# the next legitimate recovery path a red gate for the wrong reason.
+ROLLBACK_ROLES = [
+    # the trim-and-retry after a provider "context too large" 400
+    ("context-overshoot", ("overshootRetry",)),
+    # same-provider retry after a transient / 5xx / stream failure
+    ("transient-retry", ("retryDelays",)),
+    # switching to the next member of the model group
+    ("provider-fallback", ("FallbackSelected",)),
+]
 VISIBILITY_RE = re.compile(r"\bturnVisibleBlocks\s*=")
 VISIBILITY_SHAPE = re.compile(
     r"^loopState\.allToolBlocks\.drop\((?P<arg>.+)\)$")
@@ -307,6 +329,34 @@ def statement_reachable(code: str, pos: int, domains=None) -> bool:
 # ── the rules ─────────────────────────────────────────────────────────────
 
 
+def rollback_role(code: str, pos: int):
+    """The recovery role a rollback site sits on, or None.
+
+    Walks the enclosing `if` blocks innermost-first and returns the first role
+    whose markers appear in that branch's CONDITION or BODY. Body markers are
+    what make the classification robust to re-spelling: `overshootRetry` is the
+    latch the branch must consult, `retryDelays` is the budget the transient
+    branch must read, `FallbackSelected` is the T7 event the fallback branch
+    must reduce. Delete the path and its marker goes with it.
+
+    Comment/string content is already blanked by `code_view`, so a marker
+    mentioned only in prose cannot classify a site.
+    """
+    candidates = []
+    for cond, t_start, t_end, e_start, e_end in if_blocks(code):
+        if t_start <= pos < t_end:
+            candidates.append((t_end - t_start, cond, code[t_start:t_end]))
+        elif e_start is not None and e_start <= pos < e_end:
+            candidates.append((e_end - e_start, cond, code[e_start:e_end]))
+    candidates.sort(key=lambda c: c[0])
+    for _span, cond, body in candidates:
+        text = cond + "\n" + body
+        for role, markers in ROLLBACK_ROLES:
+            if any(m in text for m in markers):
+                return role
+    return None
+
+
 def check_source(engine: str, state: str, label: str):
     """`engine` / `state` are RAW sources; masking happens here (fail-closed)."""
     try:
@@ -338,21 +388,33 @@ def check_source(engine: str, state: str, label: str):
                        "continuation branch already streamed (they never reach the DB); it must be '%s'"
                        % (label, line, args[1], UNPERSISTED))
 
-    # ── R2: rollback keeps the per-turn index ─────────────────────────────
+    # ── R2: rollback keeps the per-turn index, one site per RECOVERY ROLE ──
     rollbacks = call_sites(code, ROLLBACK_FUN)
-    # [review1112-p1-5] The count is a FLOOR, not an equality. Each rollback
-    # site is a distinct failure path that must discard only the failed
-    # attempt's blocks (transient retry, provider fallback, and — added
-    # 2026-11-12 — the context-overshoot trim-and-retry). Pinning an exact
-    # number made every new recovery path a red gate for the wrong reason,
-    # while the property that actually matters (the index argument) is checked
-    # per site immediately below. Two is the historical minimum; a path that
-    # silently disappears still trips this.
-    if len(rollbacks) < 2:
-        bad.append("%s:1: expected at least 2 rollbackTurnBlocksTo(loopState.allToolBlocks, …) "
-                   "sites (transient retry + fallback), found %d" % (label, len(rollbacks)))
+    # [incr1113 F-05] Role-based, not count-based.
+    #
+    # The previous rule was `len(rollbacks) < 2` with a comment claiming "a path
+    # that silently disappears still trips this". It did not: the tree had THREE
+    # sites (context-overshoot, transient retry, provider fallback) and the floor
+    # was two, so deleting any single one stayed green — the comment was a false
+    # claim about a check that could not make it. Raising the floor to 3 would
+    # replace a false claim with a fragile exact count (the next legitimate
+    # recovery path would go red for the wrong reason, and a deletion plus an
+    # addition would still cancel out).
+    #
+    # So each site is assigned the RECOVERY ROLE it sits on, by the markers its
+    # enclosing branch carries (condition or body). Every role must be covered;
+    # a site on no recognisable role fails closed. A missing path is then
+    # reported as "missing role: <name>" instead of as a count mismatch.
+    roles_seen = {}
     for pos, args in rollbacks:
         line = line_of(engine, pos)
+        role = rollback_role(code, pos)
+        if role is None:
+            bad.append("%s:%d: this rollbackTurnBlocksTo(…) sits on no recognisable recovery path — "
+                       "each site must be inside one of %s (fail-closed)"
+                       % (label, line, ", ".join(r for r, _ in ROLLBACK_ROLES)))
+        else:
+            roles_seen.setdefault(role, []).append(line)
         if len(args) < 2:
             bad.append("%s:%d: rollbackTurnBlocksTo(…) call has %d argument(s) — cannot audit "
                        "(fail-closed)" % (label, line, len(args)))
@@ -361,6 +423,12 @@ def check_source(engine: str, state: str, label: str):
             bad.append("%s:%d: rollback uses '%s' — rollback must remove only the failed attempt's "
                        "blocks (%s), never an earlier turn's unpersisted prefix"
                        % (label, line, args[1], PER_TURN))
+    for role, markers in ROLLBACK_ROLES:
+        if role not in roles_seen:
+            bad.append("%s:1: missing rollback role '%s' — no rollbackTurnBlocksTo(…) site is on that "
+                       "path (looked for %s in the enclosing branch); the failed attempt's partial "
+                       "blocks would survive into the retried turn"
+                       % (label, role, " / ".join(repr(m) for m in markers)))
 
     # ── R3: per-turn visibility keeps the per-turn index ──────────────────
     vis = list(VISIBILITY_RE.finditer(code))
@@ -804,8 +872,16 @@ GOOD_ENGINE = '''
                     loopState.allToolBlocks.clear()
                     loopState.unpersistedBlockStart = 0
                 val toolResultDbId = host.persistToolResultMessage(resultParts, transcriptRedactions)
-                rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)
-                rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)
+                if (overshootRetry.shouldShrinkAndRetry(true, est, window, n)) {
+                    rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)
+                }
+                if (isTransient && retryAttempt < retryDelays.size) {
+                    rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)
+                }
+                if (next != null) {
+                    traceObserver.t7Reduce(AgentRunEvent.FallbackSelected(fallbackMemberIndex = 0))
+                    rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)
+                }
                 val turnVisibleBlocks = loopState.allToolBlocks.drop(turnStartBlockIndex)
 '''
 
@@ -840,8 +916,7 @@ BAD_NO_ADVANCE = GOOD_ENGINE.replace(
 )
 
 BAD_ROLLBACK_SWITCHED = GOOD_ENGINE.replace(
-    "rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)\n                rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)",
-    "rollbackTurnBlocksTo(loopState.allToolBlocks, loopState.unpersistedBlockStart)\n"
+    "rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)",
     "rollbackTurnBlocksTo(loopState.allToolBlocks, loopState.unpersistedBlockStart)",
 )
 
@@ -1025,6 +1100,30 @@ BAD_PER_TURN_STALE = GOOD_ENGINE.replace(
     "val turnStartBlockIndex = loopState.unpersistedBlockStart",
 )
 
+# [incr1113 F-05] The two witnesses the count rule could not produce.
+#
+# (a) DELETE one path, leave the other two: with three sites and a floor of two
+#     this used to stay GREEN. The role rule reports the missing role by name.
+# (b) COMMENT a site out: the text is still in the file, so any rule that
+#     matches raw source (the Kotlin unit test did, and this gate's
+#     `call_sites` would if it were fed unmasked source) counts it as present.
+#     Masking must make the site disappear.
+BAD_ROLLBACK_ROLE_DELETED = GOOD_ENGINE.replace(
+    "                if (overshootRetry.shouldShrinkAndRetry(true, est, window, n)) {\n"
+    "                    rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)\n"
+    "                }\n",
+    "",
+)
+
+BAD_ROLLBACK_COMMENTED = GOOD_ENGINE.replace(
+    "                if (overshootRetry.shouldShrinkAndRetry(true, est, window, n)) {\n"
+    "                    rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)\n"
+    "                }\n",
+    "                if (overshootRetry.shouldShrinkAndRetry(true, est, window, n)) {\n"
+    "                    // rollbackTurnBlocksTo(loopState.allToolBlocks, turnStartBlockIndex)\n"
+    "                }\n",
+)
+
 VIOLATING = [
     # (fixture name, engine, state, expected message fragment)
     ("per-turn-slice", BAD_PER_TURN_SLICE, GOOD_STATE, "persistence slice starts at 'turnStartBlockIndex'"),    ("missing-advance", BAD_NO_ADVANCE, GOOD_STATE, "does not advance the unpersisted index"),
@@ -1059,6 +1158,10 @@ VIOLATING = [
      "the per-turn baseline is initialised to '0'"),
     ("per-turn-baseline-stale", BAD_PER_TURN_STALE, GOOD_STATE,
      "the per-turn baseline is initialised to 'loopState.unpersistedBlockStart'"),
+    ("rollback-role-deleted", BAD_ROLLBACK_ROLE_DELETED, GOOD_STATE,
+     "missing rollback role 'context-overshoot'"),
+    ("rollback-commented-out", BAD_ROLLBACK_COMMENTED, GOOD_STATE,
+     "missing rollback role 'context-overshoot'"),
 ]
 
 CLEAN = [
