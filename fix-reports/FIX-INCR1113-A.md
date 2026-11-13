@@ -195,8 +195,30 @@
 
 ## 4 CI
 
-- run **3048** / id `43442347650`，`head_sha = eb9b5ba21a7c…`（与本地 HEAD 逐字符一致）
-- 结论见 §6 补记。
+**run 3051 / id `43445114987`，`head_sha = 2af30bc0fddc574440a69215c3c2fc5b00480913`**
+与本地 HEAD **逐字符一致**。五 job 全绿：`scan-gate` / `lint` / `build-apk` / `unit-tests` / `publish`。
+
+**证据逐条核实（不只看 `conclusion == success`）**
+
+| 证据 | 日志原文 |
+|---|---|
+| 全链门数 | `║  Summary: 115 passed, 0 failed` |
+| 本门在链上跑过 | `━━━ [115/115] gateway_context_metadata_check ━━━` → `OK (6 arms, 0 violations)` |
+| 夹具**真跑**（本批改了 `scripts/scan/`） | `##[notice]scanners moved in this push … — running the fixture self-test` → `scripts/scan/gateway_context_metadata_check.py` |
+| 夹具汇总 | `✅ ALL 356 CASES PASS` |
+| 本门自检在夹具集里 | `✅ gateway_context_metadata_check selftest has teeth (GATEWAY_CONTEXT_METADATA_SELFTEST=PASS)` + `✅ … real tree green` |
+| 单测 | `BUILD SUCCESSFUL in 5m 28s` |
+| F-01 | `SelectionOnlyEntryRulesTest > an empty modality list is silence, not an assertion PASSED` |
+| F-02 | `ImportEntryIdPairingTest > …` 9 例全 PASSED（含 `the positional pairing this replaces would have been wrong`） |
+| F-04 | `ModelMetadataPrecedenceTest > a multi-level vendor prefix is peeled down to the bare id PASSED` |
+| F-06 | `OpenAIModelEndpointMetadataTest > a declared vision flag adds image when the endpoint publishes no modality list PASSED` |
+| F-09 | `ProviderBoundaryTest > getProcessName throwing falls back to the cmdline name PASSED` |
+
+**第一次 run 3048（`eb9b5ba`）的失败已归因并修掉**（见 §7 第 3 条）：
+`unit-tests` 红在 `FastioSearchTest > the file that fills the budget is the last entry charged`，
+`expected:<1> but was:<2>`，8970 例中唯一一条。与本支改动无关（那两个文件本支 0 触碰，
+`git diff 4402b69 --name-only | grep fastio` 为空），根因是测试夹具依赖 `Files.walkFileTree`
+的目录项枚举顺序。
 
 ---
 
@@ -208,6 +230,7 @@
 | `supportsTools` 解析后未消费 | **显式豁免**（门内 `CONSUMPTION_EXEMPT`） | `LLMModel` 没有 tools 能力字段；加字段是四处同步 + 迁移，超出本支半径 |
 | `orderedEntryIds` 现在只剩导出侧调用 | 保留 | `SelectionOnlyContractTest` 断言它存在且不 filter（测试锚点，删会红） |
 | `ModelExecutionService` 的 `"modelservice"` 字面量 | 保留为第三级兜底 | 前两级（getProcessName / /proc）都拿不到才用；此时 `readProcIdentity` 也是 UNKNOWN，没有更好的答案 |
+| `FastioSearchTest` 的枚举顺序依赖 | **本支顺带修掉** | 它挡住停止节点（CI 唯一红点），且根因是测试自身的顺序依赖，修法只改夹具结构。已在 backlog 记规则（见 §7 第 3 条） |
 
 ---
 
@@ -229,10 +252,19 @@ git show 4402b69:scripts/scan/gateway_context_metadata_check.py > /tmp/old_gate.
 
 ---
 
-## 7 本轮踩到的两个坑（可复用）
+## 7 本轮踩到的三个坑（可复用）
 
 1. **改门的夹具前先想「夹具自己合不合规」**。基线夹具里 `val knownReasoning = false` 正是
    A6 新判据要抓的形态；不先修夹具，`--selftest` 会在「干净夹具应通过」这一步就红。
 2. **`_selftest()` 只判 `rc != 0` 是假绿**：A3 的「单剥」mutation 一度是**被 A2 的另一条臂**抓到的
    （rc=1 但红的是 A2），旧自检照样打印 `✅`。加 `expect_arm` 后立刻暴露。判据：
    **变异负控必须校验「是哪条臂红的」，不能只看退出码。**
+3. **测试夹具依赖目录项枚举顺序 = 跨机器 flake**。`FastioSearchTest` 那条把两个填充预算的文件
+   和一个子目录平铺在 root 下，并假设 walk 先到 `a.txt` 再到 `sub`。`Files.walkFileTree` 按
+   文件系统自身顺序枚举目录（tmpfs=创建顺序，ext4=哈希顺序），CI runner 上 `sub` 有时排前面
+   → `c.txt` 被扫（`filesScanned=2`）→ `expected:<1> but was:<2>`。
+   本机 200 次实验 `sub-first 0/200`（tmpfs 保序），CI 上是概率事件，所以**本地永远复现不出来**。
+   **修法不是放宽断言，是让夹具顺序无关**：root 下只放一个子目录，两个填充文件放子目录里 ——
+   无论谁先被枚举，第一个都会填满预算、第二个永不打开。改后跑两种创建顺序均通过，
+   且仍能抓「walk 不停」的真实回归（变异 → `expected:<3> but was:<4>`）。
+   判据：**断言里出现「whichever comes first」这类措辞，就是在赌文件系统顺序**，必须改成结构性无关。
