@@ -382,24 +382,21 @@ internal class ChatAgentTraceObserver(
                 reason = reason,
             )
         )
-        val recorded = if (finalizeTransition is AgentRunTransition.Rejected) {
-            downgradedTerminal(terminal)
-        } else {
-            terminal
-        }
-        val recordedReason = if (recorded == terminal) {
-            reason
-        } else {
+        val refusal = finalizeTransition as? AgentRunTransition.Rejected
+        val recorded = if (refusal != null) downgradedTerminal(terminal) else terminal
+        val recordedReason = if (refusal != null) {
             AgentTerminalReason.EXECUTION_FAILED
-        }
-        val recordedError = if (recorded == terminal) {
-            error
         } else {
+            reason
+        }
+        val recordedError = if (refusal != null) {
             listOfNotNull(
                 error,
                 "trace terminal downgraded from ${t7TerminalSchema(terminal)}: " +
-                    (finalizeTransition as AgentRunTransition.Rejected).rejection.message,
+                    refusal.rejection.message,
             ).joinToString(" | ")
+        } else {
+            error
         }
         runCatching {
             // T7-B: session slot lease 释放 —— 任何终态路径都在这里 release，

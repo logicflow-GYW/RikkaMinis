@@ -8,6 +8,7 @@ import com.rikkaminis.app.agent.runtime.AgentTerminalReason
 import com.rikkaminis.app.agent.runtime.ProviderAttemptOutcome
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -172,5 +173,49 @@ class ChatAgentTraceObserverTerminalTest {
         assertEquals(AgentTerminal.CANCELLED, ChatAgentTraceObserver.downgradedTerminal(AgentTerminal.CANCELLED))
         assertEquals(AgentTerminal.INTERRUPTED, ChatAgentTraceObserver.downgradedTerminal(AgentTerminal.INTERRUPTED))
         assertEquals(AgentTerminal.FAILED, ChatAgentTraceObserver.downgradedTerminal(AgentTerminal.FAILED))
+    }
+
+    @Test
+    fun `the downgrade never leaves the trace-only layer`() {
+        // The boundary the task book draws: this fix may not change the agent
+        // control flow. Two mechanical checks on the production source:
+        //  (1) the write path is the ONLY consumer of `recorded`;
+        //  (2) no `terminal =` assignment exists (the parameter is not shadowed
+        //      or reassigned), so the caller's verdict is untouched.
+        val src = readRepoFile(
+            "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatAgentTraceObserver.kt",
+        )
+        val body = src.substring(
+            src.indexOf("internal fun t7EndRun("),
+            src.indexOf("internal fun newTraceFile("),
+        )
+        assertEquals(
+            "recorded must feed exactly the two trace fields",
+            2,
+            Regex("t7TerminalSchema\\(recorded\\)|t7TerminalReasonSchema\\(recordedReason\\)")
+                .findAll(body).count(),
+        )
+        assertFalse(
+            "the inbound terminal must never be reassigned",
+            // `(?!\\s*terminal\\b)` — the leading \\s* matters: without it the
+            // engine backtracks `\\s*` to zero and the lookahead sees the space,
+            // so `terminal = terminal,` (a NAMED ARGUMENT, not an assignment)
+            // was reported as a reassignment. Found by running the arm.
+            Regex("""\bterminal\s*=\s*(?!\s*terminal\b)""").containsMatchIn(body),
+        )
+        assertTrue(
+            "the caller's terminal still drives the lease release",
+            body.contains("releasedBy = when (terminal)"),
+        )
+    }
+
+    private fun readRepoFile(relative: String): String {
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
+            val f = java.io.File(dir, relative)
+            if (f.isFile) return f.readText()
+            dir = dir.parentFile
+        }
+        throw java.io.FileNotFoundException("$relative not found from ${System.getProperty("user.dir")}")
     }
 }
