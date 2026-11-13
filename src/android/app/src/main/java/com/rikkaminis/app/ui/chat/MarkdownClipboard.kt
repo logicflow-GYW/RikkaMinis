@@ -235,13 +235,22 @@ object MarkdownClipboard {
 
     /** Strip inline markdown markers, return readable text. */
     private fun stripInline(s: String): String {
-        var t = s
+        // [r8-C-F05] Lift code spans out FIRST, exactly like [inlineToHtml].
+        // Removing only the backticks left the code's CONTENT in place to be
+        // eaten by the emphasis / link regexes: `__init__` → `init`,
+        // `fn[0](x)` → `fn`, `a*b*c` → `a b c`, `snake_case` → `snakecase`.
+        // The KDoc above [markdownToPlainText] promises inline code is
+        // "unwrapped (content preserved verbatim)", so the code is parked in a
+        // placeholder and restored byte-for-byte after every other rule ran.
+        val codes = mutableListOf<String>()
+        var t = INLINE_CODE.replace(s) { m ->
+            codes.add(m.groupValues[1])
+            "${CODE_PLACEHOLDER}${codes.size - 1}${CODE_PLACEHOLDER}"
+        }
         // Images: ![alt](url) → alt
         t = IMAGE_PLAIN.replace(t, "$1")
         // Links: [text](url) → text
         t = LINK.replace(t, "$1")
-        // Inline code: `code` → code
-        t = INLINE_CODE.replace(t, "$1")
         // Bold/italic/strike — order matters: longest delimiter first.
         t = BOLD_ITALIC_STAR.replace(t, "$1")
         t = BOLD_ITALIC_UNDERSCORE.replace(t, "$1")
@@ -250,6 +259,14 @@ object MarkdownClipboard {
         t = ITALIC_STAR.replace(t, "$1")
         t = ITALIC_UNDERSCORE.replace(t, "$1")
         t = STRIKETHROUGH.replace(t, "$1")
+        // Restore code spans verbatim. [audit-0917] getOrNull, not codes[i]:
+        // text that happens to contain the literal placeholder must not throw
+        // or substitute the wrong span — out-of-range matches stay as-is.
+        t = CODE_SPAN.replace(t) { m ->
+            val idx = m.groupValues[1].toIntOrNull()
+            val code = idx?.let { codes.getOrNull(it) }
+            if (code == null) m.value else code
+        }
         return t
     }
 
