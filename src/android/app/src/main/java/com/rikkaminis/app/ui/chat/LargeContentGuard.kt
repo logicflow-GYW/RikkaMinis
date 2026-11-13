@@ -273,12 +273,26 @@ internal fun LargeContentGuard(
         // protecting against). The actual off-main markdown parse cost is logged
         // separately by MarkdownParseCaches ([Perf][ColdParse] / [JankDiag] slow
         // markdown parse). Fires once via the wasDegraded latch.
+        // [incr1113 F-08] The latch is cleared INSIDE the effect, never in the
+        // composition body.
+        //
+        // Writing `wasDegraded.value = false` during composition invalidates
+        // this scope immediately, so the very next recomposition reads `false`,
+        // the `if` is no longer taken, and the `LaunchedEffect` declared by the
+        // previous pass is disposed before it ever runs its body — the log could
+        // simply never appear, and no test would notice (it is a diagnostic).
+        // It also deferred the log behind `renderer()` below, which is the
+        // opposite of what a swap-cost measurement wants.
+        //
+        // Reading the latch in the condition and writing it in the effect keeps
+        // composition read-only. The effect is keyed on the same
+        // (stableKey, content.length) pair the old shape used, and a key change
+        // disposes the old effect, so the "once per key" property is unchanged;
+        // the `if` guard only means an effect is not registered at all for a
+        // block that never degraded.
         if (!isStreaming && wasDegraded.value) {
-            wasDegraded.value = false
-            // LaunchedEffect, not `remember(key) { ...; Unit }` — see the
-            // stream-degrade log above for why. Keyed identically, so it still
-            // fires once per (stableKey, content.length).
             LaunchedEffect(stableKey, content.length) {
+                wasDegraded.value = false
                 val s = com.rikkaminis.app.diagnostics.ContentDiag.summarize(content)
                 AppLogger.info(
                     "Perf",

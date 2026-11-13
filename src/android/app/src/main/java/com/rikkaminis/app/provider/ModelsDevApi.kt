@@ -198,7 +198,9 @@ object ModelsDevApi {
      * provider entry.
      *
      * The exact id is tried first. If it misses, the id is retried with its
-     * leading `provider/` segment removed.
+     * leading `vendor/` segment(s) removed — [registryLookupId] peels EVERY
+     * leading segment, because a relay in front of a gateway can stack them
+     * (`openrouter/anthropic/claude-sonnet-4`).
      *
      * Why: a gateway that multiplexes several vendors behind one endpoint
      * publishes ids in the `vendor/model` form (the local AI-Gateway does

@@ -35,20 +35,35 @@ import com.rikkaminis.app.data.model.LLMModel
  * `codebuddy-cn/glm-5.3-flash` — and models.dev has no row for such an id,
  * while the bare part (`glm-5.3-flash`) IS in the registry.
  *
- * Only the FIRST segment is removed, and only when the remainder is
- * non-empty: `deepseek/deepseek-v4.1-flash` → `deepseek-v4.1-flash`, but a
- * leading or trailing slash yields the id unchanged (no usable fallback).
+ * [INCR-1113 F-04] EVERY leading segment is stripped, not just the first: a
+ * relay in front of a gateway can double the prefix
+ * (`openrouter/anthropic/claude-sonnet-4`), and one strip per lookup left the
+ * row one segment short of the registry key. Segments are peeled until only
+ * the last one remains, so the answer is the model's own id shape — which is
+ * exactly what models.dev keys on.
  *
- * A models.dev id can itself contain a slash (`moonshotai/kimi-k3`), so the
- * remainder is kept WHOLE rather than split again — a second split would
- * turn `moonshotai/kimi-k3` into `kimi-k3` and look it up under the wrong
- * key.
+ * Boundaries that must not move: a leading slash (`/leading`), a trailing
+ * slash (`trailing/`) and an empty id are returned UNCHANGED (there is no
+ * usable bare part to fall back to), and an id with no slash at all is
+ * returned unchanged.
+ *
+ * The step cap is a defensive bound, not a semantic rule: every iteration
+ * shortens the string by at least one character, so a non-pathological id
+ * needs far fewer than [MAX_SEGMENTS] steps.
  */
 internal fun registryLookupId(modelId: String): String {
-    val slash = modelId.indexOf('/')
-    if (slash <= 0 || slash == modelId.length - 1) return modelId
-    return modelId.substring(slash + 1)
+    var id = modelId
+    var steps = 0
+    while (steps++ < MAX_REGISTRY_ID_SEGMENTS) {
+        val slash = id.indexOf('/')
+        if (slash <= 0 || slash == id.length - 1) return id
+        id = id.substring(slash + 1)
+    }
+    return id
 }
+
+/** Defensive cap for [registryLookupId]'s peel loop (see its KDoc). */
+private const val MAX_REGISTRY_ID_SEGMENTS = 16
 
 /**
  * Merge a models.dev registry row onto a model row, with the ENDPOINT's own

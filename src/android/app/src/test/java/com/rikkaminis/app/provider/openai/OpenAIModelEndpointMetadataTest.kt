@@ -220,4 +220,68 @@ class OpenAIModelEndpointMetadataTest {
         assertEquals("Hy4", meta.displayName)
         assertEquals(false, meta.supportsReasoning)
     }
+
+    // ── [INCR-1113 F-06] the capability flags must reach the modality list ─
+
+    @Test
+    fun `a declared vision flag adds image when the endpoint publishes no modality list`() {
+        // The common gateway shape: `supports_vision: true` with no
+        // `architecture.input_modalities`. Reading the flag and dropping it
+        // left the model text-only in the app.
+        assertEquals(
+            listOf("text", "image"),
+            mergeDeclaredModalities(declared = null, declaresVision = true, declaresAudio = null),
+        )
+    }
+
+    @Test
+    fun `a declared audio flag adds audio to an existing list`() {
+        assertEquals(
+            listOf("text", "audio"),
+            mergeDeclaredModalities(
+                declared = listOf("text"),
+                declaresVision = null,
+                declaresAudio = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `an unreported or false flag changes nothing`() {
+        // A null flag is silence. A false flag is NOT a reliable denial: the
+        // local gateway writes the boolean unconditionally (all 15 rows came
+        // back false on 2026-11-12), so treating it as authoritative would
+        // strip vision from models that have it.
+        assertNull(mergeDeclaredModalities(null, declaresVision = null, declaresAudio = null))
+        assertEquals(
+            listOf("text"),
+            mergeDeclaredModalities(listOf("text"), declaresVision = false, declaresAudio = false),
+        )
+        assertEquals(
+            listOf("text"),
+            mergeDeclaredModalities(listOf("text"), declaresVision = null, declaresAudio = null),
+        )
+    }
+
+    @Test
+    fun `an already declared modality is not duplicated`() {
+        assertEquals(
+            listOf("text", "image"),
+            mergeDeclaredModalities(
+                declared = listOf("text", "image"),
+                declaresVision = true,
+                declaresAudio = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `both flags on a silent endpoint start from text`() {
+        // The result must never be a capabilities-only list: text is what
+        // every chat model accepts.
+        assertEquals(
+            listOf("text", "image", "audio"),
+            mergeDeclaredModalities(null, declaresVision = true, declaresAudio = true),
+        )
+    }
 }

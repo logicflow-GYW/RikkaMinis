@@ -109,6 +109,81 @@ class ProviderBoundaryTest {
             ProviderBoundary.overrideProcessName = saved
         }
     }
+
+    // ── [INCR-1113 F-09] process-name resolution on API 26–27 ─────────────
+
+    @Test
+    fun `getProcessName throwing falls back to the cmdline name`() {
+        // API 26–27: the method is in the bytecode but not in the platform, so
+        // it throws NoSuchMethodError. The old code folded that into null and
+        // null means "pass through" — the guard did nothing on the oldest
+        // supported devices.
+        val name = readProcessName(
+            getProcessName = { throw NoSuchMethodError("Application.getProcessName") },
+            readCmdline = { "com.rikkaminis.app:modelservice\u0000" },
+        )
+        assertEquals("com.rikkaminis.app:modelservice", name)
+    }
+
+    @Test
+    fun `the cmdline fallback keeps the package prefix and strips the NUL tail`() {
+        // The whole point: the answer must agree with what the worker's own
+        // identity probe reads, not with a bare "modelservice" literal.
+        val name = readProcCmdlineName(
+            readFile = { "com.rikkaminis.app:modelservice\u0000--arg\u0000" },
+        )
+        assertEquals("com.rikkaminis.app:modelservice", name)
+    }
+
+    @Test
+    fun `a direct answer wins and no cmdline read happens`() {
+        var cmdlineReads = 0
+        val name = readProcessName(
+            getProcessName = { "com.rikkaminis.app" },
+            readCmdline = { cmdlineReads++; "com.rikkaminis.app:modelservice" },
+        )
+        assertEquals("com.rikkaminis.app", name)
+        assertEquals(0, cmdlineReads)
+    }
+
+    @Test
+    fun `both sources failing yields null, which passes through`() {
+        val name = readProcessName(
+            getProcessName = { throw NoSuchMethodError("Application.getProcessName") },
+            readCmdline = { throw java.io.IOException("/proc unreadable") },
+        )
+        assertNull(name)
+        // null is the "no runtime context" answer, NOT a refusal — the static
+        // guard owns that path.
+        assertNull(ProviderBoundary.enforce(name))
+    }
+
+    @Test
+    fun `a null return from the stub does NOT fall back to proc`() {
+        // unitTests.isReturnDefaultValues = true makes the Android stub RETURN
+        // null rather than throw. Falling back there would answer "the Gradle
+        // test worker" and refuse every provider unit test that calls
+        // sendMessage.
+        var cmdlineReads = 0
+        val name = readProcessName(
+            getProcessName = { null },
+            readCmdline = { cmdlineReads++; "GradleWorkerMain" },
+        )
+        assertNull(name)
+        assertEquals(0, cmdlineReads)
+    }
+
+    @Test
+    fun `a blank cmdline is treated as no answer`() {
+        assertNull(readProcCmdlineName(readFile = { "\u0000" }))
+        assertNull(readProcCmdlineName(readFile = { null }))
+        assertNull(
+            readProcessName(
+                getProcessName = { throw NoSuchMethodError("x") },
+                readCmdline = { "   " },
+            ),
+        )
+    }
 }
 
 /** Minimal provider whose network entry points are the default interface ones. */

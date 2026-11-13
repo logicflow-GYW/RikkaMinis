@@ -363,6 +363,12 @@ fun String.normalizeModalityName(): String =
 
 fun List<String>?.normalizeModalities(): List<String>? =
     this?.map { it.normalizeModalityName() }?.distinct()?.takeIf { it.isNotEmpty() }
+// [INCR-1113 F-01] `empty == no opinion` is the ONE reading callers may take:
+// the fold above turns an empty list into `null`, and the cross-process hop
+// (`ModelExecutionService.jsonStrList`) decodes a MISSING key into
+// `emptyList()`. Callers must never treat `emptyList()` as an affirmative
+// "text only" declaration — the only affirmative form is a NON-empty list
+// (e.g. `listOf("text")`).
 
 /**
  * [model-defaults-1112] Why an image part ends up as an image or as a text

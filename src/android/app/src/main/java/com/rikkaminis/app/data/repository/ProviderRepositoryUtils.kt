@@ -295,3 +295,50 @@ internal fun decideEntryRename(
     }
     return EntryRenameDecision(allowed = true, oldKey = existingUuid, newKey = newKey)
 }
+
+// --- [INCR-1113 F-02] Backup `_entryIds` → restored entry-id pairing. ---
+// Extracted from ProviderRepository so the pairing rule is JVM-testable
+// without an Android runtime (the repository class itself is not).
+
+/**
+ * [INCR-1113 F-02] The backup layer's `_entryIds` annotation, in `models[]`
+ * order. Empty when the payload carries none (a single-provider share, or a
+ * backup taken before the annotation existed) — the caller then maps nothing,
+ * exactly as before.
+ */
+internal fun readSrcEntryIds(dict: JSONObject): List<String> =
+    dict.optJSONArray("_entryIds")
+        ?.let { arr -> (0 until arr.length()).map { arr.optString(it) } }
+        ?: emptyList()
+
+/**
+ * [INCR-1113 F-02] Pair the backup's `_entryIds` with the ids the import
+ * actually produced, by each row's ORIGINAL `models[]` index.
+ *
+ * This is the whole point of carrying the source index through the parse: rows
+ * the selection-only rule drops (`isHidden && !isCustom` catalog copies from a
+ * pre-split backup) are ABSENT from [sourceIndexes], and pairing by position
+ * in that shorter list shifted every later mapping by the number of dropped
+ * rows — model group members, agent-loop bindings and the compact pin then
+ * pointed at the wrong entry or dangled.
+ *
+ * A dropped row simply contributes NO mapping (its group references take the
+ * existing "unmapped" warning path), which is the honest answer: that entry
+ * does not exist on this install.
+ *
+ * Out-of-range indexes are ignored rather than clamped: an index the payload
+ * does not describe cannot be mapped to anything.
+ */
+internal fun pairEntryIdsById(
+    srcEntryIds: List<String>,
+    sourceIndexes: List<Int>,
+    resolvedIds: List<String>,
+): Map<String, String> {
+    val map = HashMap<String, String>(sourceIndexes.size)
+    sourceIndexes.forEachIndexed { position, sourceIndex ->
+        val srcId = srcEntryIds.getOrNull(sourceIndex) ?: return@forEachIndexed
+        val newId = resolvedIds.getOrNull(position) ?: return@forEachIndexed
+        if (srcId.isNotEmpty() && newId.isNotEmpty()) map[srcId] = newId
+    }
+    return map
+}

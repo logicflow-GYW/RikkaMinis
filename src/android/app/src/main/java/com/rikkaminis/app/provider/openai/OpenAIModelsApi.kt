@@ -170,7 +170,19 @@ object OpenAIModelsApi {
                     // suffixes; the rest of the codebase (models.dev, capability fragments,
                     // ModelEntryDetailScreen toggles) uses the bare form. Normalize at the parse
                     // boundary so persisted overrides round-trip correctly through the toggles.
-                    val inputModalities = arch?.optJSONArray("input_modalities")?.toStringList().normalizeModalities()
+                    //
+                    // [INCR-1113 F-06] …and fold the endpoint's own `supports_vision` /
+                    // `supports_audio` flags in. Gateways routinely declare the flags without
+                    // publishing `architecture.input_modalities`; reading the flags and then
+                    // dropping them (the pre-fix shape) left such a model text-only in the app
+                    // while the endpoint had explicitly said it takes images. `supports_tools`
+                    // has no `LLMModel` field to carry it, so it stays parsed-but-unconsumed on
+                    // purpose — see the gate's exemption list.
+                    val inputModalities = mergeDeclaredModalities(
+                        declared = arch?.optJSONArray("input_modalities")?.toStringList().normalizeModalities(),
+                        declaresVision = endpointMeta.supportsVision,
+                        declaresAudio = endpointMeta.supportsAudio,
+                    )
                     val outputModalities = arch?.optJSONArray("output_modalities")?.toStringList().normalizeModalities()
 
                     // T119: known reasoning families (GPT-5.x, o-series, Codex

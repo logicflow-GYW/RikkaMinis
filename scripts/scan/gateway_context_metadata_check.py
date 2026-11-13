@@ -60,8 +60,19 @@ PRECEDENCE_REL = APP + "/provider/ModelMetadataPrecedence.kt"
 MODELS_DEV_REL = APP + "/provider/ModelsDevApi.kt"
 HEURISTIC_REL = APP + "/data/model/ModelContextWindowHeuristic.kt"
 OVERRIDE_BUILDER_REL = APP + "/ui/settings/ModelEntryOverrideBuilder.kt"
+DETAIL_SCREEN_REL = APP + "/ui/settings/ModelEntryDetailScreen.kt"
 
 SELFTEST_MARKER = "GATEWAY_CONTEXT_METADATA_SELFTEST=PASS"
+
+# [INCR-1113 F-06] Endpoint metadata fields that are deliberately parsed but
+# NOT consumed yet, with the reason. A field that is read and then dropped is
+# exactly the defect A1 now exists to catch, so every exemption must be
+# written down here instead of being silently tolerated.
+CONSUMPTION_EXEMPT = {
+    "supportsTools":
+        "LLMModel has no tools-capability field; the flag is parsed for diagnostics "
+        "only until the data model grows one",
+}
 
 
 def _read(root, rel):
@@ -70,6 +81,30 @@ def _read(root, rel):
         return None
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def _function_body(code, header):
+    """The brace-balanced body of the declaration starting at [header].
+
+    [code] must already be comment-masked. Returns None when the header or its
+    opening brace is missing.
+    """
+    i = code.find(header)
+    if i < 0:
+        return None
+    brace = code.find("{", i)
+    if brace < 0:
+        return None
+    depth = 0
+    for j in range(brace, len(code)):
+        ch = code[j]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return code[brace:j + 1]
+    return None
 
 
 def arm1_endpoint_fields_read(texts):
@@ -133,6 +168,23 @@ def arm1_endpoint_fields_read(texts):
             "every model would switch the thinking toggle off app-wide"
         )
 
+    # [INCR-1113 F-06] Parsing a capability flag is not using it. The
+    # `supports_*` flags were parsed into the holder and then dropped: a
+    # gateway that declares `supports_vision: true` without publishing
+    # `architecture.input_modalities` left the model text-only, because
+    # nothing read the flag back out. Each flag must therefore appear as a
+    # CONSUMER (`endpointMeta.<flag>`), not merely as a JSON key.
+    for prop in ("supportsVision", "supportsAudio"):
+        if prop in CONSUMPTION_EXEMPT:
+            continue
+        if not re.search(r"endpointMeta\s*\.\s*%s\b" % prop, pcode):
+            out.append(
+                "A1 OpenAIModelsApi: `%s` is parsed but never consumed — a gateway "
+                "that declares the capability without publishing the modality list "
+                "leaves the model without it (add a consumer, or list the field in "
+                "CONSUMPTION_EXEMPT with a reason)" % prop
+            )
+
     return out
 
 
@@ -181,18 +233,42 @@ def arm3_registry_lookup_fallback(texts):
     pcode = mask_comments(prec)
     dcode = mask_comments(dev)
 
-    # The pure helper must strip the leading segment.
-    if "registryLookupId" not in pcode:
+    # The pure helper must strip EVERY leading segment, not just the first: a
+    # relay in front of a gateway stacks them
+    # (`openrouter/anthropic/claude-sonnet-4`), and one strip per lookup left
+    # `anthropic/claude-sonnet-4`, which is not a registry key either.
+    helper = _function_body(pcode, "fun registryLookupId(")
+    if helper is None:
         out.append("A3 precedence: no `registryLookupId` helper — a `vendor/model` id can never reach the registry")
-    elif "indexOf('/')" not in pcode:
-        out.append("A3 precedence: `registryLookupId` does not split the id on `/`")
+    else:
+        if "indexOf('/')" not in helper:
+            out.append("A3 precedence: `registryLookupId` does not split the id on `/`")
+        elif not re.search(r"while\s*\(", helper):
+            out.append(
+                "A3 precedence: `registryLookupId` strips only ONE segment — a "
+                "doubly-prefixed id (`openrouter/anthropic/<model>`) still misses "
+                "the registry (the peel must loop)"
+            )
 
-    # And ModelsDevApi must actually USE it (a helper nobody calls is dead code).
+    # And ModelsDevApi must actually USE it (a helper nobody calls is dead code),
+    # and use its RESULT as the lookup key rather than merely mentioning it.
     if "registryLookupId" not in dcode:
         out.append(
             "A3 ModelsDevApi: the registry lookup does not use `registryLookupId` — "
             "a gateway row still misses the registry entirely"
         )
+    else:
+        finder = _function_body(dcode, "fun findDevModel(")
+        if finder is None:
+            out.append("A3 ModelsDevApi: no `findDevModel` — the registry lookup moved or is gone")
+        else:
+            bindings = re.findall(r"\bval\s+(\w+)\s*=\s*registryLookupId\s*\(", finder)
+            used = [b for b in bindings if re.search(r"prov\s*\.\s*models\s*\[\s*%s\s*\]" % b, finder)]
+            if not used:
+                out.append(
+                    "A3 ModelsDevApi: `registryLookupId`'s result is never used as a "
+                    "registry key — the fallback is computed and dropped"
+                )
 
     return out
 
@@ -261,6 +337,26 @@ def arm5_guess_not_pinned(texts):
             "A5 override builder: the pre-fix raw write is back — the prefilled "
             "guess would be persisted and would outrank the endpoint forever"
         )
+
+    # [INCR-1113 F-06] …and the helper must actually be WIRED: a rule nobody
+    # calls protects nothing. The screen that owns the context-window field has
+    # to reach it through `buildModelEntryOverrides` (which passes it on), not
+    # write the override itself.
+    detail = texts.get(DETAIL_SCREEN_REL)
+    if detail is None:
+        out.append("A5 missing %s" % DETAIL_SCREEN_REL)
+    else:
+        dcode = mask_comments(detail)
+        if "buildModelEntryOverrides" not in dcode:
+            out.append(
+                "A5 detail screen: the context-window field no longer goes through "
+                "`buildModelEntryOverrides` — the guess-dropping rule is bypassed"
+            )
+        elif "resolveContextWindowOverride" in dcode:
+            out.append(
+                "A5 detail screen: `resolveContextWindowOverride` is called directly — "
+                "the override must be built through the single builder"
+            )
 
     return out
 
@@ -340,17 +436,43 @@ def arm6_reasoning_false_not_authoritative(texts):
     else:
         pcode = mask_comments(parser)
         if "resolveSupportsReasoning" in pcode:
-            if re.search(r"knownReasoningFamily\s*=\s*false", pcode):
-                out.append(
-                    "A6 reasoning: the call site hard-wires "
-                    "`knownReasoningFamily = false` — the whitelist can never "
-                    "answer, so the endpoint's false wins for every model"
-                )
-            elif not re.search(r"knownReasoningFamily\s*=", pcode):
+            m = re.search(r"knownReasoningFamily\s*=\s*([\w.]+)", pcode)
+            if not m:
                 out.append(
                     "A6 reasoning: the call site no longer passes the "
                     "id-family answer to `resolveSupportsReasoning`"
                 )
+            else:
+                token = m.group(1)
+                if token == "false":
+                    out.append(
+                        "A6 reasoning: the call site hard-wires "
+                        "`knownReasoningFamily = false` — the whitelist can never "
+                        "answer, so the endpoint's false wins for every model"
+                    )
+                elif re.fullmatch(r"[a-z_]\w*", token):
+                    # [INCR-1113 F-06] The forwarded value must itself be a
+                    # DECISION, not a constant. `val knownReasoning = false`
+                    # followed by `knownReasoningFamily = knownReasoning` is the
+                    # same defect one local variable away, and the pre-fix gate
+                    # could not see it: it only matched the literal.
+                    assign = re.search(
+                        r"\bval\s+%s\s*=\s*(.+)$" % re.escape(token),
+                        pcode, re.M,
+                    )
+                    if assign is None:
+                        out.append(
+                            "A6 reasoning: `%s` is passed as the id-family answer but "
+                            "has no `val` binding in the parser — the whitelist answer "
+                            "is unverifiable here" % token
+                        )
+                    elif re.fullmatch(r"(?:false|true)\s*", assign.group(1)):
+                        out.append(
+                            "A6 reasoning: `%s` is a hard-coded constant (`val %s = %s`) — "
+                            "the whitelist can never answer, so the endpoint's false "
+                            "wins for every model"
+                            % (token, token, assign.group(1).strip())
+                        )
 
     return out
 
@@ -364,6 +486,7 @@ def check_tree(root):
         MODELS_DEV_REL,
         HEURISTIC_REL,
         OVERRIDE_BUILDER_REL,
+        DETAIL_SCREEN_REL,
     ):
         src = _read(root, rel)
         if src is not None:
@@ -430,6 +553,19 @@ internal fun resolveSupportsReasoning(
     knownReasoningFamily -> true
     else -> null
 }
+
+internal fun mergeDeclaredModalities(
+    declared: List<String>?,
+    declaresVision: Boolean?,
+    declaresAudio: Boolean?,
+): List<String>? {
+    val add = ArrayList<String>(2)
+    if (declaresVision == true) add.add("image")
+    if (declaresAudio == true) add.add("audio")
+    if (add.isEmpty()) return declared
+    val base = declared ?: listOf("text")
+    return base + add.filter { it !in base }
+}
 """,
     OPENAI_MODELS_REL: """
 package com.rikkaminis.app.provider.openai
@@ -437,13 +573,23 @@ package com.rikkaminis.app.provider.openai
 object OpenAIModelsApi {
     fun parse(obj: JSONObject): String {
         val endpointMeta = parseOpenAIModelEndpointMetadata(obj)
-        val knownReasoning = false
+        val id = obj.getString("id")
+        val idLower = id.lowercase()
+        val knownReasoning = idLower.startsWith("gpt-5") ||
+            idLower.startsWith("o1") ||
+            idLower.contains("codex")
+        val inputModalities = mergeDeclaredModalities(
+            declared = obj.optJSONArray("input_modalities")?.toStringList(),
+            declaresVision = endpointMeta.supportsVision,
+            declaresAudio = endpointMeta.supportsAudio,
+        )
         return LLMModel(
-            id = obj.getString("id"),
-            displayName = endpointMeta.displayName ?: obj.getString("id"),
+            id = id,
+            displayName = endpointMeta.displayName ?: id,
             provider = "Custom",
             contextWindow = endpointMeta.contextWindow,
             maxOutputTokens = endpointMeta.maxOutputTokens,
+            inputModalities = inputModalities,
             supportsReasoning = resolveSupportsReasoning(
                 endpointFlag = endpointMeta.supportsReasoning,
                 knownReasoningFamily = knownReasoning,
@@ -456,9 +602,14 @@ object OpenAIModelsApi {
 package com.rikkaminis.app.provider
 
 internal fun registryLookupId(modelId: String): String {
-    val slash = modelId.indexOf('/')
-    if (slash <= 0) return modelId
-    return modelId.substring(slash + 1)
+    var id = modelId
+    var steps = 0
+    while (steps++ < MAX_REGISTRY_ID_SEGMENTS) {
+        val slash = id.indexOf('/')
+        if (slash <= 0 || slash == id.length - 1) return id
+        id = id.substring(slash + 1)
+    }
+    return id
 }
 
 internal fun mergeRegistryRow(model: LLMModel, registryContextWindow: Int?, registryMaxOutputTokens: Int?): LLMModel =
@@ -471,10 +622,11 @@ internal fun mergeRegistryRow(model: LLMModel, registryContextWindow: Int?, regi
 package com.rikkaminis.app.provider
 
 object ModelsDevApi {
-    fun find(prov: Map<String, LLMModel>, modelId: String): LLMModel? {
-        prov[modelId]?.let { return it }
+    private fun findDevModel(prov: ProviderEntry, modelId: String): ModelDevEntry? {
+        prov.models[modelId]?.let { return it }
         val bare = registryLookupId(modelId)
-        return prov[bare]
+        if (bare == modelId) return null
+        return prov.models[bare]
     }
 }
 """,
@@ -491,6 +643,14 @@ import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.model.inferContextWindowTokens
 
+internal fun buildModelEntryOverrides(
+    baseModel: LLMModel,
+    previous: ModelOverrides,
+    contextWindowText: String,
+): ModelOverrides = previous.copy(
+    contextWindow = resolveContextWindowOverride(contextWindowText, baseModel, previous),
+)
+
 internal fun resolveContextWindowOverride(
     text: String,
     baseModel: LLMModel,
@@ -505,10 +665,24 @@ internal fun resolveContextWindowOverride(
     return if (parsed == guess) null else parsed
 }
 """,
+    DETAIL_SCREEN_REL: """
+package com.rikkaminis.app.ui.settings
+
+internal fun save(baseModel: LLMModel, overrides: ModelOverrides, text: String): ModelOverrides =
+    buildModelEntryOverrides(baseModel = baseModel, previous = overrides, contextWindowText = text)
+""",
 }
 
 
 def _selftest():
+    """Mutate the fixture tree and prove every arm has teeth.
+
+    [INCR-1113 F-06] Each mutation declares the arm it must trip, and the
+    failure output is checked for that arm's name: a mutation that trips a
+    DIFFERENT arm is not evidence that the arm under test works. The pre-fix
+    self-test only asserted `rc != 0`, so a mutation that stopped reaching its
+    own arm still "passed" as long as some other arm complained.
+    """
     root = tempfile.mkdtemp(prefix="gwctx-gate-")
     try:
         for rel, content in _MINIMAL.items():
@@ -528,6 +702,13 @@ def _selftest():
             # A1: the parsed window never reaches the model.
             ("A1", OPENAI_MODELS_REL,
              lambda s: s.replace("contextWindow = endpointMeta.contextWindow,", "")),
+            # A1: a capability flag is parsed but never consumed — the exact
+            # shape the gate was blind to (it only checked that the JSON key
+            # appears in the parser).
+            ("A1", OPENAI_MODELS_REL,
+             lambda s: s.replace(
+                 "declaresVision = endpointMeta.supportsVision,",
+                 "declaresVision = null,")),
             # A2: the registry outranks the endpoint again.
             ("A2", PRECEDENCE_REL,
              lambda s: s.replace(
@@ -535,10 +716,33 @@ def _selftest():
                  "contextWindow = registryContextWindow ?: model.contextWindow")),
             # A3: the vendor-prefix fallback is gone.
             ("A3", PRECEDENCE_REL,
-             lambda s: s.replace("val slash = modelId.indexOf('/')", "val slash = -1")),
+             lambda s: s.replace("val slash = id.indexOf('/')", "val slash = -1")),
+            # A3: the peel stops after ONE segment again (a doubly-prefixed id
+            # then misses the registry).
+            ("A3", PRECEDENCE_REL,
+             lambda s: s.replace(
+                 """    var id = modelId
+    var steps = 0
+    while (steps++ < MAX_REGISTRY_ID_SEGMENTS) {
+        val slash = id.indexOf('/')
+        if (slash <= 0 || slash == id.length - 1) return id
+        id = id.substring(slash + 1)
+    }
+    return id""",
+                 """    val slash = modelId.indexOf('/')
+    if (slash <= 0 || slash == modelId.length - 1) return modelId
+    return modelId.substring(slash + 1)""")),
             # A3: the helper exists but nobody calls it.
             ("A3", MODELS_DEV_REL,
              lambda s: s.replace("registryLookupId(modelId)", "modelId")),
+            # A3: the helper is called and its result dropped on the floor.
+            ("A3", MODELS_DEV_REL,
+             lambda s: s.replace(
+                 "        val bare = registryLookupId(modelId)\n"
+                 "        if (bare == modelId) return null\n"
+                 "        return prov.models[bare]",
+                 "        registryLookupId(modelId)\n"
+                 "        return null")),
             # A4: the second table is back.
             ("A4", HEURISTIC_REL,
              lambda s: s.replace(
@@ -549,6 +753,12 @@ def _selftest():
              lambda s: s.replace(
                  "return if (parsed == guess) null else parsed",
                  "return parsed")),
+            # A5: the rule survives in the builder but the screen bypasses it.
+            ("A5", DETAIL_SCREEN_REL,
+             lambda s: s.replace(
+                 "buildModelEntryOverrides(baseModel = baseModel, previous = overrides, "
+                 "contextWindowText = text)",
+                 "overrides.copy(contextWindow = text.trim().toIntOrNull())")),
             # A6: the false flag becomes authoritative again — in the shape a
             # real regression takes: the existing arms stay, a new
             # `endpointFlag == false -> false` arm is APPENDED in front of the
@@ -566,19 +776,40 @@ def _selftest():
              lambda s: s.replace(
                  "knownReasoningFamily = knownReasoning,",
                  "knownReasoningFamily = false,")),
+            # A6: …and the same defect hidden behind a local constant, which
+            # the pre-fix gate could not see (it only matched the literal).
+            ("A6", OPENAI_MODELS_REL,
+             lambda s: s.replace(
+                 """        val knownReasoning = idLower.startsWith("gpt-5") ||
+            idLower.startsWith("o1") ||
+            idLower.contains("codex")""",
+                 "        val knownReasoning = false")),
         ]
 
         for expect_arm, rel, mutate in mutations:
             path = os.path.join(root, rel)
             with open(path, encoding="utf-8") as fh:
                 original = fh.read()
+            mutated = mutate(original)
+            if mutated == original:
+                print(
+                    "SELFTEST FAIL: the %s mutation did not change %s — the fixture "
+                    "drifted away from the mutation anchor" % (expect_arm, rel)
+                )
+                return 1
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(mutate(original))
-            rc = check_tree(root)
+                fh.write(mutated)
+            rc, output = _run_check(root)
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(original)
             if rc == 0:
                 print("SELFTEST FAIL: the %s mutation was NOT caught" % expect_arm)
+                return 1
+            if expect_arm + " " not in output and expect_arm + ":" not in output:
+                print(
+                    "SELFTEST FAIL: the %s mutation tripped a different arm — the "
+                    "arm under test has no teeth.\n%s" % (expect_arm, output)
+                )
                 return 1
             print("  ✅ %s mutation caught" % expect_arm)
 
@@ -591,6 +822,17 @@ def _selftest():
         return 0
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _run_check(root):
+    """[check_tree] with its violation lines captured, for arm-name assertions."""
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = check_tree(root)
+    return rc, buf.getvalue()
 
 
 def main(argv):

@@ -57,22 +57,31 @@ object ProviderBoundary {
     var bypassForTests: Boolean = false
 
     /** The current process name, or null when running under a JVM unit test. */
-    // [lint] NewApi false positive: Application.getProcessName() is API 28 on a
-    // minSdk 26 app, but runCatching catches Throwable — on API 26-27 the
-    // NoSuchMethodError is swallowed and this returns null, which is exactly
-    // the contract the KDoc above documents (and what callers already handle).
+    // [INCR-1113 F-09] `Application.getProcessName()` is API 28 on a minSdk 26
+    // app: on API 26–27 it throws NoSuchMethodError, which the old
+    // `runCatching` folded into null — and null means "pass through", so the
+    // runtime guard silently did nothing on exactly the oldest supported
+    // devices. The `/proc/self/cmdline` fallback works on every API level and
+    // is what the worker's own identity probe reads (ModelExecutionRunDir),
+    // so the two answers agree instead of disagreeing.
     @Suppress("NewApi")
-    fun currentProcessName(): String? =
-        overrideProcessName ?: runCatching { Application.getProcessName() }.getOrNull()
+    fun currentProcessName(): String? = overrideProcessName
+        ?: readProcessName(
+            getProcessName = { Application.getProcessName() },
+            readCmdline = { readProcCmdlineName() },
+        )
 
     /**
      * Pure decision: refuse provider network entry in any process other than
      * `:modelservice`. Returns the process name unchanged so senders can log it.
      *
-     * @param processName null in a JVM unit test (Android stub default) — and,
-     *   in production, a null here is treated as an unknown/non-Android context
-     *   which we refuse (fail closed rather than leak). Tests against the pure
-     *   logic may pass any String.
+     * @param processName null when NO process name could be determined — a JVM
+     *   unit test (no Android runtime) or an environment where both
+     *   [currentProcessName] sources failed. That case passes through: the
+     *   static guard ([NoInProcessProviderGuardTest]) owns it, and the runtime
+     *   guard has nothing to inspect. It is NOT "fail closed" — an earlier
+     *   revision of this doc claimed that and the code never did it.
+     *   Tests against the pure logic may pass any String.
      */
     fun enforce(processName: String?): String? {
         if (bypassForTests) return processName
@@ -91,3 +100,70 @@ object ProviderBoundary {
         )
     }
 }
+
+/**
+ * [INCR-1113 F-09] Resolve the current process name from two injectable
+ * sources, in order:
+ *
+ *  1. `Application.getProcessName()` — the cheap, authoritative answer, but
+ *     API 28+ only (it throws `NoSuchMethodError` on API 26–27, and on the JVM
+ *     it is an Android stub that returns null);
+ *  2. `/proc/self/cmdline` — available on every API level, and the same source
+ *     the worker's own identity probe reads (`ModelExecutionRunDir`), so the
+ *     two views of "who am I" cannot disagree.
+ *
+ * Both sources are parameters (not direct calls) so the fallback logic is a
+ * pure function a JVM test can drive without an Android runtime or a real
+ * `/proc` read. A blank answer counts as "did not answer" — `/proc` can return
+ * an empty cmdline for zombies / restricted processes.
+ *
+ * Returns null only when NEITHER source answered; see [ProviderBoundary.enforce]
+ * for what null means (pass through, not fail closed).
+ *
+ * **Only a THROW falls back.** A null RETURN is the JVM-unit-test stub
+ * (`unitTests.isReturnDefaultValues = true`), i.e. "there is no Android
+ * runtime here", and the static guard owns that case. Falling back to
+ * `/proc/self/cmdline` there would answer "the Gradle test worker", which is
+ * not a process this app ever runs in — every provider unit test that calls
+ * sendMessage would then trip the runtime guard.
+ */
+internal fun readProcessName(
+    getProcessName: () -> String?,
+    readCmdline: () -> String?,
+): String? {
+    val direct = try {
+        getProcessName()?.takeIf { it.isNotBlank() }
+    } catch (_: Throwable) {
+        // API 26–27: the method exists in the bytecode but not in the
+        // platform, so it throws NoSuchMethodError. That is the ONE case the
+        // /proc fallback exists for.
+        return runCatching { readCmdline() }
+            .getOrNull()
+            // Tolerate a RAW `/proc/self/cmdline` payload: argv entries are
+            // NUL-separated, so the name is everything before the first NUL.
+            // [readProcCmdlineName] already does this; doing it here too means
+            // an injected reader cannot reintroduce the terminator.
+            ?.substringBefore('\u0000')
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+    return direct
+}
+
+/**
+ * `/proc/self/cmdline`'s argv0 — the full process name including the
+ * `:modelservice` suffix. Null when the file is missing or unreadable (the
+ * same tolerance `ModelExecutionRunDir.readProcIdentity` applies).
+ *
+ * The NUL terminator is what separates argv entries, so the first entry is
+ * everything up to the first `\u0000`; a file with no terminator at all is
+ * returned whole.
+ */
+internal fun readProcCmdlineName(
+    readFile: (String) -> String? = { path ->
+        runCatching { java.io.File(path).readText() }.getOrNull()
+    },
+): String? = readFile("/proc/self/cmdline")
+    ?.substringBefore('\u0000')
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }

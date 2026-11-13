@@ -99,6 +99,45 @@ internal fun parseOpenAIModelEndpointMetadata(obj: JSONObject): OpenAIModelEndpo
 }
 
 /**
+ * [INCR-1113 F-06] Fold the endpoint's capability FLAGS into the modality
+ * list it declared.
+ *
+ * `parseOpenAIModelEndpointMetadata` reads `supports_vision` / `supports_audio`
+ * and — until this function existed — nothing consumed them: the flags were
+ * parsed and dropped, so a gateway that says `supports_vision: true` without
+ * publishing `architecture.input_modalities` (the common shape) still left the
+ * model text-only in the app. The `supports_*` flags ARE the endpoint's own
+ * statement, so they are exactly as authoritative as the modality array — the
+ * contract this family is about is "the endpoint's own word beats a registry
+ * default and a shape guess", and a flag is the endpoint's word.
+ *
+ * Rules:
+ *  - `null` (the endpoint did not report the flag) changes nothing — silence
+ *    is not a denial, same as everywhere else in this family;
+ *  - `false` changes nothing either: the local gateway writes booleans
+ *    unconditionally, so a false is not a reliable "cannot" (the same reading
+ *    [resolveSupportsReasoning] applies to the reasoning flag);
+ *  - `true` ADDS the modality; an absent list starts from `["text"]` so the
+ *    result is never a capabilities-only list that drops text.
+ *
+ * Pure function — no JSON, no Android — so the rule is JVM-testable.
+ */
+internal fun mergeDeclaredModalities(
+    declared: List<String>?,
+    declaresVision: Boolean?,
+    declaresAudio: Boolean?,
+): List<String>? {
+    val add = ArrayList<String>(2)
+    if (declaresVision == true) add.add("image")
+    if (declaresAudio == true) add.add("audio")
+    if (add.isEmpty()) return declared
+    val base = declared ?: listOf("text")
+    val missing = add.filter { it !in base }
+    if (missing.isEmpty()) return declared
+    return base + missing
+}
+
+/**
  * First strictly positive value, or null when none of the candidates is one.
  *
  * `optInt` returns 0 for a missing key, so "missing" and "reported zero"

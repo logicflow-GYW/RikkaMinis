@@ -877,6 +877,19 @@ internal class AgentLoopEngine(
         // until N) 恰好 consumeTurn N 次，全部 Allowed —— 上界不会比预算更
         // 松也不会更紧。
         val maxTurnsThisRun = observeBudget.maxTurns
+        // [incr1113 F-03] One-shot capacity recovery for the USER TURN.
+        //
+        // Scope is the whole `runAgentLoop` call, not one `turn`: this function
+        // is entered once per user message (`send` / `resume` / `retryLast` /
+        // queued-prompt drain) and the `turnLoop@` below iterates per MODEL call
+        // (tool rounds, length-wall continuations). Declaring the latch inside
+        // the turn body — where it used to live — gave every turn its own
+        // budget: a `finish=length` continuation `continue`s into a new turn,
+        // the latch reset to "not yet shrunk" and `maxTokens` was re-inflated by
+        // the preflight at the top of that turn, so one user message could
+        // 400-and-retry repeatedly. The property the KDoc promises is "one
+        // bounded shrink per user turn", so the object has to outlive the turn.
+        val overshootRetry = ContextOvershootRetry()
         // [audit3 F-02] LABELED loop — do not drop the `turnLoop@`.
         // Two execution-budget gates live INSIDE this turn body's retry loop
         // (`while (!collectDone)` further down): the deadline gate and the
@@ -1330,11 +1343,9 @@ internal class AgentLoopEngine(
             // so we catch at collect level and unwrap.
             var collectDone = false
             var retryAttempt = 0  // per-turn auto-retry counter (resets on each new turn)
-            // [review1112-p1-5] One-shot capacity recovery for this turn: when
-            // the provider says the request is too large, trim and re-send once.
-            // Declared per turn (not per attempt) so the budget is spent at most
-            // once per user turn, and re-created when the turn loop advances.
-            val overshootRetry = ContextOvershootRetry()
+            // [incr1113 F-03] The overshoot latch is declared ONCE for the whole
+            // user turn, above the `turnLoop@` (see its declaration site) — not
+            // here, where every new turn used to re-arm it.
             while (!collectDone) {
                 // T7-C: deadline 到达后不发新 provider 请求
                 if (traceObserver.activeRunBudget?.isExpired() == true) {
@@ -1953,15 +1964,32 @@ internal class AgentLoopEngine(
                         )
                     ) {
                         val windowNow = host.effectiveContextWindowTokens() ?: 0
+                        // [incr1113 F-03] Calibrate the window against what the
+                        // endpoint says its own ceiling is. `windowNow` is a
+                        // GUESS whenever the model id is unrecognised (1M), and
+                        // BOTH decisions below divide by it: the trim budget
+                        // (`contextWindow * 95 / 100`) and the re-estimate. With
+                        // a real 128K window mis-guessed as 1M, a 600K-token
+                        // history trims to 950K — i.e. nothing is dropped, the
+                        // "freed nothing" guard below fires, and the user pays
+                        // the whole fallback chain for a request we could have
+                        // fixed. Parsing the reported limit is best-effort: no
+                        // number found ⇒ keep the window as-is (never narrower
+                        // than the truth we already had, never wider).
+                        val reportedLimit = ContextOvershootRetry.parseReportedLimit(
+                            (actual as? com.rikkaminis.app.data.model.LLMError.ProviderError)?.detail,
+                        )
+                        val calibratedWindow = ContextOvershootRetry.effectiveWindow(windowNow, reportedLimit)
                         val before = host.agentHistory.size
                         AppLogger.warning(
                             TAG_STREAM,
                             "[Overshoot] context-too-large from ${loopState.currentProvider.model.id} " +
-                                "(est=$preflightEstimate window=$windowNow history=$before) — " +
+                                "(est=$preflightEstimate window=$windowNow reportedLimit=${reportedLimit ?: -1} " +
+                                "effectiveWindow=$calibratedWindow history=$before) — " +
                                 "trimming and retrying the same turn",
                         )
                         host.trimContextHistoryWindow(
-                            contextWindow = windowNow,
+                            contextWindow = calibratedWindow,
                             lastContextTokens = preflightEstimate.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                         )
                         // Re-capture the request snapshot: trim mutates
@@ -2029,6 +2057,33 @@ internal class AgentLoopEngine(
                             loopState.pendingChunkSb.setLength(0)
                             resetStreamThrottle(loopState)
                             withContext(Dispatchers.Main) { host.clearInlineError() }
+                            // [incr1113 F-03] T7 terminal events for this attempt.
+                            //
+                            // Every other exit from a provider attempt reduces an
+                            // event before leaving: success → SUCCESS, transient
+                            // retry → TRANSIENT_FAILURE + RetryRequested, fatal /
+                            // fallback → its own outcome. This branch `continue`d
+                            // straight back into the retry loop, so the reducer
+                            // stayed in CALLING_MODEL across an attempt boundary:
+                            // the next `ProviderAttemptStarted` was then a no-op
+                            // self-transition (same phase, count +1) and the trace
+                            // recorded one attempt where the device made two.
+                            // Same shape as the transient branch so the two cannot
+                            // drift: finish the attempt, then ask for a retry.
+                            traceObserver.t7State(
+                                ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
+                                ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.RETRYING),
+                                "ProviderAttemptFinished(TRANSIENT_FAILURE)",
+                            )
+                            traceObserver.t7Reduce(
+                                AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.TRANSIENT_FAILURE),
+                            )
+                            traceObserver.t7Reduce(AgentRunEvent.RetryRequested("context-overshoot"))
+                            traceObserver.t7State(
+                                ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.RETRYING),
+                                ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
+                                "RetryRequested(context-overshoot)",
+                            )
                             AppLogger.warning(
                                 TAG_STREAM,
                                 "[Overshoot] retrying the same turn with the trimmed history",
