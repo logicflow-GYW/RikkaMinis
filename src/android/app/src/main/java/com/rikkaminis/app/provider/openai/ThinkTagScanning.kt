@@ -278,10 +278,13 @@ internal fun scanThinkTags(
  *
  * Two guards, both taken from the same measurement, keep it from mangling
  * deliberate text:
- *  - ORPHAN only: a closer whose opener appeared earlier in the SAME text is
- *    kept. A provider without think-tag extraction can persist a visible
- *    `<thinking>…</thinking>` region, and that pair is body text, not
- *    artifact.
+ *  - ORPHAN only: a closer whose opener is still UNCLOSED earlier in the SAME
+ *    text is kept. (R8-B B-F08: the counter is a pairing DEPTH — incremented on
+ *    an opener, decremented on its closer. A monotonic "openers seen" count made
+ *    every closer after the first region look paired and kept artifacts that
+ *    should have been dropped.) A provider without think-tag extraction can
+ *    persist a visible `<thinking>…</thinking>` region, and that pair is body
+ *    text, not artifact.
  *  - CODE SPANS are skipped: 0/10 artifacts were inside code, while every
  *    deliberate quotation of the token in the same corpus (`` `</thinking>` ``
  *    in prose) was inside backticks. Backtick parity covers inline spans;
@@ -361,7 +364,17 @@ internal fun stripOrphanThinkClosers(text: String): String {
                 }
                 val close = fmt.close
                 if (close.isNotEmpty() && text.regionMatches(i, close, 0, close.length, ignoreCase = true)) {
-                    if (openersSeen > 0) out.append(text, i, i + close.length)
+                    // [R8-B B-F08] PAIRED count, not a monotonic one. `openersSeen`
+                    // only ever incremented, so after ONE `<thinking>…</thinking>`
+                    // every later closer — including a bare artifact sitting in the
+                    // body — found `openersSeen > 0` and was KEPT as if paired
+                    // (it should have been dropped). Consuming the opener makes the
+                    // counter mean "how many open regions are still unclosed",
+                    // which is exactly the question the orphan rule asks.
+                    if (openersSeen > 0) {
+                        out.append(text, i, i + close.length)
+                        openersSeen--
+                    }
                     i += close.length
                     matched = true
                     break
