@@ -84,8 +84,12 @@ internal data class ComposerArcBand(
             // edge sits one radius above that, i.e. exactly `topInset` below
             // the composer column's own top edge.
             val band = radiusPx + topInsetPx
+            // Anything no taller than the band has no list content inside it at
+            // all (the extension alone is `band` tall), so there is nothing for
+            // the arc to occlude — a notch there would cut into a card that has
+            // no content behind it, and its top edge would land above y=0.
+            if (heightPx <= band) return null
             val notchTop = heightPx - band + topInsetPx
-            if (notchTop <= 0f) return null
             if (widthPx < 2f * (horizontalInsetPx + radiusPx)) return null
             return ComposerArcBand(
                 cardTop = notchTop,
