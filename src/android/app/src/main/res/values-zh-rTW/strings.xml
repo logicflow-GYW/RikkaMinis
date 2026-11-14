@@ -590,7 +590,7 @@
     <string name="env_var_privacy_header">隱私</string>
     <string name="env_var_privacy_toggle">隱私模式</string>
     <string name="env_var_privacy_footer">開啟後，shell-execute 輸出中偵測到的環境變數值會在送達模型前被打碼（例如 `sk-1********ajhks`）。少於 8 個字元的值會被全部替換為 `*`。聊天中使用者可見的輸出維持不變。</string>
-    <string name="env_var_restart_terminal_note">助理執行的指令每次都會重新讀取這些變數，無需重啟終端。時區和代理的改動會推送到已開啟的終端；刪除的變數會在當中 unset，但已經在執行的程式仍持有啟動時的那份副本。</string>
+    <string name="env_var_restart_terminal_note">助理執行的指令每次都會重新讀取這些變數（刪除也一樣），無需重啟終端。時區和代理的改動會推送到已開啟的終端，其他變數不會。已經在執行的程式仍持有它啟動時的環境。</string>
     <string name="env_var_restart_terminal_body">變數在工作階段啟動時注入。已經開啟的終端會保留舊環境，關閉後重新開啟即可生效。</string>
     <string name="env_var_restart_terminal_title">終端工作階段</string>
 

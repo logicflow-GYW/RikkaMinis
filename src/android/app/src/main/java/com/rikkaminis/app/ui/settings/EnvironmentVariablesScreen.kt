@@ -164,10 +164,13 @@ fun EnvironmentVariablesScreen(
         //   2. a PTY broadcast is literally typed into the shell, so every value
         //      would be echoed on screen and land in the scrollback — the wrong
         //      trade for a page whose contents are API keys;
-        //   3. `unset` only affects the shell and its future children; a program
-        //      already running keeps the `environ` it started with. That part is
-        //      POSIX, not a missing feature — which is why the footer says so
-        //      instead of promising a live delete.
+        //   3. with no broadcast, an open terminal receives neither `export` nor
+        //      `unset` — and `unset` would not reach a running program anyway
+        //      (it keeps the `environ` it started with). That second half is
+        //      POSIX, not a missing feature, which is why the footer states the
+        //      limitation instead of promising a live delete. Deletion DOES take
+        //      effect on the assistant path: `PersistentShell.applyEnvironment`
+        //      diffs `previousKeys` and emits `unset` for the difference.
         SettingsSection(
             header = stringResource(R.string.env_var_restart_terminal_title),
             footer = stringResource(R.string.env_var_restart_terminal_note),
