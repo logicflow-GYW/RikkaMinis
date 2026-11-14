@@ -103,6 +103,8 @@
     <string name="filebrowser_empty_folder">空資料夾</string>
     <string name="filebrowser_delete_title">刪除 “%1$s”？</string>
     <string name="filebrowser_delete_message">此操作無法復原。</string>
+    <string name="filebrowser_delete_dir_message">該資料夾及其中全部內容（%1$d 項）將被刪除。此操作無法復原。</string>
+    <string name="filebrowser_delete_counting">統計中…</string>
     <string name="filebrowser_error_title">錯誤</string>
     <string name="filebrowser_sort_ascending">升序</string>
     <string name="filebrowser_sort_descending">降序</string>

@@ -470,6 +470,8 @@
     <string name="filebrowser_empty_folder">빈 폴더</string>
     <string name="filebrowser_delete_title">“%1$s” 삭제하시겠습니까?</string>
     <string name="filebrowser_delete_message">이 작업은 되돌릴 수 없습니다.</string>
+    <string name="filebrowser_delete_dir_message">이 폴더와 그 안의 모든 항목(%1$d개)이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</string>
+    <string name="filebrowser_delete_counting">계산 중…</string>
     <string name="filebrowser_error_title">오류</string>
     <string name="filebrowser_sort_ascending">오름차순</string>
     <string name="filebrowser_sort_descending">내림차순</string>

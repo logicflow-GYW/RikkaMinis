@@ -571,6 +571,8 @@
     <string name="filebrowser_empty_folder">空文件夹</string>
     <string name="filebrowser_delete_title">删除 “%1$s”？</string>
     <string name="filebrowser_delete_message">此操作无法撤销。</string>
+    <string name="filebrowser_delete_dir_message">该文件夹及其中全部内容（%1$d 项）将被删除。此操作无法撤销。</string>
+    <string name="filebrowser_delete_counting">统计中…</string>
     <string name="filebrowser_error_title">错误</string>
     <string name="filebrowser_sort_ascending">升序</string>
     <string name="filebrowser_sort_descending">降序</string>

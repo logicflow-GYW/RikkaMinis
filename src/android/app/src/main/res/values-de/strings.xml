@@ -470,6 +470,8 @@
     <string name="filebrowser_empty_folder">Leerer Ordner</string>
     <string name="filebrowser_delete_title">„%1$s“ löschen?</string>
     <string name="filebrowser_delete_message">Diese Aktion kann nicht rückgängig gemacht werden.</string>
+    <string name="filebrowser_delete_dir_message">Dieser Ordner und sein gesamter Inhalt (%1$d Einträge) werden gelöscht. Diese Aktion kann nicht rückgängig gemacht werden.</string>
+    <string name="filebrowser_delete_counting">Zählen…</string>
     <string name="filebrowser_error_title">Fehler</string>
     <string name="filebrowser_sort_ascending">Aufsteigend</string>
     <string name="filebrowser_sort_descending">Absteigend</string>

@@ -372,6 +372,8 @@
     <string name="filebrowser_empty_folder">Empty folder</string>
     <string name="filebrowser_delete_title">Delete \"%1$s\"?</string>
     <string name="filebrowser_delete_message">This action cannot be undone.</string>
+    <string name="filebrowser_delete_dir_message">This folder and everything inside it (%1$d entries) will be deleted. This action cannot be undone.</string>
+    <string name="filebrowser_delete_counting">Counting…</string>
     <string name="filebrowser_error_title">Error</string>
     <string name="filebrowser_sort_ascending">Ascending</string>
     <string name="filebrowser_sort_descending">Descending</string>

@@ -470,6 +470,8 @@
     <string name="filebrowser_empty_folder">空のフォルダ</string>
     <string name="filebrowser_delete_title">“%1$s” を削除しますか？</string>
     <string name="filebrowser_delete_message">この操作は元に戻せません。</string>
+    <string name="filebrowser_delete_dir_message">このフォルダーと中のすべて（%1$d 項目）が削除されます。この操作は元に戻せません。</string>
+    <string name="filebrowser_delete_counting">数えています…</string>
     <string name="filebrowser_error_title">エラー</string>
     <string name="filebrowser_sort_ascending">昇順</string>
     <string name="filebrowser_sort_descending">降順</string>

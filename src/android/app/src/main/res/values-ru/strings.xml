@@ -250,6 +250,8 @@
     <string name="filebrowser_empty_folder">Пустая папка</string>
     <string name="filebrowser_delete_title">Удалить \"%1$s\"?</string>
     <string name="filebrowser_delete_message">Это действие нельзя отменить.</string>
+    <string name="filebrowser_delete_dir_message">Эта папка и всё её содержимое (%1$d элементов) будут удалены. Это действие нельзя отменить.</string>
+    <string name="filebrowser_delete_counting">Подсчёт…</string>
     <string name="filebrowser_error_title">Ошибка</string>
     <string name="filebrowser_sort_ascending">По возрастанию</string>
     <string name="filebrowser_sort_descending">По убыванию</string>
