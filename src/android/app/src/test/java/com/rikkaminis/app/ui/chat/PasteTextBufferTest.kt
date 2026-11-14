@@ -182,12 +182,19 @@ class PasteTextBufferTest {
         // old "A<selected>B" → new "A<block>B": the prefix is "A", the suffix is
         // "B", and the selected text is gone from both ends at once.
         //
-        // [fix/fold-paste-split-1114] Detached: the field keeps "AB" (the
-        // selection is deleted, because the user did ask to replace it) and the
-        // block goes to the chip row under the caret's own position.
+        // [fix/fold-paste-split-1114] Detached is the LEAST destructive reading
+        // of an ambiguous gesture: the inserted run never reaches the field at
+        // all, so nothing is replaced and, in particular, the selection the
+        // paste would have overwritten stays untouched. The block survives in
+        // the chip row and is appended after the body on send
+        // ([appendUnlinkedPastes]) — no data is lost either way.
+        //
+        // Do not "fix" this to expect the selection being deleted: deleting
+        // here would mean the fold chose to edit the user's draft on a gesture
+        // it already decided not to insert.
         val (mint, stored) = sequentialStash()
         val out = fold("AselectedB", "A" + cjkChars(1500) + "B", mint)
-        assertEquals("AB", out.text)
+        assertEquals("AselectedB", out.text)
         assertEquals(cjkChars(1500), stored.single())
     }
 
@@ -317,16 +324,25 @@ class PasteTextBufferTest {
 
     @Test
     fun `an emoji-dense pasted block survives the round trip through expand`() {
+        // [fix/fold-paste-split-1114] The round trip changed shape: in the
+        // detached arm the block never enters the field, so the send path is
+        // append-after-body rather than expand-in-place. Both halves still have
+        // to agree on the text, and the UTF-16 hazard is the one that matters —
+        // a surrogate pair split anywhere here shows up as a replacement glyph
+        // in the user's own message.
         val (mint, stored) = sequentialStash()
         val block = "😀".repeat(601) // 1202 units → folds
-        val folded = fold("a", "a" + block + "b", mint).text
-        val (expanded, consumed) = expandPastePlaceholders(
-            folded,
-            listOf(PastedText(1, stored.single())),
-        )
-        assertEquals("a" + block + "b", expanded)
-        assertEquals(setOf(1), consumed)
-        assertNoLoneSurrogate(expanded, "expanded text")
+        // "a|b" so the diff's common prefix is "a" and its common suffix is "b":
+        // the inserted run is exactly `block`, not `block` glued to the tail.
+        val folded = fold("a|b", "a" + block + "b", mint)
+        assertEquals("the field keeps only what the user typed", "a|b", folded.text)
+        assertEquals("the inserted run is the block and nothing else", block, stored.single())
+
+        val detached = listOf(PastedText(1, stored.single(), inlineMarker = false))
+        val sent = appendUnlinkedPastes(folded.text, detached)
+        assertEquals("the block is appended verbatim after the body", "a|b\n\n" + block, sent)
+        assertNoLoneSurrogate(sent, "sent text")
+        assertNoLoneSurrogate(block, "stored block")
     }
 
     // ── expandPastePlaceholders ──────────────────────────────────────────────
