@@ -73,3 +73,18 @@ New `MirrorPublicBaseWiringTest` (3 cases):
 
 - 设备上那 41 MB 的 `backup/Download/…` 是本地数据的副本，修复后不会再更新；删除与否由用户决定。
 - 修复后首次同步会在正确路径重建 `current/`，`previous/` 从空开始（镜像不是唯一副本，无数据风险）。
+
+## CI（分支停止节点）
+
+- run `43610181672` **五 job 全 success**，head_sha `57dab717280da4…` 与本地 HEAD 逐字符一致。
+- scan-gate `132493339867`：`Summary: 115 passed, 0 failed`。
+- unit-tests `132493340133`：`BUILD SUCCESSFUL in 5m 55s`，三条新用例逐条 `PASSED`
+  （`thePublicWriterGetsTheVolumeRootAndNotTheAppendedDirectory` /
+  `aStorageRelativePathLandsUnderTheRootExactlyOnce` /
+  `theMigrationKeepsAddressingTheMirrorRootItself`）。
+- build-apk / lint success，publish skipped（非 main 门控）。
+
+**第一次 dispatch `43609255780` 红**：三条新用例在 Gradle 下全红、本地全绿 —— 原因是测试用
+`user.dir` 找仓库根，Gradle 的 `user.dir` 是模块目录。改成向上走目录（与
+`SilentMirrorWiringTest` 同法）并以 `-Duser.dir=src/android/app` 复现验证后转绿。
+**教训**：`user.dir` 在 harness 与 Gradle 下不是同一个值，任何「读源码」型测试都不能假设它。
