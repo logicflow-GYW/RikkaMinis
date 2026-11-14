@@ -1732,4 +1732,6 @@
     <string name="backup_done_scheduled_tasks">예약 작업을 복원했습니다.</string>
     <string name="backup_done_artifacts">산출물 파일 %1$d개를 복원했습니다.</string>
     <string name="backup_done_webdav">WebDAV 서버 설정을 복원했습니다.</string>
+    <string name="mirror_fastest_hint">가장 빠름: %1$s(%2$d ms)</string>
+    <string name="mirror_switch_to_fastest">사용</string>
 </resources>

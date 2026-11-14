@@ -1733,4 +1733,6 @@
     <string name="backup_done_scheduled_tasks">已還原定時任務。</string>
     <string name="backup_done_artifacts">已還原 %1$d 個產物檔案。</string>
     <string name="backup_done_webdav">已還原 WebDAV 伺服器設定。</string>
+    <string name="mirror_fastest_hint">最快：%1$s（%2$d ms）</string>
+    <string name="mirror_switch_to_fastest">啟用</string>
 </resources>

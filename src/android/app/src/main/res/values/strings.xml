@@ -1841,4 +1841,6 @@
     <string name="backup_done_scheduled_tasks">Restored scheduled tasks.</string>
     <string name="backup_done_artifacts">Restored %1$d artifact file(s).</string>
     <string name="backup_done_webdav">Restored the WebDAV server config.</string>
+    <string name="mirror_fastest_hint">Fastest: %1$s (%2$d ms)</string>
+    <string name="mirror_switch_to_fastest">Use</string>
 </resources>

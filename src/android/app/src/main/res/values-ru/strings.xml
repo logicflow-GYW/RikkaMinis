@@ -1686,4 +1686,6 @@
     <string name="backup_done_scheduled_tasks">Запланированные задачи восстановлены.</string>
     <string name="backup_done_artifacts">Восстановлено файлов результатов: %1$d.</string>
     <string name="backup_done_webdav">Конфигурация сервера WebDAV восстановлена.</string>
+    <string name="mirror_fastest_hint">Самый быстрый: %1$s (%2$d мс)</string>
+    <string name="mirror_switch_to_fastest">Взять</string>
 </resources>

@@ -41,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -493,12 +494,19 @@ object MirrorSpeedTestViewModel {
 
     fun selectMirror(context: Context, mirror: MirrorEntry) {
         selectedMirrorId[mirror.category] = mirror.id
+        // [RC-U04] Tapping a row IS the choice. The check mark appeared on the
+        // tapped row immediately, but the flag stayed off, so the page's own
+        // card still read "Official (default)" and the container config kept
+        // the old source until the user found the top switch and flipped it —
+        // two steps for one intent, and the green check claimed an effect it
+        // did not have. This path now enables and applies, the same contract
+        // the speed-test auto-select already uses ([da1022-F]: "a selection
+        // recorded without useCustomMirror=true never reaches the rootfs").
+        useCustomMirror[mirror.category] = true
         persist(context, mirror.category)
-        if (useCustomMirror[mirror.category] == true) {
-            // T10-L7: applyMirror copies the current config to .bak and rewrites
-            // it — disk IO that used to run inside the row's onClick.
-            scope.launch { applyMirror(context, mirror.category) }
-        }
+        // T10-L7: applyMirror copies the current config to .bak and rewrites
+        // it — disk IO that used to run inside the row's onClick.
+        scope.launch { applyMirror(context, mirror.category) }
     }
 
     fun setUseCustom(context: Context, category: MirrorCategory, enabled: Boolean) {
@@ -671,6 +679,13 @@ object MirrorSpeedTestViewModel {
     fun fastestResult(category: MirrorCategory): MirrorTestResult? =
         results[category]?.firstOrNull { it.isSuccess }
 
+    /** [RC-U05] Measured latency of ONE specific mirror, if the last speed test
+     *  reached it. The category row used to badge the fastest result while
+     *  naming the selected mirror; this is what lets the badge describe the
+     *  name beside it. */
+    fun latencyOf(category: MirrorCategory, mirrorId: String): Int? =
+        results[category]?.firstOrNull { it.mirror.id == mirrorId }?.latencyMs
+
     fun isActive(category: MirrorCategory): Boolean =
         useCustomMirror[category] == true && selectedMirrorId[category] != null
 
@@ -821,10 +836,18 @@ fun MirrorsSectionView(onNavigate: (MirrorCategory) -> Unit) {
 
 @Composable
 private fun MirrorCategoryRow(category: MirrorCategory, onClick: () -> Unit) {
+    val context = LocalContext.current
     val vm = MirrorSpeedTestViewModel
     val selected = vm.selectedMirror(category)
     val active = vm.isActive(category)
     val fastest = vm.fastestResult(category)
+    // [RC-U05] The number and the name in this row must describe the SAME
+    // mirror. Before: `selected.name` + `fastest.latencyMs`, i.e. "China USTC ·
+    // 12ms" where 12ms belonged to a different mirror — the row read as "my
+    // mirror is the fast one" even when the selection had timed out.
+    val selectedLatency = selected?.let { vm.latencyOf(category, it.id) }
+    val suggestion = fastestSuggestion(if (active) selected?.id else null, fastest)
+    val suggestionLatency = suggestion?.latencyMs
 
     ListItem(
         headlineContent = { Text(category.displayName) },
@@ -842,11 +865,31 @@ private fun MirrorCategoryRow(category: MirrorCategory, onClick: () -> Unit) {
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.widthIfShort(),
                     )
-                    Spacer(Modifier.width(6.dp))
+                    if (selectedLatency != null) {
+                        Spacer(Modifier.width(6.dp))
+                        LatencyBadge(selectedLatency)
+                    }
                 }
-                if (fastest?.latencyMs != null) {
-                    LatencyBadge(fastest.latencyMs)
-                    Spacer(Modifier.width(4.dp))
+                // The fastest mirror is advertised only when it is NOT the
+                // current selection, and it is named — plus an explicit switch,
+                // because the speed test deliberately does not re-point a
+                // hand-picked mirror on its own.
+                if (suggestion != null && suggestionLatency != null) {
+                    if (active && selected != null) Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(
+                            R.string.mirror_fastest_hint,
+                            suggestion.mirror.name,
+                            suggestionLatency,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    TextButton(onClick = { vm.selectMirror(context, suggestion.mirror) }) {
+                        Text(stringResource(R.string.mirror_switch_to_fastest))
+                    }
                 }
                 Icon(
                     Icons.AutoMirrored.Filled.KeyboardArrowRight,
