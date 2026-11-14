@@ -104,13 +104,26 @@ class TerminalClipboardWiringTest {
             readSig.contains("runCatching"),
         )
 
-        val writeHead = braceBlockAfter(src, "private fun writeClipboardText(")
-            .let { it.substring(1, minOf(it.length, 120)) }
+        val writeBlock = braceBlockAfter(src, "private fun writeClipboardText(")
+        // [fix/fold-paste-split-1114][F7] A size cap now precedes the write, so
+        // `runCatching` is no longer the FIRST statement. What must hold is that
+        // the setPrimaryClip call is inside runCatching — otherwise a failure
+        // propagates into the Termux callback (the original hazard).
+        val writeHead = writeBlock.let { it.substring(1, minOf(it.length, 400)) }
         assertTrue(
-            "writeClipboardText's first statement is no longer runCatching — a " +
-                "setPrimaryClip failure would propagate into the Termux callback. " +
-                "Body started with:\n${writeHead.trimIndent()}",
+            "writeClipboardText must bound the payload before the Binder " +
+                "transaction; body started with:\n${writeHead.trimIndent()}",
+            writeHead.contains("CLIPBOARD_MAX_CHARS"),
+        )
+        assertTrue(
+            "setPrimaryClip is no longer inside runCatching — a failure would " +
+                "propagate into the Termux callback and can take down the " +
+                "terminal session. Body started with:\n${writeHead.trimIndent()}",
             writeHead.contains("runCatching"),
+        )
+        assertTrue(
+            "the setPrimaryClip call itself must sit inside the runCatching block",
+            writeBlock.indexOf("runCatching") in 0 until writeBlock.indexOf("setPrimaryClip"),
         )
     }
 

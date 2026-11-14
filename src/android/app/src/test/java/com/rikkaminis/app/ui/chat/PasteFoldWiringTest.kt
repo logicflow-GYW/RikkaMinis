@@ -144,10 +144,15 @@ class PasteFoldWiringTest {
 
     @Test
     fun `sendMessage expands before anything else reads the text`() {
-        val body = blockAfter(viewModel, "fun sendMessage(rawText: String)")
+        val body = blockAfter(viewModel, "fun sendMessage(rawText: String")
         assertTrue(
             "expansion must be the FIRST transform — it happens INSIDE the sanitize call, so " +
                 "the folded block is sanitized too",
+            // [fix/fold-paste-split-1114] The composer passes the pasted block's
+            // offset alongside the text, and sendMessage derives the final
+            // boundary from the sanitized result. The invariant under test is
+            // unchanged: the expansion happens INSIDE the sanitize call, so the
+            // folded block is sanitized too.
             body.contains("Utf16Sanitizer.sanitize(expandPastedText(rawText))"),
         )
         val expand = body.indexOf("expandPastedText(rawText)")
@@ -158,7 +163,11 @@ class PasteFoldWiringTest {
 
     @Test
     fun `the expansion consumes exactly the entries it expanded`() {
-        val body = blockAfter(viewModel, "internal fun expandPastedText(raw: String)")
+        // [fix/fold-paste-split-1114] The body moved into
+        // `expandPastedTextWithSplit` (the plain one is now a one-line wrapper
+        // that drops the offset), so the anchor follows it. Every invariant below
+        // is unchanged.
+        val body = blockAfter(viewModel, "internal fun expandPastedTextWithSplit(raw: String)")
         assertTrue(body.contains("expandPastePlaceholders(raw, buffer)"))
         assertTrue(
             "consumed ids must be dropped from the buffer",
@@ -166,8 +175,8 @@ class PasteFoldWiringTest {
         )
         assertTrue(
             "the no-marker and no-detached-block fast paths must not touch the buffer",
-            body.contains("if (buffer.isEmpty()) return raw") &&
-                body.contains("if (consumed.isEmpty() && detachedIds.isEmpty()) return raw"),
+            body.contains("if (buffer.isEmpty()) return ExpandedPaste(raw, null)") &&
+                body.contains("if (consumed.isEmpty() && detachedIds.isEmpty()) return ExpandedPaste(raw, null)"),
         )
     }
 
@@ -206,7 +215,9 @@ class PasteFoldWiringTest {
             "val performEnterSend: () -> Boolean = handler@{" to "Enter funnel",
         )) {
             val body = blockAfter(inputArea, marker)
-            val expand = body.indexOf("viewModel.expandPastedText(")
+            // [fix/fold-paste-split-1114] The funnels call the split-aware
+            // variant so the bubble keeps the prompt outside the fold.
+            val expand = body.indexOf("viewModel.expandPastedTextWithSplit(")
             val send = body.indexOf("viewModel.sendMessage(")
             assertTrue("$label must expand the folded blocks", expand >= 0)
             assertTrue("$label must still call sendMessage", send >= 0)
@@ -222,7 +233,9 @@ class PasteFoldWiringTest {
             assertTrue(
                 "$label: the expanded string must be what gets sent, never the raw " +
                     "marker text",
-                body.substring(send).startsWith("viewModel.sendMessage(expandedToSend)"),
+                // [fix/fold-paste-split-1114] The offset rides along as the
+                // second argument; the TEXT sent must still be the expanded one.
+                body.substring(send).startsWith("viewModel.sendMessage(expandedToSend"),
             )
         }
         // The clearing entrances that are NOT sends keep the drop: a detached

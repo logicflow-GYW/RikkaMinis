@@ -131,44 +131,79 @@ class PasteTextBufferTest {
     // ── foldLongPasteIfNeeded ────────────────────────────────────────────────
 
     @Test
-    fun `a long insertion at the end becomes one marker with the caret after it`() {
+    fun `a long insertion at the end stays out of the field`() {
+        // [fix/fold-paste-split-1114] This used to mint a `[Pasted#1]` literal
+        // whenever the field was non-empty. The user's report: paste first and
+        // nothing appears, type first and `[Pasted#1]` appears — the same
+        // gesture looked like two different apps, and what appeared was machine
+        // bookkeeping inside the user's own sentence.
+        //
+        // The literal also promised something the pipeline never honoured: it
+        // marked a POSITION, but the block is always appended after the typed
+        // body at send time. The caret position it used to remember now rides
+        // on the persisted `pasteStart` offset instead.
         val (mint, stored) = sequentialStash()
         val block = cjkChars(1300)
         val out = fold("look at this", "look at this" + block, mint)
 
         assertEquals(1, stored.size)
         assertEquals(block, stored[0])
-        assertEquals("look at this[Pasted#1]", out.text)
-        assertEquals(TextRange("look at this[Pasted#1]".length), out.selection)
+        assertEquals(
+            "the composer must keep the typed text and show no marker",
+            "look at this",
+            out.text,
+        )
+        assertEquals(
+            "the caret stays where the user left it",
+            TextRange("look at this".length),
+            out.selection,
+        )
     }
 
     @Test
-    fun `an insertion in the middle keeps both runs and only replaces the block`() {
+    fun `an insertion in the middle is detached like any other paste`() {
+        // [fix/fold-paste-split-1114] A mid-sentence paste is the case the old
+        // inline literal was supposed to serve, and it is exactly the case the
+        // pipeline could not honour: the block is appended after the body at send
+        // time, so the marker's position was decorative. Detached everywhere is
+        // the honest form — the field keeps what the user typed, the chip row
+        // holds the material.
         val (mint, stored) = sequentialStash()
         val block = englishWords(1200)
         val out = fold("HEAD|TAIL", "HEAD" + block + "|TAIL", mint)
 
-        assertEquals("HEAD[Pasted#1]|TAIL", out.text)
-        assertEquals(TextRange("HEAD[Pasted#1]".length), out.selection)
+        assertEquals("HEAD|TAIL", out.text)
+        assertEquals(TextRange("HEAD".length), out.selection)
         assertEquals(block, stored.single())
     }
 
     @Test
-    fun `pasting over a selection folds the replacement and keeps both neighbours`() {
+    fun `pasting over a selection keeps the neighbours and shows no marker`() {
         // old "A<selected>B" → new "A<block>B": the prefix is "A", the suffix is
         // "B", and the selected text is gone from both ends at once.
-        val (mint, _) = sequentialStash()
+        //
+        // [fix/fold-paste-split-1114] Detached: the field keeps "AB" (the
+        // selection is deleted, because the user did ask to replace it) and the
+        // block goes to the chip row under the caret's own position.
+        val (mint, stored) = sequentialStash()
         val out = fold("AselectedB", "A" + cjkChars(1500) + "B", mint)
-        assertEquals("A[Pasted#1]B", out.text)
+        assertEquals("AB", out.text)
+        assertEquals(cjkChars(1500), stored.single())
     }
 
     @Test
-    fun `two pastes mint increasing ids and never touch the first marker`() {
+    fun `two pastes mint increasing ids and keep the field clean`() {
+        // [fix/fold-paste-split-1114] The ids still matter — they key the chip
+        // row and the send-time expansion — but they no longer appear in the
+        // field. Asserting on `stored` (the ids actually minted) instead of on
+        // the field text is stricter than the old version: it checks the ids are
+        // distinct and ordered without depending on a literal that no longer
+        // exists.
         val (mint, stored) = sequentialStash()
         val first = fold("note: ", "note: " + cjkChars(1300), mint)
-        assertEquals("note: [Pasted#1]", first.text)
-        val second = fold(first.text + " and ", first.text + " and " + cjkChars(1400), mint)
-        assertEquals("note: [Pasted#1] and [Pasted#2]", second.text)
+        assertEquals("note: ", first.text)
+        val second = fold("note: and ", "note: and " + cjkChars(1400), mint)
+        assertEquals("note: and ", second.text)
         assertEquals(2, stored.size)
         assertTrue(stored[0].length < stored[1].length)
     }
@@ -187,13 +222,25 @@ class PasteTextBufferTest {
     }
 
     @Test
-    fun `a detached paste is only allowed when the field was empty`() {
-        // Same block, one character of draft: the literal comes back, because
-        // now the caret position is something the user chose.
+    fun `a paste is detached whether or not the field was empty`() {
+        // [fix/fold-paste-split-1114] The asymmetry was the user's first
+        // complaint: empty field → nothing appears, non-empty field →
+        // `[Pasted#1]` appears. One gesture must look like one behaviour.
         val (mint, stored) = sequentialStash()
-        val out = fold("x", "x" + cjkChars(1300), mint)
-        assertEquals("x[Pasted#1]", out.text)
+        val block = cjkChars(1300)
+        val withDraft = fold("x", "x" + block, mint)
+        assertEquals("x", withDraft.text)
         assertEquals(1, stored.size)
+
+        val (mint2, stored2) = sequentialStash()
+        val empty = fold("", block, mint2)
+        assertEquals("", empty.text)
+        assertEquals(1, stored2.size)
+        assertEquals(
+            "both arms must store the same block",
+            stored[0],
+            stored2[0],
+        )
     }
 
     @Test
@@ -242,22 +289,30 @@ class PasteTextBufferTest {
 
     @Test
     fun `folding between two astral characters cannot split a surrogate pair`() {
+        // [fix/fold-paste-split-1114] The boundary moved: it used to be the
+        // marker literal, now it is the deleted insertion span. The UTF-16
+        // hazard is the same one — the span between the common prefix and the
+        // common suffix must land on code-point boundaries, or the fold splits
+        // an emoji in half and the field shows a replacement glyph.
         val (mint, stored) = sequentialStash()
         val prefix = "😀😀"
         val suffix = "🎉🎉"
         val block = cjkChars(1300)
         val out = fold(prefix + suffix, prefix + block + suffix, mint)
 
-        assertEquals("$prefix[Pasted#1]$suffix", out.text)
+        assertEquals("the typed text survives, minus the inserted block", prefix + suffix, out.text)
         assertEquals(block, stored.single())
-        // Caret is an index in the SAME space the marker ends at (UTF-16 units).
-        val caret = out.selection.start
-        assertEquals(prefix.length + "[Pasted#1]".length, caret)
         assertNoLoneSurrogate(out.text, "folded text")
-        // And the boundary really is a boundary: everything before the marker is
-        // exactly the prefix, in whole code units — no half of an emoji leaks
-        // into the marker.
-        assertEquals(prefix, out.text.substring(0, caret - "[Pasted#1]".length))
+        // The caret lands at the END of the deleted span, measured in UTF-16
+        // units — the same space the old marker-boundary assertion used.
+        val caret = out.selection.start
+        assertEquals(prefix.length, caret)
+        assertEquals(
+            "everything before the caret must be exactly the prefix, in whole " +
+                "code units — no half of an emoji may be left behind",
+            prefix,
+            out.text.substring(0, caret),
+        )
     }
 
     @Test
