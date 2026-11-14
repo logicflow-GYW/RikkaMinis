@@ -8,7 +8,7 @@
 | 提交数 | 8（U-04+U-05 合一条，U-13+U-14 合一条，其余一条一个 ID） |
 | diff | 26 文件 / **+1289 −70**（main 12 / test 5 / res 7 语言 / 报告） |
 | 门改动 | **0**（本支禁碰 `scripts/scan/**`，未碰） |
-| 状态 | **分支 CI 绿**（run `43535603191`，head_sha 与 tip 逐字符一致）；**未合并 main、未 rebase** |
+| 状态 | **分支 CI 绿**（run `43537882646`，head_sha 与代码 tip `49350e0` 逐字符一致；本报告为之后的纯文档提交）；**未合并 main、未 rebase** |
 
 ---
 
@@ -255,11 +255,12 @@ values-ru      keys=1651 diff=[]
 ```
 （key 集合逐语言完全一致；`i18n_check` ALL CLEAN，无 orphan。）
 
-### 2.7 云端 CI（run `43535603191`，event = workflow_dispatch）
+### 2.7 云端 CI（run `43537882646`，event = workflow_dispatch）
 
-`head_sha = bbb50611c2d757f3710be1ea3239a7aa64c0fe03`，与本地 `git rev-parse HEAD` **逐字符一致**；五 job 全 `success`。
+`head_sha = 49350e0b852ec4eaeed8e136a474d5793f38543d`，与本地 `git rev-parse HEAD` **逐字符一致**；五 job 全 `success`。
+（同 sha 的另一次 dispatch `43537178876` 被并发策略 `cancelled`，与结论无关。）
 
-**scan-gate**（job `132263734690`）：
+**scan-gate**（job `132271294106`）：
 ```
 Summary: 115 passed, 0 failed
 ##[notice]scanners moved in this push (or the diff was unreadable) — running the fixture self-test
@@ -270,7 +271,7 @@ ALL 356 CASES PASS
 本批锚定的 19 个门在 CI 日志里**逐条按编号找到并确认有 OK/PASS 输出**：
 `[96] backup streaming export` · `[81] mirror vm thread/state` · `[69] mirror category detail route wiring` · `[71] skill file save result + IO dispatch` · `[92] skill import off-main` · `[91] skill frontmatter roundtrip` · `[28] Scheduled-task store release guard` · `[42] Schedule date source guard` · `[66] filepreview print bounded read` · `[104] provider_remember_key_check` · `[49] backup remap + rollup` · `[20] Discarded-return guard` · `[103] envvar_config_group_check` · `[98] MCP OAuth lifecycle` · `[79] openminis compat field parity` · `[57] parts_json funnel` · `[68] provider import id + backup field parity` · `[55] provider customUserAgent parity` · `[2] i18n consistency check`（`✅ No orphan keys (1640 refs, 1653 defs)`）。
 
-**unit-tests**（job `132263734415`）：`BUILD SUCCESSFUL in 1m 16s`，**9139 条用例，0 条 FAILED**（6 行含 `FAILED` 的全是用例名子串，如 `reason PERSISTENCE_FAILED maps to persistence_failed PASSED` —— 判读陷阱第 N 次复核）。
+**unit-tests**（job `132271293701`）：`BUILD SUCCESSFUL in 1m 41s`，**9139 条用例，0 条 FAILED**（6 行含 `FAILED` 的全是用例名子串，如 `reason PERSISTENCE_FAILED maps to persistence_failed PASSED` —— 判读陷阱第 N 次复核）。
 
 本批 4 个新测试类 **22 条用例逐条在册 PASSED**：
 ```
