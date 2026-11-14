@@ -61,8 +61,10 @@ import java.io.File
  * explicit user opt-in per session view.
  */
 
-internal const val LARGE_MESSAGE_THRESHOLD_CHARS = 32_000
-internal const val LARGE_MESSAGE_PREVIEW_CHARS = 8_000
+// [fix/user-msg-fold-1114] `LARGE_MESSAGE_THRESHOLD_CHARS` /
+// `LARGE_MESSAGE_PREVIEW_CHARS` moved to MessageFoldPolicy.kt so the fold policy
+// (both families) is plain Kotlin that a JVM test can compile in isolation.
+// Same package — the references below resolve unchanged.
 
 /**
  * [T-android-streaming-regex-hang] Above this live-buffer size, an actively
@@ -80,14 +82,22 @@ internal const val STREAM_DEGRADE_CHARS = 8_000
  * Streaming content always renders inline (guard is bypassed) to avoid the
  * threshold flicker described above.
  */
-internal fun shouldCollapse(content: String, isStreaming: Boolean): Boolean =
-    !isStreaming && content.length > LARGE_MESSAGE_THRESHOLD_CHARS
+internal fun shouldCollapse(
+    content: String,
+    isStreaming: Boolean,
+    thresholdChars: Int = LARGE_MESSAGE_THRESHOLD_CHARS,
+): Boolean = shouldCollapseMessage(
+    contentLength = content.length,
+    isStreaming = isStreaming,
+    thresholdChars = thresholdChars,
+)
 
 @Composable
 internal fun LargeContentBadge(
     content: String,
     stableKey: String,
     onExpand: () -> Unit,
+    previewChars: Int = LARGE_MESSAGE_PREVIEW_CHARS,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -109,9 +119,11 @@ internal fun LargeContentBadge(
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // Preview lines — plain Text, not markdown. Capped at LARGE_MESSAGE_PREVIEW_CHARS.
-        val preview = remember(content) {
-            content.take(LARGE_MESSAGE_PREVIEW_CHARS) + if (content.length > LARGE_MESSAGE_PREVIEW_CHARS) "…" else ""
+        // Preview lines — plain Text, not markdown. Capped at [previewChars]
+        // (the assistant default is 8K; USER bubbles pass a much shorter one —
+        // see MessageFoldPolicy.kt).
+        val preview = remember(content, previewChars) {
+            content.take(previewChars) + if (content.length > previewChars) "…" else ""
         }
         Text(
             text = preview,
@@ -200,6 +212,12 @@ internal fun LargeContentBadge(
  * @param stableKey   Used to scope the expand-state to a particular block. The
  *                    caller supplies messageId+blockId so two large messages
  *                    don't share expand-state across recompositions.
+ * @param collapseThresholdChars  Frozen bodies longer than this fold behind the
+ *                    badge. Defaults to [LARGE_MESSAGE_THRESHOLD_CHARS] (the
+ *                    assistant render-cost floor); USER bubbles pass
+ *                    [USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS] so an ordinary
+ *                    long paste is readable as "folded", not as a wall of text.
+ * @param previewChars  How many leading chars the folded badge shows.
  * @param renderer    The actual body composable; called when content is small
  *                    or after user explicitly expands.
  */
@@ -208,6 +226,8 @@ internal fun LargeContentGuard(
     content: String,
     isStreaming: Boolean,
     stableKey: String,
+    collapseThresholdChars: Int = LARGE_MESSAGE_THRESHOLD_CHARS,
+    previewChars: Int = LARGE_MESSAGE_PREVIEW_CHARS,
     renderer: @Composable () -> Unit,
 ) {
     // [T-android-streaming-regex-hang] Proactive streaming degrade. While a
@@ -266,7 +286,7 @@ internal fun LargeContentGuard(
             return
         }
     }
-    if (!shouldCollapse(content, isStreaming)) {
+    if (!shouldCollapse(content, isStreaming, collapseThresholdChars)) {
         // [T-android-content-perf-diag] Stream-end swap: a block that streamed
         // degraded now renders full markdown ONCE. Log its shape so we know what
         // the deferred render is about to parse (the thing the degrade was
@@ -329,7 +349,7 @@ internal fun LargeContentGuard(
     LaunchedEffect(stableKey) {
         AppLogger.info(
             "LargeContentGuard",
-            "collapse key=$stableKey chars=${content.length} threshold=$LARGE_MESSAGE_THRESHOLD_CHARS",
+            "collapse key=$stableKey chars=${content.length} threshold=$collapseThresholdChars",
         )
     }
 
@@ -340,6 +360,7 @@ internal fun LargeContentGuard(
             content = content,
             stableKey = stableKey,
             onExpand = { expanded = true },
+            previewChars = previewChars,
         )
     }
 }
