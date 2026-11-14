@@ -40,7 +40,7 @@ class ModelExecutionRetryTest {
             assertEquals(
                 "$code after one attempt must retry once, 500ms later",
                 ModelExecutionRetryPolicy.Decision.RetryAfter(500L),
-                ModelExecutionRetryPolicy.decide(1, code, workerDied = false),
+                ModelExecutionRetryPolicy.decide(1, code, workerDied = false, workerDeathAttempts = 0),
             )
         }
     }
@@ -55,7 +55,7 @@ class ModelExecutionRetryTest {
             assertEquals(
                 "$code must give up on the first attempt",
                 ModelExecutionRetryPolicy.Decision.GiveUp,
-                ModelExecutionRetryPolicy.decide(1, code, workerDied = false),
+                ModelExecutionRetryPolicy.decide(1, code, workerDied = false, workerDeathAttempts = 0),
             )
         }
     }
@@ -65,12 +65,12 @@ class ModelExecutionRetryTest {
         val code = "stale_key_cache"
         assertEquals(
             ModelExecutionRetryPolicy.Decision.RetryAfter(500L),
-            ModelExecutionRetryPolicy.decide(2, code, workerDied = false),
+            ModelExecutionRetryPolicy.decide(2, code, workerDied = false, workerDeathAttempts = 0),
         )
         assertEquals(
             "3 dispatches is the cap (initial + 2)",
             ModelExecutionRetryPolicy.Decision.GiveUp,
-            ModelExecutionRetryPolicy.decide(3, code, workerDied = false),
+            ModelExecutionRetryPolicy.decide(3, code, workerDied = false, workerDeathAttempts = 0),
         )
     }
 
@@ -78,11 +78,11 @@ class ModelExecutionRetryTest {
     fun `a confirmed worker death keeps its historical single immediate retry`() {
         assertEquals(
             ModelExecutionRetryPolicy.Decision.RetryAfter(0L),
-            ModelExecutionRetryPolicy.decide(1, errorCode = null, workerDied = true),
+            ModelExecutionRetryPolicy.decide(1, errorCode = null, workerDied = true, workerDeathAttempts = 1),
         )
         assertEquals(
             ModelExecutionRetryPolicy.Decision.GiveUp,
-            ModelExecutionRetryPolicy.decide(2, errorCode = null, workerDied = true),
+            ModelExecutionRetryPolicy.decide(2, errorCode = null, workerDied = true, workerDeathAttempts = 2),
         )
     }
 
@@ -94,7 +94,7 @@ class ModelExecutionRetryTest {
         // `fix/audit-s3l2` comment exists.
         assertEquals(
             ModelExecutionRetryPolicy.Decision.GiveUp,
-            ModelExecutionRetryPolicy.decide(1, errorCode = null, workerDied = false),
+            ModelExecutionRetryPolicy.decide(1, errorCode = null, workerDied = false, workerDeathAttempts = 0),
         )
     }
 

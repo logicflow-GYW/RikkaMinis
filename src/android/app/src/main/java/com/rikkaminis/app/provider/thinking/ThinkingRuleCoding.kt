@@ -128,10 +128,19 @@ object ThinkingRuleCoding {
         if (json.isNullOrBlank()) return null
         return try {
             val o = JSONObject(json)
+            // [R8-B B-F05 ①] `timing` is the whole point of the policy, so a
+            // missing / misspelled / renamed-by-a-newer-build value must NOT be
+            // silently upgraded to the most aggressive tier. It used to default
+            // to EVERY_TURN, which turned corrupt JSON into "echo on every turn"
+            // for arbitrary gateways — the opposite of fail-closed. Now the
+            // field has no opinion ⇒ the whole policy is null ⇒ the legacy gate
+            // decides, byte for byte as before this policy existed.
+            val timing = ReasoningEchoPolicy.Timing.entries
+                .firstOrNull { it.name == o.optString("timing") }
+                ?: return null
             ReasoningEchoPolicy(
                 fieldName = o.optString("fieldName", "reasoning_content"),
-                timing = runCatching { ReasoningEchoPolicy.Timing.valueOf(o.optString("timing")) }
-                    .getOrDefault(ReasoningEchoPolicy.Timing.EVERY_TURN),
+                timing = timing,
             )
         } catch (_: Exception) {
             null

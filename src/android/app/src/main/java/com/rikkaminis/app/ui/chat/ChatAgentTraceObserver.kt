@@ -116,12 +116,17 @@ internal class ChatAgentTraceObserver(
     /**
      * T7-D: 把 AgentRun 事件发给 T5 状态机（旁路验证）。reducer 拒绝时只
      * 记录日志，不改生产行为；无活跃 run 时 no-op。
+     *
+     * Returns the transition so [t7EndRun] can see whether its own
+     * `RunFinalized` was refused (R8-B C-04) without re-running the reducer.
+     * Callers that only care about the side effect keep ignoring the value.
      */
-    internal fun t7Reduce(event: AgentRunEvent) {
-        val state = t7ReducerState ?: return
-        when (val r = AgentRunReducer.reduce(state, event)) {
+    internal fun t7Reduce(event: AgentRunEvent): AgentRunTransition? {
+        val state = t7ReducerState ?: return null
+        return when (val r = AgentRunReducer.reduce(state, event)) {
             is AgentRunTransition.Accepted -> {
                 if (r.changed) t7ReducerState = r.state
+                r
             }
             is AgentRunTransition.Rejected -> {
                 // [SYMPTOM-A F-A2a] Say what this actually is: a SHADOW reducer
@@ -143,6 +148,7 @@ internal class ChatAgentTraceObserver(
                     "T7-D shadow reducer declined ${event.traceName()} (non-controlling; " +
                         "no state or control-flow change): ${r.rejection.message}",
                 )
+                r
             }
         }
     }
@@ -355,12 +361,43 @@ internal class ChatAgentTraceObserver(
             }
         }
         // T7-D: 终态 reducer —— RunFinalized 只产生一次终态（reducer 幂等保护）
-        t7Reduce(
+        //
+        // [R8-B C-04] The trace must not stamp a terminal the state machine
+        // REFUSED. `terminal` comes from AgentLoopExitDecision (the loop's own
+        // verdict), while the reducer knows things the loop does not: an
+        // outcome-unknown tool result or a required persistence failure makes
+        // SUCCEEDED illegal (SUCCEED_WITH_UNKNOWN_TOOL /
+        // SUCCEED_WITH_PERSISTENCE_FAILURE). Until this check the rejection was
+        // logged and the trace file still said `"terminal_state":"Succeeded"` —
+        // the one artifact an auditor reads was contradicting the invariant.
+        //
+        // SCOPE: trace output only. The run has already finished; `terminal`, the
+        // returned value, the loop's control flow and the reducer's own state are
+        // all untouched — we merely record what the state machine actually
+        // accepted. When no reducer state exists (JVM/no-run path) the loop's
+        // verdict is the only evidence there is and is written as-is.
+        val finalizeTransition = t7Reduce(
             AgentRunEvent.RunFinalized(
                 terminal = terminal,
                 reason = reason,
             )
         )
+        val refusal = finalizeTransition as? AgentRunTransition.Rejected
+        val recorded = if (refusal != null) downgradedTerminal(terminal) else terminal
+        val recordedReason = if (refusal != null) {
+            AgentTerminalReason.EXECUTION_FAILED
+        } else {
+            reason
+        }
+        val recordedError = if (refusal != null) {
+            listOfNotNull(
+                error,
+                "trace terminal downgraded from ${t7TerminalSchema(terminal)}: " +
+                    refusal.rejection.message,
+            ).joinToString(" | ")
+        } else {
+            error
+        }
         runCatching {
             // T7-B: session slot lease 释放 —— 任何终态路径都在这里 release，
             // 与 runAgentLoop 入口的 acquire 配对（lease 平衡可被审计）。
@@ -379,8 +416,8 @@ internal class ChatAgentTraceObserver(
             }
             val snap = budget?.snapshot()
             agentTraceRecorder.endRun(
-                terminalState = t7TerminalSchema(terminal),
-                terminalReason = t7TerminalReasonSchema(reason),
+                terminalState = t7TerminalSchema(recorded),
+                terminalReason = t7TerminalReasonSchema(recordedReason),
                 durationMs = durationMs,
                 totalProviderAttempts = snap?.providerAttemptsUsed,
                 totalToolCalls = snap?.toolCallsUsed,
@@ -388,7 +425,7 @@ internal class ChatAgentTraceObserver(
                 totalCompactions = snap?.compactionCallsUsed,
                 budgetFinalJson = snap?.let { t7BudgetSnapshotJson(it) },
                 leasesRemaining = 0,
-                error = error,
+                error = recordedError,
             )
         }
         activeRunBudget = null
@@ -507,6 +544,17 @@ internal class ChatAgentTraceObserver(
             AgentTerminal.CANCELLED -> "Cancelled"
             AgentTerminal.INTERRUPTED -> "Interrupted"
         }
+
+        /**
+         * [R8-B C-04] The terminal to RECORD when the state machine refused the
+         * loop's verdict. `SUCCEEDED` is the only verdict the reducer can refuse
+         * while still being "a run that ended" (the other three are always
+         * accepted), so it degrades to `FAILED` — "it did not succeed" is the
+         * fact, and `FAILED` keeps it distinct from the `INTERRUPTED` that means
+         * "we cannot prove what happened". Anything else is left alone.
+         */
+        internal fun downgradedTerminal(terminal: AgentTerminal): AgentTerminal =
+            if (terminal == AgentTerminal.SUCCEEDED) AgentTerminal.FAILED else terminal
 
         /**
          * T7-A: 把 [AgentTerminalReason] 映射为 trace schema v2 的

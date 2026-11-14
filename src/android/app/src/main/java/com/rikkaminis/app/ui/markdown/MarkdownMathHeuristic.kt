@@ -49,6 +49,17 @@ internal object MarkdownMathHeuristic {
     )
 
     /**
+     * [R8-B B-F09] A `$ … $` content with this many ASCII-letter words, at
+     * least one of them this long, is prose. Two constants instead of one
+     * because either signal alone misfires: three single letters (`x + y`) is
+     * math, and one long word (`\alpha` without the backslash, `price`) can be
+     * either. Together they describe "an ordinary sentence" and nothing a
+     * formula writes.
+     */
+    private const val NATURAL_LANGUAGE_MIN_WORDS = 3
+    private const val NATURAL_LANGUAGE_MIN_WORD_LENGTH = 3
+
+    /**
      * Currency-skip heuristic: `$5` / `$10.99` should stay plain text. Treat the
      * `$ … $` content as math only if it has a math-ish character
      * (`\ ^ _ { }` / common big-symbol unicode) or is longer than 2 chars (so
@@ -80,6 +91,14 @@ internal object MarkdownMathHeuristic {
         // accepted the trailing `-`/`+` — both `$` were consumed and `5k-` went
         // to KaTeX. Ruled out BEFORE that scan, same as the digit-only forms.
         if (isCurrencyRangeShaped(content)) return false
+        // [R8-B B-F09] Natural-language prose is not a formula, and it must be
+        // ruled out BEFORE the glyph scan: `$50 for a 3-day pass or $100` pairs
+        // (the streaming close rule allows a space before the closing `$`) into
+        // `50 for a 3-day pass or `, whose `-` is in [MATH_GLYPHS] — so the
+        // sentence rendered as KaTeX and both `$` vanished. Neither currency net
+        // can see it: [isCurrencyShaped] demands "no letter at all" and
+        // [isCurrencyRangeShaped] demands "no spaces", and this is English.
+        if (looksLikeNaturalLanguage(content)) return false
         // T208 Layer B: previous heuristic rejected single-letter math like
         // `$c$` or `$i$` — `length > 2` returned false and the literal
         // dollar-wrapped text leaked into the rendered output. Any of:
@@ -104,6 +123,50 @@ internal object MarkdownMathHeuristic {
         if (content.length <= 30 && content.all { it.isLetterOrDigit() }) return true
         return content.length > 2
     }
+
+    /**
+     * [R8-B B-F09] "This content is a sentence, not a formula."
+     *
+     * A `$ … $` pair whose content is several whitespace-separated words of
+     * ordinary prose is never math, whatever glyphs it happens to contain:
+     * `50 for a 3-day pass or ` has a `-` but is English. The rule is
+     * deliberately narrow so it cannot eat real math:
+     *
+     *  - content containing `\` is LaTeX structure → NEVER natural language
+     *    (`\frac{1}{2}`, `\pi r^2`); checked first, so LaTeX always wins;
+     *  - need at least [NATURAL_LANGUAGE_MIN_WORDS] word tokens, where a word is
+     *    a run of ASCII letters (so `x + y` = 3 one-letter words would qualify…
+     *    hence the next bullet);
+     *  - at least one word must be [NATURAL_LANGUAGE_MIN_WORD_LENGTH] letters or
+     *    longer — a real formula's "words" are single variables (`x`, `pi`),
+     *    while prose always carries an ordinary word (`for`, `pass`, `day`).
+     *
+     * The two together keep `$x - y$`, `$x+y$`, `$1+1=2$`, `$x^2$` and
+     * `$\frac{1}{2}$` classified as math (they fail the word-count or the
+     * long-word test) while every multi-word English/Chinese-free sentence is
+     * rejected. Chinese prose has no spaces and is already excluded by the
+     * single-token path below (it is not ASCII letters).
+     */
+    private fun looksLikeNaturalLanguage(content: String): Boolean {
+        if (content.indexOf('\\') >= 0) return false
+        var words = 0
+        var hasLongWord = false
+        var i = 0
+        while (i < content.length) {
+            if (!content[i].isAsciiLetter()) {
+                i++
+                continue
+            }
+            var j = i
+            while (j < content.length && content[j].isAsciiLetter()) j++
+            words++
+            if (j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH) hasLongWord = true
+            i = j
+        }
+        return words >= NATURAL_LANGUAGE_MIN_WORDS && hasLongWord
+    }
+
+    private fun Char.isAsciiLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'
 
     /**
      * [r3-c / B09 F-13] "This `$ … $` span is money, not a formula": the content

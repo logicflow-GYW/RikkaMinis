@@ -104,10 +104,21 @@ class FileMentionIndex(
         val fresh = now - lastScanAt < cacheTtlMs
         if (sameSession && fresh && _entries.value.isNotEmpty()) return
 
+        if (!sameSession) {
+            // The old session's paths must disappear synchronously when the
+            // menu switches sessions; the replacement scan publishes in stages.
+            _entries.value = emptyList()
+        }
         lastScanSessionId = sessionId
         lastScanAt = now
         val token = UUID.randomUUID()
+        // [R8-1114 A-F03] Claim the flag SYNCHRONOUSLY, after minting the token
+        // and before the launch: the release side (`scan`'s finally) proves
+        // ownership by comparing that token, so the marker it compares has to
+        // be published before the flip — otherwise a cancelled predecessor's
+        // teardown lands inside the new claim's window and clears it.
         currentScanToken = token
+        _isScanning.value = true
         currentJob?.cancel()
         currentJob = scope.launch { scan(sessionId, token) }
     }
@@ -119,7 +130,8 @@ class FileMentionIndex(
     }
 
     private suspend fun scan(sessionId: String, token: UUID) {
-        _isScanning.value = true
+        // The claim (`_isScanning = true`) is taken by refreshIfNeeded BEFORE the
+        // launch, next to the token mint; this body only releases it.
         val collected = mutableListOf<Entry>()
         try {
             // Layer 1: session-local roots. [fix/sweep1014-b8] The per-session
@@ -191,7 +203,7 @@ class FileMentionIndex(
                 publish(token, collected)
             }
         } finally {
-            _isScanning.value = false
+            if (currentScanToken == token) _isScanning.value = false
         }
     }
 

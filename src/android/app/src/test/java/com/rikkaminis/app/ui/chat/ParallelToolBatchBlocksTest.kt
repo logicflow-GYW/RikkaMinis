@@ -96,6 +96,47 @@ class ParallelToolBatchBlocksTest {
         assertEquals("from-2", shared[1].content)
     }
 
+    // ── [r8-C-F03] a structural edit must not shift a sibling's write ───────
+
+    /**
+     * The baseline was read by POSITION (`baseline.getOrNull(i)`) while the
+     * write target was read by ID. As soon as one call inserted a block, every
+     * later block in that copy compared unequal to the wrong baseline entry —
+     * so an untouched block looked "edited" and its stale value was written
+     * back over a sibling's real edit.
+     */
+    @Test
+    fun `a call that inserts a block cannot roll a sibling's edit back`() {
+        val ids = listOf("t1", "t2", "t3")
+        val shared = fresh(ids)
+        val baseline = ParallelToolBatchBlocks.snapshot(shared)
+        val callOne = ParallelToolBatchBlocks.forkForCall(baseline)
+        val callTwo = ParallelToolBatchBlocks.forkForCall(baseline)
+        writerTick(callOne, "t2", "from-1")
+        callTwo.add(0, block("tX", "invented"))
+        writerTick(callTwo, "t3", "from-2")
+        ParallelToolBatchBlocks.mergeBack(shared, baseline, listOf(callOne, callTwo))
+        // callTwo never touched t2; its copy carries t2's pre-edit value, and
+        // that value must not undo callOne's edit.
+        assertEquals("from-1", shared[1].content)
+        assertEquals("from-2", shared[2].content)
+    }
+
+    @Test
+    fun `a call that removes a block cannot roll a sibling's edit back`() {
+        val ids = listOf("t1", "t2", "t3")
+        val shared = fresh(ids)
+        val baseline = ParallelToolBatchBlocks.snapshot(shared)
+        val callOne = ParallelToolBatchBlocks.forkForCall(baseline)
+        val callTwo = ParallelToolBatchBlocks.forkForCall(baseline)
+        writerTick(callOne, "t2", "from-1")
+        callTwo.removeAll { it.id == "t1" }
+        writerTick(callTwo, "t3", "from-2")
+        ParallelToolBatchBlocks.mergeBack(shared, baseline, listOf(callOne, callTwo))
+        assertEquals("from-1", shared[1].content)
+        assertEquals("from-2", shared[2].content)
+    }
+
     @Test
     fun `mergeBack is order preserving on a contended block`() {
         val shared = fresh(listOf("t1"))

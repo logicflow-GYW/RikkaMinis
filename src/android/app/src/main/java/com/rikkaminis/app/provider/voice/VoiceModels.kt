@@ -69,19 +69,31 @@ sealed class VoiceProviderException(message: String) : Exception(message) {
             return "Request failed (HTTP $code)"
         }
 
-        /** Best-effort extraction of an API error message from a JSON/text body. */
+        /**
+         * Best-effort extraction of an API error message from a JSON/text body.
+         *
+         * [R8-B B-F14] `optString("error")` on an OBJECT returns its
+         * `toString()` — the whole JSON body — so `{"error":{"code":1}}` used to
+         * surface as `Request failed (HTTP 500): {"code":1}`, unreadable and it
+         * shadowed the `message` fallback. Only a STRING `error` is a message;
+         * an object without `message` has nothing to say and falls through.
+         *
+         * The raw-body fallback stays, but only for a body that is NOT JSON:
+         * echoing a JSON body the parser could not read a message out of is the
+         * same unreadable output the fix above removes.
+         */
         fun serverMessage(body: ByteArray?): String? {
             if (body == null || body.isEmpty()) return null
             val text = runCatching { String(body, Charsets.UTF_8) }.getOrNull() ?: return null
-            runCatching {
-                val obj = JSONObject(text)
-                (obj.optJSONObject("error")?.optString("message"))?.takeIf { it.isNotBlank() }
-                    ?.let { return it }
+            val obj = runCatching { JSONObject(text) }.getOrNull()
+                ?: return text.trim().takeIf { it.isNotEmpty() && it.length < 200 }
+            (obj.optJSONObject("error")?.optString("message"))?.takeIf { it.isNotBlank() }
+                ?.let { return it }
+            if (obj.has("error") && !obj.isNull("error") && obj.opt("error") is String) {
                 obj.optString("error").takeIf { it.isNotBlank() }?.let { return it }
-                obj.optString("message").takeIf { it.isNotBlank() }?.let { return it }
             }
-            val trimmed = text.trim()
-            return trimmed.takeIf { it.isNotEmpty() && it.length < 200 }
+            obj.optString("message").takeIf { it.isNotBlank() }?.let { return it }
+            return null
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.rikkaminis.app.data.repository
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -127,11 +128,11 @@ class ProviderMirrorHashTest {
     }
 
     @Test
-    fun aPrefsThatReportsNothingFallsBackToTheIntendedString() {
-        assertEquals(
-            hashJsonMirror(newConfig),
-            decideSyncHash(intendedMirror = newConfig, liveMirror = null),
-        )
+    fun aPrefsThatReportsNothingHasNoMirrorToName() {
+        // [R8-1114 A-F06] `null` means prefs holds no mirror at all, so there is
+        // nothing for a hash to name. The caller deletes the meta key instead of
+        // storing a hash of a string that never landed.
+        assertNull(decideSyncHash(intendedMirror = newConfig, liveMirror = null))
     }
 
     @Test

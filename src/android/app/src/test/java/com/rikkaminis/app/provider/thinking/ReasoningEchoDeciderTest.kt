@@ -110,9 +110,17 @@ class ReasoningEchoDeciderTest {
     }
 
     @Test
-    fun `EVERY_TURN follows the capture gate but never the AUTO placeholder suppression`() {
+    fun `EVERY_TURN echoes on every turn regardless of the local capture gate`() {
+        // [R8-B B-F05 ②] SPEC CHANGE. This test used to assert
+        // `gate=false ⇒ OMIT`, i.e. a timing tier literally named EVERY_TURN
+        // could still send nothing — the name was a lie, and a gateway that
+        // validates unconditionally once thinking is ACTIVE (nous) kept 400ing
+        // on the turns where the local thinking level happened to be OFF/AUTO.
+        // The tier now means what it says; safety for corrupt rules comes from
+        // ThinkingRuleCodingEchoDefaultTest (a bad `timing` decodes to NO policy,
+        // which is why the gate can be dropped here without amplifying bad data).
         assertEquals(
-            ReasoningEchoDecider.Action.OMIT,
+            ReasoningEchoDecider.Action.PLACEHOLDER,
             decide(everyTurn, hasToolCalls = false, captured = null, gate = false, placeholder = true),
         )
         assertEquals(
@@ -122,6 +130,11 @@ class ReasoningEchoDeciderTest {
         assertEquals(
             ReasoningEchoDecider.Action.CAPTURED,
             decide(everyTurn, hasToolCalls = false, captured = "r", gate = true),
+        )
+        // And it is not gated by the AUTO/placeholder distinction either.
+        assertEquals(
+            ReasoningEchoDecider.Action.CAPTURED,
+            decide(everyTurn, hasToolCalls = true, captured = "r", gate = false, placeholder = false),
         )
     }
 

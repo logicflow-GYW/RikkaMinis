@@ -57,7 +57,9 @@ enum class Signal(val ladder: List<Int>) {
  *  - a sliding window of recent target signatures, bounded at [STORAGE_LIMIT] entries (oldest
  *    dropped first), with [Signal.Repeat] counted only within the last [COUNT_WINDOW] entries;
  *  - streak counters for [Signal.NoEffect], [Signal.Reread] and [Signal.Failure];
- *  - a per-signal "already warned at rung X" memory so each rung fires once per streak;
+ *  - a per-signal "already warned at rung X" memory so each rung fires once per streak
+ *    ([Signal.Repeat] excepted: its count is a sliding window, so its watermark follows the
+ *    count DOWN and is kept per signature — see [LoopGuard.record]);
  *  - [stopped] - set once any ladder reaches its stop rung; the facade then refuses every
  *    further call of that session until the user speaks again (facade [ActionGuard.onUserTurn]
  *    calls [reset]).
@@ -73,6 +75,14 @@ class LoopGuard {
     private var rereads = 0
     private var failures = 0
     private val warned = HashMap<Signal, Int>()
+
+    /**
+     * [R8-1114 A-F05] Repeat is the one signal whose count is a SLIDING-WINDOW
+     * count, so it can fall without any streak reset. Its reminder memory is
+     * therefore per SIGNATURE and follows the count down: the streak signals
+     * below keep their monotonic per-signal rung.
+     */
+    private val repeatWarned = HashMap<String, Int>()
 
     /** The signal that stopped this session, once any ladder reached its stop rung; null while still running. */
     @Volatile
@@ -100,6 +110,8 @@ class LoopGuard {
     @Synchronized
     fun record(signature: String?, ok: Boolean, outcome: Outcome): Pair<Signal, Int>? {
         var hit: Pair<Signal, Int>? = null
+
+        /** Streak signals: the count only rises inside a streak, so the rung is monotonic. */
         fun climb(signal: Signal, count: Int) {
             val rung = signal.ladder.lastOrNull { count >= it } ?: return
             if (rung <= (warned[signal] ?: 0)) return
@@ -107,10 +119,39 @@ class LoopGuard {
             if (rung == signal.stopAt) stopped = signal
             if (hit == null || rung == signal.stopAt) hit = signal to count
         }
+
+        /**
+         * [R8-1114 A-F05] Repeat counts a SLIDING WINDOW, so it can fall from 12
+         * back to 3 with no streak reset. A monotonic "already warned" watermark
+         * then stays at 12 and every later climb is silent: the model gets no
+         * reminder and is refused outright the next time the count reaches 12
+         * ("suddenly blocked"). The watermark therefore FOLLOWS the count down,
+         * and is kept per signature so two different targets don't share one.
+         */
+        fun climbRepeat(sig: String, count: Int) {
+            val rung = Signal.Repeat.ladder.lastOrNull { count >= it }
+            val warnedAt = repeatWarned[sig] ?: 0
+            if (rung == null) {
+                repeatWarned.remove(sig)
+                return
+            }
+            if (rung < warnedAt) {
+                repeatWarned[sig] = rung
+                return
+            }
+            if (rung == warnedAt) return
+            repeatWarned[sig] = rung
+            if (rung == Signal.Repeat.stopAt) stopped = Signal.Repeat
+            if (hit == null || rung == Signal.Repeat.stopAt) hit = Signal.Repeat to count
+        }
+
         if (signature != null) {
             recent.addLast(signature)
             while (recent.size > STORAGE_LIMIT) recent.removeFirst()
-            climb(Signal.Repeat, countInWindow(signature))
+            climbRepeat(signature, countInWindow(signature))
+            // Bounded memory: a signature that left the window can never climb
+            // again, so its watermark is dead weight.
+            repeatWarned.keys.retainAll(recent.toSet())
         }
         failures = if (ok) 0 else failures + 1
         if (failures == 0) warned.remove(Signal.Failure) else climb(Signal.Failure, failures)
@@ -140,6 +181,7 @@ class LoopGuard {
         rereads = 0
         failures = 0
         warned.clear()
+        repeatWarned.clear()
         stopped = null
     }
 

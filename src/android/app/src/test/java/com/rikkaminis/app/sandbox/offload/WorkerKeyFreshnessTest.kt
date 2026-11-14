@@ -35,8 +35,10 @@ class WorkerKeyFreshnessTest {
 
     @Test
     fun `no baseline is never stale`() {
-        // baseline 0 = not captured → nothing to compare → not stale.
-        assertFalse(WorkerKeyFreshness.isStale(0L, 999_999L))
+        // -1 = not captured (R8-B B-F02 moved the sentinel off 0, because 0 now
+        // means "captured while the file did not exist"). Nothing to compare
+        // against → not stale.
+        assertFalse(WorkerKeyFreshness.isStale(-1L, 999_999L))
     }
 
     @Test
@@ -151,8 +153,62 @@ class WorkerKeyFreshnessTest {
     fun `missing secrets file at birth is tolerated`() {
         val dataDir = tmp.newFolder("data")
         WorkerKeyFreshness.resetForTests()
-        WorkerKeyFreshness.captureBaseline(dataDir) // file absent → baseline 0
+        WorkerKeyFreshness.captureBaseline(dataDir) // file absent → baseline 0 (not "uncaptured")
         assertFalse(WorkerKeyFreshness.isStaleNow(dataDir))
+    }
+
+    // ── [R8-B B-F02] the file APPEARING is a change ───────────────────────
+
+    @Test
+    fun `the first key ever saved is detected as a change`() {
+        // The reported bug: the worker was born before `provider_secrets.xml`
+        // existed, so the baseline was 0; `isStale` read 0 as "not captured" and
+        // the first save (file appears, mtime = T1) looked unchanged — and the
+        // SECOND captureBaseline absorbed T1 as the new baseline, so the channel
+        // could never notice a change again.
+        val dataDir = tmp.newFolder("data")
+        WorkerKeyFreshness.resetForTests()
+        WorkerKeyFreshness.captureBaseline(dataDir) // file absent
+        assertFalse("still absent ⇒ nothing changed", WorkerKeyFreshness.isStaleNow(dataDir))
+
+        val secrets = secretsFileIn(dataDir)
+        secrets.writeText("v1")
+        val appearedAt = System.currentTimeMillis()
+        secrets.setLastModified(appearedAt)
+
+        assertTrue(
+            "the file appearing after birth IS the change (R8-B B-F02)",
+            WorkerKeyFreshness.isStaleNow(dataDir),
+        )
+    }
+
+    @Test
+    fun `a second capture does not absorb the appearing file`() {
+        val dataDir = tmp.newFolder("data")
+        WorkerKeyFreshness.resetForTests()
+        WorkerKeyFreshness.captureBaseline(dataDir) // absent
+        val secrets = secretsFileIn(dataDir)
+        secrets.writeText("v1")
+        secrets.setLastModified(System.currentTimeMillis())
+
+        // A revived/surviving worker re-captures on its next request. The capture
+        // is idempotent, so the baseline stays "no file" and the change is still
+        // visible instead of being absorbed.
+        WorkerKeyFreshness.captureBaseline(dataDir)
+        assertTrue(WorkerKeyFreshness.isStaleNow(dataDir))
+    }
+
+    @Test
+    fun `a pure absent-to-absent baseline is not stale`() {
+        // Pure-function edge of the same rule: baseline "no file", current 0.
+        assertFalse(WorkerKeyFreshness.isStale(0L, 0L))
+    }
+
+    @Test
+    fun `the not-captured sentinel is not a real mtime`() {
+        // -1 is the sentinel; a real capture is either 0 (no file) or > 0.
+        assertFalse(WorkerKeyFreshness.isStale(-1L, 0L))
+        assertFalse(WorkerKeyFreshness.isStale(-1L, 500L))
     }
 
     // ── Worker-death evidence for the dispatcher's fast short-circuit ────

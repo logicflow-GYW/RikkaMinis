@@ -165,8 +165,53 @@ object ToolCallResiduePolicy {
                 i++
                 continue
             }
-            val gt = indexOfString(text, ">", i + 1, text.length)
-            if (gt < 0) return null
+            // [r8-C-F01] A tag body cannot contain markup, so the closing `>` is
+            // only accepted if nothing intervenes that refutes the candidate:
+            // another `<` (this `<` was prose — the real tag starts later), a
+            // backtick (a code span begins inside the span, so the `<` is the
+            // model talking about markup) or end of text. The previous spelling
+            // took the first `>` anywhere ahead, which glued prose such as
+            // `a < 0` onto a later `<invoke name="shell_execute">`; `nameValueOf`
+            // then found that tag's own `name="…"` inside the glued body, the
+            // residue was reported at the PROSE `<`, and `stripResidue` deleted
+            // the user's sentence while leaving the markup behind.
+            var gt = -1
+            var nested = -1
+            var tick = -1
+            var k = i + 1
+            while (k < text.length) {
+                val ck = text[k]
+                if (ck == '>') {
+                    gt = k
+                    break
+                }
+                if (ck == '<') {
+                    nested = k
+                    break
+                }
+                if (ck == '`') {
+                    tick = k
+                    break
+                }
+                k++
+            }
+            if (gt < 0) {
+                // The candidate was refuted (or the text ended): resume the scan
+                // at the character that refuted it. A backtick is consumed here
+                // because the outer loop is what maintains the code-region
+                // parity — jumping over it would leave the parity stale and let
+                // a fenced example be treated as a live call.
+                if (nested >= 0) {
+                    i = nested
+                    continue
+                }
+                if (tick >= 0) {
+                    backTicks++
+                    i = tick + 1
+                    continue
+                }
+                return null
+            }
             val tag = subString(text, i + 1, gt)
             // An odd backtick run before the tag = inside a fenced / inline
             // code region: the model is talking ABOUT markup, not making a
@@ -199,14 +244,9 @@ object ToolCallResiduePolicy {
                     )
                 }
             }
-            // Account the tag body's characters before advancing — the
-            // char-by-char region test counted them too (they sat before every
-            // LATER tag), so parity stays byte-for-byte identical.
-            var k = i + 1
-            while (k <= gt && k < text.length) {
-                if (text[k] == '`') backTicks++
-                k++
-            }
+            // [r8-C-F01] The scan above stops at the first `<` or backtick, so
+            // nothing was skipped between `i` and `gt`: parity is already
+            // current and the jump is safe.
             i = gt + 1
         }
         return null

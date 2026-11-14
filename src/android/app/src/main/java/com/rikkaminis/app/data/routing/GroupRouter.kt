@@ -67,12 +67,13 @@ class GroupRouter(
         if (members.isEmpty()) return null
         val usable = members.filter { isUsable(it.id) }
         if (usable.isEmpty()) return null
-        return when {
-            preferredEntryId != null ->
-                usable.firstOrNull { it.id == preferredEntryId }?.id ?: usable.first().id
-            group.strategy == RoutingStrategy.cheapestFirst ->
+        if (preferredEntryId != null) {
+            usable.firstOrNull { it.id == preferredEntryId }?.let { return it.id }
+        }
+        return when (group.strategy) {
+            RoutingStrategy.cheapestFirst ->
                 usable.minWithOrNull(compareBy<ModelEntry> { it.costTier ?: Int.MAX_VALUE })!!.id
-            group.strategy == RoutingStrategy.loadBalance -> {
+            RoutingStrategy.loadBalance -> {
                 val lastIdx = usable.indexOfFirst { it.id == stickyEntryId }
                 usable[(lastIdx + 1) % usable.size].id
             }
@@ -172,7 +173,8 @@ class GroupRouter(
             members.indexOfFirst { modelIdOf(it) == primaryModelId }
         }
         val order = mutableListOf<String>()
-        for (offset in 1 until members.size) {
+        val firstOffset = if (currentIdx >= 0) 1 else 0
+        for (offset in firstOffset until members.size) {
             val idx = if (currentIdx >= 0) (currentIdx + offset) % members.size else offset
             order.add(members[idx])
         }
