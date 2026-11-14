@@ -1718,4 +1718,10 @@
     <string name="manage_models_deselect_all">選択を解除</string>
     <string name="manage_models_remote_section_header">プロバイダーから取得可能 (%1$d)</string>
     <string name="manage_models_error_prefix">更新できませんでした: %1$s</string>
+    <string name="auto_backup_run_busy">バックアップは既に実行中です — 今回は何も保存されていません。</string>
+    <string name="auto_backup_run_partial">保存しましたが不完全です：\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d 件のフィールドを読み取れませんでした</string>
+    <string name="auto_backup_partial_mirror">外部ミラーが更新されていません</string>
+    <string name="auto_backup_partial_remote">リモートコピーが送信されていません</string>
+    <string name="auto_backup_partial_joiner">、</string>
 </resources>

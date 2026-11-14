@@ -219,31 +219,60 @@ object AutoBackupManager {
     fun runAsync(context: Context): kotlinx.coroutines.Job? {
         val app = context.applicationContext as? MinisApp ?: return null
         return app.applicationScope.launch(Dispatchers.IO) {
-            try {
-                runNow(app)
-            } catch (t: Throwable) {
-                Log.w(TAG, "auto backup failed: ${t.message}")
+            // [RC-U01] runNow reports its own failures now (it no longer
+            // throws for anything but cancellation), so this fire-and-forget
+            // path logs the outcome instead of catching.
+            when (val outcome = runNow(app)) {
+                is AutoBackupRunOutcome.Failed ->
+                    Log.w(TAG, "auto backup failed: ${outcome.reason}")
+                is AutoBackupRunOutcome.Partial ->
+                    Log.w(
+                        TAG,
+                        "auto backup incomplete: ${outcome.unreadableFields} unreadable " +
+                            "field(s), externalMirrorFailed=${outcome.externalMirrorFailed}, " +
+                            "remotePushFailed=${outcome.remotePushFailed}",
+                    )
+                AutoBackupRunOutcome.Skipped,
+                AutoBackupRunOutcome.Success,
+                -> Unit
             }
         }
     }
 
     /** Synchronous auto-backup body (IO thread). Exposed so the settings
      *  screen can drive it inside its own gate/scope and refresh UI state
-     *  afterwards. Throws on failure — callers decide how to surface it. */
-    suspend fun runNow(app: MinisApp) {
+     *  afterwards.
+     *
+     *  [RC-U01] Returns what the run actually did instead of `Unit`: the four
+     *  swallowed failure points (concurrent skip / unreadable fields /
+     *  external mirror / WebDAV push) each only wrote a `Log.w`, so the
+     *  settings row announced "Backup saved" for all of them. See
+     *  [AutoBackupRunOutcome]. */
+    suspend fun runNow(app: MinisApp): AutoBackupRunOutcome {
         // [audit-0908] Single-flight entry (see inFlight). CAS failure means
         // a backup is already running on another path — join it by returning.
         // KEY_LAST_RUN is then left unset, so tomorrow's foreground beat
         // retries: a skipped beat self-heals, a corrupt file does not.
-        if (!inFlight.compareAndSet(false, true)) return
-        try {
+        if (!inFlight.compareAndSet(false, true)) return AutoBackupRunOutcome.Skipped
+        return try {
             runLocked(app)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            // Cancellation is not a backup outcome — never fold it into Failed
+            // (a cancelled scope would then look like a disk failure).
+            throw c
+        } catch (t: Throwable) {
+            // The local snapshot is the one layer with no fallback: nothing
+            // was saved this run, so this is Failed, not Partial. The throw
+            // happens before KEY_LAST_RUN is written, so the next foreground
+            // beat retries.
+            Log.w(TAG, "auto backup failed: ${t.message}")
+            AutoBackupRunOutcome.Failed(t.message ?: t.javaClass.simpleName)
         } finally {
             inFlight.set(false)
         }
     }
 
-    private suspend fun runLocked(app: MinisApp) {
+    private suspend fun runLocked(app: MinisApp): AutoBackupRunOutcome {
         // [sweep1013-D1/F-4] Unattended backups must not ship credentials to
         // the remote (WebDAV is pushed to without a user prompt). Without
         // secrets the restore needs values refilled (providers/envVars/MCP
@@ -300,6 +329,8 @@ object AutoBackupManager {
                 writer = writer,
             )
         }
+        // [RC-U01] still logged for the unattended path (no UI to surface it
+        // in), but the count now also rides the returned outcome.
         if (unreadableFields > 0) {
             Log.w(TAG, "auto backup wrote $unreadableFields unreadable field(s)")
         }
@@ -321,13 +352,26 @@ object AutoBackupManager {
         // "clear app data". Best-effort by the same contract as the WebDAV push
         // below: the local copy already exists, so a failure only means the
         // external layer lags a day.
-        runCatching { MirrorStore.mirrorAutoSnapshot(app, local) }
+        // [RC-U01] Best-effort, but its result is now REPORTED instead of
+        // only logged: a user who sees "backup saved" and later finds a stale
+        // external copy (the layer that survives an app-data wipe — see the
+        // 2026-10-29 incident in the class doc) was misled by this line.
+        //
+        // The call stays unconditional (mirrorAutoSnapshot does not consult the
+        // enable flag — changing that here would be a second, unrelated
+        // behavior change); the flag only decides whether a false answer is
+        // worth reporting, so a deliberately disabled mirror is not announced
+        // as a failure on every run.
+        val mirrorOk = runCatching { MirrorStore.mirrorAutoSnapshot(app, local) }
             .onFailure { Log.w(TAG, "external auto mirror failed: ${it.message}") }
+            .getOrDefault(false)
+        val externalMirrorFailed = !mirrorOk && MirrorStore.isEnabled(app)
 
         // Remote push is best-effort: local copy already exists, so a failed
         // upload only means the offsite copy lags until tomorrow. The push
         // uploads the file we just wrote (bytes read off disk), never a
         // re-assembled String.
+        var remotePushFailed = false
         val cfg = WebDavConfigStore(app).load()
         if (cfg != null && cfg.url.isNotBlank() && cfg.username.isNotBlank()) {
             runCatching {
@@ -340,12 +384,24 @@ object AutoBackupManager {
                     keep = WebDavSync.AUTO_BACKUP_KEEP,
                     protectName = remoteName,
                 )
-            }.onFailure { Log.w(TAG, "remote push failed: ${it.message}") }
+            }.onFailure {
+                remotePushFailed = true
+                Log.w(TAG, "remote push failed: ${it.message}")
+            }
         }
 
         val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs.edit()
             .putString(KEY_LAST_RUN, SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()))
             .apply()
+
+        // [RC-U01] The local snapshot landed (a failed write threw out of
+        // writeAtomically above and became Failed), so the only outcomes left
+        // are "clean" and "some layer degraded".
+        return AutoBackupRunOutcomePolicy.classify(
+            unreadableFields = unreadableFields,
+            externalMirrorFailed = externalMirrorFailed,
+            remotePushFailed = remotePushFailed,
+        )
     }
 }

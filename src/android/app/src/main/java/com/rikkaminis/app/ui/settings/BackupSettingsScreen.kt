@@ -840,14 +840,43 @@ fun BackupSettingsScreen(
                             // Dispatchers.Main block below; do it on IO and
                             // hand only the result back to Main.
                             val autoManager = com.rikkaminis.app.backup.AutoBackupManager
-                            withContext(Dispatchers.IO) { autoManager.runNow(application) }
+                            val outcome = withContext(Dispatchers.IO) { autoManager.runNow(application) }
                             val refreshedFiles = withContext(Dispatchers.IO) { autoManager.listLocal(context) }
                             withContext(Dispatchers.Main) {
                                 autoBackupFiles = refreshedFiles
                                 autoBackupLastRun = com.rikkaminis.app.backup.AutoBackupManager.lastRunLabel(context)
-                                android.widget.Toast.makeText(
-                                    context, savedToast, android.widget.Toast.LENGTH_SHORT,
-                                ).show()
+                                // [RC-U01] Branch on what the run actually did.
+                                // Every one of these four shapes used to pop the
+                                // same "Backup saved" toast: a skipped concurrent
+                                // run (nothing written at all), unreadable fields,
+                                // a failed external mirror and a failed WebDAV push
+                                // were each only a Log.w inside runNow.
+                                when (outcome) {
+                                    is com.rikkaminis.app.backup.AutoBackupRunOutcome.Failed ->
+                                        errorMessage = String.format(
+                                            errWriteFmt,
+                                            outcome.reason,
+                                        )
+                                    com.rikkaminis.app.backup.AutoBackupRunOutcome.Skipped ->
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            context.getString(R.string.auto_backup_run_busy),
+                                            android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    is com.rikkaminis.app.backup.AutoBackupRunOutcome.Partial ->
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            context.getString(
+                                                R.string.auto_backup_run_partial,
+                                                autoBackupPartialDetail(context, outcome),
+                                            ),
+                                            android.widget.Toast.LENGTH_LONG,
+                                        ).show()
+                                    com.rikkaminis.app.backup.AutoBackupRunOutcome.Success ->
+                                        android.widget.Toast.makeText(
+                                            context, savedToast, android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                }
                             }
                         } catch (t: Throwable) {
                             withContext(Dispatchers.Main) {
@@ -1042,24 +1071,6 @@ fun BackupSettingsScreen(
                                             withContext(Dispatchers.IO) {
                                                 com.rikkaminis.app.backup.MirrorStore
                                                     .syncNow(context, force = true)
-                                            }
-                                            val ms = withContext(Dispatchers.IO) {
-                                                com.rikkaminis.app.backup.MirrorStore.lastSyncMs(context)
-                                            }
-                                            val label = withContext(Dispatchers.IO) {
-                                                com.rikkaminis.app.backup.MirrorStore.lastSyncLabel(context)
-                                            }
-                                            val raw = withContext(Dispatchers.IO) {
-                                                com.rikkaminis.app.backup.MirrorStore.lastResult(context)
-                                            }
-                                            val pendingNow = withContext(Dispatchers.IO) {
-                                                com.rikkaminis.app.backup.MirrorStore.pendingCount(context)
-                                            }
-                                            withContext(Dispatchers.Main) {
-                                                mirrorLastMs = ms
-                                                mirrorLastSync = label
-                                                mirrorOutcomeRaw = raw
-                                                mirrorPending = pendingNow
                                             }
                                         } catch (t: Throwable) {
                                             withContext(Dispatchers.Main) { errorMessage = t.message ?: errUnknown }
@@ -2487,6 +2498,32 @@ private fun webDavErrorMessage(context: Context, t: Throwable): String {
 private val INSTANT_FORMATTER: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.getDefault())
         .withZone(ZoneId.systemDefault())
+
+/**
+ * [RC-U01] The "what is missing" half of the partial-backup toast.
+ *
+ * Every degraded layer is named, not just the first: the user is deciding
+ * whether this backup is good enough to rely on, and "the remote copy is stale"
+ * is a different decision from "the document itself lost fields".
+ */
+private fun autoBackupPartialDetail(
+    context: android.content.Context,
+    outcome: com.rikkaminis.app.backup.AutoBackupRunOutcome.Partial,
+): String {
+    val parts = buildList {
+        if (outcome.unreadableFields > 0) {
+            add(
+                context.getString(
+                    R.string.auto_backup_partial_fields,
+                    outcome.unreadableFields,
+                ),
+            )
+        }
+        if (outcome.externalMirrorFailed) add(context.getString(R.string.auto_backup_partial_mirror))
+        if (outcome.remotePushFailed) add(context.getString(R.string.auto_backup_partial_remote))
+    }
+    return parts.joinToString(context.getString(R.string.auto_backup_partial_joiner))
+}
 
 private fun formatSize(bytes: Long): String = when {
     bytes >= 1024L * 1024L -> String.format(Locale.getDefault(), "%.1f MB", bytes / 1024.0 / 1024.0)

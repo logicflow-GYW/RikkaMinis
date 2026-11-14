@@ -1720,4 +1720,10 @@
     <string name="manage_models_deselect_all">取消全選</string>
     <string name="manage_models_remote_section_header">服務商提供的模型（%1$d）</string>
     <string name="manage_models_error_prefix">重新整理失敗：%1$s</string>
+    <string name="auto_backup_run_busy">已有備份正在執行，本次未寫入新檔案。</string>
+    <string name="auto_backup_run_partial">已儲存，但不完整：\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d 個欄位讀取失敗</string>
+    <string name="auto_backup_partial_mirror">外部鏡像未更新</string>
+    <string name="auto_backup_partial_remote">遠端副本未推送</string>
+    <string name="auto_backup_partial_joiner">；</string>
 </resources>

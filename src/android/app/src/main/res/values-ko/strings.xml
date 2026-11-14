@@ -1719,4 +1719,10 @@
     <string name="manage_models_deselect_all">선택 해제</string>
     <string name="manage_models_remote_section_header">제공자에서 사용 가능 (%1$d)</string>
     <string name="manage_models_error_prefix">새로 고침 실패: %1$s</string>
+    <string name="auto_backup_run_busy">백업이 이미 실행 중입니다 — 이번에는 새로 저장되지 않았습니다.</string>
+    <string name="auto_backup_run_partial">저장했지만 불완전합니다:\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d개 필드를 읽을 수 없습니다</string>
+    <string name="auto_backup_partial_mirror">외부 미러가 업데이트되지 않았습니다</string>
+    <string name="auto_backup_partial_remote">원격 사본이 업로드되지 않았습니다</string>
+    <string name="auto_backup_partial_joiner">; </string>
 </resources>

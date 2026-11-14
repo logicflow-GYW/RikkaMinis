@@ -1720,4 +1720,10 @@
     <string name="manage_models_deselect_all">Auswahl aufheben</string>
     <string name="manage_models_remote_section_header">Vom Anbieter verfügbar (%1$d)</string>
     <string name="manage_models_error_prefix">Aktualisierung fehlgeschlagen: %1$s</string>
+    <string name="auto_backup_run_busy">Eine Sicherung läuft bereits — es wurde nichts Neues gespeichert.</string>
+    <string name="auto_backup_run_partial">Sicherung gespeichert, aber unvollständig:\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d Feld(er) konnten nicht gelesen werden</string>
+    <string name="auto_backup_partial_mirror">externer Spiegel nicht aktualisiert</string>
+    <string name="auto_backup_partial_remote">Remote-Kopie nicht übertragen</string>
+    <string name="auto_backup_partial_joiner">; </string>
 </resources>

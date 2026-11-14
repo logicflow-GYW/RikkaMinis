@@ -1828,4 +1828,10 @@
     <string name="paste_preview_title">Pasted text %1$s</string>
     <string name="paste_folded_summary">Folded: %1$d characters</string>
     <string name="paste_unresolved_notice">This draft holds a paste marker that can no longer be expanded (%1$s). Sending is disabled — delete the marker to send.</string>
+    <string name="auto_backup_run_busy">A backup is already running — nothing new was saved.</string>
+    <string name="auto_backup_run_partial">Backup saved, but incomplete:\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d field(s) could not be read</string>
+    <string name="auto_backup_partial_mirror">external mirror not updated</string>
+    <string name="auto_backup_partial_remote">remote copy not pushed</string>
+    <string name="auto_backup_partial_joiner">; </string>
 </resources>

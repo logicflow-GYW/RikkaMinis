@@ -1743,4 +1743,10 @@
     <string name="manage_models_deselect_all">取消全选</string>
     <string name="manage_models_remote_section_header">服务商提供的模型（%1$d）</string>
     <string name="manage_models_error_prefix">刷新失败：%1$s</string>
+    <string name="auto_backup_run_busy">已有备份正在运行，本次未写入新文件。</string>
+    <string name="auto_backup_run_partial">已保存，但不完整：\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d 个字段读取失败</string>
+    <string name="auto_backup_partial_mirror">外部镜像未更新</string>
+    <string name="auto_backup_partial_remote">远端副本未推送</string>
+    <string name="auto_backup_partial_joiner">；</string>
 </resources>

@@ -1673,4 +1673,10 @@
     <string name="manage_models_deselect_all">Снять выделение</string>
     <string name="manage_models_remote_section_header">Доступно от провайдера (%1$d)</string>
     <string name="manage_models_error_prefix">Не удалось обновить: %1$s</string>
+    <string name="auto_backup_run_busy">Резервное копирование уже выполняется — новых данных не сохранено.</string>
+    <string name="auto_backup_run_partial">Копия сохранена, но неполная:\n%1$s</string>
+    <string name="auto_backup_partial_fields">не удалось прочитать полей: %1$d</string>
+    <string name="auto_backup_partial_mirror">внешнее зеркало не обновлено</string>
+    <string name="auto_backup_partial_remote">удалённая копия не отправлена</string>
+    <string name="auto_backup_partial_joiner">; </string>
 </resources>
