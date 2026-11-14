@@ -1068,9 +1068,75 @@ fun BackupSettingsScreen(
                                     mirrorRunning = true
                                     application.applicationScope.launch {
                                         try {
-                                            withContext(Dispatchers.IO) {
+                                            // [RC-U02] syncNow already answers
+                                            // with an Outcome and swallows its
+                                            // own Throwables — dropping the
+                                            // return value is why this retry
+                                            // looked dead (a Busy or a fresh
+                                            // Failed produced no feedback and
+                                            // the screen's catch below could
+                                            // never fire).
+                                            val outcome = withContext(Dispatchers.IO) {
                                                 com.rikkaminis.app.backup.MirrorStore
                                                     .syncNow(context, force = true)
+                                            }
+                                            val ms = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.lastSyncMs(context)
+                                            }
+                                            val label = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.lastSyncLabel(context)
+                                            }
+                                            val raw = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.lastResult(context)
+                                            }
+                                            val pendingNow = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.pendingCount(context)
+                                            }
+                                            withContext(Dispatchers.Main) {
+                                                mirrorLastMs = ms
+                                                mirrorLastSync = label
+                                                mirrorOutcomeRaw = raw
+                                                mirrorPending = pendingNow
+                                                // [RC-U02] Say what this retry
+                                                // did. Busy is a normal
+                                                // concurrency guard, NOT an
+                                                // error — telling the user
+                                                // "failed" for it is its own
+                                                // small lie.
+                                                when (outcome) {
+                                                    is com.rikkaminis.app.backup.MirrorStore.Outcome.Failed ->
+                                                        errorMessage = outcome.reason
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.Busy ->
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            context.getString(R.string.mirror_retry_busy),
+                                                            android.widget.Toast.LENGTH_SHORT,
+                                                        ).show()
+                                                    is com.rikkaminis.app.backup.MirrorStore.Outcome.Synced ->
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            context.getString(R.string.mirror_retry_done),
+                                                            android.widget.Toast.LENGTH_SHORT,
+                                                        ).show()
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.NoChanges,
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.Throttled,
+                                                    -> android.widget.Toast.makeText(
+                                                        context,
+                                                        context.getString(R.string.mirror_retry_nothing),
+                                                        android.widget.Toast.LENGTH_SHORT,
+                                                    ).show()
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.Unavailable ->
+                                                        errorMessage = context.getString(R.string.mirror_diag_unavailable)
+                                                    // The row is not rendered at
+                                                    // all while the mirror is
+                                                    // disabled, so this arm is
+                                                    // unreachable — but the
+                                                    // `when` is exhaustive on
+                                                    // purpose (a new Outcome
+                                                    // must force a decision
+                                                    // here).
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.Disabled -> Unit
+                                                }
                                             }
                                         } catch (t: Throwable) {
                                             withContext(Dispatchers.Main) { errorMessage = t.message ?: errUnknown }

@@ -1726,4 +1726,7 @@
     <string name="auto_backup_partial_mirror">externer Spiegel nicht aktualisiert</string>
     <string name="auto_backup_partial_remote">Remote-Kopie nicht übertragen</string>
     <string name="auto_backup_partial_joiner">; </string>
+    <string name="mirror_retry_busy">Eine Synchronisierung läuft bereits — bitte gleich erneut versuchen.</string>
+    <string name="mirror_retry_done">Spiegel synchronisiert.</string>
+    <string name="mirror_retry_nothing">Spiegel ist bereits aktuell.</string>
 </resources>

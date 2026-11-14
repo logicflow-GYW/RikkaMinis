@@ -1679,4 +1679,7 @@
     <string name="auto_backup_partial_mirror">внешнее зеркало не обновлено</string>
     <string name="auto_backup_partial_remote">удалённая копия не отправлена</string>
     <string name="auto_backup_partial_joiner">; </string>
+    <string name="mirror_retry_busy">Синхронизация уже выполняется — повторите чуть позже.</string>
+    <string name="mirror_retry_done">Зеркало синхронизировано.</string>
+    <string name="mirror_retry_nothing">Зеркало уже актуально.</string>
 </resources>

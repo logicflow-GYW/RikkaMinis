@@ -1724,4 +1724,7 @@
     <string name="auto_backup_partial_mirror">外部ミラーが更新されていません</string>
     <string name="auto_backup_partial_remote">リモートコピーが送信されていません</string>
     <string name="auto_backup_partial_joiner">、</string>
+    <string name="mirror_retry_busy">同期が実行中です — 少し待ってから再試行してください。</string>
+    <string name="mirror_retry_done">ミラーを同期しました。</string>
+    <string name="mirror_retry_nothing">ミラーは最新です。</string>
 </resources>

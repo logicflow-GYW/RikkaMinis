@@ -1725,4 +1725,7 @@
     <string name="auto_backup_partial_mirror">외부 미러가 업데이트되지 않았습니다</string>
     <string name="auto_backup_partial_remote">원격 사본이 업로드되지 않았습니다</string>
     <string name="auto_backup_partial_joiner">; </string>
+    <string name="mirror_retry_busy">동기화가 이미 실행 중입니다 — 잠시 후 다시 시도하세요.</string>
+    <string name="mirror_retry_done">미러를 동기화했습니다.</string>
+    <string name="mirror_retry_nothing">미러가 이미 최신입니다.</string>
 </resources>

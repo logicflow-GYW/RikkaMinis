@@ -1834,4 +1834,7 @@
     <string name="auto_backup_partial_mirror">external mirror not updated</string>
     <string name="auto_backup_partial_remote">remote copy not pushed</string>
     <string name="auto_backup_partial_joiner">; </string>
+    <string name="mirror_retry_busy">A sync is already running — try again in a moment.</string>
+    <string name="mirror_retry_done">Mirror synced.</string>
+    <string name="mirror_retry_nothing">Mirror is already up to date.</string>
 </resources>

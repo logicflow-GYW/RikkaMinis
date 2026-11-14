@@ -1726,4 +1726,7 @@
     <string name="auto_backup_partial_mirror">外部鏡像未更新</string>
     <string name="auto_backup_partial_remote">遠端副本未推送</string>
     <string name="auto_backup_partial_joiner">；</string>
+    <string name="mirror_retry_busy">同步正在進行，請稍後再試。</string>
+    <string name="mirror_retry_done">鏡像已同步。</string>
+    <string name="mirror_retry_nothing">鏡像已是最新。</string>
 </resources>
