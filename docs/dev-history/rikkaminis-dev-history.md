@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-13）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-14）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-11-13，共 101 天
-- 条目总数：2597（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：4167169 / 总行数：48416
+- 合并范围：2026-08-03 ～ 2026-11-14，共 102 天
+- 条目总数：2631（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：4242076 / 总行数：49510
 
 ---
 
@@ -48409,6 +48409,1100 @@ self-test` ⇒ **夹具没跑**，日志里**没有** `ALL XX CASES PASS`。所�
 默认值（0 而非当前版）/ 备份导入隐藏行过滤（两条路委托同一函数 + 源下标配对）/
 门 A6 负向断言（含真实回归形态复现）/ 主提示词分段顺序护栏（读真实函数体）/
 主聊天路径容量自愈（ContextOvershootRetry，一次性 + 估算佐证 + 输出预算同步收紧）。
+
+<!-- 2026-11-13 11:50:58 -->
+## dev-history 档案同步（本地 + 云端）2026-11-13
+
+
+**本地**（`/var/minis/mounts/笔记/RikkaMinis开发档案/`）三件套重建：
+2550 → **2597 条**，92 → **101 天**，覆盖到 2026-11-13。SAGAS 重建 25 主题 /
+212 孤儿（8.2%）/ 265 条 ≥4 主题；两轮 sanitize 独立探针均 NONE。
+结构校验：`anchors == header == 2597`、`outOrder=0`、围栏偶数（94 → 96）。
+
+**云端**（`***OWNER***/RikkaMinis/docs/dev-history/`）：
+- `docs/dev-history-1113` → **`f970133`** 合并（父数 = 2 ✓）
+- `docs/dev-history-readme-1113` → **`050d096`** 合并（父数 = 2 ✓；README 静态统计
+  「跨 92 天 / 2550 条」→「101 天 / 2597 条」—— 这类硬编码副本每次 rebuild 都会漂移，
+  已是第二次手工补：**README 里有两处统计数字，rebuild 脚本不管它**）
+- 两分支远端 + 本地均已清理，远端只剩 main。
+- **三源 sha256 逐字节一致**：挂载源 / `git show HEAD:` / raw.githubusercontent。
+
+**可复用**：`gh_sync.sh delete-branches --keep main --yes` 对本批分支返回空表（没删），
+用 API `DELETE /git/refs/heads/<br>` 才成功（204）。清理分支别只信脚本的空输出。
+
+<!-- 2026-11-13 11:57:41 -->
+## 新类目固化：「字段身份过载」（field.identity-overload）— 2026-11-12 深夜
+
+
+用户令「写进去，还有就是之前留下的那些有多少，是不是也需要改之类的」。已落三层：
+
+**1. 规则库** `skills/self-improving-agent/data/LEARNINGS.md` 新增 `LRN-20261112-FLDROLE`
+（process / medium / pending / Recurrence-Count 6 / First-Seen 2026-08-09 / Last-Seen 2026-11-12）。
+`data/rules-index/patterns.json` 注册家族 `field.identity-overload`，5 层
+（L1-visibility / L2-cache-asset / L3-arbitration / L4-security-scope / L5-migration）。
+索引重建 2369 条（dated 167），召回实测生效：输入「一个字段同时被显示过滤和备份导出和TTL清理
+使用」→ 判定「召回问题 + 覆盖不足」，命中 L1+L2，未覆盖层 L3/L4/L5 需按需扩。
+
+**2. backlog** `§FIELD-IDENTITY`（10277 行起）：负决策 + 已实锤 6 例 + 未审候选台账 +
+三触发条件 + 不建新门的理由。`scan_debt.py notes` 判 OK（515 段 / no-触发条件 5 / 豁免 16）。
+
+**3. 探针留档** `shared/work/field-identity-1112_probe.py` + `_candidates.txt`（结构判据 v2；
+语义版 v1 为纯噪音，实测复现「语义判据 783 命中/覆盖率 1%」——探针当场自证规则库那条铁律）。
+
+**判据（结构，有校准点）**：数据类字段 ①声明处 ≤2 ②成员访问跨 ≥3 语义域
+（ui/backup/repository/config/provider）③语境角色 ≥3（PERSIST/WIRE/POLICY/GATE/UI/STATE/CACHE/
+MIGRATE）。校准点 `isHidden` 命中 4 角色/4 域/17 文件/29 访问，排第 11。
+**第二判据更硬**：同一字段的 null/默认值在不同读者处落到不同解释（图片模态 `?: emptyList()` 判 false
+vs UI `?: true` 判允许；`sessionId` 两种 null 被 elvis 混用）。
+
+**与既有家族的区分（关键，避免误合并）**：`field.sync.missing-layer` = 一个事实 N 份**物理副本**
+（改一处漏一处，可枚举边，扫描器可覆盖）；`field.identity-overload` = 一份物理副本 N 个**含义**
+（没有第二份可比 ⇒ 形状探针/四处同步门/静态门结构上看不见，只有事后审查会撞上）。
+
+**「之前留下的有多少」答数**：已实锤 6（isHidden / userModifiedAt / sessionId / overrides /
+isCustom / oauth 枚举）；未审候选 B 档 15（高优先 5：baseModel / modelEntries / modelGroups /
+memberEntryIds / instances；其余 10 含 customBaseURL、oauth、tools、overrides、createdAt、
+updatedAt、background 等）；已剔除假阳性 11（displayName 15 类同名、format、lastModified、
+isDirectory、values、fields、isEnabled、success、toolName、color）。**D 档（roles≥4）9 个，其中
+6 个是同名不同物或 JDK 方法名 ⇒ 结构判据必须配人工剔除，不能直接当清单**。
+
+**不改的理由（按修复门）**：15 个候选全部无用户可观察症状、无触发路径 = P2；装置比例不成立，
+建门等于给装置再加一层 S（正是 2026-11-12 那轮「防漏改的装置自己成了最易漏改的东西」）。
+
+<!-- 2026-11-13 12:25:37 -->
+## 字段身份过载：按修复门只做 P2-E（分支 CI 绿，未合并 main）— 2026-11-13
+
+
+用户令「就按你说的来处理吧」。上一轮给的四条建议里，**一条前提是假的，当场撤销**；真做的两项已落地。
+
+### 已落地（分支 `fix/field-identity-p2e-1113` @ `ccd5aa2`，CI #3034 success）
+
+**P2-E 修复**：`reconcileSelectedEntry` 的 `entry.copy(baseModel = fresh)` → `mergeCatalogRow`
+逐字段合并。规则：端点说话就赢 / `null` 是静默 / `emptyList()` 是断言（"text only"）/
+`displayName == id` 也是静默（解析器 `optString("name", id)` 把缺失名默认成 id，不判这条
+会把真名字换成裸 id）。
+6 例 JVM 测试 + **3 个变异负控（4 红 / 1 红 / 1 红，逐字节还原 sha256 `8c45fb43` 对拍）**。
+邻门：gateway_context_metadata_check 6 臂、provider_models_cache_wiring 19、model_entry_override_parity
+8 臂 + 26 臂 selftest，全绿。
+**CI 证据逐条核**：head_sha `ccd5aa225249` 与本地逐字符一致；`Summary: 115 passed, 0 failed`；
+本批**未改 scripts/scan** ⇒ 日志明写 `skipping the fixture self-test` ⇒ **不能声称夹具全绿**
+（这是 GLOBAL 2026-11-12 那条机制当场第二次实证）；16 例 SelectionOnlyEntryRulesTest 逐条在册；
+6 条含 `FAILED` 的行逐条确认全是 PASSED 用例名子串；build-apk `BUILD SUCCESSFUL in 10m 40s`。
+**性质**：这是「排来源优先级」，不是「拆实体」——`baseModel` 的两个角色还在，只明确了谁说话算数。
+
+### 撤销的一项（前提证伪，重要教训）
+
+上一轮说「`memberEntryIds` 有 6 处手写解析站点，改走单源，小时级高性价比」——**假的**。
+逐点读上下文后：2 处已委托 `SystemVoiceEntries.resolveIn`；1 处 `ProviderRepository.enabledMemberEntries`
+是**刻意排除**（KDoc 明写「显而易见的修法就是回归」）；1 处不是解析而是级联 id 集合判定；
+真正手写只剩 `ConfigBuiltins.firstUsableGroupMember` + `HeadlessChatRunner` 两处，且结果与单源
+一致（System 条目无实例/无 key，`firstUsableGroupEntry` 本就跳过），唯一差异是错误文案误报
+「every member id is gone」⇒ P2 文案，不改。
+**根因**：`grep | wc -l` 数「站点」会把「已委托」「刻意排除」「不是解析」一起算进去。
+**这是今天第三次「声称存在但实际不存在」**（前两次：F-01 说 UI 已改实际没改、夹具基线说同步实际落后）。
+
+### backlog §FIELD-IDENTITY 补记两节
+
+①**「已修过但身份仍未分离」的 5 个**：`userModifiedAt`（加布尔参数，仍三角色）· `sessionId`
+（加守卫，两种 null 仍共用）· `isCustom`（补刷新继承，仍三角色）· `overrides`（抽旁路 blob，
+角色 2→3 反向加深）· `oauth`（刻意保留，P3 不动）。**结论：只有 `isHidden` 真给了身份；做中档
+重构时必须把这 4 个一并算进去，不能因「修过」跳过。**
+②P2-E 已落地 + 撤销项与教训。`scan_debt.py notes` 判 OK（515 段 / no-触发条件 5 / 豁免 16）。
+
+### 停止节点
+
+分支 CI 绿 = 确定性停止节点，**未合并 main**（本支有 .kt 验证面 = 非纯文本例外，合并起手权在用户）。
+
+<!-- 2026-11-13 14:27:20 -->
+## 角色存活复核：中档重构前提消失（2026-11-13）
+
+
+用户令「把子代理排出去吧，到时候一起处理」。派发只读审计子代理（会话 `830b7986`），复核 8 字段 / 24 个「字段×角色」组合是否**还活着**。报告 `shared/work/field-identity-1113/REPORT-ROLE-SURVIVAL.md`（`STATUS: DONE`，关键结论主会话已独立复核）。
+
+**结果：ALIVE 18 · DORMANT 4 · DEAD 2。**
+
+**★ 最重要的产出：真正需要拆字段的只剩 1 个，中档重构（原估 5–7 天）的前提消失。**
+- `sessionId` 3 角色全 ALIVE 且**同向**（都以「操作属于哪个会话」为唯一操作数）⇒ 不需要拆
+- `overrides` 旁路 blob **DEAD**（全仓 kt 0 命中）⇒ 角色数回到 1 ⇒ 不需要拆
+- `instances` ③voice 过滤 DORMANT，且「复合键参与者」读的是 `ModelEntry.providerInstanceId` 不是 `instances` ⇒ **不是一字段多义**
+- `modelGroups` 3 角色全 ALIVE；`memberEntryIds` 3 角色全 ALIVE（实为 5 义）
+- `customBaseURL` ②DORMANT；③实为两臂一活一死（官方 host 判定 ALIVE / 代理超时预算 DORMANT，生产 `decideGenerationTimeoutSec` 把该参数 `@Suppress("UNUSED_PARAMETER")` 忽略，而测试有 40+ 行给死路做体检）
+- **只有 `isCustom` 需要拆**：真正两义是「用户创作（资产保留）」vs「身份可变（modelId 可写/可删）」——UI 面认为任何条目都能删、agent RPC 面认为只有 custom 能删，**两个面对同一字段给出相反裁决**。按修复门仍 P2。
+
+**★ 六条推翻既有记录（前三条主会话已独立复核 ✓）**：
+1. `isCustom` ②删除手势 **DEAD**：`ProviderDetailScreen.kt:415/430` 长按无门直接删；同文件 `:754` 注释仍写「long-press on built-in entries is a no-op」= 注释/代码/另一处 KDoc 三者互相矛盾。权限迁到 agent RPC + modelId 编辑门。
+2. `isCustom` ③**修在一个 PRODUCTION-DEAD 函数上**：`replaceEntries` 自认 `LEGACY / PRODUCTION-DEAD`（`:1701`）、生产调用方 0。今天真正防「刷新抹掉 custom」的是 `autoRefreshModels` 的「有 custom 就跳过整轮刷新」= **回避不是继承**。
+3. `overrides` ②旁路 blob 已不存在，backlog 原记「角色 2→3 反向加深」过期。
+4. `instances` ③整条云 ASR 链休眠：`resolveVoiceInputCandidates → ProviderSpeechRecognitionEngine → SpeechRecognitionManager`，末端无 UI（麦克风按钮已删、`startRecording` 包外 0 调用、`ui/` 下 0 引用 ✓）。
+5. `customBaseURL` ③一活一死。
+6. `oauth` ①ALIVE 但 **UI 不可达**（只造 apiKey）。
+
+**★ 可复用的方法学**：**角色会随 UI 被删而死掉，字段和注释不会跟着更新**。所以「这个字段有几个角色」的答案必须带时效——每次要动它之前重跑验活，不能采信 backlog/注释里的角色清单（那些记的是「曾经有几个」）。判据顺序：①grep 生产调用方（排除定义/测试/注释）②查调用链末端有无 UI 入口 ③读代码确认行为。`userModifiedAt` 的「三角色死两个」不是偶然，是这条规律的第一个样本。
+
+**★ 流程修复**：上一轮子代理提交完就停了、没交报告，主会话只能翻仓库反推。已在 `task-dispatch` SKILL 加 §4b「交报告是硬性交付项」：任务书必须有硬门「最后一条消息必须是报告本体」+ 报告末尾 `STATUS: DONE`（收口方 grep 这一行判交付）。本轮任务书追加 §8 后，子代理确实写了 `STATUS: DONE`，机制生效。
+
+**未处理**：`fix/field-identity-umod-1113` 分支（纯注释，CI #3036 绿）仍停在分支上等用户放行合并。
+
+<!-- 2026-11-13 14:37:57 -->
+## 合并收口：fix/field-identity-umod-1113 → main（2026-11-13，用户令「合并吧」）
+
+
+**merge commit `3615461`**（`--no-ff`，parents = `820110a` + `2f082f3`），**父数 = 2** ✓，
+合并树与分支 tip 差异 0 行 = 零冲突解。
+
+**合并前核查三项全过**：
+1. **检查**：2 文件 / +42 −14，无冲突标记、无夹带；**机械确认零代码变更**（diff 过滤掉注释行后为空）。
+2. **验证**：本地分支 sha 与绿 CI `2f082f3` 逐字符一致；main 与 origin 同步。
+3. **核实（三源取二）**：源1 = 分支 CI #3036 四 job 全绿；源2 = 本地独立复核（7 个锚定门 + 3 个自检带牙 + 非注释行过滤）。
+
+**main CI #3037 四 job 全绿**（`3615461d1cdd`）：unit-tests `BUILD SUCCESSFUL in 1m 6s`
+（ProviderImportRoundTrip 18 例 / ProviderEntryKeyAndPin 29 例 / OpenMinisBackupCompat 41 例在册）；
+scan-gate `Summary: 115 passed, 0 failed`；门的 FAIL 行 0；build-apk / publish success。
+
+**证据诚实边界**：本批没改 `scripts/scan` ⇒ 日志明写 `skipping the fixture self-test` ⇒
+**夹具没跑**，不能说「夹具全绿」，只能说「115 个门全跑过」。
+
+**清理完成**：远端分支 API DELETE 204、本地 `-D`；远端只剩 `main`；本地 == origin/main == `3615461`。
+
+**本批内容（纯注释，零行为变更）**：修正 `userModifiedAt` 的三处 KDoc——原来把 R3
+（shadowVoiceProviders 仲裁）当作活着的冲突来写，实际该消费者 2026-08-04 就删了（DORMANT 非已解）；
+`ModelEntry.userModifiedAt` 补了 writer rule（provenance 决定是否盖章）+ reader contract
+（必须逐字节往返，否则重复恢复不再是 no-op）。
+
+**★ 本批真正值得记的是「没做什么」**：子代理写完 `updateEntryAsRestore` / `updateEntryAsUserEdit`
+具名入口后**自己撤掉了**——因为 `provider_import_id_roundtrip_check` Arm 7 锚定字面 `updateEntry(`
+（`ENTRY_WRITE_FACE`）、`entry_id_rename_integrity_check` 要求 `updateEntry` 继续持有真实逻辑
+（`UPDATE_FN` + 4 锚点）。为 P2 可读性收益去动两个门面 + 夹具 = 装置比例不成立。
+**它没有硬凑改动交差，而是撞墙后如实论证「不值得」并把论证写进 commit message**——这比改代码更有价值。
+
+**连带产出：中档重构作废**。角色存活复核（8 字段 / 24 角色 → 18 ALIVE / 4 DORMANT / 2 DEAD）证明
+「15 个候选字段都需要拆」这个前提基本不成立，真正需要拆的只剩 `isCustom`（用户创作 vs 身份可变，
+两面裁决相反），且仍属 P2。原估 5–7 天的中档重构**不需要做**。
+
+<!-- 2026-11-13 19:52:56 -->
+## 检查体系升级：SCA 开关 + Android Lint 接入 CI（2026-11-13，分支 `ci/lint-probe-1113` @ `7098045e`）
+
+
+用户问「软件的检查方面是不是可以升级」，我按行业四类（Linter/质量扫描/SAST/SCA）对照仓库现状后动手做两件。**CI run `43418283246` 五 job 全绿**，未合并 main。报告 `shared/work/review-today-1112/LINT-SCA-REPORT.md`。
+
+### ① SCA：开关已开，但**是空管道**（关键坑）
+`PUT vulnerability-alerts` + `automated-security-fixes` 均 204（原 404 / `enabled:false`），`dependabot/alerts` 从 403 → 200 `[]`。**但 `GET dependency-graph/sbom` 只解析出 7 个 package，全是 workflow 里的 `actions/*`，零 Maven 依赖** ⇒ Gradle 依赖图需要 CI 跑 `gradle/actions/dependency-submission` 才有数据源。**开告警 ≠ 有告警能力**，这是同类操作的通用陷阱。
+
+### ② Android Lint：一句注释骗了所有人（最大发现）
+`build.gradle.kts` 原注释断言「checkReleaseBuilds=false 不影响 debug lint coverage」。**实测为假，且从没人验证过**。三轮探针：
+- 裸 `:app:lintDebug` → 三个 analyze task 全崩 `IncompatibleClassChangeError`
+- `useK2Uast=false` 无效；`disable += "NonNullableMutableLiveData"` **从来没起作用**（崩溃 trace 里该 detector 仍在跑）
+- **根因是版本不匹配**：compose-runtime-lint 1.9.x 的 detector 调 Kotlin K2 Analysis API（`KaPropertyGetterSymbol`），AGP 8.7.3 的 lint 31.7.3 不实现。类路径审计证明携带该类的 artifact **只有 1 个**（distinct copies=1）⇒「重复类」假设被证伪
+- **修法**：`-Pandroid.experimental.lint.version=8.9.0` 跑通。**属性吃 AGP 风格版本（AGP+23=lint 版本）**，传 `31.9.0` 会被解析成 `lint-gradle:54.9.0` 直接 Could not find
+
+### ★ 抓到 115 道门结构上抓不到的真 bug（P0）
+`Environment.isExternalStorageLegacy()` 需 API 29，却写在 `sdk < 30` 的 else 分支，**minSdk=26** ⇒ API 26–28 抛 `NoSuchMethodError`。两处：`MountedFoldersStore.storageDiag()`（被 `add()` 的 AppLogger 调用，**无 try**，且在状态已写入后、`return entry` 前 ⇒ **挂载文件夹点了没反应**）、`PRootKernel.storageAccessDiag()`（每次 applyMountedFoldersSnapshot 都调）。真机 sdk=35 碰不到，但 minSdk=26 是承诺范围。
+
+### 落地形态
+CI 新增 `lint` job（并行，publish 依赖它），`lint-baseline.xml` 基线门禁只对新增红，禁用 6 个纯风格族（UseKtx 183/AutoboxingStateCreation 92/PluralsCandidate 51/Typography* 30 = 356 条噪音）。基线 512 → 156（删死条目，否则 LintBaselineFixed 每次报「356 条找不到」误导）。
+
+### ★ 两条可复用教训
+1. **`val sdk = Build.VERSION.SDK_INT; if (sdk >= R)` 对 lint 的 NewApi detector 无效** —— 它不跟踪 hoist 到局部 val 的 SDK level。必须**在每个调用点内联** `Build.VERSION.SDK_INT >= Build.VERSION_CODES.X`。（原来 `isExternalStorageManager` 一直躺在基线里就是因为这个——它有守卫但看起来没有。）
+2. **我编辑引入括号不平衡，被 `enum_parse_safety_check` 当场抓住**（`<unbalanced braces — the scanner cannot see this file (fail-closed)>`），连带 build-apk/unit-tests/lint 全红。**门真的有牙，fail-closed 设计正确**。
+
+### 判据（回答「要不要补行业工具」）
+**通用工具补地板（穷举覆盖/零边际成本/不懂业务契约），自建门补天花板（领域契约/语义值流/变异负控）。** 本仓天花板已到三层楼（115 门/18.4 万行 Python vs 25.7 万行生产 Kotlin，0.72:1，111/120 脚本用真 AST 而非正则），地板是水泥地。明确不做：CodeQL（要真构建 12min+）、SpotBugs/PMD（Java 语汇误报淹人）、Semgrep、ktlint/detekt 全量、把 522 条一次清零（违反装置比例）。
+
+**证据诚实边界**：本批没改 `scripts/scan/` ⇒ 日志明写 `skipping the fixture self-test` ⇒ 夹具没跑，只能说「115 个门全跑过」，不能说「夹具全绿」。
+
+<!-- 2026-11-13 20:34:39 -->
+## 合并收口：ci/lint-probe-1113 → main（2026-11-13，用户令「合并」）
+
+
+**merge commit `4402b69`**（`--no-ff`，`parents=3615461 b8c782e`），**父数 = 2** ✓。合并树与分支 tip 差异 **0 行** = 零冲突解。11 提交 / 11 文件 / +711 −30。
+
+**合并前核查三项全过**：
+1. **检查**：冲突标记 0、调试残留 0、探针残留 0（`lint_probe`/`PROBE-ONLY`/`lint-probe-1113` 全为 0 处）；生产 .kt 实质改动逐条过（只去掉注释后剩 9 行行为改动）；workflow 只改 `build-apk.yml` 一个文件；gradle 实质改动 = 删 1 行 disable + 加 baseline/abortOnError/6 族 disable。
+2. **验证**：本地 HEAD `b8c782e` 与绿 CI `43421391844` head_sha **逐字符一致**；`git merge-tree` 预演 0 冲突。
+3. **核实（三源取二）**：源1 = 分支 CI `43421391844` 五 job 全绿；源2 = 本地全量 `scan.sh` 115 passed / 0 failed + 邻门（enum_parse_safety、thinking_wiring_guard）绿。
+
+**main CI `43423573670` 五 job 全绿**（head_sha `4402b69fdf18`）：
+- lint `BUILD SUCCESSFUL in 9m 8s`，报告仅 1 条 Information（基线自记账）
+- scan-gate `Summary: 115 passed, 0 failed`
+- unit-tests `BUILD SUCCESSFUL in 6m 47s`
+- build-apk / publish success
+
+**★ 证据诚实边界（当场实证 GLOBAL 那条机制）**：本批**没改 `scripts/scan/`** ⇒ 日志实际输出 `##[notice]scripts/scan/** untouched in this push — skipping the fixture self-test` ⇒ **夹具没跑**。只能说「115 个门全跑过」，**不能**说「夹具全绿」。
+**判读陷阱复核**：日志第 163 行 `echo "::notice::scripts/scan/** untouched..."` 是**脚本源码**，第 1087 行 `##[notice]` 才是**实际输出**——不能只看 grep 到关键词就下结论，要区分源码行与运行输出行（同族陷阱：CI 日志里 grep 到 FAILED 多半是 PASSED 用例名子串）。
+
+**清理完成**：远端分支 API DELETE 204、本地 `-D`；远端只剩 `main`；本地 == origin/main == `4402b69`。
+
+**本批内容（三类）**：
+1. **SCA**：dependabot 告警 + 自动安全修复已开（403 → 200 `[]`）。**空管道**：依赖图只解析出 7 个 workflow action，无 Maven，需 CI 跑 `dependency-submission` 才有数据源。
+2. **Android Lint 接入**：新 `lint` job（并行，publish 依赖它），`-Pandroid.experimental.lint.version=8.9.0`，`lint-baseline.xml` 基线门禁（152 条），禁 6 个纯风格族。
+3. **修 lint 抓到的真 bug**：`isExternalStorageLegacy` API 越界（API 26–28 挂载文件夹崩）×2、`remember` 返回 Unit ×3 → `LaunchedEffect`、LazyColumn item 里读 `StateFlow.value` → 顶层 `collectAsState`。
+
+**可复用教训（三条）**：
+1. **`val sdk = Build.VERSION.SDK_INT; if (sdk >= R)` 对 lint 的 NewApi detector 无效** —— 不跟踪 hoist 到局部 val 的 SDK level，必须每调用点内联比较。
+2. **`android.experimental.lint.version` 吃 AGP 风格版本**（AGP+23=lint 版本）：`8.9.0`→lint 31.9.0 ✓，`31.9.0`→`lint-gradle:54.9.0` 解析失败 ✗。
+3. **基线门禁的自证纪律**：修掉某条问题后必须**从 baseline 删除该条**，否则绿不能证明修好。删完若 CI 仍绿 = 修复有效的证据；不删 = 基线无条件吞掉。
+
+<!-- 2026-11-13 20:52:03 -->
+## 外部审计发包：INCR-1113 两日增量包（2026-11-13）
+
+
+用户要求「按已发的那个文件夹里的子文件夹格式来」，且「任务量不大就合并成一个」。已按此重整：
+
+**格式**（对齐 `背景包/已发/B0x-*/`）：`00-提示词.md`（粘贴用）+ `01-任务书.md` + `02-改动索引.md`（替代旧 `02-文件清单.md`）+ `03-本周改动.diff` + `04-…`（新增：带真实行号的上下文）+ `05-源码.zip` + `STATUS.md`。目录名 `背景包/待发-INCR-1113/`，**单包**（不是之前我拆的 A/B/C 三包，已删除）。
+
+**范围**：`451170a^..4402b69`（25 提交 / 6 合并批 / 28 文件 / +3376−169）。`docs/dev-history/**` 4 个文件已从 diff 排除（自动生成 2597 条，无审计价值）。
+
+**关键装置**：`04-改动处上下文.md` = 每个 hunk 前后 45 行改动后源码 + 逐行真实行号，覆盖 21 个文件 3625 行。行号用脚本与 `git show 4402b69:<file>` 逐行对拍，**零偏差**（抽查 30 行）。这解决了「外部模型引用的行号是编的」问题。
+
+**任务书口径**：这批的性质是「修 bug 的 bug」，已确证 5 例同形缺陷 = 「守卫/注释/测试声称保护存在而实际不存在」（schema 版本默认值、导入器直写 isHidden、门臂断言分支存在而非行为、详情页 copy(isHidden=true)、build.gradle 注释断言 lint 覆盖）。§0.3 列了 12 条已登记/刻意设计项防误报（`replaceEntries` 死码、`ONBOARDING_MODELS` 死路由、models.dev 304、FIELD-IDENTITY 四字段、两套 128K 启发式、supports_reasoning:false 不当权威、UNKNOWN 走占位、lint 基线 156 条 + 6 风格族禁用、迁移幂等键）。
+
+**输出格式**：每条 `F-NN · 类别 · 文件:行号 · 符号` + 改动意图 / 实际行为 / 触发链 / 证据 / **可证伪条件** / 把握度（concrete|probable|speculative，不许自评 P 级）+ 末尾必须有 `## 检查覆盖`（空着 = 报告作废）。
+
+**教训**：① 用户说「合并成一个」时先量总量——425KB 文本 + 425KB zip 单包完全可发，我一开始按域拆三包是过度设计；② 已发包的格式是 `00/01/02/STATUS`，`02` 是清单不是 diff，diff 从 `03` 起——对齐时先 `ls` 一个真实包再动手。
+
+<!-- 2026-11-13 22:55:06 -->
+## INCR-1113 支 A 收口：模型元数据 / 导入 / 进程边界（5 条，2026-11-13）
+
+
+**分支** `fix/incr1113-meta`，基线 `4402b69`，3 提交（`eb9b5ba` 修复 + `2af30bc` flake + `cbb99d2` 报告）。
+**CI run 3051 / id `43445114987`，head_sha `2af30bc0fddc` 与本地逐字符一致，五 job 全绿 = 停止节点达成，未合并 main。**
+
+### 五条修复（先证都自己跑过）
+- **F-01 P2** `mergeCatalogRow`：「`emptyList()` = 断言纯文本」是假契约。两处硬证据：`normalizeModalities()` 把空折回 null 且**所有**消费点都走它；跨进程 `jsonStrList(arr) = if (arr==null) emptyList() else …` 把「没报」解码成空列表 ⇒ 若空真是断言，每个跨进程模型都变 `DECLARED_TEXT_ONLY`。改成 `?.takeIf { it.isNotEmpty() }`，KDoc 重写为单一语义（null 与 empty 都是「无意见」，肯定形式只有非空列表），测试改名 + 钉死 `emptyList().normalizeModalities() == null`。
+- **F-02 P1** 备份恢复追加路径按**位置**配对 `_entryIds`：`parseImportedModelEntries` 会过滤 `isHidden && !isCustom` 行 ⇒ 恢复分表前备份时列表变短，从第一条被跳过的行起全部错位（组员/AgentLoop/压缩模型挂错或悬空）。改为 `importInstanceJSON(jsonStr, entryIdMapOut)` 按 `sourceIndex` 配对。**关键约束**：不能用新函数名 `importInstanceJSONWithEntryMap` —— `importInstanceJSON(` 是 `provider_import_id_roundtrip` 臂 6 的锚点（它 walk 函数体证明仍走 `readImportInstanceFields`），挪走实现留空壳会让门扫空。纯逻辑抽到 `ProviderRepositoryUtils.kt`。
+- **F-04 P1** `registryLookupId` 只剥一段 ⇒ `openrouter/anthropic/x` 仍 MISS。改循环逐段剥离（上限 16 步）。**富化顺序（models.dev 值冒充端点权威）登记不修** → backlog `§INCR1113-F04`，KDoc 加 ponytail 三段。
+- **F-06 P2** 门没牙（实测复现两个洞）：①`val knownReasoning = false` 局部常量转发，A6 只看字面量 ⇒ 绿；②`supportsVision/Audio` 解析后从无消费点，A1 只查字符串存在 ⇒ 绿。修法：A6 补「标识符回查 `val <token> = true/false`」；A1 补「解析了必须出现 `endpointMeta.<flag>` 消费」（`supportsTools` 进 `CONSUMPTION_EXEMPT` 带理由）；A3 补「helper 体内必须有 while」+「返回值真当 `prov.models[<bare>]` key」；A5 补「详情页必须走 builder 且不得直接调 helper」；`_selftest()` 加 `expect_arm` 校验 + 「mutation 未改变文本」检测。生产侧配套 `mergeDeclaredModalities()`（true 补 image/audio，false/null 不动，null 从 `["text"]` 起算）。
+- **F-09 P1** API 26–27 上 `Application.getProcessName()` 抛 `NoSuchMethodError` 被吞成 null ⇒ 运行期守卫对所有进程放行（KDoc 却写「fail closed」）。改 `readProcessName(getProcessName, readCmdline)`：**只有抛异常才回退 `/proc/self/cmdline`**，返回 null 不回退（JVM stub 是返回 null，回退会答成 GradleWorkerMain 把每个 provider 单测判死）。`ModelExecutionService` 共用同一 resolver，去掉裸 `"modelservice"` 回退。
+
+### ★ 三条可复用教训
+1. **变异负控必须校验「是哪条臂红的」，不能只看退出码**。旧 `_selftest()` 只判 `rc != 0`，A3 的「单剥」mutation 实际是被 A2 抓到的，旧自检照样打印 `✅`。加 `expect_arm` 后立刻暴露。
+2. **改门夹具前先想「夹具自己合不合规」**。基线夹具里 `val knownReasoning = false` 正是 A6 新判据要抓的形态，不先修夹具 `--selftest` 会在「干净夹具应通过」这步就红。
+3. **测试夹具依赖目录项枚举顺序 = 跨机器 flake，本地永远复现不出来**。CI run 3048 唯一红点 `FastioSearchTest > the file that fills the budget is the last entry charged`（`expected:<1> but was:<2>`，8970 例中 1 条），与本支 0 触碰的文件。根因：夹具把两个填充文件和一个子目录平铺在 root 下并假设 walk 先到 `a.txt`；`Files.walkFileTree` 按 FS 自身顺序枚举（tmpfs=创建顺序，ext4=哈希）。**本机 200 次实验 `sub-first 0/200`**。修法不是放宽断言而是**让夹具顺序无关**（root 下只放子目录，两个填充文件放里面 ⇒ 谁先被枚举都会填满预算、第二个永不打开），改后两种创建顺序均通过且仍能抓「walk 不停」回归。**判据：断言里出现「whichever comes first」这类措辞 = 在赌文件系统顺序。**
+
+### 本地验证（沙箱 kotlinc 2.1.0 + JUnit 4）
+F-01 `OK(16)`、F-02 `OK(9)`、F-04 `OK(18)`、F-06 `OK(27)`、F-09 `OK(6)`、FastioSearchTest `OK(17)`；
+本门 `--selftest` 14 mutation 全中 + `SELFTEST=PASS`，真树 `OK(6 arms, 0 violations)`；
+真树变异 4 条逐条命中对应臂名；邻门 `provider_import_id_roundtrip` clean(13 arms)+selftest PASS、`backup_remap_rollup` OK、`provider_boundary_guard` rc=0、`model_entry_override_parity` OK(8 arms)、`i18n` ALL CLEAN。
+**CI 证据逐条核**：`Summary: 115 passed, 0 failed` + `[115/115] gateway_context_metadata_check` + `scanners moved in this push`（夹具真跑）+ `ALL 356 CASES PASS` + 6 条新增测试在册 PASSED。
+
+<!-- 2026-11-13 23:06:57 -->
+## FIX-INCR1113-B 收口（2026-11-13，分支 `fix/incr1113-loop`）
+
+
+覆盖外部审计 F-03 / F-05 / F-07 / F-08（4/4 全动手，0 登记）。基线 `4402b69`，6 提交，tip `bfda42e`，10 文件 +721/−107（新增测试文件 1）。
+
+**分支 CI run `43445034805` 五 job 全绿 @ `3ab1347`**（head_sha 与 tip 差异仅报告文档 1 文件）。日志逐条核：unit-tests `8961 PASSED / 0 FAILED` + `BUILD SUCCESSFUL in 5m 58s`；scan-gate `Summary: 115 passed, 0 failed` + `##[notice]scanners moved in this push`（夹具**真跑**）+ `ALL 356 CASES PASS` + `loop_persist_slice_check selftest has teeth` 与 `real tree green` 两行在册；lint 6m14s；build-apk 8m44s。**停止节点达成，未合并 main**（有 .kt 验证面 = 非纯文本例外）。
+
+### 四条修复的实质
+
+- **F-03**（`AgentLoopEngine` + `ContextOvershootRetry`）：昨天的自愈在它存在的场景下**根本不能触发**。`shouldShrinkAndRetry` 用「估算 ≥ 半窗」佐证，而窗口对未知 id 是 1M 启发式 ⇒ 真 128K 端点 + 100K 历史读作「十分之一窗口」，`100_000*2 < 1_000_000`，不收缩。加**绝对臂**（≥ 32K tokens 字面量）+ **窗口校准**（`parseReportedLimit` 6 种文案形态 → `effectiveWindow` 只作上限，因为窗口还带用户 group 预算）。另补 T7 事件（`ProviderAttemptFinished(TRANSIENT_FAILURE)` + `RetryRequested`），且 **latch 从 `turnLoop@` 内部提到用户回合作用域**——原来每模型调用重置一次，`finish=length` 续写可反复 400。
+- **F-05**（门 + 测试）：`len(rollbacks) < 2` 是假保护（真树 3 处，删 1 剩 2 全绿），且注释写「a path that silently disappears still trips this」是假话。改**按角色点名**（`overshootRetry` / `retryDelays` / `FallbackSelected` 三个分支标识符），缺角色报 `missing rollback role: <name>`，无角色 fail-closed。夹具 27→29，新增两条旧规则**抓不到**的形态（删一处 / 注释掉一处）。
+- **F-07**（`SystemPromptSegmentOrderTest`）：`buildStringBody()` 是 `substring(blockStart)` 到文件末尾 ⇒ 任何后续函数的 `append(...)` 都能满足顺序断言（真树 1964 字符 vs 旧实现 ~4 万字符）。改括号配对 + fail-closed（> 文件一半即报错）。子代理断言从全文 `contains` 收到 `executeSpawnAgentTool` 函数体内并要求 `DAILY_MEMORY` 在列。hint 断言改锚**发射**（`Note: Daily logs are large`）而非守卫条件。补同区段相对顺序。**五个手工变异各自变红**。
+- **F-08**（`ChatScreen` + `LargeContentGuard`）：lint 昨天把 `thinkingLevel` 提到 ChatScreen 顶层 `collectAsState`——但 `AssistantThinking` 行**全仓唯一构造点**在 runtime-dead 的 `LegacyFlatChatBuilder`（`buildFlatChatItems` 无生产调用者，`AGGREGATE_MESSAGE_ITEMS` 已于 audit-0920 删除），修在死分支上还引入全屏重组。删顶层 collect，分支留显式 no-op 臂 + 理由。`LargeContentGuard` 的 `wasDegraded.value = false` 从组合期搬进 effect（组合期写 MutableState 会立即失效本作用域 ⇒ effect 在 body 运行前被 dispose ⇒ 日志可能永不输出）。
+
+### 两个红（都记进报告了）
+
+1. **我自己写错断言**：期望值按语义顺序写（overshoot/transient/fallback），被测侧是 `.sorted()`。CI 第一次 dispatch 就抓到了。修 `3ab1347`。**说明测试真在跑。**
+2. **`FastioSearchTest > the file that fills the budget…` 红，与本支无关**。四源取证：`git diff --stat 4402b69..HEAD -- sandbox/` = 0 行；两个 sha 上 `FastioSearch.kt` / `FastioSearchTest.kt` blob hash **完全相同**；同一份字节上一次 run `PASSED` 这次 `FAILED`；本地抽独立 JVM 工程跑 30 轮 `failures=0/30`。根因 = 测试假设 `Files.walkFileTree` 有兄弟顺序保证（没有），却硬断言 `filesScanned == 1`。**未改**（半径纪律），建议 backlog P2。
+
+### 可复用教训
+
+- **「门/测试声称能抓 X」要单独验证**：本批 F-05 与 F-07 都是「注释/断言宣称的覆盖与实际不符」，且都不是靠读代码发现的，是靠「故意删一处看是否变红」发现的。这是本批最值钱的方法：**假保护只有变异能证伪**。
+- **`substring(anchor)` 到文件末尾**是测试作用域泄漏的通用形态；凡「从函数体内某处切到 EOF」，都在赌「后面的代码不会有同名文本」。改括号配对 + 长度 fail-closed。
+- **断言锚点选「发射」不选「守卫」**：`if (x != null)` 在 `if (x != null) { }` 下依然成立；只有 `append(<文本>)` 才是行为。
+- **组合期写 `MutableState` 会取消自己刚注册的 `LaunchedEffect`**：复位要搬进 effect body。
+- **CI 夹具总数不变 ≠ 新夹具没跑**：`test_scan.py` 只对门做「标记字符串 + 真树绿」，门内臂数由门自证。引用证据要写「门的 selftest 输出里有 29 臂」，不能写「夹具总数增加了」。
+- **`echo "::notice::…"` 是 workflow 源码，`##[notice]` 才是输出**（GLOBAL 已记，本次再次实证：前两处命中是源码，第三处才是真输出）。
+- **同一二进制同一用例结论翻转 = flaky，不是回归**。取证四件套：本支 diff 范围、blob hash 相同、上一次 run 同用例结论、本地多轮复现。
+
+<!-- 2026-11-13 23:31:56 -->
+## INCR-1113 外部审计批收口：9 条全修，2 支并集 CI 绿（2026-11-13）
+
+
+**输入**：外部模型对 `451170a^..4402b69` 两日增量（25 提交 / 28 文件 / +3376−169）的审计，9 条 findings（F-01..F-09，把握度全部 concrete）。
+
+**判级**：P0 = 0。P1 = 6（F-02 / F-03 / F-04前半 / F-05 / F-07 / F-09），P2 = 3（F-01 / F-06 / F-08）。**9/9 全部动手，0 条登记不修**。
+
+**分两支（文件集两两互斥，实测零冲突）**：
+| 支 | 分支 @ sha | 覆盖 |
+|---|---|---|
+| A | `fix/incr1113-meta` @ `cbb99d2` | F-01 `emptyList()` 假契约 · F-02 导入按位置配对错位 · F-04 多级前缀只剥一段 · F-06 门 A6 被自己 `_MINIMAL` 夹具证伪 · F-09 API 26–27 进程名恒 null ⇒ ProviderBoundary 全放行 |
+| B | `fix/incr1113-loop` @ `bfda42e` | F-03 ContextOvershootRetry 三处断链 · F-05 回滚点「≥2」假保护（真树 3 处，删一全绿）· F-07 buildStringBody 函数边界未闭合 · F-08 ChatScreen 改在死分支 + LargeContentGuard 组合期翻 MutableState 自杀 LaunchedEffect |
+
+**并集** `integration/incr1113` @ **`5030afdc6fbba6bd7f5aed110fac74b30bfdc72a`**
+- `git merge --no-ff fix/incr1113-meta fix/incr1113-loop` ⇒ **octopus，父数 = 3**（`4402b69 cbb99d2 bfda42e`）
+- 29 文件 / **+2357 −236**；冲突标记 0；调试残留 0
+- **CI run `43449915315` 五 job 全 success**，head_sha 与本地 HEAD 逐字符一致
+
+**证据逐条核（不只看绿）**：
+- scan-gate：`Summary: 115 passed, 0 failed` + `ALL 356 CASES PASS` + `##[notice]scanners moved in this push`（**夹具真跑**，因本批改了 `scripts/scan/`）
+- unit-tests：`BUILD SUCCESSFUL in 6m 22s`，**8982 PASSED / 0 FAILED**
+- lint `7m 59s` / build-apk `10m 50s` 均 SUCCESS
+- 9 条修复的测试**逐条在册 PASSED**（不是「有测试文件」而是「断言真跑」）
+- 本地第二源：两门 selftest 带牙 `GATEWAY_CONTEXT_METADATA_SELFTEST=PASS` / `LOOP_PERSIST_SLICE_SELFTEST=PASS (29 violating + 3 clean arms)`
+
+**★ 本轮最有价值的三条可复用手法**：
+
+1. **「假保护」是这个代码库的稳定缺陷族**——本批 9 条里有 4 条同形：注释/测试/门声称保护存在而实际不存在（F-05 的「≥2」下限在 3 处真树前失效、F-06 的门被自己的合规夹具证伪、F-07 的 `substring(blockStart)` 到文件末尾、F-09 的 KDoc 声称 fail-closed 而代码 `return null` 放行）。**审计这类库时，「声称 vs 实际」对拍比找逻辑 bug 命中率高**。判据：凡注释里出现「still trips」「fail closed」「any path that disappears」这类断言，逐条拿真树验证。
+
+2. **计数型下限断言必须按角色点名，不能按数量**——F-05 的修法：`ROLLBACK_ROLES = [("context-overshoot", ("overshootRetry",)), ("transient-retry", ("retryDelays",)), ("provider-fallback", ("FallbackSelected",))]`，删任一角色即红。同族：`test_scan.py` 的 `DA1016_GATES` 对门只做「标记字符串命中 + 真树绿」，新增 selftest 臂不涨夹具计数 ⇒ **夹具数不变不等于夹具没扩**。
+
+3. **CI 抓自伤是正面信号，不是浪费**——B 支第一次 dispatch（`43443967050`）unit-tests 红，原因是**新写的断言自己错了**（期望值按语义顺序写，被测侧是 `.sorted()` 字典序）。同一批 A 支也栽过 `FastioSearchTest` 顺序依赖 flake（`Files.walkFileTree` 顺序假设，非本支文件，四源取证后改 fixture 为顺序无关）。**两次红都在测试面而非生产面**——印证 GLOBAL「CI 绿 ≠ 逻辑对」：绿是必要条件，逐条搜标记才是证据。
+
+**登记（P2，已落 backlog，机械门 517 段全 OK）**：
+- `§INCR1113-F04` 端点富化顺序（models.dev 值冒充端点权威覆盖已存真值）—— 修法要跨四层加 provenance 或改 enrich 顺序，无用户可观察症状
+- `§INCR1113-P2` 三项：① `androidTest` 不在 CI 执行（40+ 用例从不跑，任何 instrumented 保护都是装饰）② `legacy/LegacyFlatChatBuilder.kt` 的 `AssistantThinking` 死码（删它会动 `FROZEN_LEGACY_SYMBOLS` 冻结契约 = 整体退役决策）③ F-03 两处设计降级（`parseReportedLimit` 依赖文案形态 / `reset()` 无生产调用者）
+
+**产物**：`meta-audit/reports/r7/TRIAGE.md`（6539 字节，含判级总表 / 分波文件集 / 并集证据 / 登记表 / 观察）、两支 `fix-reports/FIX-INCR1113-{A,B}.md`。
+
+**停止节点达成，未合并 main**（有 .kt + `scripts/scan/` 验证面 ⇒ 非纯文本例外，合并起手权在用户）。合并前核查三项已在并集树完成。
+
+<!-- 2026-11-13 23:49:24 -->
+## 合并收口：integration/incr1113 → main（2026-11-13 夜，用户令「合并」）
+
+
+**merge commit `c0391a25eda9773c7225ef4b59a746cd777598f4`**（`--no-ff`，`parents=4402b69 5030afd`），**父数 = 2** ✓。
+
+**合并前核查三项全过**：
+1. **检查**：`git diff --stat origin/main...HEAD` 29 文件 / +2357−236；冲突标记 0；调试残留（`println(`/`System.out`/`TODO(`/`FIXME`）0 处；`ChatScreen.kt` 逐段过，死分支断言当场核实为真（`AGGREGATE_MESSAGE_ITEMS` 常量确实已从定义处删除、只剩注释，`LegacyFlatChatBuilder` 是唯一 `AssistantThinking` 构造点）。
+2. **验证**：本地 HEAD `5030afd` 与绿 CI `43449915315` head_sha **逐字符一致**；`git merge-tree --write-tree` 预演 exit 0 无冲突；合并树 vs 分支 tip **差异 0 行** = 逐字节等价。
+3. **核实（三源取二）**：源1 = 并集 CI 五 job 全绿；源2 = 本地两门 selftest 带牙（`GATEWAY_CONTEXT_METADATA_SELFTEST=PASS` / `LOOP_PERSIST_SLICE_SELFTEST=PASS (29 violating + 3 clean arms)`）；源3 = 9 条修复的测试在册 PASSED。
+
+**main CI `43454454329` 五 job 全 success**（head_sha `c0391a25eda9`）：
+- scan-gate `131984787487`：`Summary: 115 passed, 0 failed` + `✅ ALL 356 CASES PASS` + **`##[notice]scanners moved in this push (or the diff was unreadable) — running the fixture self-test`** ⇒ **夹具真跑**（本批改了 `scripts/scan/`，与 11-12 那批相反）
+- unit-tests `131984787763`：`BUILD SUCCESSFUL in 5m 29s`，**8982 PASSED / 0 FAILED**
+- lint `131984787714` success；build-apk `131984786979` success；publish `131990661448` success
+
+**★ 判读陷阱第 N+1 次复核（本次差点误判）**：`grep -c` 同时命中 `scanners moved in this push`（**2 处**）和 `skipping the fixture self-test`（**1 处**）——看似矛盾。逐行带前缀看才分清楚：第 159 行是 `echo "::notice::..."` **脚本源码行**，第 163 行也是源码行（else 分支），**第 1087 行 `##[notice]` 才是实际输出**。机械判据：`grep -c "^2026.*##\[notice\]scanners moved"` = 1、`grep -c "^2026.*##\[notice\]scripts/scan/\*\* untouched"` = 0。**光 grep 关键词会得出相反结论。**
+
+**★ 第二个判读陷阱（测试名大小写）**：用 `subagentContextStillCarries` / `rollupSizeHintIsInTheVolatileTail` 小写搜索得 0 命中，一度以为两个 B 支测试没跑。真实用例名是驼峰首字母大写（`theSubagentContextStillCarriesTheDailyFragment` / `theRollupSizeHintIsInTheVolatileTail`），且 JUnit 输出里**用例名不带 `()`**。**搜测试名要按类名 grep 全行再肉眼核**，别用片段小写匹配下结论。
+
+**清理完成**：远端三个分支 API DELETE 全 204（`integration/incr1113` / `fix/incr1113-meta` / `fix/incr1113-loop`），远端只剩 `main`；本地 `git worktree remove --force` 移掉两个支工作树后 `git branch -D` 成功（**先删分支会报 `cannot delete branch used by worktree`**）；本地只剩 `main`，== origin/main == `c0391a2`，工作区干净。
+
+**本批交付**：9 条审计发现全部修复（P0=0，P1=6，P2=3），2 支文件集两两互斥零冲突，门脚本各改一个互不重叠（`gateway_context_metadata_check.py` +267−25 / `loop_persist_slice_check.py` +120−17）。
+
+## 2026-11-14
+
+<!-- 2026-11-14 00:13:03 -->
+## 背景包整理 + 6 个新包就绪（2026-11-13 深夜）
+
+
+### ★ 覆盖率算法纠错（重要，之前给用户的数字是错的）
+上一轮我算「审计覆盖 124/707 = 17.5%」，**严重低估**。原因：用全路径 grep（`src/android/app/src/main/java/com/rikkaminis/app/xxx.kt`），而早期 B0x 报告用的是**相对文件名**（`Foo.kt`）。
+**正确算法**：按**文件名**取交集。
+- 生产 kt 文件名 706 个（去重后，707 文件里有重名）
+- 历史报告出现过的 kt 文件名 741 个
+- 交集 **508 = 72%**（不是 17.5%）
+- **真正从未被审计的：171 个文件 / 23,490 行**
+
+**教训**：算"覆盖率"这类指标时，先抽样看一份真实报告用什么格式引用文件。全路径 vs 相对路径的差别能让结论差 4 倍。
+
+### 按域缺口（171 文件 / 23,490 行）
+`ui/chat` 68/11,623 · `data` 51/5,582 · `provider` 20/2,294 · `config` 11/885 · `guard` 4/823 · `sandbox` 6/973 · agent/tools/conversation 3/415
+
+### 背景包目录整理（343.9M → 219.7M，省 124M）
+1. **顶层 16 个散落 `Report*.md` 归位**：12 个与 `RikkaMinis/reports/` 逐字节重复（md5 核实）→ 删；4 个是 R5-A/B/C/D 报告 → 归档到 `RikkaMinis/reports/r5/`，并从 `shared/work` 补齐 R5-E/F，**六份齐了**。
+2. **三个"待发"目录其实都已发已回**：`待发-INCR-1113`（r7 报告 md5 `990f03a2` = 用户上传的 `Report__1_.md`）→ `已发/`；`待发-RHUB-PROTOCOL-20261105`（r6 报告在 `meta-audit/reports/r6/`）→ `已发/`；`待发-R5-修后复扫`（六份报告全在）→ `_archive/`。
+3. **删残留 `_shared/r4-rescue/`（130 MB）**：README 2026-10-29 已声明"已删 _shared"，实际残留三个 tar（含 112 MB 的 fix-r4-b13-lifecycle.tar.gz），r4 事故自救产物，代码早已合 main。
+4. README 全量重写（状态表停在 10-29，把三个已回包当"待发"）。
+
+**教训**：README 里的状态声明会腐烂。**整理前先核实每个"待发"包是否真的没发过**（查 reports 目录 + md5 比对上传文件），别信目录名。
+
+### 新建 6 个包（`待发-GAP-1113/` 3 个 + `待发-RESEARCH-1113/` 3 个）
+
+**GAP 三包（审计，沿用 B01 形态）**：A-data-config 69 文件/7,705 行/138KB zip · B-provider-sandbox 32/3,827/76KB · C-ui-chat 70/11,958/197KB。任务书 = B01 的 15 类缺陷形状附录 + 输出格式 + 44 条负决策摘要，开头明说"这批历史上从未被扫过，别假设明显问题不可能没人发现"。
+
+**RESEARCH 三包（研究，核心是"什么算答对了"）**：
+- `RA-evolution` 演化方向 — 六个观察面（门:生产=0.58:1 的比例是否还成立 / 沙箱边界 / provider 四套协议的同质度 / UI 状态真相源 / 数据多重载体 / 独有能力未产品化）。附 ARCHITECTURE.md + DESIGN_PHILOSOPHY.md（35KB）并提示"文档与代码不一致本身就是结论"。
+- `RB-halfwired` 半接线盘点 — **每条必须附可执行验证命令 + 实际输出**（`rg -n "X" | grep -v 定义文件 | wc -l` → `0`）。四种形态（有实现无入口/有入口无反馈/有字段无消费者/有分支不可达），明令排除 @Composable / override / 序列化字段三类高误报。
+- `RC-friction` 用户摩擦 — 三种可指认形态（做不成/不知道做没做成/得做两遍），**每条必须给完整调用链，每跳带 file:line**，链断即作废。明令排除纯视觉/文案/性能问题。
+
+**设计要点（防"听起来合理"）**：三个研究包共同的硬约束 = ①每条锚到 file:line 或可运行命令 ②区分代码事实(concrete) vs 判断(probable)，不许全标 concrete ③必写「我否掉的假设」防下轮重复投入。
+
+**zip 去重**：三份全仓 zip 内容相同（707 kt / 4,063,070 B），保留 RA 那份，RB/RC 留 `.指针.md`。省 8MB。
+
+**验证**：从 A 包 zip 抽 `AppDatabase.kt`，512 行与仓库逐字节 `cmp` 一致 ✅。
+
+生成器在 `/var/minis/shared/work/gap-pkg-1113/{build.py,build_research.py}`，重建改 `BASE` 常量即可。
+
+<!-- 2026-11-14 05:45:52 -->
+## R8-1114 C 支（聊天 UI）收口：5 条，1 条端到端证伪
+
+
+**分支** `fix/r8-1114-c-chat-ui` @ `29a478c`（基线 `c0391a2`，5 个修复提交 + 2 个文档提交）。
+**绿 CI** `43511930289` head `9ce09cf` 五 job 全绿（9017 PASSED / 115 门），tip 与绿 sha 差异仅 `fix-reports/FIX-R8-C.md`（9 行）。**未合并 main**。
+
+**逐条结论**：
+- **C-F01 P1 真修**：`firstResidue` 取「任意位置下一个 `>`」⇒ 正文 `a < 0` 粘到后文 `<invoke name=…>`，`nameValueOf` 命中标签自己的 name，残留判在**正文 `<`** 处，整句被删而标签体留在气泡。PRE 臂实测：`expected:<when a [< 0 the rule holds.]> but was:<when a [\n<parameter name="command">ls</parameter>]`。
+  **报告未点出的第二层**：旧实现 `i = gt + 1` 直接跳过中间字符 ⇒ 跳过的反引号不计入奇偶 ⇒ 正文 `<` 之后才开的围栏永远失效。修法：逐字符前进，遇 `>` 接受、遇新 `<` 或反引号放弃候选；**反引号必须在放弃处消费**（否则奇偶滞留）。
+- **C-F03 latent**：`baseline.getOrNull(i)` 按位置 vs `indexById[id]` 按 id，同函数两套口径。可达性核查：`PARALLEL_SAFE_TOOLS = {file_read, read_image}` 均不写块 ⇒ **当前不可达**，但 KDoc 明确声称按 id（假保护）。修法与 KDoc 对齐。
+- **C-F04 P1 真修**：`anchor > length` 应为 `>=`。PRE 探针实测 `StringIndexOutOfBoundsException: begin 4, end 3, length 3`。ViewModel 造不出 ⇒ 抽纯函数 `mentionSpanIsValid`（任务书允许的折衷）+ **形状断言证明真接线**（测过但没接线 = 本批要消灭的假保护）。
+- **C-F05 P1 真修**：`stripInline` 只去反引号、内容继续被粗体/链接/斜体正则吃。PRE 臂 8 条红（`__init__`→`init`、`fn[0](x)`→`fn`、`a*b*c`→`a b c`、`snake_case`→`snakecase`、`![alt](url)`→`alt`）。修法：与 `inlineToHtml` 同法占位符 + `getOrNull` 还原；实测输出 **零 NUL 残留**。
+- **C-F07 P2，端到端证伪**：`unexpandedPasteMarkers` 的 known 含全部 id vs 展开器只认 `inlineMarker`。但生产调用点只有 `ChatViewModel:997`（草稿恢复，`_pastedTexts` 在 `:941` 初始化为空、init 在 `:2796` ⇒ **buffer 恒空**），而发送守卫读的是另一个字段 `orphanPasteMarkers`。⇒ **报告描述的路径不成立**，只修函数契约矛盾。
+
+**装置**（`shared/work/r8-1114/c-jvm/`）：真生产源码 + 真仓库测试 + 6 最小桩 + 2 镜像（`mirror_check.py` 逐字段对拍真声明，防窄桩假绿）。PRE 107 例 / **18 红全是新断言**（既有 89 臂全绿）；POST 112 例 **OK**；**5 条变异各只命中自己那组**（m1→5、m2→2、m3→3、m4→8、m5→3，零串扰）。
+**C-F01 性能**：60k 字符 10.4 ms/轮（has+strip 各一遍），线性无退化。
+
+**可复用手法**：
+1. **PRE 臂编译失败 ≠ 先证失败**：新符号（`mentionSpanIsValid`）在基线不存在，测试无法编译 ⇒ 改用**行为探针 + `-Darm=pre` 断言必须抛异常**，让基线证明「缺陷真的发生」而不是「符号不存在」。
+2. **形状测试的 `-Dprobe.repo`**：变异臂把生产文件拷到 scratch 树后，形状测试向上找 `src/android/app` 会 `FileNotFoundException` ⇒ 那是装置假红不是变异命中。修法 = 给 scratch 树造 repo 形状软链 + 显式 `-Dprobe.repo`；`mutate.sh` 里为此单列注释。
+3. **同族判据要看区间语义**：`StreamingFade.kt:215` 的 `r.end > base.length` 看着同族，实为**排他上界**（`== length` 合法），不改。
+4. **可达性核查要读调用点的实参状态**：C-F07 仅凭函数级红就报 P1 会误判——查「唯一调用点在该时刻 buffer 是否可能非空」才定性成不可达。
+
+<!-- 2026-11-14 06:20:18 -->
+## R8-1114 B 支收口：worker/provider/trace 10 条修复（2026-11-14）
+
+
+**分支** `fix/r8-1114-b-provider-worker` @ **`7ae3f3f3a4fec7cb39d3cc5f7f91641582ffe012`**（基线 `c0391a2`，10 commits，24 文件 +1583/−73）。
+**CI run `43515431372` 五 job 全 success**，head_sha 与本地 HEAD / 远端逐字符一致。**未合并 main、未 rebase**（停止节点 = 分支 CI 绿）。
+
+**10 条全动手（0 证伪、0 登记）**：B-F01 双预算计数分离 · B-F02 「文件从无到有」判为变更 · B-F05 两步同批（decodeEcho fail-closed + EVERY_TURN 去 legacy 门）· B-F04后 safeOptString · B-F06 outputIndex 唯一命中 · B-F07 `{}` 回退 initialInput · B-F08 配对计数 · B-F09 自然语言前置判据 · B-F14 error 只取字符串 · C-04 trace 终态按 reducer 判定降级（只改产物）。
+
+**证据**：本地 14 个测试类 **137 例全 PASSED**；11 条修前对照臂（10 条行为变红，m5 由结构判据变红）；3 个锚门真树 + selftest 全绿；CI `Summary: 115 passed, 0 failed` + `PROVIDER_IMPORT_ID_ROUNDTRIP: clean (13 arms)` + 14 个测试类用例数与本地逐一吻合；6 行含 `FAILED` 全是**用例名子串**。
+
+**★ 三条可复用手法**：
+1. **装置没编译到的地方 = 没验证**（本轮实证）：`decide` 加必填参数后，本地装置只编译**新**测试类，既有的 `ModelExecutionRetryTest` 7 处三参调用一路绿到 CI，`compileReleaseUnitTestKotlin` 直接红（run 43512649415）。**改共享函数签名时，装置输入清单必须用 `rg -l '<符号>' src/.../test` 生成，而不是手写。**
+2. **管道吞 rc + 旧产物 = 假绿**：`kotlinc ... | tail -40` 在 `set -e` 下 rc 恒 0，编译失败时 `out/` 里留着上一次的 class ⇒ 套件跑旧产物（新加的臂写了但从未执行，`@Test` 9 个只跑 8 个）。修法：先清 out、编译写日志、按 kotlinc 自身 rc 判定、日志含 `error:` 即中止。
+3. **平台语义差异会让行为测试失去判别力**：Maven `org.json` 对 JSON null 的 `optString` 返回 `""`，Android 返回字面量 `"null"` ⇒ B-F04 的行为臂在修前树上也绿。对策 = 补**结构判据**（必须走 `safeOptString`、不得裸 `optString`），并对变异副本跑同一套判据证明其会红。
+
+**正则回溯坑（新）**：`\bterminal\s*=\s*(?!terminal\b)` 的 `\s*` 会回溯到零宽，负向先行看到空格 ⇒ 把具名实参 `terminal = terminal,` 判成赋值。写"禁止某形态"的负向断言时，先行组里要带 `\s*`：`(?!\s*target\b)`。
+
+**报告**：`fix-reports/FIX-R8-B.md`（含 §4.6 CI 红与"声称已更新但实际没改"的自我纠正）。
+
+<!-- 2026-11-14 06:50:38 -->
+## R8-1114 收口：外部审计 35 条 → 修 22 / 登记 12 / 证伪 3（3 支并集 CI 绿）
+
+
+**输入**：六份外部报告（A-data-config 11 条 / B-provider-sandbox 14 条 / C-ui-chat 10 条 = 35 findings + RA/RB/RC 三份研究类）。基线 `c0391a2`。工作目录 `shared/work/r8-1114/`。
+
+**用户令**：①「尽可能派出少的子代理，小任务尽可能合并」→ **6 支压成 3 支**；②A-F10、B-F05 按我的意见走。
+
+**判级结果**：修 22 · 登记 12 · 证伪/驳回 3。报告 severity 普遍偏高。
+
+| 支 | 分支 @ tip | CI | 条数 |
+|---|---|---|---|
+| A | `fix/r8-1114-a-config-guard` @ `e6a76df610` | run 3062 success | 7（A-F01/02/03/04/05/06/10）|
+| B | `fix/r8-1114-b-provider-worker` @ `7ae3f3f3a4` | run 3061 success | 10（B-F01/02/04后/05/06/07/08/09/14 + RA-C-04）|
+| C | `fix/r8-1114-c-chat-ui` @ `29a478c69b` | run 3056 success | 5（C-F01/03/04/05/07）|
+
+**并集** `integration/r8-1114` @ **`acb8bdd72dc31757548554b3cf341ed58a9767f2`**：`--no-ff` 三支一次合并，**parents = 4**（`c0391a2 e6a76df 7ae3f3f 29a478c`），零冲突（文件集施工前设计为零交集）。CI **run 3063 success**，逐条核：`Summary: 115 passed, 0 failed` + `ALL 356 CASES PASS` + `scanners moved in this push`（夹具真跑，A 支改了门）+ `BUILD SUCCESSFUL in 1m 15s` / **9117 PASSED / 0 FAILED** + **20 个新/扩测试类逐条在册**。55 文件 +3551−148（main 25 / test 26 / scan 1 / report 3）。
+
+**★ 本轮最大的操作事故（必须记）**：A 支 CI 红后，我用 `minis-sessions-cli send --prompt ... --async` 发修复指令，**忘了带 `--session <原会话id>`** ⇒ 新建了第二个会话，两个会话在同一 worktree 并行改同一批文件，互相覆盖（`FileMentionIndex.kt` / `GroupRouter.kt` / `LoopGuard.kt` / `ToolLoopScope.kt` 反复被写）。发现后停两个会话、由主会话接手收尾。
+**纪律**：给**已在施工的会话**追加指令必须 `--session <id>`；`send` 不带 `--session` 永远新建会话。同一 worktree 严禁两个会话并行（文件级无锁）。
+
+**★ A 支那处门红的价值（可复用手法）**：CI 报 `[21/115] Claim/release ownership guard`，本地二分定位到「给 `scan()` 的 finally 加 token 守卫」触发的——门要求 claim 翻转前有 marker 铸造，但它**只认函数体内的 `X = Any()` 形态，不认参数**。最终修法不是加 `claim-ok:` 豁免，而是**把 claim 从 `scan()` 搬到 `refreshIfNeeded()` 里、紧挨 `currentScanToken = token` 之后**——这样满足的是门真正编码的时序约束，而不是给它让路。**判据：门红时先问「约束本身对不对」，对就改代码满足它，不要第一反应加豁免。**
+
+**★ 三条方法学发现（已写 backlog §R8-1114-P2 第六节）**：
+1. **`verify_findings.py` 静默漏报**：原正则只认 `### F-NN [M13] [medium]` 三段式，遇 `[M13] [concrete] [medium]` 四段式**整条跳过**（A/B 初跑输出 0 行 = 没解析，不是没命中）。已改为容忍任意 `[...]` 序列。**判据：机械核实输出 0 行时先怀疑正则，别先信「报告无证据」。**
+2. **同层两个子开关一个门控一个不门控 = 漏了**（A-F10：`sensitiveEnabled` 被主开关门控，`privilegedToolsEnabled` 不被）。"three independent flags" 的设计叙述解释不了这个不一致。
+3. **「缺省值往哪个方向倒」是同一个审计轴**：`decodeEcho` 的 `getOrDefault(EVERY_TURN)`（坏数据升格为最激进档）与 privileged 不门控主开关，形状相同——**"没表态"被解释成"最宽松/最激进"那一侧**。
+
+**登记**（backlog `§R8-1114-P2`，机械门 518 段全 OK）：A-F08/09/11 · B-F04前半/10/11/12/13 · C-F02/06/08/09/10（12 finding / 13 条目，B-F04 前后半分裂）。RB 30 条按形态 1/2/3/4 全登记（形态1 14 条 = 产品决策不是缺陷；形态2 5 条与 RC 批同源）；RA 7 条架构迁移停在中途 = 连 P2 都不是；RC 20 条单独成批（`r8-1114/RC-PLAN.md` 已出三支预案：RC-A 10 条 / RC-B 6 条 / RC-C 4 条）。
+
+**证伪 3 条**（写进 backlog 防下轮重复投入）：B-F04前半（`supportsTools` 全仓零消费点，机制不存在）· B-F03（`required` 列表零个非 string 必填参数）· A-F07（`ContextPolicy.check(0,0)` 路径三重守卫不可达）。
+
+**停止节点达成，未合并 main**（有 .kt + `scripts/scan/` 验证面 = 非纯文本例外，合并起手权在用户）。
+
+<!-- 2026-11-14 09:14:57 -->
+## RC-1114 A 支收口：后台结果结构化 + UI 按结果分支（10 条）
+
+
+**分支** `fix/rc-1114-a-result-plumbing`，基线 `acb8bdd`（R8 并集）。代码 tip `49350e0`，文档 tip `6cb44f9`。
+**CI run `43537882646` success @ 49350e0**（五 job 全绿）：`Summary: 115 passed, 0 failed` + `ALL 356 CASES PASS` + `scanners moved in this push`（夹具真跑）+ **9139 用例 0 FAILED** + 4 个新测试类 22 用例逐条在册。
+8 条 commit（U-04+U-05 合、U-13+U-14 合），26 文件 +1289−70。**未合并 main、未 rebase。**
+
+**形态判定全部核实成立（0 判错、0 证伪）**：A 型 = U-02（syncNow 已返回 Outcome）/ U-03①（ImportResult 已带 4 字段）/ U-20；B 型 = U-01（runNow 返回 Unit）/ U-12（importFromGitHub 返回 Skill?）/ U-14（upsertTask 无法区分写盘成败）。刻意设计 = U-05 的 autoSelectFastest 守卫、U-13 的 §5.4 默认关。
+
+**★ 可复用手法（本批最有价值的三条）**：
+
+1. **「先证」必须两臂，单臂不是证据**。`probe.py` 对每条断言同时断言 base 有缺陷形态 + post 已消失；A 型条目另加「API 未变」的双 True 臂作对照（证明「后台无责、纯 UI」）。单臂「post 里没有 X」可能 X 本来就没有。
+
+2. **多条目共改一个文件时，按 `[RC-Uxx]` 标记做 hunk 级拆分**（`stage.py` 自带行级 patcher）。`git apply`/`patch(1)` 在沙箱里路径契约麻烦且静默误目标看起来像成功（实测 `a//tmp/...` 前缀被 replace 成 `aa/...`）；自己写「按 old_start 倒序替换 + old_lines 逐行比对」的 patcher，错配直接报出期望/实际两行。**每步都跑 i18n_check**（strings.xml 按累计 key 重写，key 集合在每条 commit 都对齐）。副产物：strings.xml 的 key 行序与最终快照不同（集合相同）——这是分步的必然结果，不是缺陷。
+
+3. **改共享函数签名后，装置输入清单要用 `rg -l` 生成**（GLOBAL 已有此条，本批再次实证）：`importFromGitHub` 从 `Skill?` 改 `UpdateResult` 后，既有测试 `SkillImportPreferredIdTest` 的锚点是 `): Skill? =`，必须一起改并**在提交说明里写明是规格变更**（同时补两条新断言：失败不得返回裸 null、PartialSuccess 必须可达）。
+
+**★ 本批自伤（记下来）**：给 `ScheduledTaskEditScreen` 加状态时用 file_edit 替换，把相邻的 `deleteRefused` 声明连带删了（只留下注释）——`rg -n "deleteRefused"` 才发现。**教训：file_edit 的 old_string 若紧邻另一条声明，改完必须 grep 那个符号确认还在。**
+
+**装置**（一次性脚本，不入仓）：`shared/work/rc-1114/a-jvm/` — `probe.py` 两臂先证 / `run.sh` 纯逻辑（18 tests）/ `shape.sh` 源码形态（35 tests）/ `mutate.sh` + `mutate.py` 6 变异（各只命中自己那组，零串扰）/ `mirror_check.py` 桩字段对拍（防窄桩假绿）/ `slice.py` 从真实文件切纯函数（逐行校验与源一致）/ `stage.py` 分步提交。
+**基线负控**：把 ConfigBackup 回退到 base → 4 条新断言全红（`Tests run: 35, Failures: 4`），修复后全绿。
+
+**报告**：`fix-reports/FIX-RC-A.md`（含逐条先证结论 + A/B 判定 + 证据输出 + 禁碰核对 + 7 条遗留）。
+
+<!-- 2026-11-14 10:44:33 -->
+## RC-1114 B 支收口：10 条入口/持久化修复，CI 两红一绿（2026-11-14）
+
+
+**分支** `fix/rc-1114-b-entry-persist`，基线 `acb8bdd`，**tip `90b0e4c`**（绿 sha `2650d089dcd9`，仅报告文档差异）。11 提交。10/10 全修，0 证伪。
+
+### 10 条
+U-06 目录删除（含计数+确认+符号链接按名字 unlink）· U-08 Media 行可浏览 · U-09 Soul 恢复默认写盘 · U-10 日志隐藏族补集计数 · U-11 需重启终端提示（A 的广播未做，待拍板）· U-15 OAuth 成功后落盘（三态反馈）· U-16 HTTP/SSE 合并（**不加 transport 字段**：guest 侧 minis-mcp-cli 连接后自己协商，字段没人读）· U-17 恢复默认（40 项全覆盖，步长按任务书只登记）· U-18 视频输出开关 + 最高思考挡位 · U-19 新建页补上下文窗口/输出上限。
+
+### ★ 两条最有价值的教训（都是 CI 抓的，都是我自己造的）
+
+**1. 测试红在「用来识别身份的字面量」上 → 先问「删掉它是否改变了被保护的契约」**
+`SandboxPathGuardWiringTest` 用 `displayPrefix = "/var/minis"` 字面量识别「唯一不带 linuxRoot 的路由 = 会话入口」。U-08 把前缀改成调用方传入（工作区 `/var/minis`、媒体 `null`），字面量消失 → 9121 例中 1 条红。**但 `null` 是合法值**（`Routes.fileBrowser` 声明 `String? = null`，只在非 null 时追加参数）⇒ 契约没变，**换标记而不是回退实现**：改用 `rootLabel = "Session Files"`（4 个调用点里唯一，才是真实身份）。同时把「两个调用方各自声明自己那棵树真实具备的前缀」钉住 —— 否则「永远 null」（工作区泄漏 `/data/user/0/...`）与「永远 `/var/minis`」（媒体声称不存在的 guest 路径）都绿。
+
+**2. 「CI 绿 ≠ 该跑的跑了」第二次实证：新增测试文件必须按类名在 CI 日志里搜到**
+第一轮全绿（9122 PASSED），我按惯例搜目标测试——`grep -c FileDeletionSummaryTest` = **0**。两个测试文件从头到尾是 `??` 未跟踪：写在沙箱装置里跑通、也拷进了仓库目录，但 `git add -A` 只在更早一次执行过。⇒ **CI 对 U-06 计数逻辑与 U-08 选根规则零覆盖**。补提交后 PASSED 9122→**9132**（+10 = 6+4），两类名在册。判据：**本批新增测试文件时，绿了也要按类名搜一遍**。
+
+### 其他可复用手法
+- **`MCPIntegrationsScreen` 两个 finding 落在同一 hunk**：不强行拆（拆 = 半 hunk stage，比合一条更难 review），commit body 里写明理由。
+- **`displayPrefix` 类「随调用方变化的值」不能当下标**：`readonly_mount_write_guard` 也钉了一个 `displayPrefix` 字面量（mounts 路由），改那片要同步看门。
+- **`countEntriesUnder` / `mediaBrowseRoot` 抽纯函数 + 仓库内测试**：测试直接编译真 `FileItem`（同包无 import 无桩），与沙箱装置副本逐字节一致（`diff -q` 核实）。
+- **静态一致性检查器**（`b-jvm/static_sweep.py`，补 SDK 缺失）：R.string 引用存在性 / 必须 import 的符号 / 括号配平 / 冲突标记 / XML 可解析。两个设计要点：①**括号平衡必须相对基线判 delta**（`AppLogger.kt` 基线就是 342-vs-341，绝对值检查每轮都假红 → 训练人忽略它）；②**KDoc 里的符号不是 use**（`Dispatchers.IO` 写在注释里不算缺失 import）。它自己也做了变异自检（删 import / 引用不存在的 key / 少一个右括号，三个都抓到）。
+- **U-17 的 40 项覆盖用机械核对**：恢复块赋值集合 == 页面 state 变量集合，双向差集为空（40 == 40）。sed 提取比目测可靠。
+- **U-19 差点犯的错**：把 `displayName` 也写进 overrides —— 但那页的 `baseModel.displayName` **就是**用户刚输入的名字，等值 override 是 no-op，却会把 entry 标成 `isUserModified` 并冻结名字（后续目录更新不再生效）。删掉了。
+
+### 待拍板（3 条）
+1. **U-11 A 半（广播）**：`broadcastProxy` 能复用，但**删变量的语义没定**——`unset` 一个已 export 给运行中进程的变量 ≠ 「新开终端里它不存在」（子进程可能已继承）。需要定「删变量时运行中终端怎么办」才动手。
+2. **U-18 两个新参数用默认值而非必填**：默认值让 9 个既有调用点零改动，但**默认值本身是行为**（谁删掉显式传参就静默走默认分支）。已写 KDoc + 测试钉两个方向。
+3. **`mcp_transport_http` / `_sse` 两个旧 key 定义仍留 7 locale**（零代码引用，i18n 门不报未引用定义）。保留 = 省 14 行改动，无收益。
+
+**登记不修**：`withOverrides` 不折叠 `maxThinkingLevel`（`ProviderConfig.kt:436-444` 只折 6 个字段）——P2 跨层，无用户可观察症状，非本批引入。
+
+<!-- 2026-11-14 10:59:40 -->
+## RC-1114 批收口：20 条摩擦项全修，2 支并集 CI 绿（2026-11-14）
+
+
+**来源**：外部研究报告 `RC-friction.md`（20 条 U 项，用户摩擦形态：做不成 / 不知道做没做成 / 得做两遍）。按用户令压成 **2 支**（原计划 3 支，`c-state-persist` 撤销）。
+
+| 支 | 分支 @ sha | 内容 |
+|---|---|---|
+| A | `fix/rc-1114-a-result-plumbing` @ `49350e0`（+ 报告提交 `6cb44f9`） | 10 条：后台结果结构化 + UI 按结果分支（AutoBackupRunOutcome / MirrorRowDisplay / ScheduledTaskEditorPolicy / SkillImportPreferredId …） |
+| B | `fix/rc-1114-b-entry-persist` @ `2650d089`（+ 报告提交 `90b0e4c`） | 10 条：入口补全与状态持久化（FileBrowser 删除计数、媒体浏览根、MCP 集成、日志管理 …） |
+
+**并集** `integration/rc-1114` @ **`93bd5fa6cf0bfd09fd06d2cb73f746510102a118`**（octopus，`parents=acb8bdd 6cb44f9 90b0e4c`，父数 3）
+- 47 文件 / **+3241 −191**；冲突标记 0；**本批新增调试残留 0**（基线已有 35 处不动）
+- **i18n 键集机械校验**：7 个 locale 各 1673 条 `<string>`，全部对齐（A 在文件末尾加 21 key、B 分散插，行号不重叠 ⇒ 自动合上）
+- **CI run `#3072` 五 job 全 success** @ `93bd5fa6cf`：scan-gate `Summary: 115 passed, 0 failed` + `ALL 356 CASES PASS` + **`moved: 1` 夹具真跑**；unit-tests `BUILD SUCCESSFUL in 1m 42s` / **9154 PASSED, 0 FAILED**；lint / build-apk / publish 均 success
+
+**两处 CI 红，都是门在履职（正面信号）**：
+1. **B 支首次 `#3068` unit-tests 红**：`SandboxPathGuardWiringTest` 抓 U-08 新增媒体浏览路由未传 `linuxRoot`。B 支没有放行，而是**改判据**——原测试靠 `linuxRoot != null` 识别会话路由（只是碰巧），换成唯一 `rootLabel` 标识 + 钉住两个调用方各自 prefix 契约（`c71bc30`）。
+2. **沙箱 JVM 装置 ≠ 入仓证据**：`FileDeletionSummaryTest` / `MediaBrowseRootTest` 只在装置里跑过、**没进仓**（CI 里 0 条）。入仓时发现装置桩 `FileItem.size` 带默认值 `= 0L`、真实类必填 ⇒ 补 `size = if (dir) 0L else f.length()`。提交 `2650d089` 后 CI 里 **6 + 4 条在册**（9122→9132 的 +10 正好对上）。
+
+**★ 可复用判据**：
+- **「装置里绿」不等于「CI 里绿」**：沙箱 JVM 装置自带桩类，桩的默认值/宽松签名会掩盖真实构造要求。核对法 = 在 CI 单测日志里 **按类名 grep 到用例**，grep 不到 = 没有保护。
+- **测试用「碰巧能区分的标记」当身份判据 = 假保护**（同 R8/INCR 族）：`linuxRoot != null` 只是当时唯一差异，不是语义标识。改判据应换成**唯一且语义对得上**的字段（这里 `rootLabel`）。
+- **两个分支都改 i18n 时先看插入位置再判冲突**：末尾集中追加 vs 分散插入 ⇒ 行号不重叠 ⇒ git 自动合上，不必预先人工拆。
+
+**状态**：RC 并集停在分支上，**未合并 main**（有 .kt 验证面，合并起手权在用户）。注意还有 R8 并集 `integration/r8-1114` @ `acb8bdd` 也停在分支上未合。
+
+<!-- 2026-11-14 11:13:18 -->
+## 合并收口：R8 + RC 两批 → main（2026-11-14，用户令「合并」）
+
+
+**两个 `--no-ff` 合并提交，父数均 = 2** ✓：
+- `4b504af` = Merge `integration/r8-1114`（parents `c0391a2 acb8bdd`）
+- `78b62ca` = Merge `integration/rc-1114`（parents `4b504af 93bd5fa`）⇒ **main tip**
+
+**合并前核查三项全过（两支各走一遍）**：
+1. **检查**：r8 55 文件 +3551−148 / rc 102 文件 +6792−339（含叠加）；冲突标记 0；**本批新增调试残留 0**；`git merge-tree --write-tree` 两支均 exit 0。
+2. **验证**：两端分支 CI head_sha 与本地逐字符一致（r8 `acb8bdd` #3063 / rc `93bd5fa` #3072）；合并后 `git diff --stat <branch tip>..HEAD` = **0 行**（两支都是零冲突解，合并树与分支 tip 逐字节等价；RC 的 90b0e4c / A 的 6cb44f9 均只改 fix-reports）。
+3. **核实（三源取二）**：源1 = 并集 CI 五 job 全绿；源2 = 子代理沙箱 JVM 装置逐条变异负控 + 本批新增测试在册；源3 = 合并树 i18n 机械校验（7 locale 各 1673 条、键集对齐、XML 全可解析）。
+
+**main CI run `#3073` + Scan Gate run `#17` 全绿** @ `78b62ca803`：
+- scan-gate `132308023042`：`Summary: 115 passed, 0 failed` + **`##[notice]scanners moved` = 1（夹具真跑）** + `ALL 356 CASES PASS` + ❌ 计数 0
+- unit-tests `132308022965`：`BUILD SUCCESSFUL in 1m 22s` / **9154 PASSED, 0 FAILED**
+- lint / build-apk / publish 均 success
+
+**清理完成**：7 个远端分支 API DELETE 全 204、本地 `-D` 全成功、7 个工作树 `remove --force` 后 `prune`（**先移工作树再删分支**，否则报 `cannot delete branch used by worktree`）。终态：本地/远端只剩 `main`，== `78b62ca`，工作区干净。
+
+**本批两批合计交付 42 条**：R8 22 条（3 支）+ RC 20 条（2 支），共 5 支并行、2 个 octopus 并集、1 次 main 直落。
+
+<!-- 2026-11-14 12:12:11 -->
+## U-11 收口：环境变量不做 PTY 广播（负决策）+ 文案两轮订正（2026-11-14）
+
+
+**分支** `fix/envvar-terminal-note-1114` @ **`28fe49155266876f97fa1e1efcd26010c222bcdc`**
+CI run `43554173812` 五 job 全 success，head_sha 与本地逐字符一致。**未合并 main**（strings.xml 参与资源编译 = 非纯文本例外）。
+
+### 判定的核心：三个注入点，三个时刻
+
+| 注入点 | 位置 | 何时读变量 |
+|---|---|---|
+| 助手命令 | `ExecutionCoordinator.executeWithShellRetry:692` | **每条命令前**重读 `allAsDict()` + 与 `lastInjectedKeys` 差分 |
+| 交互式终端 PTY | `TerminalSession.buildTermuxEnv:752` | `start()` 时烘进 env 数组 |
+| 新 guest 进程 | `PRootKernel.customEnvironment` | spawn 时 |
+
+**「删变量语义没定」是误判**——`PersistentShell.applyEnvironment(envVars, previousKeys)` 早就实现了：`previousKeys - envVars.keys` 走 unset，其余 export，命令边界结算（`audit-1015 BUG-07` 修的）。真问题是「要不要在 PTY 上复刻」。
+
+### 不做广播的三条硬证据（已写进源码注释 + backlog §RC1114-U11）
+
+1. **场景到不了**：PTY 生命周期绑 Composable（`AppNavigation:1496` `remember(sessionId)` 建对象 + `TerminalScreen:157` `onDispose { stop() }`）⇒ 用户走到设置页时 PTY 已被 kill，`liveSessions` 空，广播无接收者。
+2. **泄密成本**：PTY 广播 = 往 shell 敲 `export KEY='…'\r`，值原样回显进滚动缓冲。这页专门存 API Key。
+3. **装置比例**：要改 `internalBuildTerminalEnvScript` 支持 unset + PTY 加差分 + 三写入方统一触发 + `stty -echo` 包裹，换 0 收益。
+
+### ★ 自伤两轮（都是自己抓的，值得记）
+
+**第一轮 `c3398e0`**：文案写「deleted variable is unset there [in open terminal]」——**与同一提交记录的不做广播决策自相矛盾**。没有广播 = 打开终端连 unset 也收不到。第二轮 `28fe491` 改为「删除在助手路径生效（PersistentShell 按 previousKeys 差分 unset）；打开终端两个方向都收不到；已运行进程保留启动时 environ」。
+**判据：写「某操作会怎样」的文案前，先回查这次改动自己否定了什么能力——否定广播就不能再声称广播效果。**
+
+**注释第三条同样错**：把「没有广播」与「unset 到不了运行中进程」混成一件事。后者是 POSIX，前者是本项目决策，两条事实不同层。
+
+### 可复用手法
+- **文案订正要脚本化 + 断言旧说法消失**：`STALE` 字典逐 locale 断言旧片段不在文件里，防止漏改一种语言。
+- **两个 i18n 检查器口径不同**：`i18n_check.py` 报 `1673 definitions`（严格 XML `<string>` 元素），`scan_blocks.sh:61` 内联版报 `1675 defs`（正则 `name="…"` 会把 `<plurals>` 等算进去）。差 2 是既有差异，不是本次引入。
+- **门结果**：i18n ALL CLEAN / envvar_config_group_check 16 项 / deeplink_settings_routes_check PASS / ime_inset_guard clean / scan-gate `Summary: 115 passed, 0 failed` / unit-tests `9154 PASSED` 0 FAILED。夹具跳过（本批未动 `scripts/scan/`），所以**不能声称夹具全绿**。
+
+<!-- 2026-11-14 12:27:56 -->
+## 合并收口：fix/envvar-terminal-note-1114 → main（2026-11-14 午，用户令「合并」）
+
+
+**merge commit `0945f8f`**（`--no-ff`，`parents=78b62ca 28fe491`），**父数 = 2** ✓。
+
+**合并前核查三项全过**：
+1. **检查**：8 文件 +52−22（1 .kt 注释 + 7 strings.xml）；冲突标记 0；本批新增调试残留 0；`git merge-tree --write-tree` exit 0 无冲突。
+2. **验证**：本地 HEAD / 远端 tip / 分支 CI `43554173812` head_sha 三者**逐字符一致** `28fe49155266876f97fa1e1efcd26010c222bcdc`；合并后 `git diff --stat 28fe491..HEAD` = **0 行**（合并树与分支 tip 逐字节等价）。
+3. **核实（三源取二）**：源1 = 分支 CI 五 job 全绿；源2 = 本地四门（i18n ALL CLEAN / envvar_config_group_check 16 项 / deeplink_settings_routes_check PASS / ime_inset_guard clean）；源3 = 7 locale 键集机械校验（各 1673 条 + XML 可解析 + 旧说法零残留）。
+
+**main CI run `43555611778` 五 job 全 success** @ `0945f8f`：
+- scan-gate `132327666444`：`Summary: 115 passed, 0 failed` + **`##[notice]scripts/scan/** untouched in this push — skipping the fixture self-test`**（⇒ **夹具没跑**，本批未动门脚本；不能声称夹具全绿）
+- unit-tests `132327666257`：`BUILD SUCCESSFUL in 6m 27s` / **9154 PASSED, 0 FAILED**
+- lint / build-apk / publish 均 success
+
+**清理完成**：远端分支 API DELETE 204、本地 `-D`；本地 == 远端 == `0945f8f`，只剩 `main`，工作区干净。
+
+**内容**：U-11 的提示半边订正（原文案对助手命令是错的）+ 三条不做 PTY 广播的理由写进源码注释 + backlog `§RC1114-U11` 负决策（触发条件 = 终端获得多标签/后台常驻能力）。
+
+<!-- 2026-11-14 14:17:51 -->
+## 粘贴折叠「折叠了但没发出去」根因定案（2026-11-14）
+
+
+**症状**：长文本粘贴 → 折叠成 chip → 发送后模型收不到折叠内容（inline 形态则收到字面量 `[Pasted#1]`）。
+
+**根因一行**：`ChatInputArea.clearComposerInput()` 里 `viewModel.clearPastedText()`，两个发送漏斗都在它**之后**才调 `viewModel.sendMessage()`，而 `sendMessage` 内的 `expandPastedText()` 是唯一展开点 ⇒ 先删掉唯一副本，再调用需要它的函数。
+
+**引入点**：`2a0f4e2f`（2026-10-31 23:27「composer paste lifecycle」的 P1-C 修复）。同晚 20:46 的 `06fcda40` 上线时是对的（那时漏斗里没有 `clearPastedText`）。**修 A 引入 B**：P1-C 要解决「清空后 detached chip 混进下一条消息」，加 drop 时没检查消费方顺序。
+
+**三重机制为什么全瞎（可复用判据）**：
+1. 门 `chat_ui_interaction_check` F 族只量「清空是否走同一漏斗」+ 漏斗里四条必备写入，**不量「漏斗副作用是否有界」**。加一个 `viewModel.clearPastedText()` 完全在判据外 ⇒ 绿。
+2. `PasteFoldWiringTest` 只断言 **guard 在 clear 之前**（防清空用户草稿），**从没断言 expand 在 clear 之前**。两个顺序看着对称，实为两件事。
+3. `PasteTextBufferTest` 是纯函数级；接线测试只看「sendMessage 里有展开」，不看「展开时 buffer 还活着」。中间那层「谁何时清了 buffer」无人管辖。
+4. **CI 不跑 androidTest**（只编语法），端到端粘贴→发送零自动覆盖。
+
+**日志判据（最有力）**：`grep -c '\[Paste\] expanded'` 在 11-10..11-14 全部 = 0，而 `stashed` 有 6 行。**stashed 有、expanded 无 = 折叠了但没发出去**，不需要复现。
+
+**修法**（`a4b2a950`，分支 `fix/paste-send-order-1114`，CI #3077 五 job 全绿 @ 该 sha）：两漏斗在 clear **之前** `expandPastedText(toSend)`，传展开值给 `sendMessage`；`sendMessage` 内展开保留（幂等 + debug RPC / headless 直接进那条路）。非同发送的清空保留 drop。
+
+**否决的修法**：给漏斗加 `dropPastes` 参数 —— 门 `FUNNEL_LAMBDA_RE` 只认 `val <name>: () -> Unit = {`，改 `fun` 会让 F/G4 当场红，放宽门 = 削弱「单一漏斗」保护。
+
+**CI 证据**（#3077 / run 43564430417，head_sha `a4b2a95000b5`）：unit-tests 9155 PASSED / build 4m33s；新增用例 `both send funnels expand the folded blocks before the clear drops them PASSED` 在册；scan-gate 115 门全绿含 `[109/115] chat_ui_interaction_check ... GATE OK`，**但 `scripts/scan/**` 本批未动 ⇒ 夹具被跳过**（日志明写 skipping the fixture self-test）⇒ 不能声称夹具全绿。本地补齐：该门 `--selftest` = `PASS (86 fixtures)`、真树绿；变异负控 3/3 红（撤任一处 expand→clear 顺序 / 展开后仍发原文）。
+
+<!-- 2026-11-14 14:26:43 -->
+## FIX-REVIEW1114 收口：2 必修 + 1 清理，分支 CI 绿（2026-11-14 下午）
+
+
+**分支** `fix/review1114-review-fixes`，基线 `0945f8f4`（当日 main tip）
+- 绿 sha = **`5eef7dba`**，CI run [`43565324906`](https://github.com/***OWNER***/RikkaMinis/actions/runs/43565324906) #3078 五 job 全 success
+- tip = **`9e4cee14`**（仅 + 报告 `fix-reports/FIX-REVIEW1114.md`；`git diff --name-only 5eef7dba..HEAD` = 1 个 .md）
+- **未合并 main**（有 .kt 验证面），停在分支上
+
+### 三条改动
+
+**A P1 · 嵌套符号链接让删除越界**：`FileBrowserViewModel.deleteItem` 的 `item.file.deleteRecursively()` → `internalGuestTmpDeleteTreeNoFollow(item.file.toPath())`；`FileDeletionSummary.countEntriesUnder` 的 `listFiles()` 递归 → 同一套 `walkFileTree`（无 FOLLOW_LINKS）。缺陷是**双向**的：既删穿出去，也**报多**（同一形状报 4，实际 2）——报告只写了前一半。
+
+**B P1 · 函数名公式被判散文**：`MarkdownMathHeuristic` 新增 `MATH_FUNCTION_TOKENS`（34 个），不计散文词数、不参与长单词判定，大小写不敏感 + 完整 token。5 条回归（`log x + log y` / `sin x cos x` / `max a b` / `lim n to inf` / `O(n log n)`）恢复 MATH。
+
+**C P2**：`mcp_transport_http` / `mcp_transport_sse` 从 7 locale 删除（1673 → 1671 各）。
+
+### 证据
+
+- JVM 装置：post 16/16 绿；**pre 臂（0945f8f4）3 条红** = 先证成立
+- 先证探针：基线 `deleteRecursively()` 真把 outside 2 个文件删光；旧计数器真报 4
+- **变异负控 5/5 红**：回退浏览器调用 / 加 FOLLOW_LINKS / `count += 0` / 清空词表 / 词表塞英文
+- 门：readonly_mount_write_guard(真树 + selftest 76 臂) / i18n ALL CLEAN / sysinfo_state_thread_check(+selftest) / share_dir_prune / browser_tabs_lifecycle / skill_import_offmain / fastio_tar_bounds / katex_bridge_arity / chat_ui_interaction
+- CI 逐条核：`Summary: 115 passed, 0 failed`；`[26/115] Read-only-mount write guard → OK: 9 path-parameter write site(s) guarded (711 files scanned)`；**9163 PASSED / 0 FAILED**（基线 9154，**+9 = 新增 9 条用例，对得上**）；lint `BUILD SUCCESSFUL in 6m 32s`；publish 的 Publish/tag 两步 **skipped = main 门控生效**
+- **夹具没跑**（本批未动 `scripts/scan/`）：`##[notice]scripts/scan/** untouched in this push — skipping the fixture self-test (~121s)`，`ALL N CASES PASS` 计数 0 ⇒ 报告只写「115 门全跑过」，不声称夹具全绿
+
+### ★ 四条可复用手法
+
+1. **门锚定「守卫 + 写入」同居，抽函数会打死门**。我第一版把删除分支抽成 `deleteListedEntry(item)`，`readonly_mount_write_guard` 立刻报 `deleteItem() — the write call is gone; criterion 5 lost its subject`。改回内联并把理由写进注释。**判据：想从被门锚定的函数里抽东西前，先 grep `scripts/scan/*.py` 找锚点。**
+2. **结构断言的变异负控必须让变异发生在被测树里**。变异打在临时 `main/` 而结构断言通过 `user.dir` 读真实工作树 ⇒ 报 `STILL GREEN`，而真相是负控没接上（不是断言没牙）。全部改成「树内变异 + `user.dir` 指向变异树」。
+3. **假变异 = 加了不参与计算的调用**。m2 第一版写「在计数器里加一句 `root.toFile().listFiles()`」——行为零变化，是无效负控。真变异要让行为真的变（`FOLLOW_LINKS`）。
+4. **静态文本断言必须先剥注释再判**。修复注释会逐字引用被禁的 API（`deleteRecursively()` / `FOLLOW_LINKS`，用来说明"为什么不能用"），裸搜索把自己的解释读成罪证。测试里带 `stripComments()` 状态机（`//` + 块注释 + 字符串）。
+
+### 其他可复用点
+
+- **i18n 两个计数器口径差 2 是既有现象**：`i18n_check.py` 报严格 XML `<string>` 数（1671），`scan_blocks.sh` 内联版正则 `name="…"` 把 `<plurals>` 也算进去（1673）。删前各减 2 同步，不是没删成功。
+- **`publish` job 全 null 步骤但 conclusion=success**：`Publish to Releases` / `Move the rolling tag` 是 `skipped`（`if: refs/heads/main` 门控），这是分支 CI 的正常形态，不是失败。
+- **报告事实核对出报告本身的错**：任务书表格里 `\alpha beta gamma` 标 TEXT 不成立（`content.indexOf('\\') >= 0` 第一行就返回 false → 后续 glyph 扫到 `\` 返回 true）。按实测写，不照抄。
+- **额外发现的回归**：`sin theta cos phi` 基线也是 TEXT，属同族，一并修好（报告没列）。
+- **B 支的代价必须量化**：完整清单就 2 条（`log value here` / `max a b is`），机制 = 句子里剩下的长单词只剩函数名。一个普通限定词就能救回（`the log of x` 仍 TEXT）。
+
+<!-- 2026-11-14 14:59:21 -->
+## 合并收口：两分支一起审 → integration/review1114 → main（2026-11-14 下午，用户令「两个分支一起审，审完没问题就合并」）
+
+
+**merge commit `b396ee38`**（`--no-ff`，`parents=0945f8f4 2d7175e8`），**父数 = 2** ✓。并集 `2d7175e8` 是 octopus（`parents=0945f8f4 5eef7dba a4b2a950`，父数 3），零冲突。
+
+### 两支内容
+
+| 支 | 分支 @ sha | 内容 |
+|---|---|---|
+| A（我派子代理） | `fix/review1114-review-fixes` @ `9e4cee14` | 当日审查 2 必修 + 1 清理（见下） |
+| B（用户另开会话） | `fix/paste-send-order-1114` @ `a4b2a950` | 折叠粘贴在发送前丢失：两个发送漏斗先 `expandPastedText(toSend)` 再清空 composer |
+
+**文件集零交集**（`comm -12` 空），`git merge-tree --write-tree` exit 0。
+
+### A 支三条（我写任务书派给会话子代理 `7af087ff`）
+1. **P1 目录递归删除跟随嵌套符号链接**：U-06 把目录删除入口打开后，`File.deleteRecursively()`（走 `listFiles()`，跟随链接）会把 victim 里指向外部的链接目标删光。改用项目已有的 `internalGuestTmpDeleteTreeNoFollow`（`GuestTmpSweepPlan.kt`，`Files.walkFileTree` 无 `FOLLOW_LINKS`）；`countEntriesUnder` 同步换成不跟随遍历（原 `listFiles()` 递归既重复计数又描述 bug 行为）。**我的独立探针复现**：`before: victim=2 outside=2` → `returned=true` → `after: victimExists=false outsideExists=true outsideFiles=2`。
+2. **P1 数学启发式误伤函数名**：`log`/`sin`/`cos`/`max`/`lim`/`O(n …)` 被当成「散文证据」（≥3 个 3+ 字母 ASCII 单词）。加数学函数词表排除。**我的独立探针**：5 条全回 MATH，`50 for a 3-day pass or` 仍 TEXT。
+3. **P2 孤儿资源**：`mcp_transport_http`/`_sse` 因 UI 合并成 `mcp_transport_url` 后零引用，7 locale 各删 2 条（1673→1671）。
+
+### 三条最值钱的判据
+- **「修 bug 引入新 bug」的识别法**：U-06 只是把按钮从 `if (!item.isDirectory)` 里放出来，但它把「已知会跟随链接」的实现推到主路径。真机 `/var/minis/shared` 符号链接密度 6405/45326 ≈ 14%，不是理论场景。**打开入口 = 让 latent 缺陷变 P0，必须同时审它调用的实现**。
+- **`stringResource` 返回模板再 `String.format` 不是缺陷**：`context.getString(id, args)` 内部就是 `String.format(getString(id), args)`，两者等价。7 locale 都带 `%1$s`。**别把风格差异写成 bug**（我原报告提过这条，修前自我证伪）。
+- **计数口径 1671 vs 1673 的差异来源**：`i18n_check.py` 数 `<string>` 元素（1671），`scan_blocks.sh` 内联版用正则 `name="…"` 把 2 个 `<plurals>` 也算进去（1673）。**既有口径差异，不是本次引入**——看到两个数字对不上先查是不是两套计数器。
+
+### CI 证据（逐条搜到标记，不只信绿）
+- 并集 `43566934031` success @ `2d7175e8`；main `43567896155` success @ `b396ee38`
+- unit-tests：`BUILD SUCCESSFUL in 5m 18s` + **9164 PASSED**（基线 9154，+10 = 新增用例）
+- 新增用例按类名在册：`FileDeletionNoFollowTest` 5 / `FileDeletionSummaryTest` 6 / `MarkdownMathHeuristicMoneyTest` 13 / `PasteFoldWiringTest` 12
+- scan-gate：`Summary: 115 passed, 0 failed` + `##[notice]scripts/scan/** untouched in this push` ⇒ **夹具没跑**（本批未动门脚本），**不能声称夹具全绿**
+- i18n：`Done: ALL CLEAN` + `No orphan keys (1660 refs, 1673 defs)`
+
+### 变异负控（子代理装置 + 我复跑）
+`run.sh pre`（去掉修复）→ 3 红；`run.sh post` → `OK (16 tests)`。五个变异臂：m1 换回 `deleteRecursively` 1 红 / m2-counter-follow 2 红 / m3 计数关 3 红 / m4 清空词表 2 红 / m5 把 `for` 塞进词表 1 红。**m2-counter-listfiles 是 OK（16 tests）** —— 说明「只把计数换回 listFiles 但删除保持 no-follow」这一形态没被抓住，是覆盖缺口（登记，P3：实际代码两处同源改，不会只改一处）。
+
+### 登记不修
+- `env_var_restart_terminal_note`/`_body` 同页语义重叠（P3，合并要重写 7 语言）
+- `EnvVarRepository.withPrefs` 生产零调用（P3，是测试注入缝，非死码）
+- `ParallelToolBatchBlocks` 未接线（**证伪**：`AgentLoopEngine.kt:4253/4256/4282` 真实接线）
+- `ToolConcurrencyPolicy` vs `ToolLoopScope` 两套边界（P2，当前 `shell_execute` 全串行故不冲突）
+- m2-counter-listfiles 覆盖缺口（P3）
+
+### 清理
+远端三分支 API DELETE 全 204；本地 `worktree remove --force` × 3 后 `branch -D`；`git fetch --prune` 清过期引用。终态：本地 == 远端 == `b396ee38`，只剩 `main`，工作区干净。
+
+<!-- 2026-11-14 16:11:46 -->
+## 沙箱/终端 12 点外部报告 + 粘贴气泡折叠：4 支修复收口（2026-11-14 下午）
+
+
+**输入**：①用户贴入的外部模型报告（16 个强化点，覆盖 sandbox/ui.terminal/agent.shell/tools）；②用户当场报的回归「粘贴折叠后发出去还是整段展开，那折叠还有什么意义」。
+
+### 用户报告的折叠问题（L1 渲染层，用户拍板不走 L2 数据层）
+
+**根因一行**：折叠是**输入框专用**的——`[Pasted#N]` chip 只活在 `PastedTextBuffer`（纯 UI 状态），`ChatViewModel.sendMessage()` 第一行 `expandPastedText(rawText)` 展开正文，之后同一字符串既进 DB 也进气泡。气泡唯一的折叠是 `LargeContentGuard` 的 32K 地板（为 legacy 200KB tool_result 的 markdown GC 风暴而设），1.5 万字粘贴从下面钻过去。
+**日志实证**：`14:59:58 stashed #1 (14929 chars)` → `15:00:05 expanded 0 marker(s) + 1 detached block(s) on send`。
+**修法**：新建 `MessageFoldPolicy.kt`（两端阈值 + 预览长度 + 判据，纯 Kotlin）；`LargeContentGuard` 加 `collapseThresholdChars`/`previewChars` 参数（默认=原值，助手/工具三处零变化）；用户气泡传 **4000 / 预览 600**。助手保持 32K（折叠长回答会藏起用户要的东西，且 32K 是性能地板不是可读性）。
+**为什么不选 L2**：数据层要多开四条边（parts 新类型/老消息兼容/备份/fork 重映射）+ 一个门，只为换「气泡能认出这是粘贴块」，600 字预览已够认。
+
+### 12 点报告核实结论（判级与报告 severity 差异大）
+
+**成立并已修 3 条**：
+- **#6 终端剪贴板（P1，比报告严重）**：反编译 `terminal-view-0.118.0.aar` + `terminal-emulator-0.118.0.aar`（`javap -c`）证实 Termux 选择菜单的**复制和粘贴两个分支都是死的**——`TextSelectionCursorController$1.onActionItemClicked` 的 copy_text/paste_text 都落到 `TerminalSessionClient` 的两个空实现；OSC 52 也落同一处。菜单能点是因为 enabled 由 Termux 自己查 `hasPrimaryClip()`。软键盘/IME 路径不经这两个回调，所以终端日常可用。修法：复制 → `ClipData.newPlainText`，粘贴 → **`TerminalEmulator.paste()`**（自带剥 ESC/C1、CRLF 折叠、DECSET 2004 的 `ESC[200~…201~` 包裹，我们只重写前两项就是重造轮子）。
+- **#3 复合命令误判（P1）**：旧 `classifyCommand` 只读首 token。4775 条真实命令里 **233 条 `cd X && python3` 判 LIGHT（4.9%）**，绕过 heavyGate(Semaphore(1)) + CRITICAL 放行检查 + 按类回收。改为按 `; | & \n` 切语句取最高级 + 剥 KEY=val/shell 关键字/nice + **git 按子命令**（status/diff/log 实测 220/100/90 次，判 HEAVY 只会白串行化）+ 补编译器/归档/媒体/build 包装族。**差分：299 LIGHT→HEAVY，0 降级**。
+- **#14 短词召回（P2）**：`hasSpecificToken` 要求 ≥6 字符，全短词 seed 组整组丢弃 —— 25/89 组死掉。**实证咬过人**：11-13 16:06 日志 `bad pack` 出现两次而召回计数 0。修法 `Defect.phraseGroups`（全短词组按**相邻短语**匹配，分隔符容忍标点因为 S29 自己写 `http=000 size=0`；单词组绝不放入）。**误报实测（132 条真实失败输出）：18→19 命中，新增 0 误报**，反向对照：单 `data` 8/132、`file` 35/132。
+
+**报告被证伪 3 处（重要）**：
+1. **#1 工具描述**：报告说「env 和后台进程也跨调用保持」→ **实测两者都不保持**（cwd 保持靠 EXIT trap，env 因每条命令在子 shell 跑而消失，后台进程随之死）。只有 cwd 说错了。
+2. **#16 mountGuard 修法有害**：报告说「解析失败即拒」→ 实测 busybox `readlink -f /nodir/x` 返回**空+rc=1**，`mkdir -p a/b` 会被当解析失败拒掉。正确修法是取最长已存在祖先前缀解析。
+3. **#5 体积论**：pty_bridge 只 8.9KB，是维护死角不是体积问题。
+
+**登记不修（backlog §SANDBOX-TERM-1114，12 条带三件套）**：#1 文案/#2 离线 bash/#4 debug stderr/#5 死代码/#7 字号/#8 保活（**是设计不是 bug**，注释写明防旧 PTY 泄漏）/#9 cwd 跟随/#10 bashrc（报告漏了 Alpine 的 00-bashrc.sh 中间层）/#11 快捷键栏/#12 启动超时/#13 fastio（8MiB 限制**全日志 0 次触发**）/#15 Mirror 反向依赖。
+
+### 可复用手法
+
+1. **「标签不等于守卫」**：剪贴板 m4 变异第一次假绿——断言 `block.contains("runCatching")`，而函数体自带 `return@runCatching null` 标签，换掉包装标签还在。必须锚**签名区**（读侧 `= runCatching {` 在签名里）与**函数体首条语句**（写侧）。同族：`substring(anchor)` 到区段末尾会吞掉后面的无关代码。
+2. **反编译第三方 aar 确认契约**：`javap -p/-c` 不足以反编译全部，但足够看清「谁调用这个空回调」「enabled 状态谁决定」。比读文档可靠。
+3. **量化归因优于叙述**：命令分类用去重语料跑差分（299/0 降级）、召回用真机失败语料跑误报（18→19），两条都比「理论上会更好」有说服力。
+4. **同一份语料能同时验证「改对了」和「没改坏」**：`0 降级` 这一条是分类修复安全性的全部证据。
+
+### 四支状态
+
+| 支 | sha | CI |
+|---|---|---|
+| `fix/user-msg-fold-1114` | `4e01cbe`（报告提交）绿于 `004c0e2` | 9164→9174 |
+| `fix/terminal-clipboard-1114` | `492d83a` 绿于 `c1375ac` | 9164→9168 |
+| `fix/classify-compound-1114` | `8d8a3d6` 绿于 `4b3082f` | 9164→9180 |
+| `fix/defect-short-phrase-1114` | `74dbfa6` 绿于 `74dbfa6` | 9164→9173 |
+
+文件集**两两零交集**（16 文件）。并集 `integration/sterm1114` @ `62448e9a`（4 次 `--no-ff`，父数 2），并集树本地：4 门 OK + 5 个测试类 **60 tests OK**。
+
+<!-- 2026-11-14 16:40:06 -->
+## 合并收口：integration/sterm1114 → main（2026-11-14 下午，用户令「合并」）
+
+
+**merge commit `0f74cad1`**（`--no-ff`，`parents=b396ee38 62448e9a`），**父数 = 2** ✓。
+
+### 合并前核查三项全过
+1. **检查**：16 文件 / +1487−62 逐条过（4 份报告 + 生产 5 文件 + 测试 5 文件）；冲突标记 0；调试残留（`println(`/`System.out`/`TODO(`/`FIXME`）0 处；无夹带。
+2. **验证**：本地 HEAD / 远端 tip / 并集 CI `43574614246` head_sha 三方逐字符一致 `62448e9a`；合并树 vs 并集 tip **差异 0 行**（逐字节等价）；**四个 merge 父数全为 2**（`217323e5`/`e30a28e9`/`46c347af`/`62448e9a`）。
+3. **核实（三源取二）**：源1 = 并集 CI 五 job 全绿；源2 = 本地并集树（4 门 OK + 5 个测试类 60 tests OK）；源3 = 逐支「绿 sha 之后到 tip 的非报告差异 = 0」。
+
+### main CI run `43575818962` 五 job 全 success @ `0f74cad1`
+- **unit-tests**：`9203 PASSED / 0 FAILED`（基线 9164，**+39 = 四支新增**：Fold 10 / Clipboard 4 / Classifier 16 / PhraseRecall 9；改写的旧用例 `classify chained command by its heaviest statement` 在册 PASSED）
+- **scan-gate**：`Summary: 115 passed, 0 failed` + `##[notice]scripts/scan/** untouched in this push — skipping the fixture self-test` ⇒ **夹具没跑**（本批未动门脚本），**不声称夹具全绿**
+- **publish**：本次是 main 推送，**六步全跑通**（Stage release asset → Move rolling tag android-latest → Publish to Releases 均 success），与分支 CI 的 `skipped` 形成对照 —— main 门控正常
+- lint / build-apk 均 success
+
+### 清理完成
+远端 5 分支 API DELETE 全 204；`worktree remove --force` × 5 后 `branch -D` × 5 全成功（**顺序要紧：先删 worktree 再删分支**）；`git fetch --prune`。终态：本地 == 远端 == `0f74cad1`，只剩 `main`，工作区干净。
+
+### 本批交付（四支）
+| 支 | 内容 | 关键量化 |
+|---|---|---|
+| terminal-clipboard | Termux 选择菜单复制/粘贴 + OSC 52 全死 → 接 Android 剪贴板；粘贴走 `emulator.paste()` | 反编译 aar 确认三条调用链；误报 0 |
+| classify-compound | `classifyCommand` 按语句切 + 剥赋值/关键字/nice + git 按子命令 + 补编译器/归档/媒体族 | 4775 条真实命令里 233 条（4.9%）从 LIGHT 纠正；**差分 299 LIGHT→HEAVY，0 降级** |
+| defect-short-phrase | 全短词 seed 组按**相邻短语**匹配（`Defect.phraseGroups`） | 132 条真实失败语料 **18→19 命中，新增误报 0** |
+| user-msg-fold | 用户气泡 4K 折叠 / 600 字预览（助手保持 32K 性能地板） | 日志 14929 字实证 |
+
+### 本批四个可复用手法
+1. **「标签不等于守卫」**（最值钱）：变异 m4 第一次假绿 —— 断言 `block.contains("runCatching")`，而函数体自带 `return@runCatching null` 标签，换掉包装标签还在。必须锚**签名区**（读侧 `= runCatching {` 在签名里）或**函数体首条语句**（写侧）。同族：`substring(anchor)` 到区段末尾会吞掉后面的无关代码。
+2. **反编译第三方 aar 确认契约**：`javap -p/-c` 看清「谁调用这个空回调」「enabled 谁决定」，比读文档可靠 —— 正是它让「报告说复制失效」升级为「复制+粘贴双向全失效」。
+3. **去重语料跑差分**：命令分类 299/0 降级、召回 18→19 误报不变，都在同一份真机语料上，同时证明「改对了」与「没改坏」。
+4. **无效变异臂要删不要留**：分类修复里「删掉 cd 短路分支」的变异是绿的，原因是语句切分已让它成为纯冗余 —— 删掉分支而不是保留它假装有保护。
+
+<!-- 2026-11-14 18:57:50 -->
+## 合并收口：fix/fold-paste-split-1114 → main（2026-11-14 晚）
+
+
+**merge commit `8d8016e1`**（`--no-ff`，`parents=0f74cad1 10bd6ade`），父数 = 2 ✓；合并树 vs 分支 tip 差异 0 行 = 零冲突解（`git merge-tree --write-tree` 预演 exit=0）。
+
+**main CI run `3092` 五 job 全 success @ `8d8016e1`**（unit-tests 132422647536 / build-apk / scan-gate 132422647689 / lint / publish 132424798180）：
+- unit-tests：`BUILD SUCCESSFUL in 5m 24s`，**9225 PASSED / 0 FAILED**
+- 本批测试类逐类在册：MessageBodySplit 7 / PasteTextBuffer 36 / CommandClassifierFamily 10 / SandboxDefectPhraseRecall 14 / TerminalClipboardWiring 4 / PasteFoldWiring 12
+- scan-gate：`Summary: 115 passed, 0 failed`（另有前置 18 passed 子集）；日志无 `scanners moved` ⇒ 本批未动 `scripts/scan/`，**不声称夹具全绿**
+- publish：main 门控正常，`android-latest` 由 `0f74cad` → `8d8016e`，版本 `+3092`
+
+**清理**：远端分支 API DELETE 204；本地 `branch -D`（was `10bd6ade`）；`fetch --prune`。终态：本地 == 远端 == `8d8016e1`，只剩 `main`，工作区干净。
+
+**本批交付**：`[Pasted#N]` 内联臂删除（块永远走 chip 行）+ 粘贴拆分边界持久化在首个 text part 的 `pasteStart`（不新增 part 类型/列，避免多读者同步）+ 展开可逆（补显式「收起」，原来 `rememberSaveable` 是一次性锁存）；同轮折入 sandbox/tools 三条（版本化解释器/带选项包装器不再掉 LIGHT，299 条纠正 0 降级；短词短语两端加界，132 条语料 18→19 命中 0 新误报；终端剪贴板 100K 上限）。
+
+**登记不修（用户令「残留的攒着吧」）**：`backlog §QUEUED-PASTE-SPLIT`（:10699，机械门 OK，523 段 / exit 0）。
+- **实质**：流式分支的兄弟入口没接拆分链 —— `enqueuePrompt(text: String)` 无偏移参数、`QueuedPrompt` 无 `pasteStartIndex`、`ChatQueueInterruption.kt:198/:301` 两条落库路径不带 `pasteStart`。流式中发「提示词+粘贴」落地后仍整段折叠。
+- **量化**：真机日志 `Enqueued prompt` 49 次 / `Draining` 49 次（常走路径），但 `[Paste] expanded` 全量仅 4 次、与 enqueue 相邻仅 **1 次** ⇒ P2。
+- **升级判据**：①该组合日志累计 ≥5 次；②有用户报告排队消息里提示词又被折进去。
+- **搁置主因**：drain 会把多条排队 prompt 用 `\n\n` 合并，单偏移**无法表达**多个粘贴块位置 —— 诚实退化只能 `size==1` 透传、`>1` 置 null；改动要吃 4 条边（数据载体 + 2 构造点 + 2 落库点），为 1 次历史触发不划算（装置比例纪律）。
+
+<!-- 2026-11-14 20:07:23 -->
+## 外部镜像 MirrorStore 故障定性：首版设计缺陷，不是回归（2026-11-14）
+
+
+**用户提问**：到底是"被改坏了"还是"当初做出来就漏考虑了情况"。
+**定论：首版就错，且比"漏一种情况"严重——`findUri` 在真机上恒返回 null，覆盖/读取/单文件删除三条路径全废，只剩"首次插入"能工作。**
+
+### 死证据
+`git log -L '/private fun findUri/,+9'` 与 `-L '/private fun mimeFor/,+6'` **各自只返回一个提交**：`a3224c9b`（10-29 09:36 `feat(backup): write the external mirror via MediaStore + two triggers`，功能首版）。此后 mirror 全部提交（`8cfe3818` 设置页计数 / `43593dde` 静默化 / `c6940ed7` 写入完整性 7 项 / `a7af0cbb` lambda continue）**一个字符都没碰过这两个函数**。
+
+### 缺陷本体
+- `mimeFor` 只认 4 个扩展名（json/csv/xml/html），其余一律 `text/plain`；
+- MediaProvider 对 `text/plain` 按自身 MIME→扩展名表**改写 DISPLAY_NAME**（真机实证：`2026-11-14.md` → `2026-11-14.md.txt`）。行数分布印证：555 `.txt` / 100 `.json` / 8 `.csv` —— **只有 mimeFor 认识的三种保住了原名**；
+- `findUri` 用**原始名** `DISPLAY_NAME=?` 精确匹配 ⇒ 恒 null。
+
+### 后果矩阵
+| 能力 | 实际行为 |
+|---|---|
+| `read()` | findUri null ⇒ 恒 null |
+| `write()` 覆盖 | 恒走 insert 新行，行只增不改 |
+| `delete(relPath)` | findUri null ⇒ `return true` **假成功，什么都没删** |
+| `deleteTree` | 用 RELATIVE_PATH LIKE ⇒ 正常 |
+
+⇒ `c6940ed7` 的 `overwrite` / `dropHalfWritten`（"R5-A1 写入完整性 7 项"的核心）是**死代码**：全量日志 `grep 'overwrite of'` = **0**、`grep 'dropping the truncated'` = **0**，生产环境一次未执行。修的是代码永远走不到的分支。
+
+### 为什么之前"是好的"
+第一次写永远成功（insert 新行）；只有文件**第二次变化**才暴露。
+- 11-10 / 11-11 / 11-12：真实 `W/MirrorStore` = **0**
+- 11-13：**564**；11-14：**819**（其中 `memory/2026-11-14.md` 占 727）
+分水岭 = 11-13 起 agent 高频追加 memory，同一文件一天变几十次。
+
+### 为什么三道防线全没拦
+1. 单测用 fake `MirrorTarget`，真 `findUri`/`mimeFor` 零覆盖；
+2. `androidTest` 的 backup 目录只有 `ChatImportIdempotencyInstrumentedTest.kt`，且 **CI 不跑 androidTest**（workflow 仅编译检查）；
+3. 无门检查 URI 解析（`mirror_vm_thread_check` / `mirror_category_route_check` 查的是线程与路由）；
+4. 失败是 `W` 级日志而非异常，UI 只表现为"待同步数不为 0"。
+
+### 用户"删文件夹→失败→过一会儿成功"的解释
+删除 663 个文件时 MediaProvider 逐行推入回收站（trashed 占位行保留一段时间）⇒ 同路径 insert 被占位行挡 ⇒ 大批 `write failed`；19:31:41 最后一条失败，19:33–19:34 全量 612 行 `date_added` 重写 ⇒ 恢复。**当前 manifest 612 条与源树 size+mtime 逐一比对全一致**，内容未损坏。
+⚠ 该层（trashed 行挡 insert）是**推断**，读 trash 行那次输出被 offload 未取回，非死证。
+
+### 判级 P1（非 P0）
+数据最终未丢（manifest 与源全一致）；但"覆盖写不进 / 读不出 / 单文件删不掉"是常走路径能力失效，且 `previous/` 回滚点因此从未被真正写过——用户以为存在的历史版本并不存在。
+
+### 修法方向
+不用原始名做 `DISPLAY_NAME=?`。读侧改为"列 RELATIVE_PATH 下的行，按去掉 MediaStore 追加扩展名后等于原名匹配"，或写入时统一 `application/octet-stream` 保住原名。**修完必须补真设备/仪器测试**，否则同类错误可再来一次。
+
+<!-- 2026-11-14 21:07:51 -->
+## 小浣熊 4 号批量转换（2026-11-14 晚）—— 技能首次实战
+
+
+**输入**：用户上传 4 个 `16267xxxxxauth.json`（每个 489 B，只有 `access_token` + `office_identity:"personal"`）。
+文件名 = 手机号。sub 各不同（`pu-01a1da20/da21x2/da22`），**是 4 个独立账号不是同一号的重复**。
+
+**结果：4/4 全部 OK**
+| 昵称 | 余额 | 到期 | 模型 |
+|---|---|---|---|
+| RaccoonMichael | 9300 | 2026-12-14 20:55 | 6 个 visible |
+| RaccoonChloe | 9300 | 2026-12-14 20:56 | 同上 |
+| RaccoonOlivia | 9300 | 2026-12-14 20:56 | 同上 |
+| RaccoonMichael | 9300 | 2026-12-14 20:57 | 同上 |
+
+四号**全是 `is_today_register=true`**（当天批量注册），余额整齐 9300（daily 300 + reward 9000），
+exp 都是 +30 天，只有 access_token 无 refresh。可用模型：sn-glm-5-3 / sn-kimi-k3 /
+sn-glm-5-3-flash / sn-deepseek-v4-1-flash-1017 / sn-sensenova-6-8-flash(+lite)。
+
+**验收链**：结构校验 4/4 → 探针四步全 200 → `verify_against_gateway.sh` 走网关真代码
+`decode` + `importAccounts` 落池 4/4 + `refreshCredits` 各读回 9300。
+
+**交付**：`/sdcard/Download/gateway-accounts-raccoon-x4.json`（2877 B 单行）+
+`attachments/gateway-accounts-raccoon-x4.json` + 工作副本 `shared/work/batch-xhx-1114/`。
+
+### ★ 技能修了一处真 bug（首战就暴露）
+
+第一个账号探针报 `SSL: UNEXPECTED_EOF_WHILE_READING` → 旧代码判 `TOKEN_DEAD`。
+curl 连打三次全 200 ⇒ **活号被误判成死号**。
+
+修法两条（都进脚本了）：
+1. `http_json` 加**退避重试**（5 次，1.5s 递增）—— `HTTPError`（4xx/5xx）是上游有效答复**不重试**，
+   只有网络层异常才重试。同族于 tierflow 技能的 `_retry`。
+2. 新增 `NETWORK_ERROR` 判定，与 `TOKEN_DEAD` 分开 —— **重试耗尽 = 关于调用的证据，不是关于 token 的证据**。
+   同族于 `check_evals.py` 的三态口径（UNKNOWN 是调用失败不是触发面失败）。
+
+**教训固化**：凡是「探针判死」类逻辑，必须先把「网络失败」与「凭证失败」分开，
+否则代理抖一下就会把活号报成死号 —— 而这个错误方向对买家是**最贵**的（会让他白扔好号）。
+
+<!-- 2026-11-14 21:56:06 -->
+## fix/mirror-filetarget-1114：合并前复审自查出的两处迁移缺陷（已修，分支 CI 绿）
+
+
+**背景**：外部镜像从 MediaStore 改成 All Files Access 普通文件直写（`a2c6af08`，CI #3093 绿）。提交后在合并前重读迁移代码，自己查出两处由本次引入的缺陷，补修 `49f86dd2`（CI #3095 绿）。
+
+**缺陷 1（语义没传播）**：`migrateLegacyLayout` 在 park/rename 失败时 `Log.w + return`，KDoc 写「本轮什么都不做，下次重试」，但返回 Unit ⇒ `syncNow` 照常 `runLocked`，把 v2 的普通文件写进还没搬走的旧树；下次成功 park 时会把我们自己刚写的文件当「legacy」搬走。
+**修法**：返回 `Boolean`（true = 设备已在 v2），`syncNow` 用 `if (!migrateLegacyLayout(app))` 守卫，落 `Outcome.Failed("legacy mirror tree could not be moved aside")` 并 record 后提前返回。
+
+**缺陷 2（删除范围越界 = 数据丢失）**：`deleteLegacyRows` 用 `LIKE "Download/RikkaMinis/backup/%"`，覆盖 `auto/`。v1 的 auto 每日全量快照同样经 MediaStore 写入（v1 `target.write("$AUTO_REL/$name")`，AUTO_REL=`$ROOT_REL/auto`，Android 15 上 openTarget→mediaStoreTarget），**删行等于删文件** ⇒ 迁移会顺手删掉 7 天全量快照，正是这个功能存在的理由。
+**修法**：范围收窄到 `$MIRROR_REL/%`（只删已 park 的 `mirror/` 树的幽灵行）；`auto/` 的空行与文件一律保留（不再 insert 行，幽灵行只影响 MediaStore 自己的索引，不影响 File API 写入）。
+
+**证据**：本地 89 tests OK；变异臂 m7（守卫被旁路）/m8（范围回到 ROOT_REL）各自变红，8/8 全红；4 个镜像相关门 PASS；CI #3095 `43600754786` 五 job success @ `49f86dd2a416`（本地==远端==head_sha 逐字符一致），unit-tests 9240 PASSED/0 FAILED 且两条新用例逐条 PASSED（日志 2768/2770 行），scan-gate `Summary: 115 passed, 0 failed`，夹具因未改 `scripts/scan/` 被跳过（不声称夹具全绿）。
+
+**可复用判据**：
+1. **`return` 的语义要在签名上**：凡是「失败后调用方必须改变行为」的 early return，返回值必须带出来（Unit 的 early return 等于告诉调用方「一切正常」）。
+2. **删除 MediaStore 行 = 删除文件**：任何按 RELATIVE_PATH 前缀批量删行的迁移，前缀必须精确到「已经被搬走/确认要丢弃」的那棵子树，不能按父目录粗匹配——父目录下往往混着要继续保留的东西。
+3. **迁移前先想「谁会被顺手删掉」**，而不是只想「谁需要删」。
+
+**未验证面（诚实记录）**：All Files Access 下的真机端到端写入仍未做（沙箱无共享存储挂载，`/sdcard` 不可见）。
+
+<!-- 2026-11-14 22:50:31 -->
+## 云端两分支审查+合并：composer arc / mirror 文件直写（2026-11-14 夜）
+
+
+**输入**：用户「检查一下云端上的两个分支，有问题的话就处理一下，没有问题的话就把他们合并了」。
+两个分支都没有阻塞问题，但 mirror 分支查出**两处本次引入的缺陷**（已修，属"合并前复审"而非外部审计）。
+
+### 分支一：`fix/composer-arc-occlusion-1114`（@88e0b4cb，4 文件 +325−5）—— 无缺陷
+消息列表向下延伸 22dp（radius 20 + topInset 2）钻到输入卡下面，用「卡片的圆弧反相」裁剪
+（上半矩形 + 两个角部月牙 notch），于是终止内容的是圆角不是直线。
+- 几何核对：`notchTop = height - band + topInset` = 原高度 + 2dp = card 顶边 ✓；
+  角部路径 = 方块减四分之一圆（180°→270° 顺时针 = 9→12 点钟）✓
+- 修饰符顺序：`composerArcTail()`（layout，扩展测量后报原高度）在外、`clip()` 在内 ⇒
+  clip 的 size 含 overlap band，与 `ArcClipShape` 读 `size.height` 的假设一致 ✓
+- 常量集中到 `ComposerArcOcclusion.kt`，ChatInputArea 的 16/2/20dp 字面量改成引用 ⇒
+  notch 与实际卡片不可能漂移（注释明确说"字面量会静默错位"）
+- `contentPadding.bottom + ComposerArcOverlap` 抵消 viewport 增高，最后一行位置不变 ✓
+- 测试 7 例字面量断言（1dp=2px fixture），CI 逐条 PASSED
+
+### 分支二：`fix/mirror-filetarget-1114`（@49f86dd2 → 我补 `f6b10bc7`）
+主线（a2c6af08+49f86dd2）：弃用 MediaStore 改写 plain File + 一次 v1 布局迁移（把旧树
+park 成 `legacy-mirror-v1`，不删）+ 授权缺失独立成 `MissingGrant` 状态 + 每文件写后 read-back。
+
+**我查出的两处（都在 MirrorPlan/MirrorStore）**：
+1. **`targetKind` 在 API 26–28 忽略 `legacyWriteGranted`**，无条件答 PUBLIC_DOWNLOADS。
+   "legacy storage" 是**作用域模型**不是**权限模型**——WRITE_EXTERNAL_STORAGE 自 API 23
+   起就是运行时权限。后果：从未授权的 26–28 设备（旧版写 app-external 能成功）变成
+   每轮 "write failed"，而 row 报健康（grant 在那些版本上不被当成问题）+ Retry 按钮点了也没用。
+   **而且它和本文件自己的 KDoc 矛盾**（KDoc 早已写 "26–28 before the user granted anything → APP_EXTERNAL"）
+   ⇒ 实现与文档不符，一行修复。
+2. **`migrateLegacyLayout` 用 `File.exists()` 判断有无 v1 树** —— 无读权限时 exists() 返回
+   false，v1 树与「没有 v1 树」不可区分 ⇒ 照样写 v2 pref ⇒ **以后用户授权了也永不迁移**，
+   旧 MediaProvider 改名文件（`x.md.txt`）永久躺在新文件旁边。
+   修法：迁移要求 target 就是 public 树；kind 随 target 一起返回（`openTargetWithKind`），
+   调用方不能二次读一个可撤销的 grant 得到与产生 writer 时不同的答案。
+
+**证据**：本地 90 JVM tests OK；两条变异各自命中对应测试（26–28 回退 → `targetKind_perApiLevel` 红；
+删 `if (!targetIsPublic) return true` → 新门控测试红）；两个 mirror 邻门 PASS。
+
+### 收口链路（全部有据）
+| 阶段 | sha | 证据 |
+|---|---|---|
+| composer 分支 CI #3096/43601465094 | 88e0b4cb | 5 job success；unit-tests 9232 PASSED；7 例 ComposerArcBandTest PASSED |
+| mirror 分支 CI #3097/43603539379 | f6b10bc7c8de | 5 job success；9248 PASSED（含我 4 条改动测试逐条 PASSED） |
+| 并集 `integration/1114` CI #3098/43604549334 | 340ff9fe589d | 5 job success；9248 PASSED；scan-gate `115 passed, 0 failed`；publish 的发布两步 **skipped**（非 main 门控生效） |
+| main CI #3099/43605706423 | c68227e5b74c | 5 job success；9248 PASSED；115 门全过；publish 真跑（`android-latest` → c68227e5） |
+
+merge commit `c68227e5`（`--no-ff`，**parents=8d8016e1 340ff9fe = 2** ✓），树与 integration tip 差异 0 行。
+清理：远端三分支 DELETE 204、本地 `-D` 删三支、worktree 移除；本地 main == origin/main == c68227e5。
+
+### 可复用教训
+1. **"legacy storage" 是作用域概念，不是权限概念**——判断「某 API 上能否写公共目录」必须读
+   grant，不能读「是不是 legacy 模式」。同族错误形态：把"没有 scoped storage 限制"当成"没有权限要求"。
+2. **`File.exists()` 无法区分「不存在」与「看不到」**——任何以 exists() 为前置的迁移/删除，
+   必须先证明当前进程有读权限，否则会把「暂时看不见」写成「已经处理完」。
+3. **一个决策的产出应带着它的前提一起返回**（`Pair<kind, target>`），而不是让调用方二次追问——
+   第二次问一个可撤销的授权，可能得到与第一次不同的答案，而这种不一致正好落在"迁移了 A 却写了 B"上。
+4. **实现与自己 KDoc 矛盾 = 高信噪比审计点**（本批 1 号缺陷就是这么定位的），比逐行读逻辑快。
+
+<!-- 2026-11-14 23:03:32 -->
+## 沙箱侧直接验证：11-12→11-14 三天改动（2026-11-14 夜）
+
+
+**触发**：用户「这几天改了很多，哪些是你这里能直接验证的」+「能直接验证的就验证，顺便记录」+「应用已更新到最新」。
+报告：`shared/work/verify-1114/REPORT.md`（脚本 `gates.sh` / `jvm.sh` / `jvm2.sh` 可重跑）。
+
+### 规模（`43e57e0d..c68227e5`）
+149 commits（24 merge），222 文件 +22326/−1514；生产 115 文件 +7665，单测 77 文件 +8546，门 12 文件 +1985。今日单日 91 commits / 143 文件 +11110，7 个合并点。
+
+### 实跑证据（全部沙箱内可复现）
+1. **8 门 selftest + 真树全绿**（auto_approve 22 臂 / gateway_context_metadata / model_defaults_capability_source / loop_persist_slice 29+3 / model_entry_override_parity 26 / provider_models_cache_wiring 18 / provider_remember_key 141 / compact_entry_pin_migration 29）。
+2. **i18n**：7 语言各 1676 键，缺 0 / 多 0 / 占位符错配 0；`i18n_check.py` ALL CLEAN。
+3. **JVM 纯逻辑**（对当前主树编译）：装置 A 112 tests OK（mirror target/plan/scope + SilentMirrorWiring + MessageFoldPolicy + PasteFoldWiring）；装置 B 47 tests OK（CommandClassifier family / GuestTmpSweepPlan / ModelExecutionRetryPolicy / WorkerKeyFreshness）。
+4. **设备取证（硬事实）**：`versionName=1.0.0+3099` / `lastUpdateTime=2026-11-14 22:51:09` = 云端 main CI #3099 @ `c68227e5`，即设备跑的就是今日最终合并点；pid 16233 自 22:51:09 存活，RSS 288MB；今日 FATAL EXCEPTION = 0；beacon 3 次 launch 全是装包/重启语义。
+
+### 边界（沙箱验不了，勿假装）
+Compose 渲染/几何（jvm-libs 里 0 个 compose jar → `ComposerArcBandTest` 只能在 CI/真机）、MediaStore/All Files Access/grant/迁移、Termux 剪贴板、无障碍/通知/定时系统集成、Compose 状态重组。
+
+### 可复用手法
+- **「当前主树编译」比复用旧工作副本强**：旧 harness 的 `run.sh` 硬编码 `REPO=<当时的工作目录>`，重跑等于验旧代码；把 REPO 指向 `review-today-1114/repo` 才是验 main。
+- **纯逻辑挑选法**：`grep '^import androidx' <file>` 为空 = 可脱离 Android 编译；`FileDeletionSummary`/`MirrorRowDisplay` 因依赖 `FileItem`（在 ViewModel 里）编不过 → 直接放弃，不硬凑。
+- 编译缺依赖的三件套：`json-20231013.jar`（org.json）、`kotlinx-coroutines-core-jvm`（delay/suspend）、`hamcrest`；测试文件 import 只有 JUnit 的才适合做 harness。
+- 设备版本核对 = 一条 `android-shizuku-cli exec "dumpsys package ... versionName|lastUpdateTime"`，能直接把「用户装的是不是最新」变成可判定事实（本次对上 CI #3099）。
+
+<!-- 2026-11-14 23:39:37 -->
+## 真机验证反馈 → 查出一个活 bug：外部镜像写深了一层（2026-11-14 深夜）
+
+
+**触发**：用户反馈我列的 5 条真机检查项（镜像/目录删除/终端剪贴板/环境变量文案/新模型表单），并说应用已是最新（`1.0.0+3099`）。
+
+### 发现（P1，设备上正在发生）
+`/sdcard/Download/RikkaMinis/backup/` 下出现：
+```
+backup/Download/RikkaMinis/backup/mirror/current/...   ← 41MB / 2070 项，正在写入
+backup/legacy-mirror-v1/                               ← 50MB，v1 park 树（层级正确）
+```
+根因：`openTargetWithKind` 传 `FileTarget(publicBase())`，而 `publicBase()` 已经拼了 `ROOT_REL`，
+`runLocked` 给的 relPath 又以 `Download/RikkaMinis/backup/` 开头 ⇒ 前缀两次。
+**镜像本身是健康的**（`previous/20261114-230344` 是活的），所以任何「看 row 是否报错」的检查都发现不了——
+只有看**实际落盘路径**才看得见。
+
+### 修复（分支 `fix/mirror-public-base-1114`，CI 绿，**未合并 main**）
+- `publicStorageRoot()` = `Environment.getExternalStorageDirectory()` 给 writer；`publicBase()` 保留给 v1 park 站点。
+- `appExternalBase()` 26–28 回退**故意不改**（已有文件就在嵌套路径，改了会丢），加 ponytail 三段。
+- 新增 `MirrorPublicBaseWiringTest` 3 例；`SilentMirrorWiringTest` 原先**把 bug 钉成了断言**
+  （`store.contains("FileTarget(publicBase())")`）——已改。
+- 变异负控：改回 1 行 ⇒ 2 例红。
+- CI run `43610181672` 五 job 全 success，head_sha `57dab717` 与本地逐字符一致；115 门 0 红；三条新用例逐条 PASSED。
+  **第一次 dispatch `43609255780` 红**：新测试用 `user.dir` 找仓库根，Gradle 下它是模块目录 → 改为向上走目录。
+
+### 可复用手法
+1. **「同步成功」不等于「写对了地方」**：镜像/备份类功能必须核对落盘路径，不能只看状态行。
+2. **设备侧一条 `find` 抵一轮猜**：`android-shizuku-cli exec "find <root> -maxdepth 8"` 直接暴露层级异常。
+3. **旁证：park 树与 v2 树不在同一层**，是最快的肉眼判据（两棵树隔一层 = 前缀重复）。
+4. **读源码型测试禁止假设 `user.dir`**：harness cd 到 repo root，Gradle 是 module dir（同族：文件系统顺序假设）。
+5. **"唯一副本"判据**：镜像 content 是本地数据的副本、`previous/` 才有独有历史——所以误嵌套目录可安全删除，但删前要确认 previous 里没有独有文件。
+
+### 用户问答（同轮澄清，已核实代码）
+- 第 2 项 = 文件浏览器每行的垃圾桶图标（目录现在也有），确认框文案 `filebrowser_delete_dir_message`："This folder and everything inside it (%1$d entries) will be deleted"。
+- 第 3 项 = Termux 选中菜单 Copy / OSC52 → Android 剪贴板的桥（原来两个回调是空实现）；不是"终端里能选中字符"。
+- 第 4 项 = 我措辞错了：不是保存后弹提示，而是设置页常驻 `SettingsSection("Terminal sessions")` 卡片（body + footer），所以用户"看到文案但没看到提示"完全符合实现。
 
 ---
 
