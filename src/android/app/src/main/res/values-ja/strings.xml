@@ -915,8 +915,6 @@
     <string name="mcp_section_footer">MCP サーバーを使うと、エージェントが RikkaMinis-mcp-cli を介して外部ツールを呼び出せます。設定は /var/minis/mcp-servers/servers.json に保存されます（Claude Desktop 互換）。</string>
     <string name="mcp_empty_title">MCP サーバーがありません</string>
     <string name="mcp_empty_action">+ ボタンでサーバーを追加します。</string>
-    <string name="mcp_transport_http">HTTP</string>
-    <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
     <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">フォーム</string>

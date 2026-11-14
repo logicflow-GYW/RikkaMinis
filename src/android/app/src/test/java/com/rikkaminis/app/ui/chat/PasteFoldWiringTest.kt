@@ -193,6 +193,54 @@ class PasteFoldWiringTest {
     }
 
     @Test
+    fun `both send funnels expand the folded blocks before the clear drops them`() {
+        // [fix/paste-send-order-1114] Observed in the field: a 14,929-char paste
+        // logged `stashed #1 (inline=false)` and the message arrived with no
+        // content at all (or, for the inline arm, as a literal `[Pasted#N]`).
+        // The clear funnel drops the paste buffer on purpose (a detached chip
+        // must not ride into the NEXT message), and the buffer is the only copy
+        // of a folded block -- so the expansion has to happen while it still
+        // holds them, i.e. BEFORE the clear, not inside `sendMessage`.
+        for ((marker, label) in listOf(
+            "val performSendOrEnqueue: () -> Unit = handler@{" to "send/swipe funnel",
+            "val performEnterSend: () -> Boolean = handler@{" to "Enter funnel",
+        )) {
+            val body = blockAfter(inputArea, marker)
+            val expand = body.indexOf("viewModel.expandPastedText(")
+            val send = body.indexOf("viewModel.sendMessage(")
+            assertTrue("$label must expand the folded blocks", expand >= 0)
+            assertTrue("$label must still call sendMessage", send >= 0)
+            // The LAST clear before the send: the slash-command branch earlier in
+            // the same lambda clears too, and that one is not on the send path.
+            val clear = body.lastIndexOf("clearComposerInput()", send)
+            assertTrue("$label must still clear the composer on send", clear >= 0)
+            assertTrue(
+                "$label: the expansion must run BEFORE the clear — the clear drops the " +
+                    "buffer, and it is the only copy of the block",
+                expand < clear,
+            )
+            assertTrue(
+                "$label: the expanded string must be what gets sent, never the raw " +
+                    "marker text",
+                body.substring(send).startsWith("viewModel.sendMessage(expandedToSend)"),
+            )
+        }
+        // The clearing entrances that are NOT sends keep the drop: a detached
+        // chip must not survive an explicit clear (audit P1-C).
+        assertTrue(
+            "the clear command must still drop the buffer",
+            inputArea.contains("ComposerCommand.Clear -> clearComposerInput()"),
+        )
+        // And the funnel itself still drops — the fix lives in the callers, so a
+        // new send entrance cannot silently inherit expand-after-clear.
+        val clearBody = blockAfter(inputArea, "val clearComposerInput: () -> Unit = {")
+        assertTrue(
+            "the clear funnel must still drop the paste buffer",
+            clearBody.contains("viewModel.clearPastedText()"),
+        )
+    }
+
+    @Test
     fun `the send button is disabled by the guard and the notice is rendered`() {
         assertTrue(
             "the send button must be gated by the paste guard as well as by content",

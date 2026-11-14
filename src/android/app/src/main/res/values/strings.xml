@@ -110,8 +110,6 @@
     <string name="mcp_section_footer">MCP servers let the agent call external tools via RikkaMinis-mcp-cli. Configs are stored in /var/minis/mcp-servers/servers.json (Claude Desktop compatible).</string>
     <string name="mcp_empty_title">No MCP servers</string>
     <string name="mcp_empty_action">Add a server with the + button.</string>
-    <string name="mcp_transport_http">HTTP</string>
-    <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
     <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">Form</string>

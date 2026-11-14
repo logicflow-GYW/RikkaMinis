@@ -1048,8 +1048,6 @@
     <string name="mcp_section_footer">Серверы MCP позволяют агенту вызывать внешние инструменты через RikkaMinis-mcp-cli. Конфигурация хранится в /var/minis/mcp-servers/servers.json (совместимо с Claude Desktop).</string>
     <string name="mcp_empty_title">Нет серверов MCP</string>
     <string name="mcp_empty_action">Добавьте сервер кнопкой +.</string>
-    <string name="mcp_transport_http">HTTP</string>
-    <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
     <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">Форма</string>
