@@ -1,5 +1,6 @@
 package com.rikkaminis.app.ui.sandbox
 
+import com.rikkaminis.app.sandbox.internalGuestTmpDeleteTreeNoFollow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -94,9 +95,16 @@ class FileDeletionSummaryTest {
     }
 
     @Test
-    fun theCountMatchesWhatDeleteRecursivelyActuallyRemoves() {
+    fun theCountMatchesWhatTheNoFollowDeleteActuallyRemoves() {
         // The real contract: the number the user approved equals the number of
         // entries that disappear. Measured, not assumed.
+        //
+        // [review-1114 A] The contrast arm calls the SAME walker the view model
+        // now calls. It used to call `root.deleteRecursively()` as the ground
+        // truth — that made the assertion a comparison between the counter and
+        // the very implementation the counter was supposed to police, so a
+        // walk that followed nested links would have agreed with a delete that
+        // followed nested links and this test would have stayed green.
         val dir = tmp()
         val root = File(dir, "root").apply { mkdirs() }
         File(root, "a.txt").writeText("1")
@@ -105,7 +113,7 @@ class FileDeletionSummaryTest {
         val counted = countEntriesUnder(item(root, dir = true))
         val before = root.walkTopDown().count() - 1 // exclude root itself
         assertEquals(before, counted)
-        assertTrue(root.deleteRecursively())
+        assertTrue(internalGuestTmpDeleteTreeNoFollow(root.toPath()))
         assertTrue(!root.exists())
         dir.deleteRecursively()
     }

@@ -86,4 +86,41 @@ class MarkdownMathHeuristicMoneyTest {
         // `price` or `total` is legal math), so the guard stays out of it.
         assertEquals(true, MarkdownMathHeuristic.looksLikeMath("price"))
     }
+
+    // ── [review-1114 B] function names are formula evidence, not prose ───────
+
+    @Test
+    fun `function names are still formulas`() {
+        // The prose guard counts 3+ letter ASCII words as sentence evidence,
+        // and every math function name is exactly that — so a two-log sum, a
+        // product of sines and a maximum over two values were all classified
+        // as English prose and lost their `$`. Maths wins on these tokens.
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("log x + log y"))
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("sin x cos x"))
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("max a b"))
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("lim n to inf"))
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("O(n log n)"))
+    }
+
+    @Test
+    fun `function names in any case are still formulas`() {
+        // Case-insensitive, exact token: `LOG`/`Max` are the same formula
+        // tokens, `maximum` is an ordinary word.
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("LOG x + LOG y"))
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("Max a b"))
+    }
+
+    @Test
+    fun `an ordinary word that merely starts with a function name is prose`() {
+        // `maximum` / `logarithm` are NOT `max` / `log`: exact-token matching
+        // is what keeps the table from eating real sentences.
+        assertEquals(false, MarkdownMathHeuristic.looksLikeMath("maximum value here"))
+    }
+
+    @Test
+    fun `the money sentence stays prose after the token table`() {
+        // Same sentence as the reported regression, re-asserted here so the
+        // exclusion table can never be widened into "prose is math".
+        assertEquals(false, MarkdownMathHeuristic.looksLikeMath("50 for a 3-day pass or "))
+    }
 }
