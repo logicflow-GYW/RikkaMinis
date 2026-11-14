@@ -24,13 +24,21 @@ import java.nio.file.Files
  */
 class MirrorPublicBaseWiringTest {
 
-    private val repoRoot: File = File(System.getProperty("user.dir"))
-
-    private fun storeSource(): String {
-        val f = File(repoRoot, "src/android/app/src/main/java/com/rikkaminis/app/backup/MirrorStore.kt")
-        if (!f.isFile) throw IllegalStateException("MirrorStore.kt not found under ${repoRoot.path}")
-        return f.readText()
+    // Same root discovery as SilentMirrorWiringTest: Gradle sets user.dir to the
+    // module directory, the JVM harness sets it to the repo root. Walking up is
+    // the only form that works in both.
+    private fun readRepoFile(relative: String): String {
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
+            val f = File(dir, relative)
+            if (f.exists()) return f.readText()
+            dir = dir.parentFile
+        }
+        throw IllegalStateException("$relative not found from user.dir=${System.getProperty("user.dir")}")
     }
+
+    private fun storeSource(): String =
+        readRepoFile("src/android/app/src/main/java/com/rikkaminis/app/backup/MirrorStore.kt")
 
     @Test
     fun thePublicWriterGetsTheVolumeRootAndNotTheAppendedDirectory() {
