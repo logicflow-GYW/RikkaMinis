@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.IosShare
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -419,7 +420,7 @@ private fun CollapseBackRow(
             modifier = Modifier.padding(0.dp),
         ) {
             Icon(
-                imageVector = Icons.Filled.UnfoldLess,
+                imageVector = Icons.Filled.KeyboardArrowUp,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
             )
