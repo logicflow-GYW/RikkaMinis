@@ -1282,6 +1282,8 @@
     <string name="storage_no_media_files">無媒體檔案</string>
     <string name="storage_clear_session_footer">刪除此會話生成的所有檔案。對話內容本身將保留。</string>
     <string name="storage_browse_files">瀏覽檔案</string>
+    <string name="storage_media_browse_subtitle">該工作階段的圖片與附件</string>
+    <string name="storage_media_browse">媒體</string>
     <string name="storage_clearing_status">清除中…</string>
     <string name="storage_clear_session_button">清除會話檔案</string>
     <string name="storage_clear_confirm_title">清除會話檔案？</string>

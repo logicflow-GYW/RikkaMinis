@@ -376,6 +376,8 @@
     <string name="storage_no_media_files">メディアファイルなし</string>
     <string name="storage_clear_session_footer">このセッションで生成されたすべてのファイルを削除します。会話自体は保持されます。</string>
     <string name="storage_browse_files">ファイルを閲覧</string>
+    <string name="storage_media_browse_subtitle">このセッションの画像と添付ファイル</string>
+    <string name="storage_media_browse">メディア</string>
     <string name="storage_clearing_status">削除中…</string>
     <string name="storage_clear_session_button">セッションファイルを削除</string>
     <string name="storage_clear_confirm_title">セッションファイルを削除しますか？</string>

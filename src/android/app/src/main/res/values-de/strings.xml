@@ -376,6 +376,8 @@
     <string name="storage_no_media_files">Keine Mediendateien</string>
     <string name="storage_clear_session_footer">Entfernt alle von dieser Sitzung erzeugten Dateien. Die Unterhaltung selbst bleibt erhalten.</string>
     <string name="storage_browse_files">Dateien durchsuchen</string>
+    <string name="storage_media_browse_subtitle">Bilder und Anhänge dieser Sitzung</string>
+    <string name="storage_media_browse">Medien</string>
     <string name="storage_clearing_status">Wird gelöscht…</string>
     <string name="storage_clear_session_button">Sitzungsdateien löschen</string>
     <string name="storage_clear_confirm_title">Sitzungsdateien löschen?</string>

@@ -583,6 +583,8 @@
     <string name="storage_no_media_files">Нет медиафайлов</string>
     <string name="storage_clear_session_footer">Удаляет все файлы, созданные этой сессией. Сам разговор будет сохранён.</string>
     <string name="storage_browse_files">Просмотр файлов</string>
+    <string name="storage_media_browse_subtitle">Изображения и вложения этого сеанса</string>
+    <string name="storage_media_browse">Медиа</string>
     <string name="storage_clearing_status">Очистка…</string>
     <string name="storage_clear_session_button">Очистить файлы сессии</string>
     <string name="storage_clear_confirm_title">Очистить файлы сессии?</string>

@@ -376,6 +376,8 @@
     <string name="storage_no_media_files">미디어 파일 없음</string>
     <string name="storage_clear_session_footer">이 세션에서 생성된 모든 파일을 삭제합니다. 대화 자체는 보존됩니다.</string>
     <string name="storage_browse_files">파일 탐색</string>
+    <string name="storage_media_browse_subtitle">이 세션의 이미지 및 첨부 파일</string>
+    <string name="storage_media_browse">미디어</string>
     <string name="storage_clearing_status">삭제 중…</string>
     <string name="storage_clear_session_button">세션 파일 삭제</string>
     <string name="storage_clear_confirm_title">세션 파일을 삭제하시겠습니까?</string>
