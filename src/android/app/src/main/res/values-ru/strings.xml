@@ -1018,10 +1018,6 @@
     <string name="crash_freq_zip_failed">Не удалось упаковать журналы: %1$s</string>
     <string name="crash_freq_save_failed">Не удалось сохранить журналы: %1$s</string>
     <string name="crash_freq_save_success">Журналы сохранены в %1$s</string>
-    <string name="shortcut_new_chat_short">Новый чат</string>
-    <string name="shortcut_new_chat_long">Новый чат</string>
-    <string name="shortcut_camera_chat_short">Чат с камерой</string>
-    <string name="shortcut_camera_chat_long">Чат с камерой</string>
     <string name="ok">ОК</string>
     <string name="image_action_copy">Копировать</string>
     <string name="image_action_share">Поделиться</string>

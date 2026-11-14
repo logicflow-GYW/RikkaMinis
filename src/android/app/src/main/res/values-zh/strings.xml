@@ -1206,11 +1206,6 @@
     <string name="crash_freq_save_failed">保存日志失败：%1$s</string>
     <string name="crash_freq_save_success">已保存到 %1$s</string>
 
-    <!-- T-android-app-icon-shortcuts: 长按应用图标的快捷操作（对齐 iOS QuickActionRouter）。 -->
-    <string name="shortcut_new_chat_short">新建对话</string>
-    <string name="shortcut_new_chat_long">新建对话</string>
-    <string name="shortcut_camera_chat_short">拍照对话</string>
-    <string name="shortcut_camera_chat_long">拍照对话</string>
     <string name="image_action_copy">复制</string>
     <string name="image_action_share">分享</string>
     <string name="image_action_save">保存</string>

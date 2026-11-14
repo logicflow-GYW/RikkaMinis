@@ -1449,10 +1449,6 @@
     <string name="crash_freq_zip_failed">打包日誌失敗：%1$s</string>
     <string name="crash_freq_save_failed">儲存日誌失敗：%1$s</string>
     <string name="crash_freq_save_success">已儲存到 %1$s</string>
-    <string name="shortcut_new_chat_short">新建對話</string>
-    <string name="shortcut_new_chat_long">新建對話</string>
-    <string name="shortcut_camera_chat_short">拍照對話</string>
-    <string name="shortcut_camera_chat_long">拍照對話</string>
     <string name="ok">確定</string>
     <string name="chat_load_older_messages">↑ 載入更早的訊息</string>
     <plurals name="bg_service_sessions">

@@ -74,9 +74,18 @@ sealed class DeepLinkAction {
      * (NewVoiceChat was removed together with the in-composer mic button —
      * it had no landing UI left to trigger.)
      *
-     * Encoded as `minis://action/<name>` so the static shortcuts XML can
-     * point to them via plain Intent.data without any custom extras —
-     * matches the existing minis:// deep-link conventions.
+     * Encoded as `minis://action/<name>` — plain Intent.data, no custom
+     * extras, matching the existing minis:// deep-link conventions.
+     *
+     * [chore/remove-app-shortcuts-1115] The Android app-icon long-press
+     * surface (`res/xml/shortcuts.xml`) that produced these URIs is gone: the
+     * launcher could never launch them (the static-shortcut `<intent>`
+     * `targetPackage` stayed an unresolved resource reference, so the intent
+     * carried `cmp=@2131559347/...` and resolved to nothing), and both
+     * actions duplicated entry points that already exist inside the app
+     * (cold start lands on a draft; the composer has the camera). The URI
+     * handling is kept on purpose so externally authored deep links keep
+     * working; nothing in-app emits them any more.
      */
     data object NewChat : DeepLinkAction()
     data object NewCameraChat : DeepLinkAction()
@@ -228,9 +237,10 @@ object DeepLinkHandler {
             "open_terminal" -> DeepLinkAction.OpenTerminal(
                 initCommand = sanitizeInitCommand(uri.getQueryParameter("init_command"))
             )
-            // Quick-actions surface (app-icon long-press). Path drives which
-            // pending action ChatScreen consumes on first compose. Mirrors iOS
-            // QuickActionRouter.swift action ids 1:1.
+            // Quick-actions surface. The app-icon long-press shortcuts that
+            // used to emit these were removed (see [NewChat]); the URIs stay
+            // parseable for externally authored links. Path drives which
+            // pending action ChatScreen consumes on first compose.
             "action" -> when (path.removePrefix("/")) {
                 "new_chat" -> DeepLinkAction.NewChat
                 // "voice_chat" removed with the mic button; a stale pinned

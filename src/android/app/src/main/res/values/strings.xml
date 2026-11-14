@@ -1408,14 +1408,6 @@
     <string name="crash_freq_save_failed">Failed to save logs: %1$s</string>
     <string name="crash_freq_save_success">Saved logs to %1$s</string>
 
-    <!-- T-android-app-icon-shortcuts: app-icon long-press quick actions
-         (mirrors iOS QuickActionRouter strings). shortLabel is shown in
-         the launcher popup; longLabel is read by TalkBack. -->
-    <string name="shortcut_new_chat_short">New Chat</string>
-    <string name="shortcut_new_chat_long">New Chat</string>
-    <string name="shortcut_camera_chat_short">Chat with Camera</string>
-    <string name="shortcut_camera_chat_long">Chat with Camera</string>
-
     <string name="ok">OK</string>
     <string name="image_action_copy">Copy</string>
     <string name="image_action_share">Share</string>
