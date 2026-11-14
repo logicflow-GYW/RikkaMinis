@@ -522,10 +522,30 @@ internal fun ChatInputArea(
         // AFTER the insert would wrongly read "scrolled into history" for a
         // bottom-anchored sender. Snapshot first, then act.
         val wasScrolledIntoHistory = !isNearBottom.value
+        // [fix/paste-send-order-1114] Fold the buffered blocks back into the
+        // text BEFORE the clear, not inside `sendMessage`.
+        //
+        // `clearComposerInput` drops the paste buffer on purpose (audit P1-C: a
+        // detached chip has no literal in the field, so it would outlive the
+        // text and ride into the NEXT message). But the buffer is also the ONLY
+        // copy of a folded block, and `sendMessage` is what expands it -- so
+        // clearing first destroyed the material one statement before the call
+        // that needed it. Field symptom, not theory: a 14,929-char paste logged
+        // `[Paste] stashed #1 (inline=false)` and the log has no matching
+        // `[Paste] expanded` line at all, and the message went out as the typed
+        // body alone. The inline arm lost its content the same way and shipped
+        // the literal `[Pasted#1]` to the model instead.
+        //
+        // Expanding here is safe and idempotent: `expandPastedText` consumes
+        // exactly the entries it expands, so the second expansion inside
+        // `sendMessage` (the funnel the debug RPC and the headless runner also
+        // use) finds plain text and returns it unchanged. The move-to-session
+        // path below has always worked this way.
+        val expandedToSend = viewModel.expandPastedText(toSend)
         clearComposerInput()
         keyboardController?.hide()
         focusManager.clearFocus()
-        viewModel.sendMessage(toSend)
+        viewModel.sendMessage(expandedToSend)
         noteSendForInputModePref()
         // [P2-scroll-user-send] The send re-engages follow ONLY if the user was
         // already at the bottom (wasScrolledIntoHistory==false) — sending does
@@ -1545,10 +1565,14 @@ internal fun ChatInputArea(
                         // [P2-scroll-user-send] snapshot BEFORE sendMessage
                         // (insert pushes index 0 → 1; must not read after).
                         val wasScrolledIntoHistory = !isNearBottom.value
+                        // [fix/paste-send-order-1114] Same contract as the
+                        // button/swipe funnel: expand while the buffer still
+                        // holds the blocks, then clear (the clear drops them).
+                        val expandedToSend = viewModel.expandPastedText(toSend)
                         clearComposerInput()
                         keyboardController?.hide()
                         focusManager.clearFocus()
-                        viewModel.sendMessage(toSend)
+                        viewModel.sendMessage(expandedToSend)
                         noteSendForInputModePref()
                         // [bottom-trigger] Re-engage follow only if the
                         // reader was anchored at the bottom (P2: must not
