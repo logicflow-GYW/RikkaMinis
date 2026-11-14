@@ -73,15 +73,19 @@ class ExecutionCoordinatorSchedulerTest {
     }
 
     @Test
-    fun `classify chained command by its leading token`() {
-        // Classifier is deliberately prefix-based (cheap, predictable):
-        // a chained command is classified by its FIRST token. `cd /tmp &&`
-        // classifies LIGHT, so chained heavy work is NOT recycled by class —
-        // the generation budget and memory thresholds still bound it, and
-        // misclassification errs toward keeping the shell (safe).
+    fun `classify chained command by its heaviest statement`() {
+        // [fix/classify-compound-1114] This used to assert the OPPOSITE —
+        // "classifier is deliberately prefix-based … `cd /tmp && python3 run.py`
+        // classifies LIGHT" — which encoded the defect: 233 of 4 775 real
+        // shell_execute calls in the 2026-11-01..14 device log were exactly this
+        // shape, so real HEAVY work bypassed the heavyGate (Semaphore(1)), the
+        // CRITICAL-phase heavy check and the forced recycle after.
         assertEquals(CommandClass.LIGHT, classifyCommand("cd /tmp && ls"))
-        assertEquals(CommandClass.LIGHT, classifyCommand("cd /tmp && python3 run.py"))
+        assertEquals(CommandClass.HEAVY, classifyCommand("cd /tmp && python3 run.py"))
+        assertEquals(CommandClass.HEAVY, classifyCommand("cd /var/minis && python3 run.py"))
         assertEquals(CommandClass.HEAVY, classifyCommand("python3 /tmp/run.py && echo done"))
+        // A heavy verb in ANY statement wins, even the last one.
+        assertEquals(CommandClass.HEAVY, classifyCommand("echo start; tar -cf a.tar big/"))
     }
 
     // ── internalDegradationPhase ──────────────────────────────────────

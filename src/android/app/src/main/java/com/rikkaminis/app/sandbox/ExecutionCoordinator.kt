@@ -1855,49 +1855,11 @@ internal fun appNativeHighWaterMarkMB(memAvailableMB: Long): Long {
     return if (memAvailableMB >= MEM_AVAIL_AMPLE_MB) APP_NATIVE_DYNAMIC_MB else APP_NATIVE_HEAP_HIGH_WATER_MARK_MB
 }
 
-/**
- * Command resource class. LEAKY = known native-heap leakers that should
- * never ride a shared shell (recycle unconditionally). HEAVY = commands
- * that grow the PRoot tracer / allocate real memory (recycle under
- * pressure). LIGHT = everything else (ls/cat/grep/file ops — recycle only
- * by budget or memory thresholds, never by class).
- */
-internal enum class CommandClass { LIGHT, HEAVY, LEAKY }
-
-internal fun classifyCommand(command: String): CommandClass {
-    val trimmed = command.trimStart()
-    return when {
-        // minis-model-use spawns in-process LLM calls whose DirectByteBuffer
-        // allocations live in the app native heap, invisible to GC — always
-        // isolate it from shared shells.
-        trimmed.startsWith("minis-model-use") -> CommandClass.LEAKY
-        trimmed.startsWith("python3") || trimmed.startsWith("python ") ||
-            trimmed.startsWith("apk ") || trimmed == "apk" ||
-            trimmed.startsWith("pip ") || trimmed.startsWith("pip3 ") ||
-            trimmed.startsWith("npm ") || trimmed.startsWith("go ") ||
-            trimmed.startsWith("cargo ") || trimmed.startsWith("node ") ->
-            CommandClass.HEAVY
-        else -> CommandClass.LIGHT
-    }
-}
-
-/**
- * Command-class recycle decision. LEAKY always recycles (leak containment);
- * HEAVY recycles only when app native heap is above [heavyRecycleThresholdMB]
- * (default 80MB — matches HEAVY_CMD_RECYCLE_NATIVE_MB); LIGHT never recycles
- * by class (the generation budget still caps it).
- */
-internal fun shouldRecycleByClass(
-    cmdClass: CommandClass,
-    nativeMB: Long,
-    heavyRecycleThresholdMB: Long = 80L,
-): Boolean {
-    return when (cmdClass) {
-        CommandClass.LEAKY -> true
-        CommandClass.HEAVY -> nativeMB > heavyRecycleThresholdMB
-        CommandClass.LIGHT -> false
-    }
-}
+// [fix/classify-compound-1114] CommandClass / classifyCommand / shouldRecycleByClass
+// moved to CommandClassifier.kt: the classifier is no longer a prefix check
+// (it splits statements, peels KEY=value and reads git SUBCOMMANDS), and it
+// needs to be JVM-testable without dragging Android types into the test.
+// Same package — callers are unchanged.
 
 /**
  * Shell generation budget (max commands before forced recycle), shrinking
