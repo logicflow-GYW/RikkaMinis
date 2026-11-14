@@ -550,8 +550,8 @@
     <string name="env_var_privacy_header">Privacy</string>
     <string name="env_var_privacy_toggle">Privacy Mode</string>
     <string name="env_var_privacy_footer">When enabled, any environment variable value that appears in shell-execute output is replaced with a masked form (e.g. `sk-1********ajhks`) before reaching the model. Values shorter than 8 characters become all `*`. The user-visible output in chat is unchanged.</string>
-    <string name="env_var_restart_terminal_note">Time zone and proxy changes are pushed into running terminals; environment variables are not — there is no live export/unset path.</string>
-    <string name="env_var_restart_terminal_body">Variables are injected when a terminal session starts. An already-open terminal keeps its old environment until you close and reopen it.</string>
+    <string name="env_var_restart_terminal_note">Commands run by the assistant read these values fresh every time, so they need no restart. Time zone and proxy changes are pushed into open terminals; a deleted variable is unset there, but programs already running keep the copy they started with.</string>
+    <string name="env_var_restart_terminal_body">Variables are injected when a terminal session starts. An already-open terminal keeps its old environment — close and reopen it to apply changes.</string>
     <string name="env_var_restart_terminal_title">Terminal sessions</string>
     <string name="env_var_section_header">Variables</string>
     <string name="env_var_section_footer">Environment variables are injected into the sandbox shell at session start. Names are uppercased and must match POSIX shell variable rules.</string>

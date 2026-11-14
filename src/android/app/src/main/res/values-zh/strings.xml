@@ -277,8 +277,8 @@
     <string name="env_var_privacy_header">隐私</string>
     <string name="env_var_privacy_toggle">隐私模式</string>
     <string name="env_var_privacy_footer">开启后，shell-execute 输出中检测到的环境变量值在送达模型前会被打码（例如 `sk-1********ajhks`）。少于 8 个字符的值会被全部替换为 `*`。聊天中用户可见的输出保持不变。</string>
-    <string name="env_var_restart_terminal_note">时区和代理的改动会推送到已运行的终端；环境变量不会——没有实时 export/unset 的通道。</string>
-    <string name="env_var_restart_terminal_body">变量在终端会话启动时注入。已经打开的终端会保留旧的环境变量，需要关闭并重新打开才会生效。</string>
+    <string name="env_var_restart_terminal_note">助手执行的命令每次都会重新读取这些变量，无需重启终端。时区和代理的改动会推送到已打开的终端；删除的变量会在其中被 unset，但已经在运行的进程仍持有启动时的那份副本。</string>
+    <string name="env_var_restart_terminal_body">变量在终端会话启动时注入。已经打开的终端会保留旧环境，关闭后重新打开即可生效。</string>
     <string name="env_var_restart_terminal_title">终端会话</string>
     <string name="env_var_section_header">变量</string>
     <string name="env_var_section_footer">环境变量在会话开始时被注入到沙箱 shell。名称将被转为大写，并且必须符合 POSIX shell 变量规则。</string>

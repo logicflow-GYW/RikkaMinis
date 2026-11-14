@@ -228,8 +228,8 @@
     <string name="env_var_privacy_header">프라이버시</string>
     <string name="env_var_privacy_toggle">프라이버시 모드</string>
     <string name="env_var_privacy_footer">활성화하면 shell-execute 출력에 나타난 환경 변수 값이 모델로 전달되기 전에 마스킹됩니다(예: `sk-1********ajhks`). 8자 미만의 값은 모두 `*` 로 바뀝니다. 채팅에 표시되는 출력은 그대로 유지됩니다.</string>
-    <string name="env_var_restart_terminal_note">시간대와 프록시 변경은 실행 중인 터미널에 반영되지만, 환경 변수는 반영되지 않습니다(실시간 export/unset 경로가 없음).</string>
-    <string name="env_var_restart_terminal_body">변수는 터미널 세션이 시작될 때 주입됩니다. 이미 열려 있는 터미널은 이전 환경을 유지하므로 닫았다가 다시 열어야 합니다.</string>
+    <string name="env_var_restart_terminal_note">어시스턴트가 실행하는 명령은 매번 이 값을 다시 읽으므로 재시작이 필요하지 않습니다. 시간대와 프록시 변경은 열려 있는 터미널에 반영됩니다. 삭제한 변수는 그곳에서 unset되지만, 이미 실행 중인 프로그램은 시작할 때의 복사본을 그대로 유지합니다.</string>
+    <string name="env_var_restart_terminal_body">변수는 터미널 세션이 시작될 때 주입됩니다. 이미 열려 있는 터미널은 이전 환경을 유지하므로 닫았다가 다시 열면 반영됩니다.</string>
     <string name="env_var_restart_terminal_title">터미널 세션</string>
     <string name="env_var_section_header">변수</string>
     <string name="env_var_section_footer">환경 변수는 세션 시작 시 샌드박스 셸에 주입됩니다. 이름은 대문자로 변환되며 POSIX 셸 변수 규칙을 따라야 합니다.</string>

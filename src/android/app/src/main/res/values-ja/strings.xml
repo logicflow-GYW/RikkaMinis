@@ -228,8 +228,8 @@
     <string name="env_var_privacy_header">プライバシー</string>
     <string name="env_var_privacy_toggle">プライバシーモード</string>
     <string name="env_var_privacy_footer">有効にすると、shell-execute の出力に含まれる環境変数の値はモデルに渡される前にマスクされます（例: `sk-1********ajhks`）。8 文字未満の値はすべて `*` に置き換えられます。チャットに表示される出力は変更されません。</string>
-    <string name="env_var_restart_terminal_note">タイムゾーンとプロキシの変更は実行中のターミナルに反映されますが、環境変数は反映されません（export/unset を即時反映する経路がないため）。</string>
-    <string name="env_var_restart_terminal_body">変数はターミナルセッションの開始時に注入されます。すでに開いているターミナルは古い環境を保持するため、閉じて開き直す必要があります。</string>
+    <string name="env_var_restart_terminal_note">アシスタントが実行するコマンドは毎回これらの値を読み直すため、再起動は不要です。タイムゾーンとプロキシの変更は開いているターミナルに反映されます。削除した変数はそこで unset されますが、すでに実行中のプログラムは起動時のコピーを保持します。</string>
+    <string name="env_var_restart_terminal_body">変数はターミナルセッションの開始時に注入されます。すでに開いているターミナルは古い環境を保持するため、閉じて開き直すと反映されます。</string>
     <string name="env_var_restart_terminal_title">ターミナルセッション</string>
     <string name="env_var_section_header">変数</string>
     <string name="env_var_section_footer">環境変数はセッション開始時にサンドボックスシェルに注入されます。名前は大文字に変換され、POSIX シェル変数のルールに従う必要があります。</string>

@@ -228,8 +228,8 @@
     <string name="env_var_privacy_header">Datenschutz</string>
     <string name="env_var_privacy_toggle">Datenschutzmodus</string>
     <string name="env_var_privacy_footer">Wenn aktiviert, werden in der Ausgabe von shell-execute erkannte Werte von Umgebungsvariablen vor der Weitergabe an das Modell maskiert (z. B. `sk-1********ajhks`). Werte mit weniger als 8 Zeichen werden vollständig durch `*` ersetzt. Die für den Nutzer sichtbare Ausgabe im Chat bleibt unverändert.</string>
-    <string name="env_var_restart_terminal_note">Änderungen an Zeitzone und Proxy werden in laufende Terminals übertragen, Umgebungsvariablen nicht — dafür gibt es keinen Live-export/unset-Weg.</string>
-    <string name="env_var_restart_terminal_body">Variablen werden beim Start einer Terminal-Sitzung injiziert. Ein bereits geöffnetes Terminal behält seine alte Umgebung, bis Sie es schließen und neu öffnen.</string>
+    <string name="env_var_restart_terminal_note">Von der Assistenz ausgeführte Befehle lesen diese Werte jedes Mal neu, ein Neustart ist dafür nicht nötig. Änderungen an Zeitzone und Proxy werden in offene Terminals übertragen; eine gelöschte Variable wird dort entfernt, aber bereits laufende Programme behalten die Kopie, mit der sie gestartet sind.</string>
+    <string name="env_var_restart_terminal_body">Variablen werden beim Start einer Terminal-Sitzung injiziert. Ein bereits geöffnetes Terminal behält seine alte Umgebung — schließen und neu öffnen, um Änderungen zu übernehmen.</string>
     <string name="env_var_restart_terminal_title">Terminal-Sitzungen</string>
     <string name="env_var_section_header">Variablen</string>
     <string name="env_var_section_footer">Umgebungsvariablen werden beim Sitzungsstart in die Sandbox-Shell eingespeist. Namen werden in Großbuchstaben umgewandelt und müssen den POSIX-Shell-Regeln entsprechen.</string>
