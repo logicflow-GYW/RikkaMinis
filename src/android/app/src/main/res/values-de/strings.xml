@@ -1721,6 +1721,11 @@
     <string name="mirror_diag_failed">Letzte Synchronisierung fehlgeschlagen</string>
     <string name="mirror_diag_unavailable">Kein nutzbarer Speicherort</string>
     <string name="mirror_retry">Erneut versuchen</string>
+    <!-- [mirror-filetarget-1114] The grant is gone: a retry cannot fix it. -->
+    <string name="mirror_diag_missing_grant">Externer Ordner nicht erreichbar</string>
+    <string name="mirror_diag_missing_grant_sub">Zugriff auf alle Dateien ist aus — die Kopie wurde nach %1$s nicht mehr aktualisiert.</string>
+    <string name="mirror_diag_missing_grant_sub_never">Zugriff auf alle Dateien ist aus — die Kopie wurde noch nie geschrieben.</string>
+    <string name="mirror_grant_action">Erlauben</string>
     <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
     <string name="paste_chip_desc">Gefalteter Einfügetext #%1$d, %2$d Zeichen. Tippen zum Ansehen.</string>
     <string name="paste_preview_title">Eingefügter Text %1$s</string>

@@ -586,8 +586,13 @@ internal fun ChatInputArea(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 16.dp)
-                .padding(top = 2.dp, bottom = 8.dp),
+                // [composer-arc-1114] These two insets are not free numbers any
+                // more: the message list overlaps the composer by
+                // ComposerArcOverlap and clips itself with the inverse of this
+                // card's arc, so they have to come from the shared constants —
+                // a literal here would silently misalign the notch.
+                .padding(horizontal = ComposerCardHorizontalInset)
+                .padding(top = ComposerCardTopInset, bottom = 8.dp),
         ) {
             // T13 banner moved INSIDE the LazyColumn so it renders at the
             // visual end of the message list (mirrors iOS — see the
@@ -1200,7 +1205,9 @@ internal fun ChatInputArea(
                 modifier = Modifier
                     .fillMaxWidth()
                     .drawBehind {
-                        val radiusPx = 20.dp.toPx()
+                        // [composer-arc-1114] Shared with the list's arc clip —
+                        // see ComposerArcOcclusion.kt.
+                        val radiusPx = ComposerCardCornerRadius.toPx()
                         val canvas = drawContext.canvas.nativeCanvas
                         // Pass 1: symmetric ambient halo — small blur, low alpha.
                         shadowPaint.setShadowLayer(

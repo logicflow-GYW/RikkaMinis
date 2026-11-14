@@ -1,9 +1,8 @@
 package com.rikkaminis.app.backup
 
-import android.content.ContentValues
 import android.content.Context
-import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import com.rikkaminis.app.MinisApp
@@ -50,7 +49,7 @@ object MirrorStore {
 
     private const val TAG = "MirrorStore"
 
-    /** MediaStore-relative root. A sibling of the app's filesDir by design. */
+    /** Path inside the shared volume. A sibling of the app's filesDir by design. */
     const val ROOT_REL = "Download/RikkaMinis/backup"
     const val MIRROR_REL = "$ROOT_REL/mirror"
     const val CURRENT_REL = "$MIRROR_REL/current"
@@ -99,6 +98,20 @@ object MirrorStore {
 
     /** Human-readable outcome of the last run, for the settings row. */
     fun lastResult(context: Context): String? = prefs(context).getString(KEY_RESULT, null)
+
+    /**
+     * Whether a target exists right now, cheaply — no disk walk.
+     *
+     * The settings row needs the answer every minute, and [pendingCount] is a
+     * ~1800-stat walk. The only way the target can disappear is a revoked
+     * grant, so the grant is the whole question. Reads exactly the same
+     * [MirrorPlan.targetKind] call [openTarget] does, so the two cannot
+     * disagree about which devices can write.
+     */
+    fun isTargetReachable(context: Context): Boolean {
+        val app = context.applicationContext
+        return runCatching { currentTargetKind(app) }.getOrNull() != null
+    }
 
     /**
      * How many files the next sync would touch (writes + deletions), or null
@@ -197,194 +210,205 @@ object MirrorStore {
 
     // --------------------------------------------------------------- target
 
+    /** Stored layout version. 1 = the MediaStore-backed tree (retired), 2 =
+     *  plain files. A missing pref means "this device has not migrated yet",
+     *  which is exactly the case that needs the one-time move below. */
+    private const val KEY_LAYOUT = "external_mirror_layout"
+    private const val LAYOUT_PLAIN_FILES = 2
+
+    /** The v1 tree inside `backup/`, and where it is parked (never deleted). */
+    private const val LEGACY_TREE = "mirror"
+    private const val LEGACY_PARK = "legacy-mirror-v1"
+
     /**
-     * MediaStore target. Every path is a `Downloads` row whose RELATIVE_PATH is
-     * the mirror directory and whose DISPLAY_NAME is the last segment — the
-     * folder tree the user sees in a file manager is produced by MediaStore
-     * from those two columns.
+     * The public Downloads root, as a plain path.
      *
-     * Overwrite uses `openOutputStream(uri, "wt")` rather than delete+insert:
-     * MediaStore would rename a same-name insert to `foo (1).md` instead of
-     * replacing (measured behaviour, not a guess), which would silently fork the
-     * mirror. New files insert with IS_PENDING=1 and are published only after
-     * the bytes are on disk, so a killed write cannot leave a half file under a
-     * visible name.
+     * `getExternalStorageDirectory` is deprecated on R+ but still answers the
+     * primary shared volume, which is exactly what this constant names. The
+     * scoped-storage replacement (MediaStore) is the API this file just stopped
+     * using, so the suppression stays local and explained rather than
+     * reintroducing the thing that broke the mirror.
      */
-    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
-    internal class MediaStoreTarget(private val context: Context) : MirrorTarget {
+    @Suppress("DEPRECATION")
+    private fun publicBase(): File = File(Environment.getExternalStorageDirectory(), ROOT_REL)
 
-        private val resolver get() = context.contentResolver
-        private val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+    private fun appExternalBase(app: Context): File? =
+        app.getExternalFilesDir(null)?.let { File(it, "RikkaMinis/backup") }
 
-        private fun split(relPath: String): Pair<String, String> {
-            val i = relPath.lastIndexOf('/')
-            return if (i <= 0) "" to relPath else relPath.substring(0, i) to relPath.substring(i + 1)
-        }
+    /** The one place the two grants are read, so the row and the writer can
+     *  never disagree about which devices can write. */
+    private fun currentTargetKind(app: Context): MirrorPlan.TargetKind? =
+        MirrorPlan.targetKind(
+            sdkInt = Build.VERSION.SDK_INT,
+            allFilesAccess = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                Environment.isExternalStorageManager(),
+            legacyWriteGranted = app.checkSelfPermission(
+                android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
+        )
 
-        private fun dirWithSlash(dir: String): String = if (dir.endsWith("/")) dir else "$dir/"
+    /**
+     * Resolve the I/O target for this device.
+     *
+     * [MirrorPlan.targetKind] owns the API/permission decision (pure, pinned by
+     * the JVM harness). What stays here is the part that needs a Context: the
+     * two base directories and reading the grant. It performs NO writes:
+     * `pendingCount` calls it on the settings row's read path, so anything that
+     * mutates the target belongs in `syncNow` instead.
+     *
+     * A device that cannot reach the public folder reports NO target instead of
+     * falling back to an app-private directory — but only where the grant is
+     * what is missing on a version that can still be told about it. On 29+ the
+     * visible folder IS the feature, so quietly writing somewhere the user
+     * cannot see would rebuild the original defect (a copy that exists, but not
+     * where the user was told it is). On 26–28 an ungranted
+     * `WRITE_EXTERNAL_STORAGE` keeps the app-specific fallback, because there
+     * the alternative is not "write somewhere less visible", it is "fail every
+     * round with no reachable repair".
+     */
+    internal fun openTarget(context: Context): MirrorTarget? = openTargetWithKind(context)?.second
 
-        private fun findUri(relPath: String): Uri? {
-            val (dir, name) = split(relPath)
-            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?"
-            val args = arrayOf(dirWithSlash(dir), name)
-            resolver.query(collection, arrayOf(MediaStore.MediaColumns._ID), selection, args, null)
-                ?.use { c -> if (c.moveToFirst()) return Uri.withAppendedPath(collection, c.getString(0)) }
-            return null
-        }
-
-        override fun read(relPath: String): ByteArray? = runCatching {
-            val uri = findUri(relPath) ?: return null
-            resolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull()
-
-        override fun write(relPath: String, bytes: ByteArray): Boolean = runCatching {
-            val existing = findUri(relPath)
-            if (existing != null) {
-                return overwrite(existing, relPath, bytes)
-            }
-            val (dir, name) = split(relPath)
-            val mime = mimeFor(name)
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, dirWithSlash(dir))
-                put(MediaStore.MediaColumns.IS_PENDING, 1)
-            }
-            val uri = resolver.insert(collection, values) ?: return false
-            try {
-                resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: run {
-                    resolver.delete(uri, null, null)
-                    return false
-                }
-                val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-                resolver.update(uri, done, null, null)
-                true
-            } catch (t: Throwable) {
-                runCatching { resolver.delete(uri, null, null) }
-                false
-            }
-        }.getOrDefault(false)
-
-        /**
-         * [R5-A / F-01] Replace the bytes of an existing row.
-         *
-         * `"wt"` truncates at OPEN, so a failed write used to leave a 0-byte or
-         * half-written document under a visible name in the user's Downloads —
-         * and inside the `previous/` point-spacing window there is no archived
-         * copy to fall back to (accepted trade, see runLocked). "Non-atomic
-         * overwrite that fails" therefore has no recovery: the ROW is what is
-         * wrong, so the row is dropped. The next sync takes the IS_PENDING
-         * insert path (which cannot expose a partial file) and rebuilds it from
-         * the source tree.
-         *
-         * Deliberately NOT delete-then-insert up front: a same-name insert makes
-         * MediaStore rename the new row to `foo (1).md` (measured behaviour, see
-         * the class doc), forking the mirror on every single overwrite.
-         *
-         * The re-diff hazard — dropping the row while the manifest still
-         * describes the old bytes — cannot swallow the retry: a file that
-         * reaches this call is in `diff.toWrite`, i.e. the manifest does NOT
-         * match the source, so the next run classifies it as changed again.
-         */
-        private fun overwrite(existing: Uri, relPath: String, bytes: ByteArray): Boolean {
-            val failure: Throwable? = try {
-                val stream = resolver.openOutputStream(existing, "wt")
-                    ?: return dropHalfWritten(existing, relPath, "no output stream")
-                stream.use { it.write(bytes) }
-                null
-            } catch (t: Throwable) {
-                t
-            }
-            return if (failure == null) true else dropHalfWritten(existing, relPath, failure.message)
-        }
-
-        private fun dropHalfWritten(existing: Uri, relPath: String, reason: String?): Boolean {
-            Log.w(
-                TAG,
-                "overwrite of $relPath failed ($reason) — dropping the truncated row so the " +
-                    "next sync rebuilds it through IS_PENDING",
-            )
-            runCatching { resolver.delete(existing, null, null) }
-            return false
-        }
-
-        override fun delete(relPath: String): Boolean = runCatching {
-            val uri = findUri(relPath) ?: return true
-            resolver.delete(uri, null, null) > 0
-        }.getOrDefault(false)
-
-        override fun deleteTree(relDirPrefix: String): Boolean = runCatching {
-            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
-            val args = arrayOf("$relDirPrefix%")
-            val uris = ArrayList<Uri>()
-            resolver.query(collection, arrayOf(MediaStore.MediaColumns._ID), selection, args, null)
-                ?.use { c ->
-                    val idCol = c.getColumnIndex(MediaStore.MediaColumns._ID)
-                    while (c.moveToNext()) uris.add(Uri.withAppendedPath(collection, c.getString(idCol)))
-                }
-            var ok = true
-            for (u in uris) if (resolver.delete(u, null, null) <= 0) ok = false
-            ok
-        }.getOrDefault(false)
-
-        override fun list(relDirPrefix: String): List<String> = runCatching {
-            // RELATIVE_PATH is per-directory, so a prefix search over it returns
-            // only direct children of one folder level — walk is not required
-            // for the mirror (flat topic dirs), but supplied for completeness by
-            // querying the exact dir plus its one-level subdirs lazily.
-            val out = ArrayList<String>()
-            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
-            resolver.query(
-                collection,
-                arrayOf(
-                    MediaStore.MediaColumns.RELATIVE_PATH,
-                    MediaStore.MediaColumns.DISPLAY_NAME,
-                ),
-                selection,
-                arrayOf("$relDirPrefix%"),
-                null,
-            )?.use { c ->
-                val dirCol = c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
-                val nameCol = c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
-                while (c.moveToNext()) {
-                    val dir = c.getString(dirCol) ?: continue
-                    val name = c.getString(nameCol) ?: continue
-                    out.add(dir.removePrefix(if (relDirPrefix.endsWith("/")) relDirPrefix else "$relDirPrefix/") + name)
-                }
-            }
-            out
-        }.getOrDefault(emptyList())
-
-        private fun mimeFor(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
-            "json" -> "application/json"
-            "csv" -> "text/csv"
-            "xml" -> "text/xml"
-            "html" -> "text/html"
-            else -> "text/plain"
-        }
-    }
-
-    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
-    private fun mediaStoreTarget(context: Context): MirrorTarget = MediaStoreTarget(context)
-
-    /** Resolve the I/O target for this device. */
-    internal fun openTarget(context: Context): MirrorTarget? {
+    /**
+     * [openTarget] plus the [MirrorPlan.TargetKind] it was built for.
+     *
+     * The kind travels with the target instead of being re-read by the caller:
+     * the grant is revocable from the system UI at any instant, so a second
+     * read could answer differently than the one that produced the target. The
+     * legacy-layout migration keys on "we are actually writing the public tree",
+     * and asking a second, independent question would allow the one state that
+     * must not exist — migrating the v1 tree away while the writer went
+     * somewhere else.
+     */
+    private fun openTargetWithKind(
+        context: Context,
+    ): Pair<MirrorPlan.TargetKind, MirrorTarget>? {
         val app = context.applicationContext
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                mediaStoreTarget(app)
-            } else {
-                // API 26–28: public Downloads needs a runtime permission we do
-                // not want to request for a background sync, so the fallback is
-                // the app-specific external dir (still outside filesDir, still
-                // surviving a reinstall's data wipe of internal storage).
-                val base = app.getExternalFilesDir(null) ?: return null
-                FileTarget(File(base, "RikkaMinis/backup"))
+            val kind = currentTargetKind(app) ?: run {
+                Log.w(TAG, "no mirror target: all-files access not granted")
+                return null
             }
+            val target = when (kind) {
+                MirrorPlan.TargetKind.PUBLIC_DOWNLOADS -> FileTarget(publicBase())
+                MirrorPlan.TargetKind.APP_EXTERNAL -> appExternalBase(app)?.let { FileTarget(it) }
+            } ?: run {
+                Log.w(TAG, "no mirror target: app-specific external dir unavailable")
+                return null
+            }
+            kind to target
         } catch (t: Throwable) {
             Log.w(TAG, "no mirror target: ${t.message}")
             null
         }
+    }
+
+    /**
+     * One-time move off the v1 (MediaStore) layout.
+     *
+     * v1 addressed every file as a `Downloads` row whose DISPLAY_NAME was the
+     * logical name. MediaProvider rewrote `memory/x.md` to `x.md.txt` (measured
+     * on device), so the tree on disk is not the tree the manifest describes —
+     * and the manifest's records are all intact, so a fresh sync would diff
+     * clean and decide there is nothing to do. The stale files would stay
+     * forever, next to the new correct ones. The tree therefore has to be
+     * retired, not reused.
+     *
+     * Files are MOVED ASIDE, never deleted. `current/` mirrors live files, but
+     * a file deleted from the source since it was mirrored exists only here;
+     * 49 MB of maybe-only-copy is not something a migration should discard
+     * unattended. The parked directory says what it is, is never touched again,
+     * and removing it is a one-tap decision for the user.
+     *
+     * Idempotent: every step answers "already done" without side effects, and
+     * the layout pref is written only after the legacy tree is out of the way,
+     * so a run killed midway resumes instead of leaving two live trees.
+     */
+    private fun migrateLegacyLayout(app: Context, targetIsPublic: Boolean): Boolean {
+        val prefs = prefs(app)
+        if (prefs.getInt(KEY_LAYOUT, 1) >= LAYOUT_PLAIN_FILES) return true
+        // v1 only ever wrote into the public tree, so a device that is currently
+        // writing elsewhere has nothing here to migrate. It must NOT be marked
+        // v2 either: `File.exists()` answers false for a directory we cannot
+        // read, so marking it now would strand the real v1 files forever — the
+        // migration would never run again after the user granted the access it
+        // was waiting for. Deferring costs one predicate per sync.
+        if (!targetIsPublic) return true
+
+        val base = publicBase()
+        val legacy = File(base, LEGACY_TREE)
+
+        // 1. Park the tree FIRST, before touching any row.
+        //
+        // Order matters and it is not the obvious one: deleting a MediaStore row
+        // also deletes the file it points at. Doing that first would destroy the
+        // very files this migration exists to preserve, and then the park below
+        // would find nothing to park. Moving the directory aside makes every
+        // legacy row point at a path that no longer exists, so step 2 removes
+        // only index entries.
+        //
+        // Parked, not deleted: `current/` mirrors live files, but a file deleted
+        // from the source since it was mirrored exists only here. 49 MB of
+        // maybe-only-copy is not something a migration should discard
+        // unattended — the directory says what it is and one file-manager tap
+        // removes it.
+        val park: File?
+        if (!legacy.exists()) {
+            park = null
+        } else {
+            val dest = uniqueParkDir(base)
+            if (!legacy.renameTo(dest)) {
+                // Leave the rows alone too: this run changes nothing, and the
+                // next sync retries. Racing it would trade a retry for data.
+                Log.w(TAG, "legacy mirror tree is still at $legacy — retrying next sync")
+                return false
+            }
+            park = dest
+        }
+
+        // 2. Drop the v1 index entries. They now describe paths that no longer
+        //    exist; leaving them would put ghost rows back on the exact paths the
+        //    plain-file writer is about to reuse — a UNIQUE-constraint fight with
+        //    MediaProvider, which is what the 2026-11-14 incident actually was.
+        val rows = deleteLegacyRows(app)
+
+        // 3. Only now is the device on v2. A run killed before this line simply
+        //    re-enters: the tree is already parked (`legacy.exists()` false), so
+        //    the retry goes straight to steps 2–3.
+        prefs.edit().putInt(KEY_LAYOUT, LAYOUT_PLAIN_FILES).apply()
+        Log.i(
+            TAG,
+            "mirror layout v2: removed $rows legacy MediaStore row(s), " +
+                (park?.let { "parked the old tree at $it (safe to delete from a file manager)" }
+                    ?: "no legacy tree present"),
+        )
+        return true
+    }
+
+    private fun uniqueParkDir(base: File): File {
+        val first = File(base, LEGACY_PARK)
+        if (!first.exists()) return first
+        return File(base, "$LEGACY_PARK-${BackupRotation.stamp(System.currentTimeMillis())}")
+    }
+
+    /**
+     * Delete the v1 `Downloads` rows under the **parked tree only**. Returns how
+     * many were removed (0 on any device that never had them, incl. API 26–28).
+     *
+     * The scope deliberately stops at `mirror/`: v1 also wrote the daily full
+     * snapshots under `auto/` through MediaStore, and deleting a row deletes the
+     * file it points at. Those files are not parked, so their rows must stay —
+     * the row is the only index left describing them.
+     */
+    private fun deleteLegacyRows(app: Context): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+        val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+        return runCatching {
+            app.contentResolver.delete(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                selection,
+                arrayOf("$MIRROR_REL/%"),
+            )
+        }.getOrDefault(0)
     }
 
     // ---------------------------------------------------------------- sync
@@ -408,7 +432,17 @@ object MirrorStore {
         if (!isEnabled(app)) return@withContext Outcome.Disabled
         if (!inFlight.compareAndSet(false, true)) return@withContext Outcome.Busy
         try {
-            val target = openTarget(app) ?: return@withContext Outcome.Unavailable.also { record(app, "unavailable") }
+            val (kind, target) = openTargetWithKind(app)
+                ?: return@withContext Outcome.Unavailable.also { record(app, "unavailable") }
+            // A legacy tree we could not move aside means the v1 paths are
+            // still live on top of the tree v2 writes into — and the next
+            // run's park would move our own fresh files into the "legacy"
+            // pile. Refuse this round; the next sync retries the move.
+            if (!migrateLegacyLayout(app, targetIsPublic = kind == MirrorPlan.TargetKind.PUBLIC_DOWNLOADS)) {
+                val blocked = Outcome.Failed("legacy mirror tree could not be moved aside")
+                record(app, outcomeText(blocked))
+                return@withContext blocked
+            }
             val outcome = runLocked(app, target, force)
             record(app, outcomeText(outcome))
             outcome
@@ -487,8 +521,18 @@ object MirrorStore {
                 skipped += e.relPath
                 continue
             }
-            if (!target.write(currentPath(e.relPath), bytes)) {
+            val rel = currentPath(e.relPath)
+            if (!target.write(rel, bytes)) {
                 throw IOException("write failed: ${e.relPath}")
+            }
+            // Read back what we just wrote. `write()` returning true only means
+            // the bytes reached a stream — it cannot notice a writer that puts
+            // them somewhere else, and that is not hypothetical: the retired
+            // MediaStore target reported success while MediaProvider had renamed
+            // the row, so `current/` served 16-day-old bytes with a healthy row
+            // and pending 0 (2026-11-14). One read per changed file, per sync.
+            if (!mirrorBytesMatch(target, rel, bytes)) {
+                throw IOException("write not readable back: ${e.relPath}")
             }
             written++
         }
@@ -533,6 +577,25 @@ object MirrorStore {
             previousPoints = rotation.kept.size,
             totalFiles = currentEntries.size,
         )
+    }
+
+    /**
+     * The bytes on disk are the bytes we asked to write.
+     *
+     * `write()` is an interface method with a boolean contract; this is the only
+     * place that can prove it kept it. It cannot notice a writer that puts the
+     * bytes somewhere else than the name it was given — and that is not
+     * hypothetical: the retired MediaStore target reported success while
+     * MediaProvider had renamed the row, so `current/` served 16-day-old bytes
+     * with a healthy row and pending 0 (2026-11-14).
+     *
+     * One read per actually-changed file, once per sync. The selected trees are
+     * text documents (38 MB total across ~1800 files), so a full rebuild costs
+     * one extra pass over the same bytes the write just produced.
+     */
+    private fun mirrorBytesMatch(target: MirrorTarget, relPath: String, expected: ByteArray): Boolean {
+        val readBack = target.read(relPath) ?: return false
+        return readBack.size == expected.size && readBack.contentEquals(expected)
     }
 
     private fun currentPath(relPath: String) = "$CURRENT_REL/$relPath"
@@ -582,7 +645,18 @@ object MirrorStore {
             val stampMs = BackupRotation.stampMillis(name, AutoBackupManager.LOCAL_FILE_PREFIX)
                 ?: local.lastModified()
             val bytes = local.readBytes()
-            if (!target.write("$AUTO_REL/$name", bytes)) return false
+            val rel = "$AUTO_REL/$name"
+            if (!target.write(rel, bytes)) return false
+            // Same contract as the mirror loop: a write that cannot be read back
+            // is not a write. This one matters more, not less — `auto/` holds the
+            // daily full snapshot, and the rotation below counts on `list()` to
+            // decide what to keep. A snapshot that landed under a different name
+            // would be invisible to the rotation AND would leave the local copy
+            // (the only real backup) silently out of step with the external one.
+            if (!mirrorBytesMatch(target, rel, bytes)) {
+                Log.w(TAG, "auto snapshot mirror failed: wrote $rel but could not read it back")
+                return false
+            }
 
             // Rotate by NAME stamp (never mtime): a clock-rolled-back run would
             // otherwise look like the oldest copy and be deleted right after it

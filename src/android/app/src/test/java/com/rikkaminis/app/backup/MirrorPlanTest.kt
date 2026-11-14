@@ -170,6 +170,101 @@ class MirrorPlanTest {
     }
 
     @Test
+    fun health_missingGrantOutranksEveryOtherVerdict() {
+        // "All Files Access" is revoked from the system UI at any time. When it
+        // is, no target exists and a sync fails identically forever — so the row
+        // must not show a retry (which cannot work) and must not keep reporting
+        // a healthy last-sync time (which is how the 2026-11-14 outage stayed
+        // invisible for 16 days).
+        val last = 1_700_000_000_000L
+        val h = MirrorPlan.classifyHealth(
+            enabled = true,
+            lastSyncMs = last,
+            pending = 3,
+            lastOutcome = "ok 2w/0d/0a of 1810",
+            nowMs = last + 1_000L,
+            targetReachable = false,
+        )
+        assertEquals(MirrorPlan.Health.MissingGrant(last), h)
+    }
+
+    @Test
+    fun health_missingGrantStillLosesToDisabled() {
+        // The row is not rendered at all when the feature is off; a grant
+        // warning there would be an alarm about something the user deliberately
+        // stopped using.
+        assertEquals(
+            MirrorPlan.Health.Disabled,
+            MirrorPlan.classifyHealth(
+                enabled = false,
+                lastSyncMs = 5L,
+                pending = 1,
+                lastOutcome = "failed: x",
+                nowMs = 1_000_000L,
+                targetReachable = false,
+            ),
+        )
+    }
+
+    @Test
+    fun health_reachableTargetKeepsTheOldVerdicts() {
+        // Defaulted parameter: every caller that does not know about the grant
+        // keeps the pre-existing behaviour, so this change cannot silently
+        // reclassify a device that is fine.
+        val last = 1_700_000_000_000L
+        assertEquals(
+            MirrorPlan.Health.Healthy(0),
+            MirrorPlan.classifyHealth(
+                enabled = true,
+                lastSyncMs = last,
+                pending = 0,
+                lastOutcome = "ok 0w/0d/0a of 1810",
+                nowMs = last + 1_000L,
+            ),
+        )
+    }
+
+    // ------------------------------------------------------- which target
+
+    @Test
+    fun targetKind_perApiLevel() {
+        // 30+: only "All Files Access" reaches public Downloads, and its absence
+        // must NOT downgrade to a private dir — the feature promises a folder the
+        // user can see.
+        assertNull(MirrorPlan.targetKind(sdkInt = 30, allFilesAccess = false, legacyWriteGranted = true))
+        assertNull(MirrorPlan.targetKind(sdkInt = 35, allFilesAccess = false, legacyWriteGranted = false))
+        assertEquals(
+            MirrorPlan.TargetKind.PUBLIC_DOWNLOADS,
+            MirrorPlan.targetKind(sdkInt = 35, allFilesAccess = true, legacyWriteGranted = false),
+        )
+        // 29: scoped storage still honours the legacy write grant, which this app
+        // requests (requestLegacyExternalStorage). Without it, the private dir.
+        assertEquals(
+            MirrorPlan.TargetKind.PUBLIC_DOWNLOADS,
+            MirrorPlan.targetKind(sdkInt = 29, allFilesAccess = false, legacyWriteGranted = true),
+        )
+        assertEquals(
+            MirrorPlan.TargetKind.APP_EXTERNAL,
+            MirrorPlan.targetKind(sdkInt = 29, allFilesAccess = false, legacyWriteGranted = false),
+        )
+        // 26–28: "legacy storage" names the scoping model, not the permission
+        // model — WRITE_EXTERNAL_STORAGE has been a runtime grant since API 23.
+        // Without it the public tree is no more writable here than on 29, so
+        // the fallback is the same one; answering PUBLIC_DOWNLOADS would make
+        // the row report a healthy target that fails on every write.
+        for (sdk in 26..28) {
+            assertEquals(
+                MirrorPlan.TargetKind.PUBLIC_DOWNLOADS,
+                MirrorPlan.targetKind(sdkInt = sdk, allFilesAccess = false, legacyWriteGranted = true),
+            )
+            assertEquals(
+                MirrorPlan.TargetKind.APP_EXTERNAL,
+                MirrorPlan.targetKind(sdkInt = sdk, allFilesAccess = false, legacyWriteGranted = false),
+            )
+        }
+    }
+
+    @Test
     fun health_failureOutranksStaleness() {
         val h = MirrorPlan.classifyHealth(
             enabled = true,

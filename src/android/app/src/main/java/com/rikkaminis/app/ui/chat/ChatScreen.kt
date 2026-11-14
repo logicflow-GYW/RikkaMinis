@@ -3566,8 +3566,25 @@ fun ChatScreen(
                 // unreliable on device. Follow is engaged only by explicit
                 // intent: the down-arrow FAB below, send-when-anchored, and
                 // auto-push while already sticky. (See AlwaysStretchOverscroll.kt.)
+                // [composer-arc-1114] The list runs ComposerArcOverlap past its
+                // own bounds so it continues underneath the composer instead of
+                // stopping at a horizontal line: the card's rounded corners —
+                // not a square — are what terminate the content. The clip is
+                // the inverse of that arc (everything above the card, plus the
+                // two corner notches), so content is only revealed where the
+                // card isn't. If anything upstream ever clips us, the result
+                // degrades to the old straight cut rather than smearing content
+                // over the card.
                 Box {
-                AlwaysStretchOverscrollBox { sharedEffect ->
+                // The extension and the clip ride the scroll container, NOT the
+                // enclosing Box: the FABs, the selection hosts and the drag
+                // tracker below are siblings inside that Box, so extending it
+                // would drop them ComposerArcOverlap down under the card.
+                AlwaysStretchOverscrollBox(
+                    modifier = Modifier
+                        .composerArcTail()
+                        .clip(composerArcClipShape),
+                ) { sharedEffect ->
                 // [render-churn-1] Tool-pill progress flow (LocalToolProgressById)
                 // provided ONCE with a stable reference — the flow instance
                 // never changes, so this provider never invalidates children.
@@ -3598,7 +3615,12 @@ fun ChatScreen(
                     // message spacing are untouched.
                     contentPadding = PaddingValues(
                         top = 4.dp,
-                        bottom = if (bottomReserve == 0.dp) 12.dp else bottomReserve,
+                        // [composer-arc-1114] The viewport is ComposerArcOverlap
+                        // taller than the space it occupies (it slides under the
+                        // composer), so the clearance has to grow by the same
+                        // amount to keep the last row exactly where it was.
+                        bottom = (if (bottomReserve == 0.dp) 12.dp else bottomReserve) +
+                            ComposerArcOverlap,
                     ),
                     modifier = Modifier
                         .fillMaxWidth()

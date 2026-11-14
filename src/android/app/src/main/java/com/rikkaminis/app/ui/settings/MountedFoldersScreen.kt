@@ -5,7 +5,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
-import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -209,25 +208,11 @@ fun MountedFoldersScreen(
                 AllFilesAccessBanner(onClick = {
                     when {
                         // Android 11+: special All Files Access page.
-                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> runCatching {
-                            context.startActivity(
-                                Intent(
-                                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                    Uri.parse("package:${context.packageName}"),
-                                ),
-                            )
-                        }.onFailure {
-                            // Some OEMs (HarmonyOS/EMUI) don't host the per-app page —
-                            // fall back to the app details screen.
-                            runCatching {
-                                context.startActivity(
-                                    Intent(
-                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                        Uri.parse("package:${context.packageName}"),
-                                    ),
-                                )
-                            }
-                        }
+                        // Android 11+: the special All Files Access page, with the
+                        // OEM fallback (HarmonyOS/EMUI don't host the per-app page)
+                        // shared with the mirror row.
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                            openAllFilesAccessSettings(context)
                         // Android 10: request the legacy storage runtime permissions
                         // (READ for readdir, WRITE for the badge + agent writes).
                         Build.VERSION.SDK_INT == Build.VERSION_CODES.Q ->
