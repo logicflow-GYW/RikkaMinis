@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.IosShare
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -354,7 +355,22 @@ internal fun LargeContentGuard(
     }
 
     if (expanded) {
-        renderer()
+        // [fix/fold-paste-split-1114] Expansion is now REVERSIBLE.
+        //
+        // `expanded` used to be write-once: the badge set it true and nothing
+        // ever set it back, so one tap on a 15K paste turned the bubble into a
+        // wall of text for the rest of the session (the state is
+        // `rememberSaveable`, so it survived scrolling away and back too). The
+        // collapse control lives here rather than on the renderer because only
+        // the guard knows the body is foldable at all.
+        Column(Modifier.fillMaxWidth()) {
+            renderer()
+            CollapseBackRow(
+                stableKey = stableKey,
+                contentLength = content.length,
+                onCollapse = { expanded = false },
+            )
+        }
     } else {
         LargeContentBadge(
             content = content,
@@ -362,6 +378,58 @@ internal fun LargeContentGuard(
             onExpand = { expanded = true },
             previewChars = previewChars,
         )
+    }
+}
+
+/**
+ * [fix/fold-paste-split-1114] The "collapse again" control appended under an
+ * expanded oversized body.
+ *
+ * Why it exists: `expanded` was a one-way latch, so a single tap on a 15K paste
+ * committed the bubble to rendering the whole thing — including across session
+ * navigation, because the state is `rememberSaveable`. Users who tapped by
+ * accident had no way back short of leaving the chat.
+ *
+ * Deliberately a plain row rather than a floating button: it must scroll with
+ * the content (a FAB over a long markdown block covers text), and it must be
+ * present even when the expanded body is taller than the viewport, which is
+ * exactly when the badge at the top is scrolled out of sight. Tapping the badge
+ * area again is NOT an option — the badge no longer exists once expanded.
+ */
+@Composable
+private fun CollapseBackRow(
+    stableKey: String,
+    contentLength: Int,
+    onCollapse: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 2.dp),
+        horizontalArrangement = Arrangement.Start,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(
+            onClick = {
+                AppLogger.info(
+                    "LargeContentGuard",
+                    "collapse requested key=$stableKey chars=$contentLength",
+                )
+                onCollapse()
+            },
+            modifier = Modifier.padding(0.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.KeyboardArrowUp,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
+            Text(
+                text = stringResource(R.string.chat_message_large_collapse),
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
     }
 }
 

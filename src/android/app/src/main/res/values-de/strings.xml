@@ -1488,6 +1488,7 @@
     <string name="image_budget_total_exceeded">Gesamtbildgröße überschreitet 25MB; spätere Bilder übersprungen</string>
     <string name="image_budget_request_elided">Ältere %1$d Bild(er) aus der Anfrage entfernt, um das 25MB-Budget einzuhalten</string>
     <string name="chat_message_large_collapsed_title">Großer Inhalt (%1$s)</string>
+    <string name="chat_message_large_collapse">Einklappen</string>
     <string name="chat_message_large_expand">Zum Erweitern tippen</string>
     <string name="chat_message_large_export">In Datei exportieren</string>
     <string name="chat_message_large_export_ok">Exportiert</string>

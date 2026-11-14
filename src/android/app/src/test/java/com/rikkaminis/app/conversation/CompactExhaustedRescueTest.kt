@@ -220,7 +220,10 @@ class CompactExhaustedRescueTest {
         // Reset #1 — a real user send re-arms AFTER the auto-compact trigger
         // (guards already returned), inside sendMessage.
         val vm = readRepoFile("app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModel.kt")
-        val send = vm.substringAfter("fun sendMessage(rawText: String)")
+        // [fix/fold-paste-split-1114] sendMessage gained an optional
+        // `pasteStartIndex` parameter; anchor on the prefix so the assertions
+        // below still measure the body rather than a signature.
+        val send = vm.substringAfter("fun sendMessage(rawText: String")
             .substringBefore("fun runCompactNow()")
         val atTrigger = send.indexOf("maybeTriggerAutoCompact()")
         val atReset = send.indexOf("rescueAttemptedForCompact = false")

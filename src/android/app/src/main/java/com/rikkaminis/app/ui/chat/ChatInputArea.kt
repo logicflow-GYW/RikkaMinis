@@ -541,11 +541,16 @@ internal fun ChatInputArea(
         // `sendMessage` (the funnel the debug RPC and the headless runner also
         // use) finds plain text and returns it unchanged. The move-to-session
         // path below has always worked this way.
-        val expandedToSend = viewModel.expandPastedText(toSend)
+        // [fix/fold-paste-split-1114] Take the SPLIT, not just the text: the
+        // offset is what lets the bubble keep the user's own words outside the
+        // fold. It must be read here — `clearComposerInput` drops the buffer,
+        // and with it the only record of where the block began.
+        val expanded = viewModel.expandPastedTextWithSplit(toSend)
+        val expandedToSend = expanded.text
         clearComposerInput()
         keyboardController?.hide()
         focusManager.clearFocus()
-        viewModel.sendMessage(expandedToSend)
+        viewModel.sendMessage(expandedToSend, expanded.pasteStart)
         noteSendForInputModePref()
         // [P2-scroll-user-send] The send re-engages follow ONLY if the user was
         // already at the bottom (wasScrolledIntoHistory==false) — sending does
@@ -1568,11 +1573,14 @@ internal fun ChatInputArea(
                         // [fix/paste-send-order-1114] Same contract as the
                         // button/swipe funnel: expand while the buffer still
                         // holds the blocks, then clear (the clear drops them).
-                        val expandedToSend = viewModel.expandPastedText(toSend)
+                        // [fix/fold-paste-split-1114] Same split contract as
+                        // the button/swipe funnel above.
+                        val expanded = viewModel.expandPastedTextWithSplit(toSend)
+                        val expandedToSend = expanded.text
                         clearComposerInput()
                         keyboardController?.hide()
                         focusManager.clearFocus()
-                        viewModel.sendMessage(expandedToSend)
+                        viewModel.sendMessage(expandedToSend, expanded.pasteStart)
                         noteSendForInputModePref()
                         // [bottom-trigger] Re-engage follow only if the
                         // reader was anchored at the bottom (P2: must not

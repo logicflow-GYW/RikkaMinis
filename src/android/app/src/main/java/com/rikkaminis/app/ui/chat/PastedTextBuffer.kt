@@ -360,10 +360,30 @@ fun foldLongPasteIfNeeded(
     // An empty field is the "paste the material, then say what to do with it"
     // case: there is no position worth remembering, so the block stays out of
     // the text and the composer reads as empty.
-    val allowInlineMarker = oldText.isNotEmpty()
-    val marker = stash(inserted, allowInlineMarker)
+    //
+    // [fix/fold-paste-split-1114] ALWAYS take that arm — even when the field
+    // already had text.
+    //
+    // The old rule wrote a `[Pasted#N]` literal whenever the field was
+    // non-empty, which the user reads as the app spraying bookkeeping into
+    // their prompt: paste first → nothing appears, type first → `[Pasted#1]`
+    // appears, and the same action produces two different-looking composers.
+    // Worse, the literal marks a POSITION the fold cannot honour anyway: the
+    // pasted block is always appended after the typed body at send time
+    // ([appendUnlinkedPastes]), so an inline marker that says "this block sits
+    // in the middle of my sentence" is a promise the pipeline does not keep.
+    //
+    // What the inline arm did buy — remembering the caret — is now carried by
+    // the `pasteStart` offset persisted with the message, which survives to the
+    // bubble. Nothing is lost by dropping the literal, and the composer stops
+    // showing machine text in what is supposed to be the user's own words.
+    val marker = stash(inserted, false)
     if (marker == null) {
-        // Detached: the inserted run never reaches the field.
+        // Detached: the inserted run never reaches the field. A long block is
+        // "attach this material", not a mid-sentence insertion, so the field is
+        // left exactly as it was — including a selection the paste would have
+        // replaced. Nothing is deleted and the block is preserved in the chip
+        // row, which is the least destructive reading of an ambiguous gesture.
         val caret = minOf(insertedStart, oldText.length)
         return TextFieldValue(text = oldText, selection = TextRange(caret))
     }
