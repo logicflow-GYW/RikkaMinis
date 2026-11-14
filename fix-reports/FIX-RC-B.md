@@ -275,7 +275,50 @@
 4. **U-17 滑杆步长仍粗**（任务书 §3 明令只登记）。
 5. **`mcp_transport_http` / `mcp_transport_sse` 两个旧 key 的定义仍在 7 个 locale 里**（零代码引用，i18n 门不报）。
 
-## 7 提交
+## 7 CI 过程（两红一绿 —— 两次都是我自己造成的）
+
+### 7.1 第一轮：unit-tests 红，9121 例中 1 条
+
+`SandboxPathGuardWiringTest > every fileBrowser route passes a linuxRoot except the host-based session entry`
+
+**不是功能回归，是我的次生修复打断了测试的身份标记。** 那条测试用字面量 `displayPrefix = "/var/minis"` 识别「唯一不带 linuxRoot 的路由 = 会话入口」。U-08 把该前缀改成**调用方传入**（工作区传 `"/var/minis"`，媒体传 `null`），字面量就消失了。
+
+**修法不是回退**：`displayPrefix = null` 在运行期本来就被正确支持（`Routes.fileBrowser` 声明 `String? = null`，`:199` 只在非 null 时才追加参数），所以媒体路由是对的。错的是**钉住的东西选错了** —— 那个字面量只是碰巧能标识这条路由。改用 `rootLabel = "Session Files"`（4 个调用点里唯一，才是这条路由的真实身份）。
+
+同时补上标记改动会留下的空白：**两个调用方各自声明自己那棵树真实具备的前缀**。不补的话，「永远传 null」（工作区路径会泄漏 `/data/user/0/...` 这种不可读宿主路径）与「永远传 `/var/minis`」（媒体路径会声称一个沙箱里不存在的路径）两种写法都能绿。
+
+**判据（可复用）**：**测试红在「用来识别身份的字面量」上时，问「删掉这个字面量是否改变了被保护的契约」。** 如果没改变契约（本例：null 是合法值，路由照常工作），换一个更稳定的身份标记；如果改变了契约，才是回退实现。这条区分决定了「是修测试还是修代码」。
+
+### 7.2 第二轮：绿了，但绿得不可信
+
+上一轮 9122 PASSED 全绿，我按惯例搜了目标测试在不在册，结果：
+
+```
+grep -c FileDeletionSummaryTest  ->  0
+grep -c MediaBrowseRootTest      ->  0
+```
+
+**两个测试文件从头到尾就没进仓库** —— 它们在沙箱装置里跑通（本地 32 例 OK），我也把它们拷进了仓库目录，但它们一直是 `??` 未跟踪状态：`git add -A` 只在写报告那次执行过，而这两个文件是在那之后才落到仓库目录的。CI **对 U-06 的计数逻辑与 U-08 的选根规则零覆盖**。
+
+**这是「CI 绿 ≠ 证据存在」的第二次实证**（GLOBAL 里那条规则的又一个形态）：绿只说明「跑到的都过了」，不说明「该跑的跑了」。**判据：本批新增了测试文件时，必须在 CI 日志里按类名搜到它**，搜不到 = 没跑。
+
+修法 = 把两个文件提交（与装置副本逐字节一致，`diff -q` 核实过；它们编译的是仓库真 `FileItem`，同包无 import 无桩），第三轮 CI 的 PASSED 从 9122 → **9132**，正好 +10（6+4），且两个类名各自在册。
+
+### 7.3 第三轮：全绿（确定性停止节点达成）
+
+**run `43546671685` 五 job 全 success**，`head_sha = 2650d089dcd917ce4c515be54ab74b1b8d001c40` **与本地 HEAD 逐字符一致**，工作树干净。
+
+证据逐条核实（不只看绿）：
+
+| 项 | 证据 |
+|---|---|
+| unit-tests | `BUILD SUCCESSFUL in 5m 14s`；**9132 PASSED / 0 FAILED**；行尾 `FAILED` 的真失败 **0** 条；`SandboxPathGuardWiringTest > …session entry PASSED` + `…prefix their tree actually has PASSED`；`FileDeletionSummaryTest` 6 行在册、`MediaBrowseRootTest` 4 行在册、`ModelEntryOverrideBuilderTest` 22 行在册 |
+| scan-gate | `Summary: 115 passed, 0 failed`；`ALL 356 CASES PASS`；`##[notice]scanners moved in this push … running the fixture self-test` ⇒ **夹具真跑**（本批没改 `scripts/scan/`，但 diff 触及被门锚定的生产文件；日志里是 `scanners moved`，不是 `scripts/scan/** untouched`，两种都要认） |
+| lint | success |
+| build-apk | success |
+| publish | success |
+
+## 8 提交
 
 一条一个 ID（U-09+U-15 与 U-18+U-19 按任务书允许合并；U-15+U-16 因落在同一文件的同一 hunk 合并，理由写在 commit body）：
 
@@ -288,6 +331,11 @@ f03853f  fix(rc-1114-U11): say that environment variables need a new terminal
 c5a0313  fix(rc-1114-U15,U16): persist the server once OAuth completes; two transports, not three
 c4e33d0  feat(rc-1114-U17): restore shipped defaults from the runtime limits page
 24d7bb7  feat(rc-1114-U18,U19): edit video output and the thinking ceiling; carry capabilities into the new-model form
+b232cce  docs(rc-1114-b): FIX-RC-B report
+c71bc30  test(rc-1114-U08): identify the session route by rootLabel, and pin both callers' prefixes
+2650d08  test(rc-1114-U06,U08): commit the two unit tests the JVM harness was running
 ```
 
-**tip `24d7bb7bd9794bcac4f23023a721c799c0df150e`**
+**tip `2650d089dcd917ce4c515be54ab74b1b8d001c40`** ← 分支 CI 绿即此 sha
+
+**停止节点达成，未合并 main**（有 `.kt` + `scripts/scan/` 锚定文件 = 非纯文本例外，合并起手权在用户）。
