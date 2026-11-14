@@ -1456,6 +1456,20 @@ private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?
              */
             override fun onRendererGone(view: WebView?) {
                 AppLogger.warning("FilePreview", "print renderer gone for ${item.name}")
+                // [RC-U07] Say it out loud. This branch released the WebView and
+                // logged, so the toolbar's print icon looked dead: no print
+                // panel, no message, and the user retried a button that had
+                // already given up. The dialog path below already toasts on
+                // failure — this is the same contract for the two silent ways a
+                // print can die before PrintManager is asked.
+                Toast.makeText(
+                    context,
+                    context.getString(
+                        R.string.file_print_failed_toast,
+                        context.getString(R.string.file_print_renderer_gone),
+                    ),
+                    Toast.LENGTH_SHORT,
+                ).show()
                 // `view` is nullable in the callback signature; the overload
                 // takes a non-null WebView because its identity check is the
                 // whole point.
@@ -1502,6 +1516,16 @@ private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?
                     "FilePreview",
                     "print page load failed for ${item.name}: ${error.description}",
                 )
+                // [RC-U07] Same as the renderer-gone branch: a load failure used
+                // to be indistinguishable from a dead button (no print panel, no
+                // message). The platform's description is passed through — it
+                // separates "file missing" from "renderer unavailable" better
+                // than any wording this file could invent.
+                Toast.makeText(
+                    context,
+                    context.getString(R.string.file_print_failed_toast, error.description),
+                    Toast.LENGTH_SHORT,
+                ).show()
                 releasePrintWebView(view)
             }
         }

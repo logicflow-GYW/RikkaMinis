@@ -1688,4 +1688,5 @@
     <string name="backup_done_webdav">Конфигурация сервера WebDAV восстановлена.</string>
     <string name="mirror_fastest_hint">Самый быстрый: %1$s (%2$d мс)</string>
     <string name="mirror_switch_to_fastest">Взять</string>
+    <string name="file_print_renderer_gone">окно печати перестало отвечать</string>
 </resources>

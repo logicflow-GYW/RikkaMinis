@@ -1733,4 +1733,5 @@
     <string name="backup_done_webdav">WebDAV サーバー設定を復元しました。</string>
     <string name="mirror_fastest_hint">最速: %1$s（%2$d ms）</string>
     <string name="mirror_switch_to_fastest">使用</string>
+    <string name="file_print_renderer_gone">印刷ビューが応答を停止しました</string>
 </resources>
