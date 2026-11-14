@@ -88,7 +88,14 @@ fun LogManagementScreen(
     // (no further stat calls).
     val dailyLogs = remember { mutableStateListOf<AppLogger.LogFileMeta>() }
     val crashLogs = remember { mutableStateListOf<AppLogger.LogFileMeta>() }
-    var totalSize by remember { mutableStateOf(0L) }
+    // [rc-1114 U-10] Two totals, never one: `listedSize` is what the rows below
+    // sum to, `hiddenLogSize` is what the page deliberately does not list. The
+    // "Delete All" row and its confirm dialog show their SUM — that is what
+    // actually leaves the disk — while the footer names the hidden part, so
+    // neither number can be mistaken for the other.
+    var listedSize by remember { mutableStateOf(0L) }
+    var hiddenLogCount by remember { mutableStateOf(0) }
+    var hiddenLogSize by remember { mutableStateOf(0L) }
     var loading by remember { mutableStateOf(true) }
     var showDeleteAllConfirm by remember { mutableStateOf(false) }
     var loggingEnabled by remember { mutableStateOf(AppLogger.isEnabled(context)) }
@@ -128,7 +135,15 @@ fun LogManagementScreen(
         // 但不在此页可见，要看需走文件管理或调试 RPC。| 天花板: 用户想在设置
         // 里直接翻 debug/快照文件时失效。| 升级触发: 用户提出"设置里看不到
         // debug 日志"，或需要新增分区标题（要动 7+1 语言文件）。
-        val (daily, crash, total) = withContext(Dispatchers.IO) {
+        //
+        // [rc-1114 U-10] Hiding them is DELIBERATE (a day of SSE deltas is
+        // ~100 MB and listing those rows would make the page crawl), but the
+        // page used to hide the fact that they exist AND leave their bytes out
+        // of the total — so the number disagreed with the directory and "Delete
+        // All" silently removed files the user had never seen. The exclusion is
+        // now stated with a count + size, and both halves of the total are
+        // derived from the same load pass (see `LogPageLoad`).
+        val loaded = withContext(Dispatchers.IO) {
             val d = AppLogger.listLogFileMetas(prefix = "minis-", limit = 100)
             val cJ = AppLogger.listLogFileMetas(prefix = "crash-", limit = 100)
             val cN = AppLogger.listLogFileMetas(prefix = "native-crash-", limit = 100)
@@ -145,18 +160,33 @@ fun LogManagementScreen(
                 nameOf = { it.name },
                 modifiedOf = { it.lastModified },
             )
-            // totalSize sums only the displayed rows. Older / over-cap files
-            // are still on disk but excluded from the cap-100 view; the
-            // footer wording matches what the user actually sees here.
-            val sum = (d.sumOf { it.sizeBytes }) + (merged.sumOf { it.sizeBytes })
-            Triple(d, merged, sum)
+            LogPageLoad(
+                daily = d,
+                crash = merged,
+                listedSize = d.sumOf { it.sizeBytes } + merged.sumOf { it.sizeBytes },
+                // Complement, not an enumerated prefix list: everything in the
+                // directory that these rows do not show — debug-<date>*.log,
+                // error-snapshot-*, launch-beacon, memspike-*, and any file
+                // past a family's 100-row cap. `clearLogs()` unlinks the whole
+                // directory, so the total must cover the whole directory.
+                hidden = AppLogger.summarizeLogFilesExcluding(
+                    (d.map { it.name } + merged.map { it.name }).toSet(),
+                ),
+            )
         }
-        dailyLogs.clear(); dailyLogs.addAll(daily)
-        crashLogs.clear(); crashLogs.addAll(crash)
-        totalSize = total
+        dailyLogs.clear(); dailyLogs.addAll(loaded.daily)
+        crashLogs.clear(); crashLogs.addAll(loaded.crash)
+        listedSize = loaded.listedSize
+        hiddenLogCount = loaded.hidden.count
+        hiddenLogSize = loaded.hidden.sizeBytes
         loading = false
     }
     fun refresh() { refreshTrigger.value++ }
+
+    // [rc-1114 U-10] What "Delete All" really removes: the listed rows PLUS
+    // the families the page hides. Both come from the same load pass, so the
+    // dialog cannot promise one number and delete another.
+    val deleteAllSize = listedSize + hiddenLogSize
 
     SettingsScaffold(
         title = stringResource(R.string.log_title),
@@ -167,7 +197,9 @@ fun LogManagementScreen(
             context = context,
             dailyLogs = dailyLogs,
             crashLogs = crashLogs,
-            totalSize = totalSize,
+            listedSize = listedSize,
+            hiddenLogCount = hiddenLogCount,
+            hiddenLogSize = hiddenLogSize,
             loading = loading,
             loggingEnabled = loggingEnabled,
             onToggleLogging = {
@@ -184,7 +216,12 @@ fun LogManagementScreen(
             onDismissRequest = { showDeleteAllConfirm = false },
             title = { Text(stringResource(R.string.log_delete_confirm_title)) },
             text = {
-                Text(stringResource(R.string.log_delete_confirm_text, Formatter.formatFileSize(context, totalSize)))
+                Text(
+                    stringResource(
+                        R.string.log_delete_confirm_text,
+                        Formatter.formatFileSize(context, deleteAllSize),
+                    ),
+                )
             },
             confirmButton = {
                 MinisTextButton(onClick = {
@@ -210,13 +247,48 @@ fun LogManagementScreen(
     }
 }
 
+/*
+ * [rc-1114 U-10] What this page hides, and why it is not an enumerated list.
+ *
+ * `debug-<date>.log` carries every SSE delta and can reach ~100 MB/day —
+ * listing a hundred of those rows would make the page crawl, so the exclusion
+ * is deliberate (see the ponytail note at the call site). `error-snapshot-`
+ * files are one-per-fault diagnostics written by the logging channel itself and
+ * have no reader in the UI at all. `launch-beacon.log` and `memspike-*.log`
+ * are written by other components entirely, and any family can also spill past
+ * a listed family's 100-row cap.
+ *
+ * Because of that tail, the count/size is computed as the COMPLEMENT of the
+ * displayed rows (see
+ * [com.rikkaminis.app.logging.AppLogger.summarizeLogFilesExcluding]) rather
+ * than from a prefix list here — an enumerated list would under-count the
+ * moment a new family appears, and the page's total would disagree with the
+ * disk again, which is the bug this change exists to fix.
+ */
+
+/**
+ * [rc-1114 U-10] One load pass of the log page: the two listed families, the
+ * bytes those rows sum to, and the hidden families' count + bytes.
+ *
+ * Keeping `listedSize` and `hidden` together means the visible total, the
+ * Delete-All total and the footer note can never come from different scans.
+ */
+private data class LogPageLoad(
+    val daily: List<AppLogger.LogFileMeta>,
+    val crash: List<AppLogger.LogFileMeta>,
+    val listedSize: Long,
+    val hidden: AppLogger.LogFileSummary,
+)
+
 /** Logs body — the LogManagementScreen content. */
 @Composable
 private fun LogsBody(
     context: Context,
     dailyLogs: List<AppLogger.LogFileMeta>,
     crashLogs: List<AppLogger.LogFileMeta>,
-    totalSize: Long,
+    listedSize: Long,
+    hiddenLogCount: Int,
+    hiddenLogSize: Long,
     loading: Boolean,
     loggingEnabled: Boolean,
     onToggleLogging: (Boolean) -> Unit,
@@ -300,11 +372,34 @@ private fun LogsBody(
         }
 
         // ── Storage / Delete All (only when files exist) ───────────────
-        if (anyFiles) {
+        // [rc-1114 U-10] `anyFiles` now also considers the hidden families: a
+        // directory holding nothing but debug-<date>.log still has bytes to
+        // reclaim, and the section used to vanish entirely in that case.
+        val hasAnything = anyFiles || hiddenLogCount > 0
+        if (hasAnything) {
+            val deleteAllSize = listedSize + hiddenLogSize
             SettingsSection(
                 header = stringResource(R.string.log_section_storage),
-                footer = stringResource(R.string.log_section_storage_footer, Formatter.formatFileSize(context, totalSize)),
+                footer = if (hiddenLogCount > 0) {
+                    stringResource(
+                        R.string.log_section_storage_footer,
+                        Formatter.formatFileSize(context, deleteAllSize),
+                    ) + " " + stringResource(
+                        R.string.log_hidden_files_note,
+                        hiddenLogCount,
+                        Formatter.formatFileSize(context, hiddenLogSize),
+                    )
+                } else {
+                    stringResource(
+                        R.string.log_section_storage_footer,
+                        Formatter.formatFileSize(context, deleteAllSize),
+                    )
+                },
             ) {
+                // The row shows what Delete All ACTUALLY removes — the listed
+                // rows plus the hidden families — so the number here, the
+                // number in the confirm dialog and the bytes that disappear all
+                // come from the same two state variables.
                 SettingsRow(
                     title = stringResource(R.string.log_delete_all_title),
                     titleColor = MaterialTheme.colorScheme.error,
@@ -313,7 +408,7 @@ private fun LogsBody(
                     showDivider = false,
                     trailing = {
                         Text(
-                            Formatter.formatFileSize(context, totalSize),
+                            Formatter.formatFileSize(context, deleteAllSize),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

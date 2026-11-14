@@ -430,6 +430,7 @@
     <string name="log_no_files">Нет файлов журналов</string>
     <string name="log_section_storage">Хранилище</string>
     <string name="log_section_storage_footer">Всего занято журналами: %1$s</string>
+    <string name="log_hidden_files_note">Не показано в этом списке: отладочных/снимковых журналов %1$d, всего %2$s. При удалении всех они тоже удаляются.</string>
     <string name="log_section_crash">Журналы сбоев</string>
     <string name="log_section_crash_footer">Последние %1$d отчёт(ов) о сбоях (Java/Kotlin + native)</string>
     <string name="log_delete_all_title">Удалить все журналы</string>

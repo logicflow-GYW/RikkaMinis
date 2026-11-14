@@ -254,6 +254,7 @@
     <string name="log_no_files">ログファイルなし</string>
     <string name="log_section_storage">ストレージ</string>
     <string name="log_section_storage_footer">ログ保存合計: %1$s</string>
+    <string name="log_hidden_files_note">この一覧には表示していません：デバッグ/スナップショットログ %1$d 件、%2$s。すべて削除するとこれらも消えます。</string>
     <string name="log_section_crash">クラッシュログ</string>
     <string name="log_section_crash_footer">最近 %1$d 件のクラッシュレポート（Java/Kotlin + native）</string>
     <string name="log_delete_all_title">すべてのログを削除</string>

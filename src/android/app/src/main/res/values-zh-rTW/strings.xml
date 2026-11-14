@@ -1142,6 +1142,7 @@
     <string name="log_no_files">無日誌檔案</string>
     <string name="log_section_storage">儲存</string>
     <string name="log_section_storage_footer">日誌儲存總量: %1$s</string>
+    <string name="log_hidden_files_note">本清單未顯示：%1$d 個除錯/快照日誌，共 %2$s。全部刪除時一併清除。</string>
     <string name="log_section_crash">崩潰日誌</string>
     <string name="log_section_crash_footer">最近 %1$d 條崩潰報告（Java/Kotlin + native）</string>
     <string name="log_delete_all_title">刪除所有日誌</string>

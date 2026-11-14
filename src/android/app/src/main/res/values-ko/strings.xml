@@ -254,6 +254,7 @@
     <string name="log_no_files">로그 파일 없음</string>
     <string name="log_section_storage">저장 공간</string>
     <string name="log_section_storage_footer">총 로그 저장: %1$s</string>
+    <string name="log_hidden_files_note">이 목록에 표시되지 않음: 디버그/스냅샷 로그 %1$d개, %2$s. 모두 삭제하면 함께 지워집니다.</string>
     <string name="log_section_crash">크래시 로그</string>
     <string name="log_section_crash_footer">최근 %1$d개의 크래시 보고서 (Java/Kotlin + native)</string>
     <string name="log_delete_all_title">모든 로그 삭제</string>

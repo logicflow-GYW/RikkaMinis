@@ -303,6 +303,7 @@
     <string name="log_no_files">无日志文件</string>
     <string name="log_section_storage">存储</string>
     <string name="log_section_storage_footer">日志存储总量: %1$s</string>
+    <string name="log_hidden_files_note">本列表未显示：%1$d 个调试/快照日志，共 %2$s。全部删除时一并清除。</string>
     <string name="log_section_crash">崩溃日志</string>
     <string name="log_section_crash_footer">最近 %1$d 条崩溃报告（Java/Kotlin + native）</string>
     <string name="log_delete_all_title">删除所有日志</string>

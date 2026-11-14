@@ -572,6 +572,7 @@
     <string name="log_no_files">No log files</string>
     <string name="log_section_storage">Storage</string>
     <string name="log_section_storage_footer">Total log storage: %1$s</string>
+    <string name="log_hidden_files_note">Hidden from this list: %1$d debug/snapshot files, %2$s. Deleting all removes them too.</string>
     <string name="log_section_crash">Crash Logs</string>
     <string name="log_section_crash_footer">Most recent %1$d crash report(s) (Java/Kotlin + native).</string>
     <string name="log_delete_all_title">Delete All Logs</string>

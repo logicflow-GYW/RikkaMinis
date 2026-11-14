@@ -254,6 +254,7 @@
     <string name="log_no_files">Keine Logdateien</string>
     <string name="log_section_storage">Speicherplatz</string>
     <string name="log_section_storage_footer">Gesamtlogspeicher: %1$s</string>
+    <string name="log_hidden_files_note">Nicht in dieser Liste: %1$d Debug-/Snapshot-Protokolle, %2$s. Beim Löschen aller werden sie mit entfernt.</string>
     <string name="log_section_crash">Absturzprotokolle</string>
     <string name="log_section_crash_footer">Letzte %1$d Absturzbericht(e) (Java/Kotlin + native)</string>
     <string name="log_delete_all_title">Alle Logs löschen</string>
