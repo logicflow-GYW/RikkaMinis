@@ -1587,6 +1587,12 @@
     <string name="runtime_limits_heavy_gate">Sandbox: Heavy-Gate-Wartezeit</string>
     <string name="runtime_limits_heavy_gate_desc">Wie lange ein Heavy-Befehl auf das globale Heavy-Gate wartet, bevor gemeldet wird, dass ein anderer Heavy-Befehl noch läuft.</string>
     <string name="runtime_limits_sandbox_footer">Diese Fenster schützen die App vor Speicherdruck. Die Standardwerte entsprechen den früheren festen Werten.</string>
+    <string name="runtime_limits_restore_confirm_body">Jeder Wert dieser Seite kehrt im Editor auf den Auslieferungswert zurück. Erst beim Speichern wird geschrieben.</string>
+    <string name="runtime_limits_restore_confirm_title">Standard wiederherstellen?</string>
+    <string name="runtime_limits_restore_defaults_footer">Wiederherstellen ändert nur die ungespeicherten Werte dieser Seite — zum Anwenden speichern. Die Schieberegler-Schritte bleiben unverändert: manche Standardwerte (etwa das Alter für die tmp-Bereinigung) sind nach dem Verstellen nicht mehr erreichbar, dafür gibt es diese Zeile.</string>
+    <string name="runtime_limits_restore_defaults_desc">Setzt jeden Wert dieser Seite auf den Auslieferungswert zurück</string>
+    <string name="runtime_limits_restore_defaults">Standard wiederherstellen</string>
+    <string name="runtime_limits_section_reset">Zurücksetzen</string>
     <string name="runtime_limits_media_footer">Höhere Bildgrenzen bringen bessere Bildqualität zum Modell — auf Kosten größerer Anfragen.</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that

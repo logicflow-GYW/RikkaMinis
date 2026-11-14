@@ -1540,6 +1540,12 @@
     <string name="runtime_limits_heavy_gate">Песочница: ожидание шлюза</string>
     <string name="runtime_limits_heavy_gate_desc">Сколько тяжёлая команда ждёт глобальный шлюз тяжёлых команд, прежде чем сообщить, что другая тяжёлая команда ещё выполняется.</string>
     <string name="runtime_limits_sandbox_footer">Эти окна защищают приложение от нехватки памяти. Значения по умолчанию совпадают с прежними фиксированными.</string>
+    <string name="runtime_limits_restore_confirm_body">Все параметры этой страницы в редакторе вернутся к заводским значениям. Запись произойдёт только после нажатия «Сохранить».</string>
+    <string name="runtime_limits_restore_confirm_title">Восстановить значения по умолчанию?</string>
+    <string name="runtime_limits_restore_defaults_footer">Сброс меняет только несохранённые значения этой страницы — чтобы применить, нажмите «Сохранить». Шаг ползунков не изменён: некоторые значения по умолчанию (например, возраст очистки tmp) после сдвига недостижимы — для этого и нужна эта строка.</string>
+    <string name="runtime_limits_restore_defaults_desc">Возвращает все параметры этой страницы к заводским значениям</string>
+    <string name="runtime_limits_restore_defaults">Восстановить значения по умолчанию</string>
+    <string name="runtime_limits_section_reset">Сброс</string>
     <string name="runtime_limits_media_footer">Более высокие лимиты изображений пропускают лучшее качество к модели — ценой размера запроса.</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that

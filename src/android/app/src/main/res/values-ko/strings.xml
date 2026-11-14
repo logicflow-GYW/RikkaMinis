@@ -1586,6 +1586,12 @@
     <string name="runtime_limits_heavy_gate">샌드박스: 헤비 게이트 대기</string>
     <string name="runtime_limits_heavy_gate_desc">무거운 명령이 전역 헤비 게이트를 기다리는 최대 시간입니다. 초과하면 다른 무거운 명령이 실행 중이라고 보고합니다.</string>
     <string name="runtime_limits_sandbox_footer">이 시간들은 메모리 압박을 막기 위한 것입니다. 기본값은 이전의 고정값과 같습니다.</string>
+    <string name="runtime_limits_restore_confirm_body">이 페이지의 모든 값이 편집기에서 출하 시 기본값으로 돌아갑니다. 저장을 누르기 전에는 아무것도 기록되지 않습니다.</string>
+    <string name="runtime_limits_restore_confirm_title">기본값으로 복원할까요?</string>
+    <string name="runtime_limits_restore_defaults_footer">복원은 이 페이지의 저장되지 않은 값만 바꿉니다. 적용하려면 저장을 누르세요. 슬라이더 간격은 그대로입니다. 일부 기본값(임시 디렉터리 정리 기간 등)은 한 번 움직이면 되돌릴 수 없기 때문에 이 항목이 있습니다.</string>
+    <string name="runtime_limits_restore_defaults_desc">이 페이지의 모든 값을 출하 시 기본값으로 되돌립니다</string>
+    <string name="runtime_limits_restore_defaults">기본값 복원</string>
+    <string name="runtime_limits_section_reset">초기화</string>
     <string name="runtime_limits_media_footer">이미지 상한을 올리면 더 좋은 화질로 모델에 전달되지만 요청이 커집니다.</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that

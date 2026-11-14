@@ -1705,6 +1705,12 @@
     <string name="runtime_limits_heavy_gate">Sandbox: heavy gate wait</string>
     <string name="runtime_limits_heavy_gate_desc">How long a heavy command waits for the global heavy-command gate before reporting that another heavy command is still running.</string>
     <string name="runtime_limits_sandbox_footer">These windows protect the app from memory pressure. Defaults match the previously fixed values.</string>
+    <string name="runtime_limits_restore_confirm_body">Every knob on this page goes back to its shipped value in the editor. Nothing is written until you press Save.</string>
+    <string name="runtime_limits_restore_confirm_title">Restore defaults?</string>
+    <string name="runtime_limits_restore_defaults_footer">Restoring only changes this page\'s unsaved values — press Save to apply them. Slider steps are unchanged: some defaults (such as the tmp sweep age) are not reachable by dragging once you have moved past them, which is why this row exists.</string>
+    <string name="runtime_limits_restore_defaults_desc">Put every knob on this page back to its shipped value</string>
+    <string name="runtime_limits_restore_defaults">Restore defaults</string>
+    <string name="runtime_limits_section_reset">Reset</string>
     <string name="runtime_limits_media_footer">Higher image limits let better-quality pictures reach the model at the cost of request size.</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that

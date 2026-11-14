@@ -1592,6 +1592,12 @@
     <string name="runtime_limits_heavy_gate">沙箱：重負載閘門等待</string>
     <string name="runtime_limits_heavy_gate_desc">重負載指令等待全域重負載閘門的最長時間，逾時則回報另一重負載仍在執行。</string>
     <string name="runtime_limits_sandbox_footer">這些視窗用於防止記憶體壓力，預設值與先前的固定值一致。</string>
+    <string name="runtime_limits_restore_confirm_body">本頁所有參數在編輯器裡回到出廠值。在你按儲存之前不會寫入任何內容。</string>
+    <string name="runtime_limits_restore_confirm_title">恢復預設？</string>
+    <string name="runtime_limits_restore_defaults_footer">恢復只改動本頁尚未儲存的數值，需要再按儲存才會生效。滑桿步長未變：部分預設值（如暫存目錄收割年齡）一旦拖過就再也拖不回來，這一列就是為此存在的。</string>
+    <string name="runtime_limits_restore_defaults_desc">把本頁所有參數改回出廠值</string>
+    <string name="runtime_limits_restore_defaults">恢復預設</string>
+    <string name="runtime_limits_section_reset">重設</string>
     <string name="runtime_limits_media_footer">調高圖片上限可讓更高品質圖片進入模型，代價是請求體積變大。</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that

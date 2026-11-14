@@ -1615,6 +1615,12 @@
     <string name="runtime_limits_heavy_gate">沙箱：重活闸门等待</string>
     <string name="runtime_limits_heavy_gate_desc">重活命令等待全局重活闸门的最长时间，超时则报告另一重活仍在运行。</string>
     <string name="runtime_limits_sandbox_footer">这些窗口用于防止内存压力，默认值与之前的固定值一致。</string>
+    <string name="runtime_limits_restore_confirm_body">本页所有参数在编辑器里回到出厂值。在你点保存之前不会写入任何内容。</string>
+    <string name="runtime_limits_restore_confirm_title">恢复默认？</string>
+    <string name="runtime_limits_restore_defaults_footer">恢复只改动本页尚未保存的数值，需要再点保存才会生效。滑块步长未变：部分默认值（如临时目录收割年龄）一旦拖过就再也拖不回来，这一行就是为此存在的。</string>
+    <string name="runtime_limits_restore_defaults_desc">把本页所有参数改回出厂值</string>
+    <string name="runtime_limits_restore_defaults">恢复默认</string>
+    <string name="runtime_limits_section_reset">重置</string>
     <string name="runtime_limits_media_footer">调高图片上限可让更高质量图片进入模型，代价是请求体积变大。</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that

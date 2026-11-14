@@ -1586,6 +1586,12 @@
     <string name="runtime_limits_heavy_gate">サンドボックス：ヘビーゲート待ち</string>
     <string name="runtime_limits_heavy_gate_desc">重いコマンドがグローバルのヘビーゲートを待つ最大時間。超えると別の重いコマンドが実行中と報告します。</string>
     <string name="runtime_limits_sandbox_footer">これらの時間はメモリ圧迫を防ぐためのものです。既定値は以前の固定値と同じです。</string>
+    <string name="runtime_limits_restore_confirm_body">このページの全項目が編集画面で出荷時の値に戻ります。保存を押すまで何も書き込まれません。</string>
+    <string name="runtime_limits_restore_confirm_title">デフォルトに戻しますか？</string>
+    <string name="runtime_limits_restore_defaults_footer">復元はこのページの未保存の値だけを変更します。適用するには保存を押してください。スライダーの刻みは変わりません。一部の既定値（一時ディレクトリの回収年齢など）は一度動かすと戻せないため、この行があります。</string>
+    <string name="runtime_limits_restore_defaults_desc">このページの全項目を出荷時の値に戻します</string>
+    <string name="runtime_limits_restore_defaults">デフォルトに戻す</string>
+    <string name="runtime_limits_section_reset">リセット</string>
     <string name="runtime_limits_media_footer">画像上限を上げると高画質のままモデルへ届きますが、リクエストが大きくなります。</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
