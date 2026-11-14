@@ -1725,6 +1725,11 @@
     <string name="mirror_diag_failed">上次同步失敗</string>
     <string name="mirror_diag_unavailable">沒有可用的儲存目標</string>
     <string name="mirror_retry">重試</string>
+    <!-- [mirror-filetarget-1114] The grant is gone: a retry cannot fix it. -->
+    <string name="mirror_diag_missing_grant">無法存取外部資料夾</string>
+    <string name="mirror_diag_missing_grant_sub">「所有檔案存取權限」已關閉——副本在 %1$s 之後停止更新。</string>
+    <string name="mirror_diag_missing_grant_sub_never">「所有檔案存取權限」已關閉——副本從未寫入過。</string>
+    <string name="mirror_grant_action">授權</string>
     <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
     <string name="paste_chip_desc">已摺疊的貼上內容 #%1$d，%2$d 字元。點擊預覽。</string>
     <string name="paste_preview_title">貼上內容 %1$s</string>

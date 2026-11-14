@@ -165,6 +165,62 @@ internal object MirrorPlan {
         return nowMs - newest >= spacingMs
     }
 
+    // ---------------------------------------------------------------- target
+
+    /** Where the mirror writes. */
+    enum class TargetKind {
+        /** The public `Download/RikkaMinis/backup` tree, written as plain
+         *  files. Reachable on API 26–28 through the legacy write grant and on
+         *  API 30+ through "All Files Access". */
+        PUBLIC_DOWNLOADS,
+
+        /** App-specific external dir — still outside `filesDir` (so it survives
+         *  a reinstall's internal-storage wipe) but invisible to a file manager,
+         *  so it is only used where the public tree needs a runtime permission
+         *  a background sync should not request: API 29, and API 26–28 before
+         *  the user granted anything. */
+        APP_EXTERNAL,
+    }
+
+    /**
+     * Which target this device can use, or null when the visible folder is the
+     * promise and this install cannot keep it.
+     *
+     * The rule, per API level — this is the whole "why did the mirror stop
+     * updating" question in one pure function:
+     *  - **30+ (R)**: `MANAGE_EXTERNAL_STORAGE` ("All Files Access") is the only
+     *    grant that reaches public Downloads, and it is a Settings-page grant
+     *    that can be revoked between runs. Without it the answer is NULL, not
+     *    the app-private dir: the feature's contract is a copy the user can see,
+     *    and a silent downgrade would rebuild the original defect (a backup
+     *    that exists somewhere other than where the user was told).
+     *  - **29 (Q)**: scoped storage still honours the legacy write grant for
+     *    public dirs when `requestLegacyExternalStorage` is set (this app sets
+     *    it), so a granted `WRITE_EXTERNAL_STORAGE` is enough.
+     *  - **26–28**: the same `WRITE_EXTERNAL_STORAGE` grant as 29, and for the
+     *    same reason — "legacy storage" describes the *scoping* model, not the
+     *    runtime-permission model, which has required the grant since API 23.
+     *    Answering PUBLIC_DOWNLOADS without it would not make the directory
+     *    writable; it would turn a device that used to sync (into the
+     *    app-specific dir) into one that fails every round with a Retry button
+     *    that cannot help.
+     *
+     * Deliberately NOT gated on `Environment.isExternalStorageManager()` alone:
+     * that API exists from R, and calling it on Q throws. The caller passes the
+     * already-read booleans so this stays JVM-testable.
+     */
+    fun targetKind(
+        sdkInt: Int,
+        allFilesAccess: Boolean,
+        legacyWriteGranted: Boolean,
+    ): TargetKind? = when {
+        sdkInt >= 30 -> if (allFilesAccess) TargetKind.PUBLIC_DOWNLOADS else null
+        // 29 and 26–28 read the same grant. Keeping them distinguishable in the
+        // history (29 also needs `requestLegacyExternalStorage`, set in the
+        // manifest) is why the doc above splits them; the decision is identical.
+        else -> if (legacyWriteGranted) TargetKind.PUBLIC_DOWNLOADS else TargetKind.APP_EXTERNAL
+    }
+
     // ---------------------------------------------------------------- health
 
     /**
@@ -253,6 +309,15 @@ internal object MirrorPlan {
         /** The last run failed (or found no target). [reason] is the recorded
          *  diagnostic, null for "no usable target". */
         data class Failed(val reason: String?) : Health()
+
+        /** The install cannot reach the public folder because a grant is gone.
+         *
+         *  Separate from [Failed] because the repair is different: retrying a
+         *  sync that has no target reproduces the same failure forever, and the
+         *  row's retry button would be an affordance that cannot work. This
+         *  state's action is the system grant page. It outranks every other
+         *  verdict: without the grant nothing below it can be true. */
+        data class MissingGrant(val lastSyncMs: Long) : Health()
     }
 
     fun classifyHealth(
@@ -262,8 +327,16 @@ internal object MirrorPlan {
         lastOutcome: String?,
         nowMs: Long,
         staleAfterMs: Long = STALE_AFTER_MS,
+        /** False when this install cannot write the public folder at all — the
+         *  "All Files Access" grant was revoked, or a Q device lost its legacy
+         *  write grant. Read by the row on every composition, not from the
+         *  recorded outcome: the grant can disappear between syncs, and the row
+         *  that is on screen when the user opens Backup settings is the one that
+         *  has to say so. */
+        targetReachable: Boolean = true,
     ): Health {
         if (!enabled) return Health.Disabled
+        if (!targetReachable) return Health.MissingGrant(lastSyncMs)
         when (outcomeKind(lastOutcome)) {
             "failed" -> return Health.Failed(lastOutcome?.removePrefix("failed: "))
             "unavailable" -> return Health.Failed(null)

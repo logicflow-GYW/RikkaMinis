@@ -1674,6 +1674,11 @@
     <string name="mirror_diag_failed">Последняя синхронизация не удалась</string>
     <string name="mirror_diag_unavailable">Нет доступного хранилища</string>
     <string name="mirror_retry">Повторить</string>
+    <!-- [mirror-filetarget-1114] The grant is gone: a retry cannot fix it. -->
+    <string name="mirror_diag_missing_grant">Нет доступа к внешней папке</string>
+    <string name="mirror_diag_missing_grant_sub">Нет доступа ко всем файлам — копия не обновлялась после %1$s.</string>
+    <string name="mirror_diag_missing_grant_sub_never">Нет доступа ко всем файлам — копия ни разу не создавалась.</string>
+    <string name="mirror_grant_action">Разрешить</string>
     <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
     <string name="paste_chip_desc">Свёрнутая вставка #%1$d, %2$d символов. Нажмите для просмотра.</string>
     <string name="paste_preview_title">Вставленный текст %1$s</string>
