@@ -124,17 +124,7 @@ class SandboxDefectPhraseRecallTest {
     fun `real registry now exposes phrase groups for the previously blind entries`() {
         // Reads the live registry, not a fixture: the value of this test is that
         // it fails if someone re-flattens the gate.
-        val reg = java.io.File(System.getProperty("user.dir"))
-            .let { dir ->
-                var d: java.io.File? = dir
-                var found: java.io.File? = null
-                while (d != null && found == null) {
-                    val f = java.io.File(d, "/var/minis/shared/sandbox-limits.md")
-                    if (f.isFile) found = f
-                    d = d.parentFile
-                }
-                found
-            }
+        val reg = findRegistryAncestor(System.getProperty("user.dir") ?: ".")
         if (reg == null) {
             // Sandbox-only fixture: absent on CI. Assert the code path instead.
             val synthetic = SandboxDefectRegistry.parse(registry("`bad pack`"))
@@ -153,5 +143,16 @@ class SandboxDefectPhraseRecallTest {
             "A1 must fire on the real 2026-11-13 failure line",
             SandboxDefectRegistry.match("! [remote rejected] main -> main (bad pack)", defects).any { it.id == "A1" },
         )
+    }
+
+    /** Walk up from [start] looking for the host-side registry copy (sandbox only). */
+    private fun findRegistryAncestor(start: String): java.io.File? {
+        var dir: java.io.File? = java.io.File(start)
+        while (dir != null) {
+            val candidate = java.io.File(dir, "/var/minis/shared/sandbox-limits.md")
+            if (candidate.isFile) return candidate
+            dir = dir.parentFile
+        }
+        return null
     }
 }
