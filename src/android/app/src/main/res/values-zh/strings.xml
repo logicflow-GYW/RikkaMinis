@@ -1760,4 +1760,7 @@
     <string name="mirror_switch_to_fastest">启用</string>
     <string name="file_print_renderer_gone">打印视图已停止响应</string>
     <string name="skill_import_partial">已导入，但附属文件不完整：%1$s</string>
+    <string name="scheduled_enable_after_save">保存后立即启用</string>
+    <string name="scheduled_saved_disabled">已保存。任务处于关闭状态，请在列表里打开开关。</string>
+    <string name="scheduled_saved_global_off">已保存。定时任务的全局开关是关闭的，打开后任务才会运行。</string>
 </resources>

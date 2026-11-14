@@ -226,10 +226,33 @@ object ScheduledTasksStore {
         lock.withLock { loadLocked(context) }
     }
 
+    /**
+     * Result of one mutation: the document that is actually on disk, plus
+     * whether this call's write landed.
+     *
+     * [RC-U14] `mutate` returns the PRE-write document when the write did not
+     * land (disk full, or the [unreadable] guard — see
+     * [ScheduledTaskStorePolicy.visibleAfterWrite]), which is enough for a
+     * delete ("is my task still there?") but NOT for an upsert: an edit's
+     * pre-write document still contains the task, so the editor's
+     * `saved.tasks.any { it.id == id }` check answered "yes" and the screen
+     * closed as if the change had been saved. The flag is the missing bit.
+     */
+    data class WriteOutcome(
+        val file: ScheduledTasksFile,
+        val persisted: Boolean,
+    )
+
     suspend fun mutate(
         context: Context,
         transform: (ScheduledTasksFile) -> ScheduledTasksFile,
-    ): ScheduledTasksFile = withContext(Dispatchers.IO) {
+    ): ScheduledTasksFile = mutateReporting(context, transform).file
+
+    /** [RC-U14] Same write as [mutate], plus whether it actually landed. */
+    suspend fun mutateReporting(
+        context: Context,
+        transform: (ScheduledTasksFile) -> ScheduledTasksFile,
+    ): WriteOutcome = withContext(Dispatchers.IO) {
         lock.withLock {
             val current = loadLocked(context)
             // [FIX-R3-E F-07] An unreadable file parsed to an EMPTY document;
@@ -241,10 +264,13 @@ object ScheduledTasksStore {
             // phantom success.
             if (unreadable) {
                 AppLogger.warning(TAG, "mutation refused: scheduled-tasks.json is unreadable")
-                return@withLock current
+                return@withLock WriteOutcome(current, persisted = false)
             }
             val next = transform(current)
-            if (next === current) return@withLock next
+            // Identity means the transform refused the change (e.g. an edit
+            // whose target vanished with allowInsert = false): nothing was
+            // written, and the caller must not report success.
+            if (next === current) return@withLock WriteOutcome(next, persisted = false)
             val wrote = writeLocked(context, next)
             if (!wrote) {
                 AppLogger.warning(TAG, "mutation not persisted; handing back the pre-write document")
@@ -252,7 +278,10 @@ object ScheduledTasksStore {
             // [FIX-R3-E F-07] A verified atomic write is the only thing that
             // may be reported back as the document; anything else hands back
             // what is actually on disk.
-            ScheduledTaskStorePolicy.visibleAfterWrite(current, next, wrote)
+            WriteOutcome(
+                file = ScheduledTaskStorePolicy.visibleAfterWrite(current, next, wrote),
+                persisted = wrote,
+            )
         }
     }
 
@@ -270,13 +299,18 @@ object ScheduledTasksStore {
      * stored record. Writing the caller's whole record here used to erase any run
      * that settled while the editor was open (up to the full prompt budget) —
      * see the merge function for the shape.
+     *
+     * [RC-U14] Answers with a [WriteOutcome]: "the task is in the document" is
+     * true even when the write failed for an EDIT (the pre-write document still
+     * holds the old row), so the editor needs the write flag or it closes the
+     * screen on a discarded change.
      */
     suspend fun upsertTask(
         context: Context,
         task: ScheduledTask,
         allowInsert: Boolean = true,
-    ): ScheduledTasksFile =
-        mutate(context) { file ->
+    ): WriteOutcome =
+        mutateReporting(context) { file ->
             ScheduledTaskTransitions.mergeUpsertTask(file, task, allowInsert)
         }
 

@@ -1737,4 +1737,7 @@
     <string name="mirror_switch_to_fastest">啟用</string>
     <string name="file_print_renderer_gone">列印檢視已停止回應</string>
     <string name="skill_import_partial">已匯入，但附屬檔案不完整：%1$s</string>
+    <string name="scheduled_enable_after_save">儲存後立即啟用</string>
+    <string name="scheduled_saved_disabled">已儲存。任務處於關閉狀態，請在清單中開啟開關。</string>
+    <string name="scheduled_saved_global_off">已儲存。定時任務的全域開關是關閉的，開啟後任務才會執行。</string>
 </resources>

@@ -1737,4 +1737,7 @@
     <string name="mirror_switch_to_fastest">Nutzen</string>
     <string name="file_print_renderer_gone">die Druckansicht reagiert nicht mehr</string>
     <string name="skill_import_partial">Importiert, aber die mitgelieferten Dateien sind unvollständig: %1$s</string>
+    <string name="scheduled_enable_after_save">Nach dem Speichern aktivieren</string>
+    <string name="scheduled_saved_disabled">Gespeichert. Die Aufgabe ist aus — im Listen-Schalter einschalten.</string>
+    <string name="scheduled_saved_global_off">Gespeichert. Der Hauptschalter für geplante Aufgaben ist aus — erst dann läuft etwas.</string>
 </resources>

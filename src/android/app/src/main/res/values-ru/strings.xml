@@ -1690,4 +1690,7 @@
     <string name="mirror_switch_to_fastest">Взять</string>
     <string name="file_print_renderer_gone">окно печати перестало отвечать</string>
     <string name="skill_import_partial">Импортировано, но вложенные файлы неполные: %1$s</string>
+    <string name="scheduled_enable_after_save">Включить после сохранения</string>
+    <string name="scheduled_saved_disabled">Сохранено. Задача выключена — включите её переключателем в списке.</string>
+    <string name="scheduled_saved_global_off">Сохранено. Общий переключатель запланированных задач выключен — без него задачи не запускаются.</string>
 </resources>
