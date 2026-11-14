@@ -11,10 +11,10 @@ import java.nio.file.Files
 
 /**
  * [feat/auto-backup-external-mirror] Selection rules + the plain-file I/O
- * target. The MediaStore target cannot run without a device, so every decision
- * that can be wrong in a harmful way is pushed into these two objects (which
- * are Android-free) and pinned here; [MirrorStore.MediaStoreTarget] is left as
- * a thin, reviewable adapter.
+ * target. Every decision that can be wrong in a harmful way is pushed into
+ * these two objects (which are Android-free) and pinned here, and the I/O target
+ * itself is plain `java.io`, so the write/read/delete contract is pinned here
+ * too. `MirrorStore` keeps only the Context-dependent shell.
  */
 class MirrorScopeTest {
 
@@ -118,56 +118,14 @@ class MirrorScopeTest {
     }
 
     // ------------------------------------------------------------ FileTarget
-
-    @Test
-    fun fileTarget_writeReadRoundTrip() {
-        val t = FileTarget(File(root, "target"))
-        assertNull(t.read("mirror/current/memory/a.md"))
-        assertTrue(t.write("mirror/current/memory/a.md", "hello mirror".toByteArray()))
-        assertEquals("hello mirror", t.read("mirror/current/memory/a.md")?.toString(Charsets.UTF_8))
-    }
-
-    @Test
-    fun fileTarget_overwriteReplacesInsteadOfForking() {
-        // The defect this pins on the MediaStore side: a naive insert with the
-        // same name forks `a (1).md`. The file target must replace the bytes
-        // under the SAME path, and leave no temp file behind.
-        val base = File(root, "target")
-        val t = FileTarget(base)
-        t.write("mirror/current/memory/a.md", "v1".toByteArray())
-        t.write("mirror/current/memory/a.md", "v2".toByteArray())
-        assertEquals("v2", t.read("mirror/current/memory/a.md")?.toString(Charsets.UTF_8))
-        val names = File(base, "mirror/current/memory").list()!!.sorted()
-        assertEquals(listOf("a.md"), names)
-    }
-
-    @Test
-    fun fileTarget_deleteAndDeleteTree() {
-        val base = File(root, "target")
-        val t = FileTarget(base)
-        t.write("mirror/current/memory/a.md", "1".toByteArray())
-        t.write("mirror/previous/20261029-090000/memory/a.md", "old".toByteArray())
-        t.write("mirror/previous/20261029-090000/memory/b.md", "old".toByteArray())
-
-        assertTrue(t.delete("mirror/current/memory/a.md"))
-        assertNull(t.read("mirror/current/memory/a.md"))
-        // Deleting an already-absent file is success (idempotent cleanup).
-        assertTrue(t.delete("mirror/current/memory/a.md"))
-
-        assertTrue(t.deleteTree("mirror/previous/20261029-090000/"))
-        assertEquals(emptyList<String>(), t.list("mirror/previous/20261029-090000/"))
-    }
-
-    @Test
-    fun fileTarget_listReturnsPathsRelativeToBase() {
-        val base = File(root, "target")
-        val t = FileTarget(base)
-        t.write("auto/rikkaminis-auto-20261029-090000.json", "{}".toByteArray())
-        assertEquals(
-            listOf("auto/rikkaminis-auto-20261029-090000.json"),
-            t.list("auto/"),
-        )
-    }
+    //
+    // [mirror-filetarget-1114] Moved to [MirrorFileTargetTest]. These four cases
+    // outlived their original reason: they pinned the API 26–28 fallback that
+    // nobody ran, while the API 29+ writer — the one that actually shipped —
+    // could only be exercised on a device. The file target is now the only
+    // writer, so its contract lives in its own class with the link-safety and
+    // temp-file cases this file never had. Keeping both would mean two copies of
+    // the same assertions drifting apart.
 
     // ------------------------------------------------- credential red line (P0)
 

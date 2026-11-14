@@ -1748,6 +1748,11 @@
     <string name="mirror_diag_failed">上次同步失败</string>
     <string name="mirror_diag_unavailable">没有可用的存储目标</string>
     <string name="mirror_retry">重试</string>
+    <!-- [mirror-filetarget-1114] The grant is gone: a retry cannot fix it. -->
+    <string name="mirror_diag_missing_grant">无法访问外部文件夹</string>
+    <string name="mirror_diag_missing_grant_sub">「所有文件访问权限」已关闭——副本在 %1$s 之后停止更新。</string>
+    <string name="mirror_diag_missing_grant_sub_never">「所有文件访问权限」已关闭——副本从未写入过。</string>
+    <string name="mirror_grant_action">授权</string>
     <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
     <string name="paste_chip_desc">已折叠的粘贴内容 #%1$d，%2$d 字符。点击预览。</string>
     <string name="paste_preview_title">粘贴内容 %1$s</string>

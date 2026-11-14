@@ -218,6 +218,12 @@ fun BackupSettingsScreen(
     // last recorded outcome text (kind + diagnostic reason).
     var mirrorLastMs by remember { mutableStateOf(0L) }
     var mirrorOutcomeRaw by remember { mutableStateOf<String?>(null) }
+    // [mirror-filetarget-1114] Whether this install can write the public folder
+    // at all. Read on every recomposition of the row (not from the recorded
+    // outcome): "All Files Access" is revoked from the system UI at arbitrary
+    // times, and a row that keeps reporting "Last sync: …" while the target is
+    // gone is exactly the passive row that lies.
+    var mirrorTargetReachable by remember { mutableStateOf(true) }
     // [T-auto-backup-remote-dir] Remote automatic-backup management state:
     // the WebDAV `auto/` subdirectory listing (plus legacy root stragglers),
     // managed from a dedicated dialog inside the auto-backup section so the
@@ -282,6 +288,9 @@ fun BackupSettingsScreen(
         mirrorLastSync = mirrorRow.second
         mirrorLastMs = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastSyncMs(context) }
         mirrorOutcomeRaw = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastResult(context) }
+        mirrorTargetReachable = withContext(Dispatchers.IO) {
+            com.rikkaminis.app.backup.MirrorStore.isTargetReachable(context)
+        }
     }
     // [silent-mirror] The row is passive by design (the "sync now" button is
     // gone — 2026-10-29), so it has to keep itself current or it stops being
@@ -301,6 +310,12 @@ fun BackupSettingsScreen(
             mirrorLastMs = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastSyncMs(context) }
             mirrorLastSync = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastSyncLabel(context) }
             mirrorOutcomeRaw = withContext(Dispatchers.IO) { com.rikkaminis.app.backup.MirrorStore.lastResult(context) }
+            // The grant is revocable from the system UI while this screen is
+            // open (the user may have just come back from that page), so it is
+            // re-read on the same beat rather than once at entry.
+            mirrorTargetReachable = withContext(Dispatchers.IO) {
+                com.rikkaminis.app.backup.MirrorStore.isTargetReachable(context)
+            }
             delay(60_000L)
         }
     }
@@ -1000,11 +1015,23 @@ fun BackupSettingsScreen(
                 pending = mirrorPending,
                 lastOutcome = mirrorOutcomeRaw,
                 nowMs = System.currentTimeMillis(),
+                targetReachable = mirrorTargetReachable,
             )
             val mirrorTitle: String
             val mirrorSubtitle: String?
             var mirrorUnhealthy = false
             when (val h = mirrorHealth) {
+                is com.rikkaminis.app.backup.MirrorPlan.Health.MissingGrant -> {
+                    // Not a retry case: a retry with no target fails identically
+                    // every time. The action is the system grant page.
+                    mirrorTitle = stringResource(R.string.mirror_diag_missing_grant)
+                    mirrorSubtitle = if (h.lastSyncMs > 0L) {
+                        stringResource(R.string.mirror_diag_missing_grant_sub, mirrorLastSync ?: "")
+                    } else {
+                        stringResource(R.string.mirror_diag_missing_grant_sub_never)
+                    }
+                    mirrorUnhealthy = true
+                }
                 is com.rikkaminis.app.backup.MirrorPlan.Health.Failed -> {
                     mirrorTitle = stringResource(R.string.mirror_diag_failed)
                     mirrorSubtitle = h.reason ?: stringResource(R.string.mirror_diag_unavailable)
@@ -1061,7 +1088,16 @@ fun BackupSettingsScreen(
                     } else {
                         MaterialTheme.colorScheme.onSurface
                     },
-                    trailing = if (mirrorUnhealthy) {
+                    // A missing grant gets its own action. Rendering the retry
+                    // here would be an affordance that cannot work: syncNow with
+                    // no target answers Unavailable every single time.
+                    trailing = if (mirrorHealth is com.rikkaminis.app.backup.MirrorPlan.Health.MissingGrant) {
+                        {
+                            TextButton(
+                                onClick = { openAllFilesAccessSettings(context) },
+                            ) { Text(stringResource(R.string.mirror_grant_action)) }
+                        }
+                    } else if (mirrorUnhealthy) {
                         {
                             TextButton(
                                 onClick = {

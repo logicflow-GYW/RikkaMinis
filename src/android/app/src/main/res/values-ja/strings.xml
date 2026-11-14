@@ -1719,6 +1719,11 @@
     <string name="mirror_diag_failed">前回の同期に失敗しました</string>
     <string name="mirror_diag_unavailable">利用可能なストレージがありません</string>
     <string name="mirror_retry">再試行</string>
+    <!-- [mirror-filetarget-1114] The grant is gone: a retry cannot fix it. -->
+    <string name="mirror_diag_missing_grant">外部フォルダーにアクセスできません</string>
+    <string name="mirror_diag_missing_grant_sub">「すべてのファイルへのアクセス」がオフです — コピーは %1$s 以降更新されていません。</string>
+    <string name="mirror_diag_missing_grant_sub_never">「すべてのファイルへのアクセス」がオフです — コピーは一度も書き込まれていません。</string>
+    <string name="mirror_grant_action">許可</string>
     <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
     <string name="paste_chip_desc">折りたたまれた貼り付け #%1$d、%2$d 文字。タップでプレビュー。</string>
     <string name="paste_preview_title">貼り付けたテキスト %1$s</string>

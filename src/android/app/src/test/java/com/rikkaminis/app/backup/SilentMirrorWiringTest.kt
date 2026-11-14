@@ -30,6 +30,7 @@ class SilentMirrorWiringTest {
     private val screenRel =
         "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/BackupSettingsScreen.kt"
     private val storeRel = "src/android/app/src/main/java/com/rikkaminis/app/backup/MirrorStore.kt"
+    private val targetRel = "src/android/app/src/main/java/com/rikkaminis/app/backup/MirrorTarget.kt"
     private val appRel = "src/android/app/src/main/java/com/rikkaminis/app/MinisApp.kt"
 
     private fun readRepoFile(relative: String): String {
@@ -201,32 +202,136 @@ class SilentMirrorWiringTest {
 
     // ------------------------------------- [R5-A] the I/O shell's own contracts
     //
-    // MediaStoreTarget needs a ContentResolver and runLocked needs a Context, so
-    // the JVM cannot instantiate them. What the pure layer cannot prove is that
-    // the shell USES the decisions, which is what these three assertions pin.
+    // `runLocked` needs a Context, so the JVM cannot instantiate it. What the pure
+    // layer cannot prove is that the shell USES the decisions, which is what
+    // these assertions pin.
 
     @Test
-    fun aFailedOverwriteDropsTheTruncatedRow() {
+    fun everyWrittenFileIsReadBackBeforeItCountsAsSynced() {
+        // [mirror-filetarget-1114] The one check that would have caught the
+        // 2026-11-14 outage on day one. `write()` returning true only means the
+        // bytes reached some stream; the retired MediaStore target returned true
+        // while MediaProvider had renamed the row, so `current/` served 16-day-old
+        // bytes with a healthy row and pending 0. Nothing in the pipeline
+        // compared what was asked for against what is on disk.
         val code = withoutComments(readRepoFile(storeRel))
+        val runLocked = braced(code, code.indexOf("private suspend fun runLocked("))
         assertTrue(
-            "the existing-row branch must go through overwrite(): `wt` truncates at OPEN, so " +
-                "an inline write leaves a 0-byte or half-written document under a visible name",
-            code.contains("return overwrite(existing, relPath, bytes)"),
+            "a write that is not read back is a write nobody verified",
+            runLocked.contains("mirrorBytesMatch(target, rel, bytes)"),
         )
-        val overwrite = braced(code, code.indexOf("private fun overwrite("))
-        assertEquals(
-            "both failure shapes — a thrown write and a null stream — must reach " +
-                "dropHalfWritten(), or one of them still leaves the corpse",
-            2,
-            count(overwrite, "dropHalfWritten("),
-        )
-        val drop = braced(code, code.indexOf("private fun dropHalfWritten("))
+        val guard = runLocked.substring(runLocked.indexOf("mirrorBytesMatch(target, rel, bytes)"))
         assertTrue(
-            "the failure path must DELETE the row, so the next sync rebuilds it through the " +
-                "IS_PENDING insert path",
-            drop.contains("resolver.delete(existing, null, null)"),
+            "a mismatch must FAIL the sync — logging it and recording the file as synced " +
+                "reproduces the silent-inconsistency the check exists to prevent",
+            guard.contains("throw IOException(\"write not readable back:"),
         )
-        assertTrue("dropping the row is still a failed write", drop.contains("return false"))
+        val helper = braced(code, code.indexOf("private fun mirrorBytesMatch("))
+        assertTrue(
+            "the helper must compare the bytes, not just the existence of a file",
+            helper.contains("contentEquals(expected)") && helper.contains("size =="),
+        )
+    }
+
+    @Test
+    fun theAutoSnapshotVerifiesItsWriteToo() {
+        // `auto/` holds the daily full snapshot and the rotation below counts on
+        // `list()` to decide what to keep. A snapshot that landed under another
+        // name is invisible to the rotation — and `auto/` is the only external
+        // copy of the whole app state, so "written but unreadable" is the same
+        // class of lie as the 2026-11-14 mirror.
+        val code = withoutComments(readRepoFile(storeRel))
+        val auto = braced(code, code.indexOf("fun mirrorAutoSnapshot("))
+        assertTrue(
+            "the auto snapshot must be read back after writing",
+            auto.contains("mirrorBytesMatch(target, rel, bytes)"),
+        )
+        val writeAt = auto.indexOf("target.write(rel, bytes)")
+        val checkAt = auto.indexOf("mirrorBytesMatch(target, rel, bytes)")
+        assertTrue(
+            "the check must come AFTER the write",
+            writeAt in 0 until checkAt,
+        )
+    }
+
+    @Test
+    fun theWriterIsAPlainFileTargetWithNoContentResolver() {
+        // The whole class of defect this change removes is MediaProvider's
+        // naming/visibility behaviour. If a future refactor routes the mirror
+        // back through a ContentResolver, this assertion is the one that says
+        // "then you must also re-pin overwrite/read/delete on a device".
+        val target = withoutComments(readRepoFile(targetRel))
+        assertFalse(
+            "MirrorTarget must stay Android-free — that is what makes every one of its " +
+                "behaviours testable in the JVM harness instead of only on a device",
+            target.contains("android.content") || target.contains("android.net") ||
+                target.contains("android.provider"),
+        )
+        val store = withoutComments(readRepoFile(storeRel))
+        assertFalse(
+            "no writer may go through MediaStore again: measured on device, its display-name " +
+                "normalisation forked, blinded and silently-deleted the mirror for 16 days",
+            store.contains("MediaStoreTarget("),
+        )
+        assertTrue(
+            "openTarget must resolve through the pure decision, so the row and the writer " +
+                "cannot disagree about which devices can write",
+            store.contains("MirrorPlan.targetKind(") && store.contains("FileTarget(publicBase())"),
+        )
+    }
+
+    @Test
+    fun aMissingGrantIsARefusalNotAPrivateFallback() {
+        // On 29+ the visible folder IS the feature. Quietly writing to the
+        // app-specific dir instead would rebuild the original defect: a copy that
+        // exists, but not where the user was told it is.
+        val code = withoutComments(readRepoFile(storeRel))
+        val openTarget = braced(code, code.indexOf("internal fun openTarget("))
+        assertFalse(
+            "the null arm must not construct a target",
+            openTarget.contains("null -> appExternalBase(") ||
+                openTarget.contains("null -> FileTarget("),
+        )
+        assertTrue(
+            "a null verdict must be a logged refusal",
+            openTarget.contains("null ->") && openTarget.contains("no mirror target"),
+        )
+        assertTrue(
+            "only the API-29/26-28 kind may fall back to the app-specific dir",
+            openTarget.contains("MirrorPlan.TargetKind.APP_EXTERNAL -> appExternalBase"),
+        )
+        assertTrue(
+            "no legacy MediaStore path may survive the switch",
+            !openTarget.contains("mediaStoreTarget("),
+        )
+    }
+
+    @Test
+    fun theLegacyTreeIsParkedAndTheLayoutIsVersioned() {
+        // Migration, not deletion: a file deleted from the source since it was
+        // mirrored exists only in `current/`, so retiring v1 must MOVE it.
+        val code = withoutComments(readRepoFile(storeRel))
+        val migrate = braced(code, code.indexOf("private fun migrateLegacyLayout("))
+        assertTrue(
+            "the old tree is renamed aside",
+            migrate.contains("legacy.renameTo("),
+        )
+        assertFalse(
+            "it must never be deleted — 49 MB of maybe-only-copy",
+            migrate.contains("deleteRecursively()"),
+        )
+        val parkAt = migrate.indexOf("legacy.renameTo(")
+        val rowsAt = migrate.indexOf("deleteLegacyRows(app)")
+        assertTrue(
+            "the tree must be parked BEFORE the rows are dropped: deleting a MediaStore row " +
+                "also deletes its backing file, which would destroy what we are preserving",
+            parkAt in 0 until rowsAt,
+        )
+        assertTrue(
+            "the layout pref is written last, so an interrupted run resumes instead of " +
+                "leaving two live trees",
+            migrate.lastIndexOf("prefs.edit().putInt(KEY_LAYOUT") > rowsAt,
+        )
     }
 
     @Test

@@ -1844,6 +1844,11 @@
     <string name="mirror_diag_failed">Last sync failed</string>
     <string name="mirror_diag_unavailable">No usable storage target</string>
     <string name="mirror_retry">Retry</string>
+    <!-- [mirror-filetarget-1114] The grant is gone: a retry cannot fix it. -->
+    <string name="mirror_diag_missing_grant">Cannot reach the external folder</string>
+    <string name="mirror_diag_missing_grant_sub">All files access is off — the copy stopped updating after %1$s.</string>
+    <string name="mirror_diag_missing_grant_sub_never">All files access is off — the copy has never been written.</string>
+    <string name="mirror_grant_action">Grant</string>
     <!-- [feat/paste-fold-marker] Long-paste folding: chip, preview, send guard. -->
     <string name="paste_chip_desc">Folded paste #%1$d, %2$d characters. Tap to preview.</string>
     <string name="paste_preview_title">Pasted text %1$s</string>
