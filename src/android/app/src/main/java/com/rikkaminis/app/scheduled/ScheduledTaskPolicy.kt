@@ -296,6 +296,54 @@ object ScheduledTaskRevisionPolicy {
 }
 
 /**
+ * [RC-U13] The editor's two save-time decisions, extracted so the JVM harness
+ * can pin them without a Context (same split as [ScheduledTaskRevisionPolicy]).
+ *
+ * Context: brand-new tasks enter OFF on purpose (§5.4 — a task fires a prompt
+ * and spends quota, so an accidental save must not arm it). What was missing was
+ * the opposite intent: a user who built a task in order to run it had to save,
+ * go back to the list, and flip the row switch — and on a fresh install also the
+ * master switch. The default stays OFF; the opt-in switch is the one tap.
+ */
+object ScheduledTaskEditorPolicy {
+
+    /** Notice the editor owes the user after a save that LANDED. */
+    enum class SaveNotice {
+        /** Enabled and the master switch is on — nothing to say. */
+        NONE,
+
+        /** Saved, but the task itself is off. */
+        TASK_OFF,
+
+        /** Saved, but the master switch keeps every task from running. */
+        GLOBAL_OFF,
+    }
+
+    /**
+     * What `enabled` the save writes.
+     *
+     * An edit keeps the stored state: the row switch is the control for that,
+     * and an edit must never silently re-arm a task the user turned off (or one
+     * the fuse suspended). A new task follows the "enable after saving" switch,
+     * which defaults to false — §5.4's safe default, unchanged.
+     */
+    fun enabledOnSave(priorEnabled: Boolean?, enableAfterSave: Boolean): Boolean =
+        priorEnabled ?: enableAfterSave
+
+    /**
+     * Which hint (if any) to show. The global check wins because it is the
+     * wider gate: with the master switch off, an enabled task still does not
+     * run, and telling the user only "the task is off" sends them back to a
+     * screen where everything they can touch already looks enabled.
+     */
+    fun noticeAfterSave(taskEnabled: Boolean, globalEnabled: Boolean): SaveNotice = when {
+        !globalEnabled -> SaveNotice.GLOBAL_OFF
+        !taskEnabled -> SaveNotice.TASK_OFF
+        else -> SaveNotice.NONE
+    }
+}
+
+/**
  * [FIX-R3-E F-07 / F-04B] The two decisions [ScheduledTasksStore] makes around
  * every write, extracted so the JVM harness can drive them without a Context
  * (the store itself is Android-bound; the existing convention for exactly this

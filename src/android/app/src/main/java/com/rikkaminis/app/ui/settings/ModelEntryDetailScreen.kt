@@ -25,12 +25,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelOverrides
+import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.data.model.inferContextWindowTokens
 import com.rikkaminis.app.data.model.normalizeModalityName
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.ModelsDevApi
+import com.rikkaminis.app.ui.chat.localizedName
 import com.rikkaminis.app.ui.components.RowLabel
+import com.rikkaminis.app.ui.components.SectionDropdown
 import com.rikkaminis.app.ui.components.SectionTextField
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisButton
@@ -167,6 +170,19 @@ fun ModelEntryDetailScreen(
     var videoInput by remember(entry.id, effectiveInput) { mutableStateOf("video" in effectiveInput) }
     var imageOutput by remember(entry.id, effectiveOutput) { mutableStateOf("image" in effectiveOutput) }
     var audioOutput by remember(entry.id, effectiveOutput) { mutableStateOf("audio" in effectiveOutput) }
+    // [RC-1114 U-18] Video output used to have no switch: the screen carried
+    // the dimension through untouched, so a model whose base did not declare
+    // "video" could never be marked as producing video even though the list
+    // badges and the group sheet both render that capability. Seed from the
+    // same normalized effective set the other output switches use.
+    var videoOutput by remember(entry.id, effectiveOutput) { mutableStateOf("video" in effectiveOutput) }
+    // [RC-1114 U-18] Ceiling for this model's thinking intensity. Null means
+    // "inherit the catalog default" — the same contract as every other
+    // ModelOverrides field, so an untouched picker must persist null rather
+    // than freezing today's resolved level.
+    var maxThinkingLevel by remember(entry.id, overrides.maxThinkingLevel) {
+        mutableStateOf(overrides.maxThinkingLevel)
+    }
 
     SettingsScaffold(
         title = stringResource(R.string.model_entry_model_detail),
@@ -215,6 +231,10 @@ fun ModelEntryDetailScreen(
                         videoInput = videoInput,
                         imageOutput = imageOutput,
                         audioOutput = audioOutput,
+                        // [RC-1114 U-18] Both dimensions the data layer already
+                        // carried but the screen could not edit.
+                        videoOutput = videoOutput,
+                        maxThinkingLevel = maxThinkingLevel,
                     )
                     // [selection-only-ui-writer-1112] The save path must NOT
                     // carry `isHidden` at all. Since the selection-only
@@ -362,8 +382,37 @@ fun ModelEntryDetailScreen(
                 title = stringResource(R.string.modeldetail_thinking),
                 checked = thinkingEnabled,
                 onCheckedChange = { thinkingEnabled = it },
-                showDivider = false,
             )
+            // [RC-1114 U-18] Ceiling picker. `ModelOverrides.maxThinkingLevel`
+            // has been the top-priority source in the resolution chain since
+            // the thinking-level arch work, but no Android surface could write
+            // it — only backup import / config restore / the agent RPC could.
+            // A model that reaches MAX in the catalog therefore could not be
+            // capped below it by hand. Null = "inherit the catalog default",
+            // so an untouched picker writes nothing.
+            SettingsCardBlock {
+                RowLabel(text = stringResource(R.string.modeldetail_max_thinking_level))
+                // `itemLabel` is a plain `(T) -> String`, not a composable
+                // lambda, so the "inherit" caption is resolved here (one
+                // stringResource call in composition scope) instead of inside
+                // the lambda.
+                val inheritLabel = stringResource(R.string.modeldetail_max_thinking_inherit)
+                SectionDropdown(
+                    selected = maxThinkingLevel,
+                    // OFF is excluded because the switch above already carries
+                    // "thinking off" semantics, and AUTO is excluded because it
+                    // is not an intensity at all (it means "no effort opinion")
+                    // — capping a model at "no opinion" would be a contradictory
+                    // instruction, so the ceiling list is the real intensity
+                    // ladder plus "inherit".
+                    items = listOf<ThinkingLevel?>(null) +
+                        ThinkingLevel.entries.filter {
+                            it != ThinkingLevel.OFF && it != ThinkingLevel.AUTO
+                        },
+                    onSelect = { maxThinkingLevel = it },
+                    itemLabel = { level -> level?.localizedName(context) ?: inheritLabel },
+                )
+            }
         }
 
         // ── Selection ──────────────────────────────────────────────────
@@ -441,6 +490,16 @@ fun ModelEntryDetailScreen(
                 title = stringResource(R.string.modeldetail_audio_output),
                 checked = audioOutput,
                 onCheckedChange = { audioOutput = it },
+            )
+            // [RC-1114 U-18] The video-output dimension the data layer already
+            // carried. Without this switch a model could only ever inherit
+            // "video" from its catalog row — never be marked as producing
+            // video by the user, even though the model list badge and the
+            // group sheet both render that capability.
+            SettingsSwitchRow(
+                title = stringResource(R.string.modeldetail_video_output),
+                checked = videoOutput,
+                onCheckedChange = { videoOutput = it },
                 showDivider = false,
             )
         }

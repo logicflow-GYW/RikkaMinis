@@ -236,8 +236,49 @@ class SandboxPathGuardWiringTest {
             rooted.any { it.contains("linuxRoot = \"/\"") },
         )
         assertTrue(
-            "the bare route is not the session entry (displayPrefix marker):\n$bare",
-            bare.all { it.contains("displayPrefix = \"/var/minis\"") },
+            // [rc-1114 U-08] The marker used to be `displayPrefix = "/var/minis"`.
+            // It is now `rootLabel`, because the prefix became caller-supplied:
+            // the workspace row passes "/var/minis" (its children ARE the PRoot
+            // /var/minis/* subdirs) while the media row passes null (the media
+            // tree has no guest counterpart, so a /var/minis/... path there
+            // would resolve to nothing). A literal can no longer identify this
+            // route; the label still does, and it is unique across the four
+            // call sites. The per-caller prefixes are pinned in the test below.
+            "the bare route is not the session entry (rootLabel marker):\n$bare",
+            bare.all { it.contains("rootLabel = \"Session Files\"") },
+        )
+    }
+
+    // ── rc-1114 U-08: the session entry's two callers declare their prefix ──
+    //
+    // The route forwards whatever the caller passes, so "Copy Absolute Path"
+    // correctness now lives at the call sites. Pinning both keeps the change
+    // from silently degrading into "always null" (workspace paths would then
+    // leak the opaque /data/user/0/... host path) or "always /var/minis"
+    // (media paths would then claim a guest path that does not exist).
+
+    @Test
+    fun `the two session-file callers pass the prefix their tree actually has`() {
+        val src = readRepoFile(STORAGE_SCREEN)
+        // Workspace tree: host children map 1:1 onto /var/minis/*.
+        assertTrue(
+            "the workspace row must pass the /var/minis prefix:\n$src".take(400),
+            src.contains("onBrowseFiles(") &&
+                Regex(
+                    """onBrowseFiles\(\s*sessionFiles\.sessionDir\(sessionId\)\.absolutePath,\s*"/var/minis",\s*\)""",
+                ).containsMatchIn(src),
+        )
+        // Media tree: filesDir/media/<yyyy>/<MM>/<dd>/<sid>/ has no guest
+        // counterpart, so the prefix must be null rather than a path that
+        // resolves to nothing inside the sandbox.
+        assertTrue(
+            "the media row must pass a null prefix (no guest counterpart)",
+            Regex(
+                """onBrowseFiles\(\s*mediaBrowseRoot\([^)]*\)\.absolutePath,\s*//[^\n]*\n(?:\s*//[^\n]*\n)*\s*null,\s*\)""",
+            ).containsMatchIn(src) ||
+                Regex(
+                    """onBrowseFiles\(\s*mediaBrowseRoot\([^)]*\)\.absolutePath,\s*null,\s*\)""",
+                ).containsMatchIn(src),
         )
     }
 
@@ -394,5 +435,8 @@ class SandboxPathGuardWiringTest {
             "src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/FastioOffloadHandler.kt"
         private const val APP_NAV =
             "src/android/app/src/main/java/com/rikkaminis/app/ui/navigation/AppNavigation.kt"
+        // [rc-1114 U-08] The session file route's two callers live here.
+        private const val STORAGE_SCREEN =
+            "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/StorageManagementScreen.kt"
     }
 }

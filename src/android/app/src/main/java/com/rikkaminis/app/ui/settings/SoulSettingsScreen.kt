@@ -290,6 +290,14 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
             text = { Text(stringResource(R.string.soul_restore_confirm_body)) },
             confirmButton = {
                 Button(onClick = {
+                    // [RC-1114 U-09] Restore Default used to only re-seed the
+                    // in-composable editors and close the dialog: SOUL.md on
+                    // disk kept the old content, so leaving the screen without
+                    // also pressing Save silently discarded the reset. The user
+                    // had already been asked to confirm (the dialog IS the
+                    // confirmation), so the second confirmation — "now press
+                    // Save" — was pure friction. Write through here, the same
+                    // way AppearanceScreen's restore-default does.
                     val parsed = SoulMDParser.parse(SoulStore.DEFAULT_CONTENT)
                     name = parsed.metadata.name
                     preservedEmoji = parsed.metadata.emoji
@@ -297,6 +305,20 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
                     lang = parsed.metadata.lang
                     body = parsed.body
                     showRestoreDialog = false
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) { SoulStore.save(context, parsed) }
+                            android.widget.Toast.makeText(
+                                context,
+                                context.getString(R.string.soul_restored_default),
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        } catch (t: Throwable) {
+                            // Surface it instead of leaving the editors showing
+                            // defaults while the file still holds the old text.
+                            saveError = t.message ?: context.getString(R.string.soul_save_error_title)
+                        }
+                    }
                 }) { Text(stringResource(R.string.soul_restore_default)) }
             },
             dismissButton = {

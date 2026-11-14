@@ -228,6 +228,9 @@
     <string name="env_var_privacy_header">프라이버시</string>
     <string name="env_var_privacy_toggle">프라이버시 모드</string>
     <string name="env_var_privacy_footer">활성화하면 shell-execute 출력에 나타난 환경 변수 값이 모델로 전달되기 전에 마스킹됩니다(예: `sk-1********ajhks`). 8자 미만의 값은 모두 `*` 로 바뀝니다. 채팅에 표시되는 출력은 그대로 유지됩니다.</string>
+    <string name="env_var_restart_terminal_note">시간대와 프록시 변경은 실행 중인 터미널에 반영되지만, 환경 변수는 반영되지 않습니다(실시간 export/unset 경로가 없음).</string>
+    <string name="env_var_restart_terminal_body">변수는 터미널 세션이 시작될 때 주입됩니다. 이미 열려 있는 터미널은 이전 환경을 유지하므로 닫았다가 다시 열어야 합니다.</string>
+    <string name="env_var_restart_terminal_title">터미널 세션</string>
     <string name="env_var_section_header">변수</string>
     <string name="env_var_section_footer">환경 변수는 세션 시작 시 샌드박스 셸에 주입됩니다. 이름은 대문자로 변환되며 POSIX 셸 변수 규칙을 따라야 합니다.</string>
     <string name="env_var_empty_title">환경 변수 없음</string>
@@ -254,6 +257,7 @@
     <string name="log_no_files">로그 파일 없음</string>
     <string name="log_section_storage">저장 공간</string>
     <string name="log_section_storage_footer">총 로그 저장: %1$s</string>
+    <string name="log_hidden_files_note">이 목록에 표시되지 않음: 디버그/스냅샷 로그 %1$d개, %2$s. 모두 삭제하면 함께 지워집니다.</string>
     <string name="log_section_crash">크래시 로그</string>
     <string name="log_section_crash_footer">최근 %1$d개의 크래시 보고서 (Java/Kotlin + native)</string>
     <string name="log_delete_all_title">모든 로그 삭제</string>
@@ -376,6 +380,8 @@
     <string name="storage_no_media_files">미디어 파일 없음</string>
     <string name="storage_clear_session_footer">이 세션에서 생성된 모든 파일을 삭제합니다. 대화 자체는 보존됩니다.</string>
     <string name="storage_browse_files">파일 탐색</string>
+    <string name="storage_media_browse_subtitle">이 세션의 이미지 및 첨부 파일</string>
+    <string name="storage_media_browse">미디어</string>
     <string name="storage_clearing_status">삭제 중…</string>
     <string name="storage_clear_session_button">세션 파일 삭제</string>
     <string name="storage_clear_confirm_title">세션 파일을 삭제하시겠습니까?</string>
@@ -470,6 +476,8 @@
     <string name="filebrowser_empty_folder">빈 폴더</string>
     <string name="filebrowser_delete_title">“%1$s” 삭제하시겠습니까?</string>
     <string name="filebrowser_delete_message">이 작업은 되돌릴 수 없습니다.</string>
+    <string name="filebrowser_delete_dir_message">이 폴더와 그 안의 모든 항목(%1$d개)이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</string>
+    <string name="filebrowser_delete_counting">계산 중…</string>
     <string name="filebrowser_error_title">오류</string>
     <string name="filebrowser_sort_ascending">오름차순</string>
     <string name="filebrowser_sort_descending">내림차순</string>
@@ -617,6 +625,7 @@
     <string name="add_provider_custom_api_base_optional">사용자 정의 API 베이스 (선택 사항)</string>
     <string name="add_custom_model_model_id">모델 ID</string>
     <string name="add_custom_model_display_name_optional">표시 이름 (선택 사항)</string>
+    <string name="add_custom_model_capabilities_footer">비워 두면 공급자가 보고한 값을 사용합니다. 나중에 모델 상세 페이지에서 변경할 수 있습니다.</string>
     <string name="model_entry_model_detail">모델 세부 정보</string>
     <string name="model_entry_display_name">표시 이름</string>
     <string name="model_entry_max_output_tokens">최대 출력 토큰</string>
@@ -901,6 +910,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">양식</string>
     <string name="mcp_tab_import">JSON 가져오기</string>
     <string name="mcp_form_name">이름</string>
@@ -926,6 +936,9 @@
     <string name="mcp_form_save">저장</string>
     <string name="mcp_form_oauth_section">OAuth (선택)</string>
     <string name="mcp_form_oauth_authorized">인증됨</string>
+    <string name="mcp_form_oauth_saved_failed">인증되었지만 서버를 저장하지 못했습니다. 삭제되었을 수 있습니다. 시트를 닫고 다시 추가하세요.</string>
+    <string name="mcp_form_oauth_saved_incomplete">인증되었지만 이름 또는 URL이 비어 있어 저장되지 않았습니다. 입력 후 저장을 누르세요.</string>
+    <string name="mcp_form_oauth_saved">인증하고 저장했습니다</string>
     <string name="mcp_form_oauth_client_id">클라이언트 ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth 클라이언트 ID</string>
     <string name="mcp_form_oauth_client_secret">클라이언트 시크릿</string>
@@ -1264,6 +1277,7 @@
     <string name="soul_cancel">취소</string>
     <string name="soul_ok">확인</string>
     <string name="soul_restore_default">기본값 복원</string>
+    <string name="soul_restored_default">기본값으로 복원했습니다</string>
     <string name="soul_restore_confirm_title">기본 SOUL.md를 복원할까요?</string>
     <string name="soul_restore_confirm_body">현재 변경 사항이 기본 성격 파일로 덮어써집니다. 원본은 시작점으로 제공되며 언제든지 다시 편집할 수 있습니다.</string>
     <string name="soul_save_error_title">저장할 수 없음</string>
@@ -1342,6 +1356,8 @@
     <string name="add_provider_endpoint_hint">비워 두면 기본 엔드포인트를 사용합니다. “/v1”이 자동으로 추가되므로 베이스 호스트만 입력하세요.</string>
     <string name="add_provider_endpoint_gemini_hint">비워 두면 Google 기본 엔드포인트를 사용합니다. 버전 경로를 포함한 전체 베이스 URL을 입력하세요.</string>
     <string name="modeldetail_video_output">비디오 출력</string>
+    <string name="modeldetail_max_thinking_inherit">모델 기본값 따르기</string>
+    <string name="modeldetail_max_thinking_level">최대 사고 단계</string>
     <string name="quicktest_title">빠른 테스트</string>
     <string name="quicktest_button">빠른 테스트</string>
     <string name="quicktest_footer">이 모델의 주요 기능에 맞는 빠른 테스트를 실행합니다.</string>
@@ -1573,6 +1589,12 @@
     <string name="runtime_limits_heavy_gate">샌드박스: 헤비 게이트 대기</string>
     <string name="runtime_limits_heavy_gate_desc">무거운 명령이 전역 헤비 게이트를 기다리는 최대 시간입니다. 초과하면 다른 무거운 명령이 실행 중이라고 보고합니다.</string>
     <string name="runtime_limits_sandbox_footer">이 시간들은 메모리 압박을 막기 위한 것입니다. 기본값은 이전의 고정값과 같습니다.</string>
+    <string name="runtime_limits_restore_confirm_body">이 페이지의 모든 값이 편집기에서 출하 시 기본값으로 돌아갑니다. 저장을 누르기 전에는 아무것도 기록되지 않습니다.</string>
+    <string name="runtime_limits_restore_confirm_title">기본값으로 복원할까요?</string>
+    <string name="runtime_limits_restore_defaults_footer">복원은 이 페이지의 저장되지 않은 값만 바꿉니다. 적용하려면 저장을 누르세요. 슬라이더 간격은 그대로입니다. 일부 기본값(임시 디렉터리 정리 기간 등)은 한 번 움직이면 되돌릴 수 없기 때문에 이 항목이 있습니다.</string>
+    <string name="runtime_limits_restore_defaults_desc">이 페이지의 모든 값을 출하 시 기본값으로 되돌립니다</string>
+    <string name="runtime_limits_restore_defaults">기본값 복원</string>
+    <string name="runtime_limits_section_reset">초기화</string>
     <string name="runtime_limits_media_footer">이미지 상한을 올리면 더 좋은 화질로 모델에 전달되지만 요청이 커집니다.</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
@@ -1719,4 +1741,25 @@
     <string name="manage_models_deselect_all">선택 해제</string>
     <string name="manage_models_remote_section_header">제공자에서 사용 가능 (%1$d)</string>
     <string name="manage_models_error_prefix">새로 고침 실패: %1$s</string>
+    <string name="auto_backup_run_busy">백업이 이미 실행 중입니다 — 이번에는 새로 저장되지 않았습니다.</string>
+    <string name="auto_backup_run_partial">저장했지만 불완전합니다:\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d개 필드를 읽을 수 없습니다</string>
+    <string name="auto_backup_partial_mirror">외부 미러가 업데이트되지 않았습니다</string>
+    <string name="auto_backup_partial_remote">원격 사본이 업로드되지 않았습니다</string>
+    <string name="auto_backup_partial_joiner">; </string>
+    <string name="mirror_retry_busy">동기화가 이미 실행 중입니다 — 잠시 후 다시 시도하세요.</string>
+    <string name="mirror_retry_done">미러를 동기화했습니다.</string>
+    <string name="mirror_retry_nothing">미러가 이미 최신입니다.</string>
+    <string name="backup_done_thinking_rules">사고 규칙 %1$d개를 복원했습니다.</string>
+    <string name="backup_done_scheduled_tasks">예약 작업을 복원했습니다.</string>
+    <string name="backup_done_artifacts">산출물 파일 %1$d개를 복원했습니다.</string>
+    <string name="backup_done_webdav">WebDAV 서버 설정을 복원했습니다.</string>
+    <string name="mirror_fastest_hint">가장 빠름: %1$s(%2$d ms)</string>
+    <string name="mirror_switch_to_fastest">사용</string>
+    <string name="file_print_renderer_gone">인쇄 뷰가 응답을 멈췄습니다</string>
+    <string name="skill_import_partial">가져왔지만 포함 파일이 불완전합니다: %1$s</string>
+    <string name="scheduled_enable_after_save">저장 후 사용</string>
+    <string name="scheduled_saved_disabled">저장했습니다. 작업이 꺼져 있습니다 — 목록의 스위치로 켜세요.</string>
+    <string name="scheduled_saved_global_off">저장했습니다. 예약 작업 전역 스위치가 꺼져 있습니다 — 켜야 작업이 실행됩니다.</string>
+    <string name="provider_detail_refresh_catalog_failed">새로 고침 실패: %1$s</string>
 </resources>

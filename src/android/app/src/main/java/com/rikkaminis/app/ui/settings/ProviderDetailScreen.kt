@@ -353,15 +353,34 @@ fun ProviderDetailScreen(
                                     // the in-memory config StateFlow — safe on
                                     // the main dispatcher, no withContext.
                                     val selected = providerRepository.entriesFor(instance.id).size
-                                    Toast.makeText(
-                                        toastContext,
-                                        toastContext.getString(
-                                            R.string.provider_detail_refresh_catalog_result,
-                                            catalog.models.size,
-                                            selected,
-                                        ),
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
+                                    // [RC-U20] `catalog.error` was only ever
+                                    // logged. A failed fetch therefore popped
+                                    // the same "Refreshed — 0 remote models"
+                                    // toast as an empty-but-successful one, so
+                                    // a user checking a fresh API key or base
+                                    // URL read the failure as "the endpoint
+                                    // works, it just has no models".
+                                    val error = catalog.error
+                                    if (error != null) {
+                                        Toast.makeText(
+                                            toastContext,
+                                            toastContext.getString(
+                                                R.string.provider_detail_refresh_catalog_failed,
+                                                error,
+                                            ),
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    } else {
+                                        Toast.makeText(
+                                            toastContext,
+                                            toastContext.getString(
+                                                R.string.provider_detail_refresh_catalog_result,
+                                                catalog.models.size,
+                                                selected,
+                                            ),
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
                                     AppLogger.info(
                                         TAG,
                                         "Refreshed remote catalog for ${instance.id}: " +

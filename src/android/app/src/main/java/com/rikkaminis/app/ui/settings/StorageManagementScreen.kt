@@ -70,6 +70,21 @@ private data class SessionStorageInfo(
     val totalSize: Long get() = sessionDirSize + mediaSize
 }
 
+/**
+ * [rc-1114 U-08] Everything the session detail page needs from one IO hop.
+ *
+ * The media DIRECTORY LIST travels with the sizes on purpose: the Media row
+ * both displays [mediaBytes] and browses to [mediaDirs]'s shared root, so
+ * measuring one and opening the other from a second scan would let the two
+ * disagree (a scan running while a draft attachment is written/removed).
+ */
+private data class LoadedSession(
+    val session: ChatSessionEntity?,
+    val minisBytes: Long,
+    val mediaBytes: Long,
+    val mediaDirs: List<File>,
+)
+
 /** Immutable snapshot of one full Storage-page scan, kept across
  *  composable re-entries (process lifetime) so re-visits render instantly. */
 private data class StorageSnapshot(
@@ -609,7 +624,13 @@ fun SessionStorageDetailScreen(
     sessionId: String,
     chatDao: ChatDao,
     onBack: () -> Unit,
-    onBrowseFiles: (rootPath: String) -> Unit = {},
+    // [rc-1114 U-08] The guest-visible prefix travels WITH the request instead
+    // of being hardcoded in the nav callback: the workspace tree maps onto
+    // /var/minis/* but the media tree (filesDir/media/<yyyy>/<MM>/<dd>/<sid>/)
+    // has no guest counterpart, so "Copy Absolute Path" there must emit the
+    // host path rather than a /var/minis/... path that does not exist in the
+    // sandbox. null = no rewriting.
+    onBrowseFiles: (rootPath: String, displayPrefix: String?) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -618,6 +639,10 @@ fun SessionStorageDetailScreen(
     var session by remember { mutableStateOf<ChatSessionEntity?>(null) }
     var minisSize by remember { mutableLongStateOf(0L) }
     var mediaSize by remember { mutableLongStateOf(0L) }
+    // [rc-1114 U-08] Where the Media row browses to. Measured alongside the
+    // bytes (same IO hop) so the row cannot show a size from one scan and open
+    // a directory from another.
+    var mediaDirs by remember { mutableStateOf<List<File>>(emptyList()) }
     var isClearing by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
 
@@ -626,16 +651,19 @@ fun SessionStorageDetailScreen(
             // [deep-audit-1045 B-03] IO computes, Main publishes — same shape as
             // the list screen's scan above. All three of these are Compose
             // state, and all three used to be assigned from the IO dispatcher.
-            val (loaded, minisBytes, mediaBytes) = withContext(Dispatchers.IO) {
-                Triple(
-                    chatDao.getSession(sessionId),
-                    sessionFiles.sizeOf(sessionFiles.sessionDir(sessionId)),
-                    sessionFiles.mediaSize(sessionId),
+            val loaded = withContext(Dispatchers.IO) {
+                val dirs = sessionFiles.mediaSessionDirs(sessionId)
+                LoadedSession(
+                    session = chatDao.getSession(sessionId),
+                    minisBytes = sessionFiles.sizeOf(sessionFiles.sessionDir(sessionId)),
+                    mediaBytes = dirs.sumOf { sessionFiles.sizeOf(it) },
+                    mediaDirs = dirs,
                 )
             }
-            session = loaded
-            minisSize = minisBytes
-            mediaSize = mediaBytes
+            session = loaded.session
+            minisSize = loaded.minisBytes
+            mediaSize = loaded.mediaBytes
+            mediaDirs = loaded.mediaDirs
         }
     }
 
@@ -651,7 +679,10 @@ fun SessionStorageDetailScreen(
                     title = stringResource(R.string.storage_browse_files),
                     value = Formatter.formatFileSize(context, minisSize),
                     onClick = {
-                        onBrowseFiles(sessionFiles.sessionDir(sessionId).absolutePath)
+                        onBrowseFiles(
+                            sessionFiles.sessionDir(sessionId).absolutePath,
+                            "/var/minis",
+                        )
                     },
                     valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     showDivider = false,
@@ -668,9 +699,28 @@ fun SessionStorageDetailScreen(
 
         SettingsSection(header = stringResource(R.string.storage_section_media)) {
             if (mediaSize > 0) {
+                // [rc-1114 U-08] This row used to display the bytes and do
+                // nothing: the session browser is rooted at
+                // `minis-sessions/<sid>`, which does not contain `media/`, so
+                // the only way to free a single big image was "Clear session"
+                // — which also deletes the workspace. It now browses the media
+                // tree (see [mediaBrowseRoot] for which directory, and why).
                 SettingsValueRow(
-                    title = "Media",
+                    title = stringResource(R.string.storage_media_browse),
                     value = Formatter.formatFileSize(context, mediaSize),
+                    subtitle = stringResource(R.string.storage_media_browse_subtitle),
+                    onClick = {
+                        onBrowseFiles(
+                            mediaBrowseRoot(mediaDirs, sessionFiles.mediaRootDir).absolutePath,
+                            // [rc-1114 U-08] No guest mapping for media: the
+                            // sandbox sees /var/minis/{workspace,attachments,
+                            // offloads,browser} only, never filesDir/media.
+                            // Emitting a /var/minis/... path here would hand
+                            // the user a path that resolves to nothing.
+                            null,
+                        )
+                    },
+                    valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     showDivider = false,
                 )
             } else {

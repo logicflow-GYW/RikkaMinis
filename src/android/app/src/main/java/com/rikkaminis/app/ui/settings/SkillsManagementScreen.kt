@@ -631,8 +631,24 @@ private fun SkillImportSheet(
                                             // importFromContent path only grabbed SKILL.md, leaving
                                             // skills like douyin-downloader non-runnable because the
                                             // sibling python scripts never made it to local storage.
-                                            val result = skillRepository.importFromGitHub(urlText.trim())
-                                            if (result != null) onDismiss() else errorText = context.getString(R.string.skill_import_error_invalid)
+                                            //
+                                            // [RC-U12] It now answers with the sibling walk's
+                                            // outcome. The sheet used to dismiss on "SKILL.md
+                                            // landed", so a rate-limited scripts/ download produced a
+                                            // green import and a skill that failed at run time.
+                                            when (val result = skillRepository.importFromGitHub(urlText.trim())) {
+                                                is SkillRepository.UpdateResult.Success -> onDismiss()
+                                                is SkillRepository.UpdateResult.PartialSuccess ->
+                                                    // Landed, but incomplete — keep the sheet open so
+                                                    // the reason is readable instead of auto-dismissing
+                                                    // a red line the user never sees.
+                                                    errorText = context.getString(
+                                                        R.string.skill_import_partial,
+                                                        result.reason,
+                                                    )
+                                                is SkillRepository.UpdateResult.Failure ->
+                                                    errorText = context.getString(R.string.skill_import_error_invalid)
+                                            }
                                         } catch (e: Exception) {
                                             // [F-13] localized frame; the
                                             // throwable message stays as data.

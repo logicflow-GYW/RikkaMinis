@@ -228,6 +228,9 @@
     <string name="env_var_privacy_header">Datenschutz</string>
     <string name="env_var_privacy_toggle">Datenschutzmodus</string>
     <string name="env_var_privacy_footer">Wenn aktiviert, werden in der Ausgabe von shell-execute erkannte Werte von Umgebungsvariablen vor der Weitergabe an das Modell maskiert (z. B. `sk-1********ajhks`). Werte mit weniger als 8 Zeichen werden vollständig durch `*` ersetzt. Die für den Nutzer sichtbare Ausgabe im Chat bleibt unverändert.</string>
+    <string name="env_var_restart_terminal_note">Änderungen an Zeitzone und Proxy werden in laufende Terminals übertragen, Umgebungsvariablen nicht — dafür gibt es keinen Live-export/unset-Weg.</string>
+    <string name="env_var_restart_terminal_body">Variablen werden beim Start einer Terminal-Sitzung injiziert. Ein bereits geöffnetes Terminal behält seine alte Umgebung, bis Sie es schließen und neu öffnen.</string>
+    <string name="env_var_restart_terminal_title">Terminal-Sitzungen</string>
     <string name="env_var_section_header">Variablen</string>
     <string name="env_var_section_footer">Umgebungsvariablen werden beim Sitzungsstart in die Sandbox-Shell eingespeist. Namen werden in Großbuchstaben umgewandelt und müssen den POSIX-Shell-Regeln entsprechen.</string>
     <string name="env_var_empty_title">Keine Umgebungsvariablen</string>
@@ -254,6 +257,7 @@
     <string name="log_no_files">Keine Logdateien</string>
     <string name="log_section_storage">Speicherplatz</string>
     <string name="log_section_storage_footer">Gesamtlogspeicher: %1$s</string>
+    <string name="log_hidden_files_note">Nicht in dieser Liste: %1$d Debug-/Snapshot-Protokolle, %2$s. Beim Löschen aller werden sie mit entfernt.</string>
     <string name="log_section_crash">Absturzprotokolle</string>
     <string name="log_section_crash_footer">Letzte %1$d Absturzbericht(e) (Java/Kotlin + native)</string>
     <string name="log_delete_all_title">Alle Logs löschen</string>
@@ -376,6 +380,8 @@
     <string name="storage_no_media_files">Keine Mediendateien</string>
     <string name="storage_clear_session_footer">Entfernt alle von dieser Sitzung erzeugten Dateien. Die Unterhaltung selbst bleibt erhalten.</string>
     <string name="storage_browse_files">Dateien durchsuchen</string>
+    <string name="storage_media_browse_subtitle">Bilder und Anhänge dieser Sitzung</string>
+    <string name="storage_media_browse">Medien</string>
     <string name="storage_clearing_status">Wird gelöscht…</string>
     <string name="storage_clear_session_button">Sitzungsdateien löschen</string>
     <string name="storage_clear_confirm_title">Sitzungsdateien löschen?</string>
@@ -470,6 +476,8 @@
     <string name="filebrowser_empty_folder">Leerer Ordner</string>
     <string name="filebrowser_delete_title">„%1$s“ löschen?</string>
     <string name="filebrowser_delete_message">Diese Aktion kann nicht rückgängig gemacht werden.</string>
+    <string name="filebrowser_delete_dir_message">Dieser Ordner und sein gesamter Inhalt (%1$d Einträge) werden gelöscht. Diese Aktion kann nicht rückgängig gemacht werden.</string>
+    <string name="filebrowser_delete_counting">Zählen…</string>
     <string name="filebrowser_error_title">Fehler</string>
     <string name="filebrowser_sort_ascending">Aufsteigend</string>
     <string name="filebrowser_sort_descending">Absteigend</string>
@@ -617,6 +625,7 @@
     <string name="add_provider_custom_api_base_optional">Benutzerdefinierte API-Basis (optional)</string>
     <string name="add_custom_model_model_id">Modell-ID</string>
     <string name="add_custom_model_display_name_optional">Anzeigename (optional)</string>
+    <string name="add_custom_model_capabilities_footer">Leer lassen, um den vom Anbieter gemeldeten Wert zu nutzen. Später auf der Detailseite des Modells änderbar.</string>
     <string name="model_entry_model_detail">Modelldetails</string>
     <string name="model_entry_display_name">Anzeigename</string>
     <string name="model_entry_max_output_tokens">Maximale Ausgabe-Tokens</string>
@@ -902,6 +911,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">Formular</string>
     <string name="mcp_tab_import">JSON importieren</string>
     <string name="mcp_form_name">Name</string>
@@ -927,6 +937,9 @@
     <string name="mcp_form_save">Sichern</string>
     <string name="mcp_form_oauth_section">OAuth (optional)</string>
     <string name="mcp_form_oauth_authorized">Autorisiert</string>
+    <string name="mcp_form_oauth_saved_failed">Autorisiert, aber der Server konnte nicht gespeichert werden — er wurde möglicherweise gelöscht. Blatt schließen und erneut hinzufügen.</string>
+    <string name="mcp_form_oauth_saved_incomplete">Autorisiert, aber Name oder URL fehlt — der Server wurde nicht gespeichert. Bitte ergänzen und Speichern drücken.</string>
+    <string name="mcp_form_oauth_saved">Autorisiert und gespeichert</string>
     <string name="mcp_form_oauth_client_id">Client-ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth-Client-ID</string>
     <string name="mcp_form_oauth_client_secret">Client-Secret</string>
@@ -1265,6 +1278,7 @@
     <string name="soul_cancel">Abbrechen</string>
     <string name="soul_ok">OK</string>
     <string name="soul_restore_default">Standard wiederherstellen</string>
+    <string name="soul_restored_default">Auf Standard zurückgesetzt</string>
     <string name="soul_restore_confirm_title">Standard-SOUL.md wiederherstellen?</string>
     <string name="soul_restore_confirm_body">Ihre aktuellen Änderungen werden durch die Standard-Persönlichkeitsdatei überschrieben. Das Original dient als Ausgangspunkt und kann jederzeit erneut bearbeitet werden.</string>
     <string name="soul_save_error_title">Speichern nicht möglich</string>
@@ -1343,6 +1357,8 @@
     <string name="add_provider_endpoint_hint">Leer lassen, um den Standard-Endpunkt zu verwenden. \"/v1\" wird automatisch angehängt – geben Sie nur den Basis-Host ein.</string>
     <string name="add_provider_endpoint_gemini_hint">Leer lassen, um den Standard-Google-Endpunkt zu verwenden. Geben Sie die vollständige Basis-URL einschließlich Versionspfad ein.</string>
     <string name="modeldetail_video_output">Videoausgabe</string>
+    <string name="modeldetail_max_thinking_inherit">Modellvorgabe übernehmen</string>
+    <string name="modeldetail_max_thinking_level">Maximale Denkstufe</string>
     <string name="quicktest_title">Schnelltest</string>
     <string name="quicktest_button">Schnelltest</string>
     <string name="quicktest_footer">Führen Sie einen Schnelltest aus, der der Hauptfunktion dieses Modells entspricht.</string>
@@ -1574,6 +1590,12 @@
     <string name="runtime_limits_heavy_gate">Sandbox: Heavy-Gate-Wartezeit</string>
     <string name="runtime_limits_heavy_gate_desc">Wie lange ein Heavy-Befehl auf das globale Heavy-Gate wartet, bevor gemeldet wird, dass ein anderer Heavy-Befehl noch läuft.</string>
     <string name="runtime_limits_sandbox_footer">Diese Fenster schützen die App vor Speicherdruck. Die Standardwerte entsprechen den früheren festen Werten.</string>
+    <string name="runtime_limits_restore_confirm_body">Jeder Wert dieser Seite kehrt im Editor auf den Auslieferungswert zurück. Erst beim Speichern wird geschrieben.</string>
+    <string name="runtime_limits_restore_confirm_title">Standard wiederherstellen?</string>
+    <string name="runtime_limits_restore_defaults_footer">Wiederherstellen ändert nur die ungespeicherten Werte dieser Seite — zum Anwenden speichern. Die Schieberegler-Schritte bleiben unverändert: manche Standardwerte (etwa das Alter für die tmp-Bereinigung) sind nach dem Verstellen nicht mehr erreichbar, dafür gibt es diese Zeile.</string>
+    <string name="runtime_limits_restore_defaults_desc">Setzt jeden Wert dieser Seite auf den Auslieferungswert zurück</string>
+    <string name="runtime_limits_restore_defaults">Standard wiederherstellen</string>
+    <string name="runtime_limits_section_reset">Zurücksetzen</string>
     <string name="runtime_limits_media_footer">Höhere Bildgrenzen bringen bessere Bildqualität zum Modell — auf Kosten größerer Anfragen.</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
@@ -1720,4 +1742,25 @@
     <string name="manage_models_deselect_all">Auswahl aufheben</string>
     <string name="manage_models_remote_section_header">Vom Anbieter verfügbar (%1$d)</string>
     <string name="manage_models_error_prefix">Aktualisierung fehlgeschlagen: %1$s</string>
+    <string name="auto_backup_run_busy">Eine Sicherung läuft bereits — es wurde nichts Neues gespeichert.</string>
+    <string name="auto_backup_run_partial">Sicherung gespeichert, aber unvollständig:\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d Feld(er) konnten nicht gelesen werden</string>
+    <string name="auto_backup_partial_mirror">externer Spiegel nicht aktualisiert</string>
+    <string name="auto_backup_partial_remote">Remote-Kopie nicht übertragen</string>
+    <string name="auto_backup_partial_joiner">; </string>
+    <string name="mirror_retry_busy">Eine Synchronisierung läuft bereits — bitte gleich erneut versuchen.</string>
+    <string name="mirror_retry_done">Spiegel synchronisiert.</string>
+    <string name="mirror_retry_nothing">Spiegel ist bereits aktuell.</string>
+    <string name="backup_done_thinking_rules">%1$d Denkregel(n) wiederhergestellt.</string>
+    <string name="backup_done_scheduled_tasks">Geplante Aufgaben wiederhergestellt.</string>
+    <string name="backup_done_artifacts">%1$d Artefaktdatei(en) wiederhergestellt.</string>
+    <string name="backup_done_webdav">WebDAV-Serverkonfiguration wiederhergestellt.</string>
+    <string name="mirror_fastest_hint">Schnellster: %1$s (%2$d ms)</string>
+    <string name="mirror_switch_to_fastest">Nutzen</string>
+    <string name="file_print_renderer_gone">die Druckansicht reagiert nicht mehr</string>
+    <string name="skill_import_partial">Importiert, aber die mitgelieferten Dateien sind unvollständig: %1$s</string>
+    <string name="scheduled_enable_after_save">Nach dem Speichern aktivieren</string>
+    <string name="scheduled_saved_disabled">Gespeichert. Die Aufgabe ist aus — im Listen-Schalter einschalten.</string>
+    <string name="scheduled_saved_global_off">Gespeichert. Der Hauptschalter für geplante Aufgaben ist aus — erst dann läuft etwas.</string>
+    <string name="provider_detail_refresh_catalog_failed">Aktualisierung fehlgeschlagen: %1$s</string>
 </resources>

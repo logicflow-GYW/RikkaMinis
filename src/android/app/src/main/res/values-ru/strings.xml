@@ -103,6 +103,7 @@
     <string name="soul_cancel">Отмена</string>
     <string name="soul_ok">ОК</string>
     <string name="soul_restore_default">Сбросить к стандартным</string>
+    <string name="soul_restored_default">Восстановлены значения по умолчанию</string>
     <string name="soul_restore_confirm_title">Восстановить стандартный SOUL.md?</string>
     <string name="soul_restore_confirm_body">Ваши текущие изменения будут перезаписаны стандартным файлом личности. Оригинал служит отправной точкой, и его можно отредактировать заново в любой момент.</string>
     <string name="soul_save_error_title">Не удалось сохранить</string>
@@ -250,6 +251,8 @@
     <string name="filebrowser_empty_folder">Пустая папка</string>
     <string name="filebrowser_delete_title">Удалить \"%1$s\"?</string>
     <string name="filebrowser_delete_message">Это действие нельзя отменить.</string>
+    <string name="filebrowser_delete_dir_message">Эта папка и всё её содержимое (%1$d элементов) будут удалены. Это действие нельзя отменить.</string>
+    <string name="filebrowser_delete_counting">Подсчёт…</string>
     <string name="filebrowser_error_title">Ошибка</string>
     <string name="filebrowser_sort_ascending">По возрастанию</string>
     <string name="filebrowser_sort_descending">По убыванию</string>
@@ -401,6 +404,9 @@
     <string name="env_var_privacy_header">Конфиденциальность</string>
     <string name="env_var_privacy_toggle">Режим конфиденциальности</string>
     <string name="env_var_privacy_footer">Когда включено, любое значение переменной окружения, появляющееся в выводе выполнения команд оболочки, заменяется маскированной формой (например, `sk-1********ajhks`) перед передачей модели. Значения короче 8 символов заменяются полностью на `*`. Вывод, видимый пользователю в чате, остаётся неизменным.</string>
+    <string name="env_var_restart_terminal_note">Изменения часового пояса и прокси передаются в запущенные терминалы, а переменные окружения — нет: живого пути export/unset не существует.</string>
+    <string name="env_var_restart_terminal_body">Переменные подставляются при запуске сеанса терминала. Уже открытый терминал сохраняет старое окружение — закройте и откройте его заново.</string>
+    <string name="env_var_restart_terminal_title">Сеансы терминала</string>
     <string name="env_var_section_header">Переменные</string>
     <string name="env_var_section_footer">Переменные окружения внедряются в оболочку песочницы при запуске сессии. Имена приводятся к верхнему регистру и должны соответствовать правилам имён переменных оболочки POSIX.</string>
     <string name="env_var_empty_title">Нет переменных окружения</string>
@@ -427,6 +433,7 @@
     <string name="log_no_files">Нет файлов журналов</string>
     <string name="log_section_storage">Хранилище</string>
     <string name="log_section_storage_footer">Всего занято журналами: %1$s</string>
+    <string name="log_hidden_files_note">Не показано в этом списке: отладочных/снимковых журналов %1$d, всего %2$s. При удалении всех они тоже удаляются.</string>
     <string name="log_section_crash">Журналы сбоев</string>
     <string name="log_section_crash_footer">Последние %1$d отчёт(ов) о сбоях (Java/Kotlin + native)</string>
     <string name="log_delete_all_title">Удалить все журналы</string>
@@ -581,6 +588,8 @@
     <string name="storage_no_media_files">Нет медиафайлов</string>
     <string name="storage_clear_session_footer">Удаляет все файлы, созданные этой сессией. Сам разговор будет сохранён.</string>
     <string name="storage_browse_files">Просмотр файлов</string>
+    <string name="storage_media_browse_subtitle">Изображения и вложения этого сеанса</string>
+    <string name="storage_media_browse">Медиа</string>
     <string name="storage_clearing_status">Очистка…</string>
     <string name="storage_clear_session_button">Очистить файлы сессии</string>
     <string name="storage_clear_confirm_title">Очистить файлы сессии?</string>
@@ -704,6 +713,7 @@
     <string name="add_provider_custom_api_base_optional">Свой базовый URL API (необязательно)</string>
     <string name="add_custom_model_model_id">ID модели</string>
     <string name="add_custom_model_display_name_optional">Отображаемое имя (необязательно)</string>
+    <string name="add_custom_model_capabilities_footer">Оставьте пустым, чтобы использовать значение от провайдера. Позже можно изменить на странице модели.</string>
     <string name="model_entry_model_detail">Сведения о модели</string>
     <string name="model_entry_display_name">Отображаемое имя</string>
     <string name="model_entry_max_output_tokens">Макс. токенов вывода</string>
@@ -731,6 +741,8 @@
     <string name="modeldetail_image_output">Вывод изображений</string>
     <string name="modeldetail_audio_output">Вывод аудио</string>
     <string name="modeldetail_video_output">Вывод видео</string>
+    <string name="modeldetail_max_thinking_inherit">Как в модели по умолчанию</string>
+    <string name="modeldetail_max_thinking_level">Максимальный уровень размышления</string>
     <string name="modeldetail_output_modality_footer">Включите для моделей, генерирующих изображения или аудио (например, gpt-image-1, TTS). Текстовый вывод доступен всегда.</string>
     <string name="modelgroup_speech_output">Речевой вывод</string>
     <string name="modelgroup_speech_transcription">Транскрипция речи</string>
@@ -1039,6 +1051,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">Форма</string>
     <string name="mcp_tab_import">Импорт JSON</string>
     <string name="mcp_form_name">Имя</string>
@@ -1064,6 +1077,9 @@
     <string name="mcp_form_save">Сохранить</string>
     <string name="mcp_form_oauth_section">OAuth (необязательно)</string>
     <string name="mcp_form_oauth_authorized">Авторизовано</string>
+    <string name="mcp_form_oauth_saved_failed">Авторизация выполнена, но сохранить сервер не удалось — возможно, он удалён. Закройте панель и добавьте заново.</string>
+    <string name="mcp_form_oauth_saved_incomplete">Авторизация выполнена, но имя или URL не заполнены — сервер не сохранён. Заполните и нажмите «Сохранить».</string>
+    <string name="mcp_form_oauth_saved">Авторизовано и сохранено</string>
     <string name="mcp_form_oauth_client_id">ID клиента</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth client ID</string>
     <string name="mcp_form_oauth_client_secret">Секрет клиента</string>
@@ -1527,6 +1543,12 @@
     <string name="runtime_limits_heavy_gate">Песочница: ожидание шлюза</string>
     <string name="runtime_limits_heavy_gate_desc">Сколько тяжёлая команда ждёт глобальный шлюз тяжёлых команд, прежде чем сообщить, что другая тяжёлая команда ещё выполняется.</string>
     <string name="runtime_limits_sandbox_footer">Эти окна защищают приложение от нехватки памяти. Значения по умолчанию совпадают с прежними фиксированными.</string>
+    <string name="runtime_limits_restore_confirm_body">Все параметры этой страницы в редакторе вернутся к заводским значениям. Запись произойдёт только после нажатия «Сохранить».</string>
+    <string name="runtime_limits_restore_confirm_title">Восстановить значения по умолчанию?</string>
+    <string name="runtime_limits_restore_defaults_footer">Сброс меняет только несохранённые значения этой страницы — чтобы применить, нажмите «Сохранить». Шаг ползунков не изменён: некоторые значения по умолчанию (например, возраст очистки tmp) после сдвига недостижимы — для этого и нужна эта строка.</string>
+    <string name="runtime_limits_restore_defaults_desc">Возвращает все параметры этой страницы к заводским значениям</string>
+    <string name="runtime_limits_restore_defaults">Восстановить значения по умолчанию</string>
+    <string name="runtime_limits_section_reset">Сброс</string>
     <string name="runtime_limits_media_footer">Более высокие лимиты изображений пропускают лучшее качество к модели — ценой размера запроса.</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
@@ -1673,4 +1695,25 @@
     <string name="manage_models_deselect_all">Снять выделение</string>
     <string name="manage_models_remote_section_header">Доступно от провайдера (%1$d)</string>
     <string name="manage_models_error_prefix">Не удалось обновить: %1$s</string>
+    <string name="auto_backup_run_busy">Резервное копирование уже выполняется — новых данных не сохранено.</string>
+    <string name="auto_backup_run_partial">Копия сохранена, но неполная:\n%1$s</string>
+    <string name="auto_backup_partial_fields">не удалось прочитать полей: %1$d</string>
+    <string name="auto_backup_partial_mirror">внешнее зеркало не обновлено</string>
+    <string name="auto_backup_partial_remote">удалённая копия не отправлена</string>
+    <string name="auto_backup_partial_joiner">; </string>
+    <string name="mirror_retry_busy">Синхронизация уже выполняется — повторите чуть позже.</string>
+    <string name="mirror_retry_done">Зеркало синхронизировано.</string>
+    <string name="mirror_retry_nothing">Зеркало уже актуально.</string>
+    <string name="backup_done_thinking_rules">Восстановлено правил рассуждения: %1$d.</string>
+    <string name="backup_done_scheduled_tasks">Запланированные задачи восстановлены.</string>
+    <string name="backup_done_artifacts">Восстановлено файлов результатов: %1$d.</string>
+    <string name="backup_done_webdav">Конфигурация сервера WebDAV восстановлена.</string>
+    <string name="mirror_fastest_hint">Самый быстрый: %1$s (%2$d мс)</string>
+    <string name="mirror_switch_to_fastest">Взять</string>
+    <string name="file_print_renderer_gone">окно печати перестало отвечать</string>
+    <string name="skill_import_partial">Импортировано, но вложенные файлы неполные: %1$s</string>
+    <string name="scheduled_enable_after_save">Включить после сохранения</string>
+    <string name="scheduled_saved_disabled">Сохранено. Задача выключена — включите её переключателем в списке.</string>
+    <string name="scheduled_saved_global_off">Сохранено. Общий переключатель запланированных задач выключен — без него задачи не запускаются.</string>
+    <string name="provider_detail_refresh_catalog_failed">Не удалось обновить: %1$s</string>
 </resources>

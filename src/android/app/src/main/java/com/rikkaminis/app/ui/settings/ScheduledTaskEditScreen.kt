@@ -29,6 +29,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.R
 import com.rikkaminis.app.scheduled.ScheduledTask
+import com.rikkaminis.app.scheduled.ScheduledTaskEditorPolicy
 import com.rikkaminis.app.scheduled.ScheduledTaskPolicy
 import com.rikkaminis.app.scheduled.ScheduledTaskRevisionPolicy
 import com.rikkaminis.app.scheduled.ScheduledTaskTransitions
@@ -79,11 +80,21 @@ fun ScheduledTaskEditScreen(
     // with Save locked for good (`original == null`) while Delete stayed live
     // on an id that no longer exists.
     var recordMissing by remember { mutableStateOf(false) }
+    // [RC-U14] The save's write did not land (disk full, or the document is
+    // unreadable). It used to be indistinguishable from success — the store
+    // hands back the PRE-write document, which still contains an edited task —
+    // so the screen closed and the change was gone.
+    var saveRefused by remember { mutableStateOf(false) }
     // [R5-B2 F-04] The delete confirm's result: a refused write (disk full, or
     // the store's unreadable guard) hands back the PRE-delete document, so the
     // task is still there — closing the screen as if it were gone is the
     // "silent close" the report pinned.
     var deleteRefused by remember { mutableStateOf(false) }
+    // [RC-U13] "Enable after saving", shown for NEW tasks only and defaulting to
+    // false (§5.4: a brand-new task enters OFF). The default stays safe; this
+    // switch is the explicit opt-in that saves the "save → back → flip the row
+    // switch (→ flip the master switch)" round trip.
+    var enableOnSave by remember { mutableStateOf(false) }
     // [deep-audit-1046 S-11] "This screen has finished its initial read." The
     // change watcher below must not speak before it: a refresh that fires while
     // the load effect is still in flight would judge the form against a document
@@ -323,13 +334,46 @@ fun ScheduledTaskEditScreen(
             }
         }
 
+        if (isNew) {
+            // [RC-U13] The one-tap version of "save, go back, flip the row
+            // switch". Only for a task being created — an existing task's state
+            // is the list row's switch, and repeating it here would be a second
+            // control for one flag.
+            SettingsSection {
+                SettingsSwitchRow(
+                    title = stringResource(R.string.scheduled_enable_after_save),
+                    checked = enableOnSave,
+                    onCheckedChange = { enableOnSave = it },
+                    showDivider = false,
+                )
+            }
+        }
+
+        if (saveRefused) {
+            // [RC-U14] The save did not reach disk — say so instead of closing.
+            Text(
+                text = stringResource(
+                    R.string.backup_err_write,
+                    ScheduledTasksStore.fileFor(context).name,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+
         Spacer(Modifier.height(20.dp))
         MinisButton(
             onClick = {
                 val prior = original
                 val effectiveId = taskId ?: ScheduledTasksCodec.newTaskId()
+                // A retry must be able to clear the previous refusal.
+                saveRefused = false
                 scope.launch {
-                    val saved = ScheduledTasksStore.upsertTask(
+                    val outcome = ScheduledTasksStore.upsertTask(
                         context,
                         ScheduledTask(
                             id = effectiveId,
@@ -340,7 +384,13 @@ fun ScheduledTaskEditScreen(
                             // §5.4: brand-new tasks enter OFF. Editing keeps the
                             // task's current enabled state (the row switch is
                             // the explicit control for that).
-                            enabled = prior?.enabled ?: false,
+                            // [RC-U13] The "enable after saving" switch is the
+                            // user's explicit opt-in; both halves live in one
+                            // tested decision instead of an inline `?:`.
+                            enabled = ScheduledTaskEditorPolicy.enabledOnSave(
+                                priorEnabled = prior?.enabled,
+                                enableAfterSave = enableOnSave,
+                            ),
                             maxTurns = turnsValue ?: ScheduledTask.DEFAULT_MAX_TURNS,
                             deadlineSec = deadlineValue ?: ScheduledTask.DEFAULT_DEADLINE_SEC,
                             maxEstimatedTokens = tokensValue ?: ScheduledTask.DEFAULT_MAX_TOKENS,
@@ -357,6 +407,7 @@ fun ScheduledTaskEditScreen(
                         // screen says the record is gone.
                         allowInsert = isNew,
                     )
+                    val saved = outcome.file
                     if (
                         ScheduledTaskRevisionPolicy.shouldMarkMissing(
                             loadedOnce,
@@ -364,7 +415,39 @@ fun ScheduledTaskEditScreen(
                         )
                     ) {
                         recordMissing = true
+                    } else if (!outcome.persisted) {
+                        // [RC-U14] The write did not land. The store hands back
+                        // the PRE-write document, which still contains an edited
+                        // task — so "is my id in there" answered yes and this
+                        // screen closed on a change that was discarded. Stay,
+                        // and say why (same wording the refused delete uses).
+                        saveRefused = true
                     } else {
+                        // [RC-U13] Announce the state the user is about to land
+                        // in. Closing straight to a list where a brand-new task
+                        // shows "off" (and, on a fresh install, a master switch
+                        // that is off too) was the "it doesn't run" report.
+                        when (
+                            ScheduledTaskEditorPolicy.noticeAfterSave(
+                                taskEnabled = saved.tasks
+                                    .firstOrNull { it.id == effectiveId }?.enabled == true,
+                                globalEnabled = saved.globalEnabled,
+                            )
+                        ) {
+                            ScheduledTaskEditorPolicy.SaveNotice.GLOBAL_OFF ->
+                                android.widget.Toast.makeText(
+                                    context,
+                                    context.getString(R.string.scheduled_saved_global_off),
+                                    android.widget.Toast.LENGTH_LONG,
+                                ).show()
+                            ScheduledTaskEditorPolicy.SaveNotice.TASK_OFF ->
+                                android.widget.Toast.makeText(
+                                    context,
+                                    context.getString(R.string.scheduled_saved_disabled),
+                                    android.widget.Toast.LENGTH_LONG,
+                                ).show()
+                            ScheduledTaskEditorPolicy.SaveNotice.NONE -> Unit
+                        }
                         onDone()
                     }
                 }

@@ -840,14 +840,43 @@ fun BackupSettingsScreen(
                             // Dispatchers.Main block below; do it on IO and
                             // hand only the result back to Main.
                             val autoManager = com.rikkaminis.app.backup.AutoBackupManager
-                            withContext(Dispatchers.IO) { autoManager.runNow(application) }
+                            val outcome = withContext(Dispatchers.IO) { autoManager.runNow(application) }
                             val refreshedFiles = withContext(Dispatchers.IO) { autoManager.listLocal(context) }
                             withContext(Dispatchers.Main) {
                                 autoBackupFiles = refreshedFiles
                                 autoBackupLastRun = com.rikkaminis.app.backup.AutoBackupManager.lastRunLabel(context)
-                                android.widget.Toast.makeText(
-                                    context, savedToast, android.widget.Toast.LENGTH_SHORT,
-                                ).show()
+                                // [RC-U01] Branch on what the run actually did.
+                                // Every one of these four shapes used to pop the
+                                // same "Backup saved" toast: a skipped concurrent
+                                // run (nothing written at all), unreadable fields,
+                                // a failed external mirror and a failed WebDAV push
+                                // were each only a Log.w inside runNow.
+                                when (outcome) {
+                                    is com.rikkaminis.app.backup.AutoBackupRunOutcome.Failed ->
+                                        errorMessage = String.format(
+                                            errWriteFmt,
+                                            outcome.reason,
+                                        )
+                                    com.rikkaminis.app.backup.AutoBackupRunOutcome.Skipped ->
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            context.getString(R.string.auto_backup_run_busy),
+                                            android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    is com.rikkaminis.app.backup.AutoBackupRunOutcome.Partial ->
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            context.getString(
+                                                R.string.auto_backup_run_partial,
+                                                autoBackupPartialDetail(context, outcome),
+                                            ),
+                                            android.widget.Toast.LENGTH_LONG,
+                                        ).show()
+                                    com.rikkaminis.app.backup.AutoBackupRunOutcome.Success ->
+                                        android.widget.Toast.makeText(
+                                            context, savedToast, android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                }
                             }
                         } catch (t: Throwable) {
                             withContext(Dispatchers.Main) {
@@ -1039,7 +1068,15 @@ fun BackupSettingsScreen(
                                     mirrorRunning = true
                                     application.applicationScope.launch {
                                         try {
-                                            withContext(Dispatchers.IO) {
+                                            // [RC-U02] syncNow already answers
+                                            // with an Outcome and swallows its
+                                            // own Throwables — dropping the
+                                            // return value is why this retry
+                                            // looked dead (a Busy or a fresh
+                                            // Failed produced no feedback and
+                                            // the screen's catch below could
+                                            // never fire).
+                                            val outcome = withContext(Dispatchers.IO) {
                                                 com.rikkaminis.app.backup.MirrorStore
                                                     .syncNow(context, force = true)
                                             }
@@ -1060,6 +1097,46 @@ fun BackupSettingsScreen(
                                                 mirrorLastSync = label
                                                 mirrorOutcomeRaw = raw
                                                 mirrorPending = pendingNow
+                                                // [RC-U02] Say what this retry
+                                                // did. Busy is a normal
+                                                // concurrency guard, NOT an
+                                                // error — telling the user
+                                                // "failed" for it is its own
+                                                // small lie.
+                                                when (outcome) {
+                                                    is com.rikkaminis.app.backup.MirrorStore.Outcome.Failed ->
+                                                        errorMessage = outcome.reason
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.Busy ->
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            context.getString(R.string.mirror_retry_busy),
+                                                            android.widget.Toast.LENGTH_SHORT,
+                                                        ).show()
+                                                    is com.rikkaminis.app.backup.MirrorStore.Outcome.Synced ->
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            context.getString(R.string.mirror_retry_done),
+                                                            android.widget.Toast.LENGTH_SHORT,
+                                                        ).show()
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.NoChanges,
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.Throttled,
+                                                    -> android.widget.Toast.makeText(
+                                                        context,
+                                                        context.getString(R.string.mirror_retry_nothing),
+                                                        android.widget.Toast.LENGTH_SHORT,
+                                                    ).show()
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.Unavailable ->
+                                                        errorMessage = context.getString(R.string.mirror_diag_unavailable)
+                                                    // The row is not rendered at
+                                                    // all while the mirror is
+                                                    // disabled, so this arm is
+                                                    // unreachable — but the
+                                                    // `when` is exhaustive on
+                                                    // purpose (a new Outcome
+                                                    // must force a decision
+                                                    // here).
+                                                    com.rikkaminis.app.backup.MirrorStore.Outcome.Disabled -> Unit
+                                                }
                                             }
                                         } catch (t: Throwable) {
                                             withContext(Dispatchers.Main) { errorMessage = t.message ?: errUnknown }
@@ -1872,6 +1949,42 @@ fun BackupSettingsScreen(
                             style = MaterialTheme.typography.bodyMedium,
                         )
                     }
+                    // [RC-U03] ImportResult has carried these four counts since
+                    // the restore paths landed; the dialog rendered none of
+                    // them, so a restore that DID bring back thinking rules,
+                    // scheduled tasks, artifact files and the WebDAV config
+                    // looked like it had skipped them — users went and re-checked
+                    // (or re-configured) those modules by hand.
+                    if (report.thinkingRulesImported > 0) {
+                        Text(
+                            stringResource(
+                                R.string.backup_done_thinking_rules,
+                                report.thinkingRulesImported,
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (report.scheduledTasksImported) {
+                        Text(
+                            stringResource(R.string.backup_done_scheduled_tasks),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (report.artifactFilesImported > 0) {
+                        Text(
+                            stringResource(
+                                R.string.backup_done_artifacts,
+                                report.artifactFilesImported,
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (report.webdavConfigImported) {
+                        Text(
+                            stringResource(R.string.backup_done_webdav),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                     if (report.skipped.isNotEmpty()) {
                         Text(
                             stringResource(R.string.backup_done_skipped, report.skipped.size),
@@ -2487,6 +2600,32 @@ private fun webDavErrorMessage(context: Context, t: Throwable): String {
 private val INSTANT_FORMATTER: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.getDefault())
         .withZone(ZoneId.systemDefault())
+
+/**
+ * [RC-U01] The "what is missing" half of the partial-backup toast.
+ *
+ * Every degraded layer is named, not just the first: the user is deciding
+ * whether this backup is good enough to rely on, and "the remote copy is stale"
+ * is a different decision from "the document itself lost fields".
+ */
+private fun autoBackupPartialDetail(
+    context: android.content.Context,
+    outcome: com.rikkaminis.app.backup.AutoBackupRunOutcome.Partial,
+): String {
+    val parts = buildList {
+        if (outcome.unreadableFields > 0) {
+            add(
+                context.getString(
+                    R.string.auto_backup_partial_fields,
+                    outcome.unreadableFields,
+                ),
+            )
+        }
+        if (outcome.externalMirrorFailed) add(context.getString(R.string.auto_backup_partial_mirror))
+        if (outcome.remotePushFailed) add(context.getString(R.string.auto_backup_partial_remote))
+    }
+    return parts.joinToString(context.getString(R.string.auto_backup_partial_joiner))
+}
 
 private fun formatSize(bytes: Long): String = when {
     bytes >= 1024L * 1024L -> String.format(Locale.getDefault(), "%.1f MB", bytes / 1024.0 / 1024.0)
