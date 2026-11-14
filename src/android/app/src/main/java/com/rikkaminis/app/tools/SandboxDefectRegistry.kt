@@ -118,6 +118,22 @@ object SandboxDefectRegistry {
         /** `- 救不动：` content, null when the entry has none. */
         val frozen: String?,
         /**
+         * Phrasings made ENTIRELY of short (< [SPECIFIC_MIN_LEN]) non-structural
+         * tokens, joined back into one lowercase phrase each — e.g. `bad pack`,
+         * `git fsck`, `merge base`. These fail [hasSpecificToken] on every token,
+         * so they are not in [seedGroups]; they live here instead and are matched
+         * as an ADJACENT phrase (whitespace-normalised substring), which is what
+         * makes them specific again.
+         *
+         * Single-token all-short seeds (`data`, `file`, `wait`, `000`) are
+         * deliberately NOT collected: a lone generic word has no adjacency to
+         * borrow specificity from. Measured on 132 real tool-failure outputs:
+         * `data` appears in 8, `file` in 35 — admitting them would fire on
+         * unrelated failures (exactly the false-positive class the 2026-10-27
+         * gate was added to prevent).
+         */
+        val phraseGroups: List<String> = emptyList(),
+        /**
          * Token groups from the backticked seeds of the symptom line. One
          * group holds the tokens of ONE candidate phrasing (`a / b` inside a
          * single backtick pair = two candidates). The entry matches when
@@ -145,6 +161,7 @@ object SandboxDefectRegistry {
                     title = title,
                     recovery = recovery,
                     frozen = frozen,
+                    phraseGroups = phraseGroupsOf(symptom),
                     seedGroups = seedGroupsOf(symptom),
                 )
             }
@@ -194,6 +211,55 @@ object SandboxDefectRegistry {
     }
 
     /**
+     * Adjacency test for a short-token phrase.
+     *
+     * The phrase is stored space-joined (`http 000 size`), but the log text that
+     * has to match often separates the same tokens with punctuation instead of a
+     * space — `http=000 size=0` is the registry's own S29 wording. So the
+     * separator is "anything that is not alphanumeric": still strictly adjacent
+     * (no unrelated word may sit between the tokens), but shape-tolerant.
+     *
+     * Tokens are [Regex.escape]d: they legitimately contain `.` (from names like
+     * `l2s.tmp_obj`), which must not become a wildcard.
+     */
+    private fun phraseMatches(hay: String, phrase: String): Boolean {
+        val tokens = phrase.split(' ').filter { it.isNotEmpty() }
+        if (tokens.isEmpty()) return false
+        if (tokens.size == 1) return hay.contains(tokens[0])
+        val pattern = tokens.joinToString("[^a-z0-9]+") { Regex.escape(it) }
+        return Regex(pattern).containsMatchIn(hay)
+    }
+
+    /**
+     * [fix/defect-short-phrase-1114] The complement of [seedGroupsOf]: phrasings
+     * whose tokens are ALL short/generic, rejoined into one adjacent phrase.
+     *
+     * Before this, the gate silently dropped 25 of the registry's 89 seed
+     * groups, including the ones for real defects the agent has actually hit —
+     * `bad pack` (A1) fired twice in the 2026-11-13 log and the registry stayed
+     * silent, because `bad` and `pack` are both 4 chars.
+     *
+     * Why adjacency and not plain AND: `[git, log]` as an unordered AND matches
+     * any output containing both words anywhere (the registry's own `git log`
+     * example line does that). As a phrase it matches only `git log`.
+     *
+     * Single-token groups are excluded on purpose — see [Defect.phraseGroups].
+     */
+    internal fun phraseGroupsOf(symptom: String?): List<String> {
+        if (symptom.isNullOrBlank()) return emptyList()
+        val phrases = mutableListOf<String>()
+        for (m in BACKTICK_RE.findAll(symptom)) {
+            for (alt in m.groupValues[1].split(" / ")) {
+                val tokens = tokensOf(alt)
+                if (tokens.size < 2) continue
+                if (hasSpecificToken(tokens)) continue
+                phrases += tokens.joinToString(" ")
+            }
+        }
+        return phrases.distinct()
+    }
+
+    /**
      * True when at least one token could not plausibly appear in unrelated
      * output. AND-matching over generic-only tokens degenerates into a
      * universal hit: `[grep, file]` (from the example-style seed
@@ -224,7 +290,8 @@ object SandboxDefectRegistry {
         val hay = output.lowercase()
         val hits = mutableListOf<Defect>()
         for (d in defects) {
-            val hit = d.seedGroups.any { group -> group.isNotEmpty() && group.all { hay.contains(it) } }
+            val hit = d.seedGroups.any { group -> group.isNotEmpty() && group.all { hay.contains(it) } } ||
+                d.phraseGroups.any { phrase -> phraseMatches(hay, phrase) }
             if (hit) {
                 hits += d
                 if (hits.size >= MAX_HINTS) break

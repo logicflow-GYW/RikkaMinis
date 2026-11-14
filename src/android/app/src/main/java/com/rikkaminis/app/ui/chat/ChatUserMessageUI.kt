@@ -220,6 +220,15 @@ internal fun UserMessageBubble(
                                 content = message.content,
                                 isStreaming = false,
                                 stableKey = "user:${message.id}",
+                                // [fix/user-msg-fold-1114] Composers fold a
+                                // paste into a chip, but the chip dies on send
+                                // (sendMessage expands the body before it is
+                                // persisted), so the bubble used to render the
+                                // whole 15K paste. Fold USER bodies early: the
+                                // 32K default is a markdown GC-storm floor, not
+                                // a reading affordance.
+                                collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS,
+                                previewChars = USER_MESSAGE_PREVIEW_CHARS,
                             ) {
                                 Text(
                                     text = message.content,
