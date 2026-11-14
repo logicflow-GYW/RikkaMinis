@@ -917,6 +917,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">フォーム</string>
     <string name="mcp_tab_import">JSON をインポート</string>
     <string name="mcp_form_name">名前</string>
@@ -942,6 +943,9 @@
     <string name="mcp_form_save">保存</string>
     <string name="mcp_form_oauth_section">OAuth（任意）</string>
     <string name="mcp_form_oauth_authorized">認証済み</string>
+    <string name="mcp_form_oauth_saved_failed">認証しましたが、サーバーを保存できませんでした。削除された可能性があります。シートを閉じて追加し直してください。</string>
+    <string name="mcp_form_oauth_saved_incomplete">認証しましたが、名前または URL が未入力のため保存されていません。入力して保存を押してください。</string>
+    <string name="mcp_form_oauth_saved">認証して保存しました</string>
     <string name="mcp_form_oauth_client_id">クライアント ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth クライアント ID</string>
     <string name="mcp_form_oauth_client_secret">クライアントシークレット</string>

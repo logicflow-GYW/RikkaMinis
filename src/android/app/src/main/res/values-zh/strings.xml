@@ -1240,6 +1240,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">表单</string>
     <string name="mcp_tab_import">导入 JSON</string>
     <string name="mcp_form_name">名称</string>
@@ -1265,6 +1266,9 @@
     <string name="mcp_form_save">保存</string>
     <string name="mcp_form_oauth_section">OAuth（可选）</string>
     <string name="mcp_form_oauth_authorized">已授权</string>
+    <string name="mcp_form_oauth_saved_failed">已授权，但服务器保存失败 —— 可能已被删除。请关闭面板后重新添加。</string>
+    <string name="mcp_form_oauth_saved_incomplete">已授权，但名称或 URL 未填完，服务器未保存 —— 请补充后点保存。</string>
+    <string name="mcp_form_oauth_saved">已授权并保存</string>
     <string name="mcp_form_oauth_client_id">客户端 ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth 客户端 ID</string>
     <string name="mcp_form_oauth_client_secret">客户端密钥</string>

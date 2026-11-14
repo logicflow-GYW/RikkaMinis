@@ -910,6 +910,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">Formular</string>
     <string name="mcp_tab_import">JSON importieren</string>
     <string name="mcp_form_name">Name</string>
@@ -935,6 +936,9 @@
     <string name="mcp_form_save">Sichern</string>
     <string name="mcp_form_oauth_section">OAuth (optional)</string>
     <string name="mcp_form_oauth_authorized">Autorisiert</string>
+    <string name="mcp_form_oauth_saved_failed">Autorisiert, aber der Server konnte nicht gespeichert werden — er wurde möglicherweise gelöscht. Blatt schließen und erneut hinzufügen.</string>
+    <string name="mcp_form_oauth_saved_incomplete">Autorisiert, aber Name oder URL fehlt — der Server wurde nicht gespeichert. Bitte ergänzen und Speichern drücken.</string>
+    <string name="mcp_form_oauth_saved">Autorisiert und gespeichert</string>
     <string name="mcp_form_oauth_client_id">Client-ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth-Client-ID</string>
     <string name="mcp_form_oauth_client_secret">Client-Secret</string>

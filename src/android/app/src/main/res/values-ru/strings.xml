@@ -1048,6 +1048,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">Форма</string>
     <string name="mcp_tab_import">Импорт JSON</string>
     <string name="mcp_form_name">Имя</string>
@@ -1073,6 +1074,9 @@
     <string name="mcp_form_save">Сохранить</string>
     <string name="mcp_form_oauth_section">OAuth (необязательно)</string>
     <string name="mcp_form_oauth_authorized">Авторизовано</string>
+    <string name="mcp_form_oauth_saved_failed">Авторизация выполнена, но сохранить сервер не удалось — возможно, он удалён. Закройте панель и добавьте заново.</string>
+    <string name="mcp_form_oauth_saved_incomplete">Авторизация выполнена, но имя или URL не заполнены — сервер не сохранён. Заполните и нажмите «Сохранить».</string>
+    <string name="mcp_form_oauth_saved">Авторизовано и сохранено</string>
     <string name="mcp_form_oauth_client_id">ID клиента</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth client ID</string>
     <string name="mcp_form_oauth_client_secret">Секрет клиента</string>

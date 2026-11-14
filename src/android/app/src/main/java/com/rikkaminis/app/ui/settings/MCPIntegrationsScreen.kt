@@ -486,25 +486,75 @@ private fun MCPFormTab(
     // clearing a non-empty env field. (Empty field clears with no confirm.)
     var showClearEnvConfirm by remember { mutableStateOf(false) }
 
-    // True for the url-based transports (HTTP / SSE).
+    // True for the url-based transport.
     val isUrlTransport = transport != 2
 
+    // [T-mcp-server-export-android] Build a MCPServerConfig from the CURRENT
+    // form fields (so Copy/Share export reflects unsaved edits, same
+    // construction Save uses). Returns null + sets errorText when invalid.
+    // URL transport persists as a url-only entry; STDIO (2) persists
+    // command/args/env. createdAt preserved on edit.
+    //
+    // [RC-1114 U-15] Declared BEFORE the layout (not inside the Column body)
+    // because the OAuth success handler now persists through it too: a user who
+    // completed the full external browser round-trip should not have to press
+    // Save afterwards, or the server they just authorized vanishes from the
+    // list when the sheet closes.
+    fun buildServerFromForm(): MCPRepository.MCPServerConfig? {
+        if (name.isBlank()) {
+            errorText = context.getString(R.string.mcp_form_error_no_name); return null
+        }
+        return if (isUrlTransport) {
+            if (url.isBlank()) {
+                errorText = context.getString(R.string.mcp_form_error_no_transport); return null
+            }
+            MCPRepository.MCPServerConfig(
+                id = name.trim(),
+                note = note.trim().ifBlank { null },
+                enabled = editServer?.enabled ?: true,
+                url = url.trim(),
+                headers = parseKeyValueLines(headers, ':'),
+                // [T-android-mcp-oauth] Persist the non-secret OAuth config.
+                oauth = currentOAuthConfig(),
+                createdAt = editServer?.createdAt ?: System.currentTimeMillis(),
+            )
+        } else {
+            if (command.isBlank()) {
+                errorText = context.getString(R.string.mcp_form_error_no_transport); return null
+            }
+            MCPRepository.MCPServerConfig(
+                id = name.trim(),
+                note = note.trim().ifBlank { null },
+                enabled = editServer?.enabled ?: true,
+                command = command.trim(),
+                args = args.trim().split(Regex("\\s+")).filter { it.isNotEmpty() },
+                env = parseKeyValueLines(env, '='),
+                startupTimeoutSeconds = startupTimeout.trim().toIntOrNull(),
+                createdAt = editServer?.createdAt ?: System.currentTimeMillis(),
+            )
+        }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // [RC-1114 U-16] TWO segments, not three. The old HTTP / SSE / STDIO
+        // picker offered a choice the storage layer cannot represent: MCPServer
+        // has only `url` and `command`, `isStdio = !command.isNullOrBlank()`,
+        // and both URL branches built byte-identical entries — so "SSE" was a
+        // label that evaporated on save and the edit form always came back on
+        // HTTP. Persisting a `transport` field would not fix that either: the
+        // guest-side `minis-mcp-cli` negotiates the protocol after connecting
+        // and never reads one. Offering one combined entry is the honest shape
+        // — the app cannot choose, so it does not pretend to.
         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
             SegmentedButton(
-                selected = transport == 0,
+                selected = transport != 2,
                 onClick = { transport = 0; errorText = null },
-                shape = SegmentedButtonDefaults.itemShape(0, 3),
-            ) { Text(stringResource(R.string.mcp_transport_http)) }
-            SegmentedButton(
-                selected = transport == 1,
-                onClick = { transport = 1; errorText = null },
-                shape = SegmentedButtonDefaults.itemShape(1, 3),
-            ) { Text(stringResource(R.string.mcp_transport_sse)) }
+                shape = SegmentedButtonDefaults.itemShape(0, 2),
+            ) { Text(stringResource(R.string.mcp_transport_url)) }
             SegmentedButton(
                 selected = transport == 2,
                 onClick = { transport = 2; errorText = null },
-                shape = SegmentedButtonDefaults.itemShape(2, 3),
+                shape = SegmentedButtonDefaults.itemShape(1, 2),
             ) { Text(stringResource(R.string.mcp_transport_stdio)) }
         }
 
@@ -746,11 +796,53 @@ private fun MCPFormTab(
                                         when (result) {
                                             is com.rikkaminis.app.mcp.oauth.MCPOAuthController.Result.Success -> {
                                                 oauthAuthorized = true
-                                                android.widget.Toast.makeText(
-                                                    context,
-                                                    context.getString(R.string.mcp_form_oauth_authorized),
-                                                    android.widget.Toast.LENGTH_SHORT,
-                                                ).show()
+                                                // [RC-1114 U-15] Persist the server
+                                                // now, not only when Save is pressed.
+                                                // The user already paid the full
+                                                // cost of this operation — an
+                                                // external browser round trip with
+                                                // a live consent screen — so
+                                                // requiring a THIRD confirmation
+                                                // (Save) is the same "two steps
+                                                // done, the third never mentioned"
+                                                // shape as SoulSettingsScreen's
+                                                // reset. Without this, closing the
+                                                // sheet after seeing "Authorized"
+                                                // dropped the server from the list.
+                                                //
+                                                // The write itself must not run on
+                                                // Main: add/update serialize and
+                                                // hit servers.json + the OAuth
+                                                // reconcile (bridge file + chmod).
+                                                // `buildServerFromForm` returns null
+                                                // when name/url is incomplete — in
+                                                // that case say so instead of
+                                                // silently dropping the result.
+                                                val pending = buildServerFromForm()
+                                                if (pending == null) {
+                                                    errorText = context.getString(
+                                                        R.string.mcp_form_oauth_saved_incomplete,
+                                                    )
+                                                } else {
+                                                    val saved = withContext(Dispatchers.IO) {
+                                                        if (isEdit) mcpRepository.update(pending)
+                                                        else mcpRepository.add(pending)
+                                                    }
+                                                    if (saved) {
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            context.getString(R.string.mcp_form_oauth_saved),
+                                                            android.widget.Toast.LENGTH_SHORT,
+                                                        ).show()
+                                                    } else {
+                                                        // update() refuses when the
+                                                        // entry disappeared while
+                                                        // the browser was open.
+                                                        errorText = context.getString(
+                                                            R.string.mcp_form_oauth_saved_failed,
+                                                        )
+                                                    }
+                                                }
                                             }
                                             is com.rikkaminis.app.mcp.oauth.MCPOAuthController.Result.Cancelled -> {}
                                             is com.rikkaminis.app.mcp.oauth.MCPOAuthController.Result.Failed -> {
@@ -855,46 +947,6 @@ private fun MCPFormTab(
 
         if (errorText != null) {
             Text(errorText!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        }
-
-        // [T-mcp-server-export-android] Build a MCPServerConfig from the CURRENT
-        // form fields (so Copy/Share export reflects unsaved edits, same
-        // construction Save uses). Returns null + sets errorText when invalid.
-        // HTTP (0) and SSE (1) both persist as a url-only entry; STDIO (2)
-        // persists command/args/env. createdAt preserved on edit.
-        fun buildServerFromForm(): MCPRepository.MCPServerConfig? {
-            if (name.isBlank()) {
-                errorText = context.getString(R.string.mcp_form_error_no_name); return null
-            }
-            return if (isUrlTransport) {
-                if (url.isBlank()) {
-                    errorText = context.getString(R.string.mcp_form_error_no_transport); return null
-                }
-                MCPRepository.MCPServerConfig(
-                    id = name.trim(),
-                    note = note.trim().ifBlank { null },
-                    enabled = editServer?.enabled ?: true,
-                    url = url.trim(),
-                    headers = parseKeyValueLines(headers, ':'),
-                    // [T-android-mcp-oauth] Persist the non-secret OAuth config.
-                    oauth = currentOAuthConfig(),
-                    createdAt = editServer?.createdAt ?: System.currentTimeMillis(),
-                )
-            } else {
-                if (command.isBlank()) {
-                    errorText = context.getString(R.string.mcp_form_error_no_transport); return null
-                }
-                MCPRepository.MCPServerConfig(
-                    id = name.trim(),
-                    note = note.trim().ifBlank { null },
-                    enabled = editServer?.enabled ?: true,
-                    command = command.trim(),
-                    args = args.trim().split(Regex("\\s+")).filter { it.isNotEmpty() },
-                    env = parseKeyValueLines(env, '='),
-                    startupTimeoutSeconds = startupTimeout.trim().toIntOrNull(),
-                    createdAt = editServer?.createdAt ?: System.currentTimeMillis(),
-                )
-            }
         }
 
         // [T-mcp-server-export-android] Export the current config as standard

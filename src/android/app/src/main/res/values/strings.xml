@@ -113,6 +113,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">Form</string>
     <string name="mcp_tab_import">Import JSON</string>
     <string name="mcp_form_name">Name</string>
@@ -150,6 +151,9 @@
     <!-- [T-android-mcp-oauth] Static OAuth section -->
     <string name="mcp_form_oauth_section">OAuth (optional)</string>
     <string name="mcp_form_oauth_authorized">Authorized</string>
+    <string name="mcp_form_oauth_saved_failed">Authorized, but the server could not be saved — it may have been deleted. Close the sheet and add it again.</string>
+    <string name="mcp_form_oauth_saved_incomplete">Authorized. Name and URL are incomplete, so the server was not saved — fill them in and press Save.</string>
+    <string name="mcp_form_oauth_saved">Authorized and saved</string>
     <string name="mcp_form_oauth_client_id">Client ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth client ID</string>
     <string name="mcp_form_oauth_client_secret">Client Secret</string>

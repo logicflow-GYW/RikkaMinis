@@ -909,6 +909,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">양식</string>
     <string name="mcp_tab_import">JSON 가져오기</string>
     <string name="mcp_form_name">이름</string>
@@ -934,6 +935,9 @@
     <string name="mcp_form_save">저장</string>
     <string name="mcp_form_oauth_section">OAuth (선택)</string>
     <string name="mcp_form_oauth_authorized">인증됨</string>
+    <string name="mcp_form_oauth_saved_failed">인증되었지만 서버를 저장하지 못했습니다. 삭제되었을 수 있습니다. 시트를 닫고 다시 추가하세요.</string>
+    <string name="mcp_form_oauth_saved_incomplete">인증되었지만 이름 또는 URL이 비어 있어 저장되지 않았습니다. 입력 후 저장을 누르세요.</string>
+    <string name="mcp_form_oauth_saved">인증하고 저장했습니다</string>
     <string name="mcp_form_oauth_client_id">클라이언트 ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth 클라이언트 ID</string>
     <string name="mcp_form_oauth_client_secret">클라이언트 시크릿</string>
