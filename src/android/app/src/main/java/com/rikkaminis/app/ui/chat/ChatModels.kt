@@ -86,6 +86,17 @@ data class ChatMessage(
     // ChatMessage.sourceSortOrder, which serves the same UI↔raw mapping
     // role (AIChatViewModel.swift:3411, 3421).
     val sourceDbIds: List<String> = emptyList(),
+    // [fix/fold-paste-split-1114] Where "what the user typed" ends and "what
+    // they pasted" begins in [content]; null when the message carries no paste
+    // part (or predates this field). The bubble renders the prompt in full and
+    // folds only the paste — before this, folding the whole body swallowed the
+    // user's own instruction into the "content too large" card.
+    //
+    // Derived at read time from the persisted parts (`paste:true` on the
+    // second text part), so it needs no column of its own: `MessageEntity`
+    // has no per-message extras column and a room migration for a
+    // presentation offset would be the wrong trade.
+    val pasteStartIndex: Int? = null,
 ) {
     /**
      * [T-bridge-message-ui-leak-android] True when this UI message is the

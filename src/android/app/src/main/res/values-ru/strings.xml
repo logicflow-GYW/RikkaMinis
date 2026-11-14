@@ -998,6 +998,7 @@
     <string name="composer_swipe_release_to_send">Отпустите, чтобы отправить</string>
     <string name="composer_swipe_release_to_queue">Отпустите, чтобы поставить в очередь</string>
     <string name="chat_message_large_collapsed_title">Большое содержимое (%1$s)</string>
+    <string name="chat_message_large_collapse">Свернуть</string>
     <string name="chat_message_large_expand">Нажмите, чтобы развернуть</string>
     <string name="chat_message_large_export">Экспортировать в файл</string>
     <string name="chat_message_large_export_ok">Экспортировано</string>

@@ -1487,6 +1487,7 @@
     <string name="image_budget_total_exceeded">이미지 총 크기가 25MB를 초과하여 이후 이미지는 건너뜁니다</string>
     <string name="image_budget_request_elided">25MB 제한에 맞추기 위해 이전 이미지 %1$d개를 요청에서 생략했습니다</string>
     <string name="chat_message_large_collapsed_title">대용량 콘텐츠 (%1$s)</string>
+    <string name="chat_message_large_collapse">접기</string>
     <string name="chat_message_large_expand">탭하여 펼치기</string>
     <string name="chat_message_large_export">파일로 내보내기</string>
     <string name="chat_message_large_export_ok">내보냈습니다</string>

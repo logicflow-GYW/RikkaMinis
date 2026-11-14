@@ -11,7 +11,17 @@ import org.json.JSONArray
  * (UI rendering) and [ChatViewModel.buildLlmMessages] (LLM history).
  */
 sealed interface ParsedPart {
-    data class Text(val value: String) : ParsedPart
+    /**
+     * [fix/fold-paste-split-1114] [pasteStart] is the extra `pasteStart` key
+     * that `buildUserPartsJson` writes onto the user row's first text part: the
+     * offset in [value] where the pasted block begins. Null for every row
+     * written before this change and for every assistant text part.
+     *
+     * It is carried here (not in a separate part) so every existing reader of
+     * `ParsedPart.Text` keeps working unchanged — the LLM history builder, the
+     * debug RPC and the backup exporter all read [value] and ignore the offset.
+     */
+    data class Text(val value: String, val pasteStart: Int? = null) : ParsedPart
     data class ToolUse(
         val id: String,
         val name: String,
@@ -62,7 +72,17 @@ fun tryParsePartsJson(partsJson: String): List<ParsedPart>? {
         for (i in 0 until array.length()) {
             val obj = array.getJSONObject(i)
             val part = when (val type = obj.optString("type")) {
-                "text" -> ParsedPart.Text(value = obj.optString("value", ""))
+                "text" -> ParsedPart.Text(
+                    value = obj.optString("value", ""),
+                    // [fix/fold-paste-split-1114] Absent (legacy row) or
+                    // out-of-range → null, which the renderer treats as "one
+                    // body, fold it whole" (the pre-fix behaviour).
+                    pasteStart = if (obj.has("pasteStart")) {
+                        obj.optInt("pasteStart", 0).takeIf { it > 0 }
+                    } else {
+                        null
+                    },
+                )
                 "toolUse" -> {
                     val v = obj.getJSONObject("value")
                     ParsedPart.ToolUse(

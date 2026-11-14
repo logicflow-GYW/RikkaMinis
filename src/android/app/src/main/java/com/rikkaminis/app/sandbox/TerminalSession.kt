@@ -45,6 +45,18 @@ class TerminalSession(private val context: Context) {
         const val DEFAULT_ROWS = 24
 
         /**
+         * [fix/fold-paste-split-1114][F7] Upper bound on one clipboard write.
+         *
+         * 100 000 chars (≈200 KB UTF-8 for CJK, ≈100 KB for ASCII) sits an order
+         * of magnitude under the ~1 MB Binder transaction ceiling while still
+         * covering any human-sized copy — a full screen of terminal output is
+         * ~4 KB, a 200-line log excerpt ~20 KB. The bound exists so "select all"
+         * on a huge build log degrades to a truncated copy instead of a
+         * `TransactionTooLargeException` swallowed into a silent no-op.
+         */
+        private const val CLIPBOARD_MAX_CHARS = 100_000
+
+        /**
          * [meta-audit-1028 E3 / F-13] How often a deferred env broadcast
          * re-checks whether the shell is back at an idle prompt. One /proc
          * children read per second is negligible next to a terminal running.
@@ -792,10 +804,30 @@ class TerminalSession(private val context: Context) {
     }.getOrNull()
 
     private fun writeClipboardText(context: Context, text: String) {
+        // [fix/fold-paste-split-1114][F7] Bound the payload before it crosses a
+        // Binder transaction.
+        //
+        // Termux's selection Copy hands us whatever was selected — "select all"
+        // on a long build log is a few hundred KB, and the clipboard is written
+        // through a Binder transaction whose buffer is ~1 MB per process. Over
+        // that, `setPrimaryClip` throws, and the `runCatching` below would turn
+        // it into the same silent no-op this whole fix set exists to remove: the
+        // menu item is enabled (Termux asked `hasPrimaryClip`), the tap looks
+        // accepted, and the clipboard keeps its previous contents.
+        //
+        // Truncating is the lesser evil and it is visible: the write succeeds,
+        // the copy is usable for the normal case (a few lines), and the log line
+        // records both lengths so a truncated copy is diagnosable instead of
+        // mysterious.
+        val capped = if (text.length > CLIPBOARD_MAX_CHARS) text.take(CLIPBOARD_MAX_CHARS) else text
         runCatching {
             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                 ?: return@runCatching
-            cm.setPrimaryClip(ClipData.newPlainText("terminal", text))
+            cm.setPrimaryClip(ClipData.newPlainText("terminal", capped))
+        }.onSuccess {
+            if (capped.length != text.length) {
+                Log.w(TAG, "clipboard copy truncated: ${text.length} → ${capped.length} chars")
+            }
         }.onFailure { Log.w(TAG, "clipboard write failed: ${it.message}") }
     }
 

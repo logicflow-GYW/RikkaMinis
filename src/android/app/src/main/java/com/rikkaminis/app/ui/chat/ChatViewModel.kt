@@ -77,6 +77,20 @@ import java.io.File
 // [T-android-split-chat] StreamingDelta / ChatMessage / QueuedPrompt /
 // ToolBlockStatus / SlashCommand / AssistantBlock moved verbatim to ChatModels.kt.
 
+/**
+ * [fix/fold-paste-split-1114] Result of expanding a composer's folded pastes:
+ * the full text for the model, plus where the pasted block starts in it.
+ *
+ * [pasteStart] uses the SAME coordinates as [text] (UTF-16 code units) and is
+ * null whenever the boundary is not well defined — no paste, paste only, or a
+ * legacy inline marker. Null means "fold the whole body", i.e. the pre-fix
+ * rendering, so a missing offset degrades instead of hiding content.
+ */
+internal data class ExpandedPaste(
+    val text: String,
+    val pasteStart: Int?,
+)
+
 class ChatViewModel(
     internal val sessionId: String,
     internal val chatRepository: ChatRepository,
@@ -1079,9 +1093,26 @@ class ChatViewModel(
      * alone: they are harmless, and their ids only come back once no literal
      * on screen references them ([pasteMarkerIdsIn] keeps that reservation).
      */
-    internal fun expandPastedText(raw: String): String {
+    internal fun expandPastedText(raw: String): String = expandPastedTextWithSplit(raw).text
+
+    /**
+     * [fix/fold-paste-split-1114] The send-time expansion plus the offset where
+     * the pasted block starts.
+     *
+     * The offset is what lets the bubble render "what the user typed" in full
+     * and fold only the material — before this, the whole body collapsed into
+     * one card and the user's own 48-char instruction vanished inside it.
+     *
+     * `pasteStart` is null in three cases, all of which fold as ONE body (the
+     * pre-fix behaviour, i.e. graceful degradation rather than a lost half):
+     *   - no paste in the composer at all;
+     *   - the composer held ONLY the paste (nothing typed to keep outside);
+     *   - a legacy INLINE entry (`[Pasted#N]`) expanded, which places its block
+     *     at an arbitrary caret position — an offset there would be a guess.
+     */
+    internal fun expandPastedTextWithSplit(raw: String): ExpandedPaste {
         val buffer = _pastedTexts.value
-        if (buffer.isEmpty()) return raw
+        if (buffer.isEmpty()) return ExpandedPaste(raw, null)
         val (expanded, consumed) = if (raw.contains('#')) {
             expandPastePlaceholders(raw, buffer)
         } else {
@@ -1089,15 +1120,24 @@ class ChatViewModel(
         }
         // Detached blocks were pasted into an empty field: no literal exists for
         // them, so they ride after the typed body (see [appendUnlinkedPastes]).
-        val detachedIds = buffer.filter { !it.inlineMarker }.mapTo(mutableSetOf()) { it.id }
-        if (consumed.isEmpty() && detachedIds.isEmpty()) return raw
+        val detached = buffer.filter { !it.inlineMarker }
+        val detachedIds = detached.mapTo(mutableSetOf()) { it.id }
+        if (consumed.isEmpty() && detachedIds.isEmpty()) return ExpandedPaste(raw, null)
         val out = appendUnlinkedPastes(expanded, buffer)
         _pastedTexts.value = _pastedTexts.value.filterNot { it.id in consumed || it.id in detachedIds }
         AppLogger.info(
             TAG,
             "[Paste] expanded ${consumed.size} marker(s) + ${detachedIds.size} detached block(s) on send",
         )
-        return out
+        // Only the detached arm has a well-defined boundary: everything before
+        // the first appended block is the typed body.
+        val split = if (consumed.isEmpty() && expanded.isNotEmpty() && out.length > expanded.length) {
+            // appendUnlinkedPastes joins with "\n\n"; the block starts after it.
+            (expanded.length + 2).takeIf { it in 1 until out.length }
+        } else {
+            null
+        }
+        return ExpandedPaste(out, split)
     }
 
     /**
@@ -3795,8 +3835,33 @@ class ChatViewModel(
             AppLogger.info(TAG_STREAM, "✏️ editMessage restaged ${restaged.size} attachment(s)")
         }
         _editingMessageId.value = messageId
-        AppLogger.info(TAG_STREAM, "✏️ editMessage id=${messageId.take(8)} text=${text.length}ch")
-        return text
+        // [fix/fold-paste-split-1114] Re-fold the paste half before it reaches
+        // the composer.
+        //
+        // Editing a message that carried a 15K paste used to dump all 15K into
+        // the input field (the edit prefill bypasses `foldLongPasteIfNeeded`,
+        // which only runs on user edits): the caret fell off the bottom, the
+        // field scrolled for pages, and the typed instruction — the part being
+        // edited — was pushed out of sight. The paste is material, not something
+        // anyone edits, so it goes back into the chip row exactly as a fresh
+        // paste would, and the composer shows the prompt.
+        //
+        // Only when the row HAS a paste boundary: a legacy row (or a body with
+        // no paste) keeps the old whole-text prefill, because guessing where to
+        // cut is how a user loses text they were trying to edit.
+        var prefill = text
+        var refolded = false
+        msg.pasteStartIndex?.let { at ->
+            val halves = splitMessageBody(text, at)
+            val paste = halves.paste
+            if (paste != null && isLongPastedText(paste)) {
+                stashPastedText(paste, inlineMarker = false)
+                prefill = halves.prompt
+                refolded = true
+            }
+        }
+        AppLogger.info(TAG_STREAM, "✏️ editMessage id=${messageId.take(8)} text=${prefill.length}ch (paste refolded=$refolded)")
+        return prefill
     }
 
     /**
@@ -3917,7 +3982,7 @@ class ChatViewModel(
     // AgentLoopHost.kt (the engine returns/consumes it); the VM keeps its own
     // alias-free references. The old private nested data class is gone.
 
-    fun sendMessage(rawText: String) {
+    fun sendMessage(rawText: String, pasteStartIndex: Int? = null) {
         // [feat/paste-fold-marker] Folded pastes come back BEFORE anything else
         // reads the text: this function is the single funnel for the UI (send
         // button, Enter/swipe), the debug RPC and the headless runner, so
@@ -3928,6 +3993,30 @@ class ChatViewModel(
         // of a marker nobody minted; the composer-side guard is what stops a
         // restored draft from shipping one silently.
         val text = Utf16Sanitizer.sanitize(expandPastedText(rawText))
+        // [fix/fold-paste-split-1114] Where the pasted block starts, in `text`
+        // coordinates. The composer computes the split while expanding (that is
+        // the last moment the block and the typed body are still separable);
+        // `sendMessage` re-derives the index here so the persisted offset can
+        // never disagree with the persisted text.
+        //
+        // Verified by content, not by arithmetic: `Utf16Sanitizer.sanitize` can
+        // drop a lone surrogate, which would shift a raw offset by one and cut
+        // the prompt in the wrong place. Sanitizing the paste half and requiring
+        // the result to be a SUFFIX of `text` makes a mis-computed offset fall
+        // back to "one body" (the pre-fix behaviour) instead of corrupting the
+        // split.
+        val pasteSplitInText: Int? = run {
+            val rawSplit = pasteStartIndex ?: return@run null
+            val halves = splitMessageBody(rawText, rawSplit)
+            val paste = halves.paste ?: return@run null
+            val sanitizedPaste = Utf16Sanitizer.sanitize(paste)
+            if (sanitizedPaste.isEmpty() || !text.endsWith(sanitizedPaste)) return@run null
+            val at = text.length - sanitizedPaste.length
+            // Require at least the joiner ("\n\n") plus one prompt char, so the
+            // bubble never renders an empty prompt with everything folded.
+            if (at < 2) return@run null
+            at
+        }
         // [backlog #1 / fix/utf16-lone-surrogate] User input is one of the two
         // text boundaries into the app (the other is the provider stream): a
         // clipboard paste can carry an unpaired UTF-16 surrogate, which later
@@ -3943,6 +4032,12 @@ class ChatViewModel(
             "session=${SessionIdAliases.resolve(sessionId)} chars=${text.length} attachments=${_attachments.value.size} streaming=${_isStreaming.value}",
         )
         val trimmed = text.trim()
+        // [fix/fold-paste-split-1114] Same offset, rebased onto `trimmed` —
+        // `trim()` can drop leading whitespace, which would move the boundary.
+        val pasteSplitInTrimmed: Int? = pasteSplitInText?.let { at ->
+            val lead = text.length - text.trimStart().length
+            (at - lead).takeIf { it in 1 until trimmed.length }
+        }
         // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
         if (_isStreaming.value) {
             // [FIX-R4-P F-13] An edit is a REWRITE of the transcript, not a new
@@ -4172,7 +4267,17 @@ class ChatViewModel(
             // Save user message — text + persisted mediaRef parts so images survive
             // a session reload (T128). Non-image attachments still only contribute
             // their name (rendered as a file tile) and are not persisted.
-            val userPartsJson = buildUserPartsJson(trimmed, prepared.mediaRefPartsJson, prepared.attachedFilesXml)
+            val userPartsJson = buildUserPartsJson(
+                trimmed,
+                prepared.mediaRefPartsJson,
+                prepared.attachedFilesXml,
+                // [fix/fold-paste-split-1114] Persist the prompt/paste boundary
+                // so a reload folds only the pasted material. Null (no paste, or
+                // a legacy inline `[Pasted#N]` expansion) omits the key
+                // entirely — the column shape stays byte-identical to what the
+                // pre-fix build wrote.
+                pasteStartIndex = pasteSplitInTrimmed,
+            )
             val persistedUser = chatRepository.appendMessage(activeSessionId, "user", userPartsJson)
 
             // [feat/tool-loop-guard] A new user turn is a new chance: the session's loop ladders
@@ -4189,6 +4294,10 @@ class ChatViewModel(
                 imageUris = prepared.imageUris,
                 attachmentNames = prepared.attachmentNames,
                 attachmentUris = prepared.nonImageUris,
+                // [fix/fold-paste-split-1114] The live bubble must fold the same
+                // way a reloaded one does — otherwise the just-sent message shows
+                // the whole paste and only a session reload folds it.
+                pasteStartIndex = pasteSplitInTrimmed,
             )
             _messages.value = _messages.value + userMsg
             val imageParts = prepared.imageParts

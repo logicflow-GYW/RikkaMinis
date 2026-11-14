@@ -48,10 +48,29 @@ fun buildUserPartsJson(
     text: String,
     mediaRefPartsJson: List<String>,
     attachedFilesXml: String? = null,
+    pasteStartIndex: Int? = null,
 ): String {
     val parts = mutableListOf<String>()
     if (text.isNotEmpty() || mediaRefPartsJson.isEmpty()) {
-        parts.add("""{"type":"text","value":${escapeJson(text)}}""")
+        // [fix/fold-paste-split-1114] `pasteStart` rides as an EXTRA KEY on the
+        // existing text part, not as a new part type.
+        //
+        // Why not a new type: the LLM-side builder (ChatStreamToolHelpers) only
+        // reads `part.value`, so an extra key is invisible to the wire while a
+        // new part type would need a consumer in every reader (LLM history,
+        // debug RPC, backup, fork) — and `ContentPartSerializer` would silently
+        // degrade an unknown type to `Text` and then fail to parse a numeric
+        // `value`.
+        //
+        // Why not a column: it is a presentation offset, and it is derivable —
+        // see ChatModels.ChatMessage.pasteStartIndex. Legacy rows simply lack
+        // the key and fold as one body, i.e. exactly the old behaviour.
+        val marker = if (pasteStartIndex != null && pasteStartIndex in 1 until text.length) {
+            ""","pasteStart":$pasteStartIndex"""
+        } else {
+            ""
+        }
+        parts.add("""{"type":"text","value":${escapeJson(text)}$marker}""")
     }
     parts.addAll(mediaRefPartsJson)
     attachedFilesXml?.let { parts.add("""{"type":"text","value":${escapeJson(it)}}""") }

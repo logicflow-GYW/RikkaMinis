@@ -1487,6 +1487,7 @@
     <string name="image_budget_total_exceeded">画像サイズの合計が25MBを超えるため、以降の画像は削除されました</string>
     <string name="image_budget_request_elided">25MBの制限に収めるため、古い%1$d枚の画像をリクエストから省略しました</string>
     <string name="chat_message_large_collapsed_title">大きなコンテンツ（%1$s）</string>
+    <string name="chat_message_large_collapse">折りたたむ</string>
     <string name="chat_message_large_expand">タップして展開</string>
     <string name="chat_message_large_export">ファイルに書き出す</string>
     <string name="chat_message_large_export_ok">書き出しました</string>

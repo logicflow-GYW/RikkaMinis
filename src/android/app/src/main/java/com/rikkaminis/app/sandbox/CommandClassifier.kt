@@ -87,6 +87,43 @@ private val HEAVY_VERBS = setOf(
 )
 
 /**
+ * [fix/fold-paste-split-1114][F5] Versioned interpreter/runtime names:
+ * `python3.13`, `python3.9`, `python2.7`, `node20`, `ruby3.2`.
+ *
+ * The explicit list above can only ever hold the versions that existed when it
+ * was written — `python3.11` / `python3.12` were added by hand, and the very
+ * next minor (`python3.13`, a real binary on this device) fell through to
+ * LIGHT. That is a REGRESSION, not a gap: the old prefix check classified every
+ * `python3*` as HEAVY, so the statement-aware rewrite silently downgraded the
+ * newer interpreters. Measured against the pre-fix classifier over the device
+ * log: `python3.13`/`python3.9`/`python3.10`/`python3.14` all flipped
+ * HEAVY→LIGHT.
+ *
+ * Matched on the verb AFTER the last `/`, so `./python3.13` counts. Anchored at
+ * both ends: `python3.cfg` is not an interpreter.
+ */
+private val VERSIONED_HEAVY_VERB = Regex(
+    """(?:python|python2|python3|node|nodejs|ruby|perl|php|java|kotlin|dotnet|deno|bun)(?:\d+(?:\.\d+)*)?""",
+)
+
+/**
+ * True when [verb] is a heavy interpreter/runtime, including versioned names.
+ *
+ * Split out so `python3.13` (regex) and `python3` (set) both work, and so a
+ * plain `python` keeps matching the set.
+ */
+private fun isHeavyVerb(verb: String): Boolean {
+    if (verb in HEAVY_VERBS) return true
+    // Only pay for the regex when the verb looks like a runtime at all — a bare
+    // `ls`/`git` never reaches it.
+    return (verb.startsWith("python") || verb.startsWith("node") ||
+        verb.startsWith("ruby") || verb.startsWith("perl") || verb.startsWith("php") ||
+        verb.startsWith("java") || verb.startsWith("kotlin") || verb.startsWith("dotnet") ||
+        verb.startsWith("deno") || verb.startsWith("bun")) &&
+        VERSIONED_HEAVY_VERB.matches(verb)
+}
+
+/**
  * Leading shell keywords that wrap a real command without changing its cost:
  * `for f in a b; do python3 …; done` splits into `do python3 …` (the `;` is a
  * separator), `time python3 x`, `nohup python3 x`, `nice -n 10 python3 x`.
@@ -99,6 +136,48 @@ private val PREFIX_KEYWORDS = setOf(
 
 /** Wrappers that take a numeric/-n argument before the real verb. */
 private val NICE_LIKE = setOf("nice", "ionice", "chrt")
+
+/**
+ * [fix/fold-paste-split-1114][F6] Wrappers whose own flags/values sit BETWEEN
+ * them and the real verb, where `nice` only handles the single numeric form.
+ *
+ * `sudo -u x make`, `sudo -E python3 x`, `env -i FOO=bar python3 x`,
+ * `time -p python3 x` all reached the classifier with `-u`/`-E`/`-i`/`-p` as the
+ * verb, matched nothing, and came out LIGHT — while the KDoc of
+ * [stripLeadingNoise] explicitly claimed those wrappers were peeled. The old
+ * prefix classifier got them right by accident (it saw `sudo` and stayed
+ * LIGHT… and also saw nothing heavy, so this is strictly a fix).
+ *
+ * `sudo`/`env`/`time` additionally accept `VAR=value` and bare words as their
+ * own arguments (`sudo -u x`, `env FOO=bar`, `time python3`), so the peeling
+ * rule is "drop flags and their values, then drop any `K=V` word" — bounded by
+ * the same guard as everything else.
+ */
+private val OPTION_WRAPPERS = setOf("sudo", "env", "time", "nohup", "exec", "command")
+
+/**
+ * Wrapper flags that consume the FOLLOWING token, **per wrapper**.
+ *
+ * A single global table is wrong because the same letter means different things
+ * to different wrappers: `-p` takes sudo's prompt but is time's POSIX-format
+ * switch, and treating time's `-p` as value-taking would swallow `python3` and
+ * classify `time -p python3 x` as LIGHT. Wrapper-specific tables make the
+ * ambiguity impossible instead of picking a side.
+ *
+ * Flags absent here are treated as bare (`-E`, `-i`) and dropped alone.
+ */
+private val WRAPPER_VALUE_FLAGS: Map<String, Set<String>> = mapOf(
+    "sudo" to setOf(
+        "-u", "--user", "-g", "--group", "-p", "--prompt", "-C", "--close-from",
+        "-h", "--host", "-r", "--role", "-t", "--type", "-T", "--command-timeout",
+        "-D", "--chdir", "-U", "--other-user", "-R", "--chroot",
+    ),
+    "env" to setOf("-u", "--unset", "-C", "--chdir", "-S", "--split-string"),
+    "time" to setOf("-f", "--format", "-o", "--output"),
+    "nohup" to emptySet(),
+    "exec" to setOf("-a"),
+    "command" to emptySet(),
+)
 
 /** `git` global flags that consume the FOLLOWING token as their value. */
 private val GIT_VALUE_FLAGS = setOf(
@@ -150,7 +229,7 @@ private fun classifyStatement(rawStatement: String): CommandClass {
 
     if (verb == "git") return classifyGit(s.substringAfter(' ', "").trimStart())
 
-    return if (verb in HEAVY_VERBS) CommandClass.HEAVY else CommandClass.LIGHT
+    return if (isHeavyVerb(verb)) CommandClass.HEAVY else CommandClass.LIGHT
 }
 
 /**
@@ -230,6 +309,39 @@ private fun stripLeadingNoise(input: String): String {
                     s = s.substringAfter(' ', "").trimStart()
                 }
             }
+            continue
+        }
+        // [fix/fold-paste-split-1114][F6] `sudo -u x make` / `env -i K=V python3`
+        // / `time -p python3`: consume the wrapper's flags, their values, and any
+        // `K=V` words, then classify whatever verb survives.
+        if (verb in OPTION_WRAPPERS) {
+            s = s.substringAfter(' ', "").trimStart()
+            val valueFlags = WRAPPER_VALUE_FLAGS[verb].orEmpty()
+            var dropGuard = 0
+            while (s.isNotEmpty() && dropGuard++ < 24) {
+                val head = s.substringBefore(' ')
+                when {
+                    head.startsWith("-") -> {
+                        val afterFlag = s.substringAfter(' ', "").trimStart()
+                        s = if (head in valueFlags) {
+                            // Drop the flag AND the token after it.
+                            afterFlag.substringAfter(' ', "").trimStart()
+                        } else {
+                            afterFlag
+                        }
+                    }
+                    // `env FOO=bar python3` — the assignment is the wrapper's
+                    // own argument, not part of the real command.
+                    LEADING_ASSIGNMENT.find("$head ") != null -> {
+                        s = s.substringAfter(' ', "").trimStart()
+                    }
+                    else -> break // not a wrapper argument: `s` starts at the verb
+                }
+            }
+            // Always `continue`, even when no flag/assignment was present: `s`
+            // has already advanced past the wrapper word, and falling through to
+            // the PREFIX_KEYWORDS branch below would strip it a SECOND time
+            // (`time python3 x` → `python3 x` → `x`, classified LIGHT).
             continue
         }
         if (verb in PREFIX_KEYWORDS) {

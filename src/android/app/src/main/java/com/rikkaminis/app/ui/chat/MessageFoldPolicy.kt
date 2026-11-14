@@ -61,3 +61,49 @@ internal fun shouldCollapseMessage(
     isStreaming: Boolean,
     thresholdChars: Int,
 ): Boolean = !isStreaming && contentLength > thresholdChars
+
+/**
+ * [fix/fold-paste-split-1114] How a USER body splits into "what I typed" and
+ * "what I pasted".
+ *
+ * The fold defect this fixes: the bubble folded the WHOLE message, so a 48-char
+ * prompt plus a 14,929-char paste became one 12 KB card whose 600-char preview
+ * was 48 chars of the user's own instruction followed by paste. The user's
+ * words disappeared into a card labelled "content too large" — they could not
+ * see what they had asked.
+ *
+ * The split point is PERSISTED (`paste` flag on the parts_json text part), not
+ * re-derived: after `expandPastedText` flattens the block into one string there
+ * is no boundary left to find, and heuristics over blank lines / "looks like a
+ * log" would be guessing.
+ *
+ * Compatibility: rows written before this change carry no flag, so
+ * [pasteStartIndex] is null and the caller folds the whole body — exactly the
+ * previous behaviour. No migration, no field on `MessageEntity`.
+ */
+internal data class MessageBodySplit(
+    /** What the user typed. Always rendered in full — never folded. */
+    val prompt: String,
+    /** The pasted material, or null when this message has no paste part. */
+    val paste: String?,
+)
+
+/**
+ * Split [content] at [pasteStartIndex].
+ *
+ * Returns the whole body as the prompt and null paste when the index is
+ * missing/out of range — a damaged or absent index must degrade to "one body",
+ * never to a lost half. The separator produced at send time is `"\n\n"`
+ * (`appendUnlinkedPastes`), so the prompt is trimmed of the trailing newlines
+ * the join added.
+ */
+internal fun splitMessageBody(content: String, pasteStartIndex: Int?): MessageBodySplit {
+    if (pasteStartIndex == null) return MessageBodySplit(content, null)
+    if (pasteStartIndex <= 0 || pasteStartIndex >= content.length) {
+        return MessageBodySplit(content, null)
+    }
+    val prompt = content.substring(0, pasteStartIndex).trimEnd('\n')
+    val paste = content.substring(pasteStartIndex)
+    if (paste.isEmpty()) return MessageBodySplit(content, null)
+    return MessageBodySplit(prompt, paste)
+}

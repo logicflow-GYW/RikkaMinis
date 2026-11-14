@@ -1430,6 +1430,7 @@
     <string name="import_zip_no_supported">壓縮包中沒有可匯入的檔案</string>
     <string name="import_zip_summary">已匯入 %2$d 個檔案中的 %1$d 個</string>
     <string name="chat_message_large_collapsed_title">內容較大（%1$s）</string>
+    <string name="chat_message_large_collapse">收合</string>
     <string name="chat_message_large_expand">點選展開</string>
     <string name="chat_message_large_export">匯出為檔案</string>
     <string name="chat_message_large_export_ok">已匯出</string>

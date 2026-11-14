@@ -212,34 +212,79 @@ internal fun UserMessageBubble(
                             val bubbleModifier = if (isQueued && onWithdraw != null) {
                                 Modifier.weight(1f, fill = false)
                             } else Modifier
-                            // T-android-gc-storm-issue17: long user messages (rare,
+                            // [T-android-gc-storm-issue17] long user messages (rare,
                             // but legacy sessions can carry pasted log dumps) blow
                             // up text layout the same way large assistant content
                             // does. User bubbles never stream so isStreaming=false.
-                            LargeContentGuard(
-                                content = message.content,
-                                isStreaming = false,
-                                stableKey = "user:${message.id}",
-                                // [fix/user-msg-fold-1114] Composers fold a
-                                // paste into a chip, but the chip dies on send
-                                // (sendMessage expands the body before it is
-                                // persisted), so the bubble used to render the
-                                // whole 15K paste. Fold USER bodies early: the
-                                // 32K default is a markdown GC-storm floor, not
-                                // a reading affordance.
-                                collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS,
-                                previewChars = USER_MESSAGE_PREVIEW_CHARS,
-                            ) {
-                                Text(
-                                    text = message.content,
-                                    color = textColor,
-                                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.5.sp * LocalMarkdownFontScale.current),
-                                    modifier = bubbleModifier
-                                        .background(bubbleBg, shape)
-                                        .clip(shape)
-                                        .then(dashedStroke)
-                                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                                )
+                            //
+                            // [fix/fold-paste-split-1114] Two segments, not one:
+                            // what the user TYPED renders in full (never folded —
+                            // a 40-char instruction must not hide behind a "content
+                            // too large" card), and only the pasted material folds.
+                            // `split.paste == null` (no paste, or a legacy row with
+                            // no `pasteStart`) keeps the old single-body behaviour,
+                            // folding the whole thing once it passes 4K.
+                            val split = splitMessageBody(message.content, message.pasteStartIndex)
+                            if (split.paste == null) {
+                                LargeContentGuard(
+                                    content = message.content,
+                                    isStreaming = false,
+                                    stableKey = "user:${message.id}",
+                                    collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS,
+                                    previewChars = USER_MESSAGE_PREVIEW_CHARS,
+                                ) {
+                                    Text(
+                                        text = message.content,
+                                        color = textColor,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.5.sp * LocalMarkdownFontScale.current),
+                                        modifier = bubbleModifier
+                                            .background(bubbleBg, shape)
+                                            .clip(shape)
+                                            .then(dashedStroke)
+                                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    )
+                                }
+                            } else {
+                                Column(
+                                    horizontalAlignment = Alignment.End,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    if (split.prompt.isNotBlank()) {
+                                        Text(
+                                            text = split.prompt,
+                                            color = textColor,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.5.sp * LocalMarkdownFontScale.current),
+                                            modifier = bubbleModifier
+                                                .background(bubbleBg, shape)
+                                                .clip(shape)
+                                                .then(dashedStroke)
+                                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                                        )
+                                    }
+                                    LargeContentGuard(
+                                        content = split.paste,
+                                        isStreaming = false,
+                                        // Separate key space ("paste:") so expand/
+                                        // collapse state is per-segment: folding the
+                                        // material must never fold the prompt, and
+                                        // expanding the material must not require
+                                        // expanding anything else.
+                                        stableKey = "paste:${message.id}",
+                                        collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS,
+                                        previewChars = USER_MESSAGE_PREVIEW_CHARS,
+                                    ) {
+                                        Text(
+                                            text = split.paste,
+                                            color = textColor,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.5.sp * LocalMarkdownFontScale.current),
+                                            modifier = Modifier
+                                                .background(bubbleBg, shape)
+                                                .clip(shape)
+                                                .then(dashedStroke)
+                                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                                        )
+                                    }
+                                }
                             }
                         }
                         } // end caption-only guard ([B-05 deep-audit-1037])

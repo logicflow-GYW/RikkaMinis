@@ -1383,6 +1383,7 @@
 
     <!-- T-android-gc-storm-issue17: render-side safe mode for large messages -->
     <string name="chat_message_large_collapsed_title">Large content (%1$s)</string>
+    <string name="chat_message_large_collapse">Collapse</string>
     <string name="chat_message_large_expand">Tap to expand</string>
     <string name="chat_message_large_export">Export to file</string>
     <string name="chat_message_large_export_ok">Exported</string>

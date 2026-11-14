@@ -1183,6 +1183,7 @@
 
     <!-- T-android-gc-storm-issue17: 渲染端大消息折叠 -->
     <string name="chat_message_large_collapsed_title">内容较大（%1$s）</string>
+    <string name="chat_message_large_collapse">收起</string>
     <string name="chat_message_large_expand">点击展开</string>
     <string name="chat_message_large_export">导出为文件</string>
     <string name="chat_message_large_export_ok">已导出</string>

@@ -226,7 +226,17 @@ object SandboxDefectRegistry {
         val tokens = phrase.split(' ').filter { it.isNotEmpty() }
         if (tokens.isEmpty()) return false
         if (tokens.size == 1) return hay.contains(tokens[0])
-        val pattern = tokens.joinToString("[^a-z0-9]+") { Regex.escape(it) }
+        // [fix/fold-paste-split-1114][F3] Both ends are bounded. Without the
+        // trailing guard `bad pack` matched `bad package` (measured: the device
+        // log holds 21 real `bad package` occurrences, an npm error that has
+        // nothing to do with git's `bad pack`). Same class: `git log` matched
+        // `git logger`, `merge base` matched `merge baseline`.
+        //
+        // `(?![a-z0-9])` and not `\b` on purpose: `\b` treats `_` as a word
+        // character, so `git_log` would still pass, while the registry's own
+        // S29 wording (`http=000 size=0`) relies on punctuation being a valid
+        // separator. "Not alphanumeric" is the actual rule.
+        val pattern = tokens.joinToString("[^a-z0-9]+") { Regex.escape(it) } + "(?![a-z0-9])"
         return Regex(pattern).containsMatchIn(hay)
     }
 
@@ -253,11 +263,57 @@ object SandboxDefectRegistry {
                 val tokens = tokensOf(alt)
                 if (tokens.size < 2) continue
                 if (hasSpecificToken(tokens)) continue
+                // [fix/fold-paste-split-1114][F4] A candidate phrase has to be
+                // something an ERROR MESSAGE would contain, and two shapes in
+                // the live registry are not:
+                //
+                //  - a COMMAND TEMPLATE (`grep -n X file`, `/etc/apk/world`).
+                //    Their short tokens are short precisely because they are
+                //    syntax/filler — `grep file` fires on `grep, file and…`,
+                //    `etc apk world` on any run of those three words.
+                //  - a placeholder-bearing snippet (`val s = "\0CODE\0"` →
+                //    `val 0code`, where `CODE` is a stand-in, not text).
+                //
+                // Detected structurally rather than by an allow-list: the
+                // phrase is dropped when the ORIGINAL seed contains a shell/path
+                // metacharacter or an ALL-CAPS placeholder token. The remaining
+                // 4 phrases (`bad pack`, `git log`, `git fsck`, `merge base`,
+                // `http 000 size`) are exactly the raw error wording the recall
+                // is supposed to key on.
+                if (looksLikeTemplate(alt)) continue
                 phrases += tokens.joinToString(" ")
             }
         }
         return phrases.distinct()
     }
+
+    /**
+     * [fix/fold-paste-split-1114][F4] True when [seed] is a command example or a
+     * placeholder rather than literal error wording.
+     *
+     * Three signals, each aimed at one shape present in the live registry, and
+     * all conservative in the same direction — a false NEGATIVE only costs one
+     * silent phrase, while a false POSITIVE fires recall on unrelated output:
+     *
+     *  - a `-x` flag (`grep -n X file`): the seed is quoting a command LINE, so
+     *    its short tokens are syntax and filler;
+     *  - a path separator (`/etc/apk/world`): a path template, and the three
+     *    words `etc`/`apk`/`world` are each generic on their own;
+     *  - an ALL-CAPS run (`CODE` in `"\0CODE\0"`): a stand-in, not text.
+     *
+     * `=` is deliberately NOT a signal: real log output is full of `k=v`, and
+     * S29's own seed is `http=000 size=0`, which must keep matching.
+     */
+    private fun looksLikeTemplate(seed: String): Boolean =
+        FLAG_RE.containsMatchIn(seed) ||
+            seed.contains('/') ||
+            PLACEHOLDER_RE.containsMatchIn(seed)
+
+    /** A command-line option: space (or line start) followed by `-x`. */
+    private val FLAG_RE = Regex("""(?:^|\s)-[A-Za-z]""")
+
+    /** ALL-CAPS placeholder run: `CODE`, `PATH`, `HASH`. */
+    private val PLACEHOLDER_RE = Regex("""[A-Z]{2,}""")
 
     /**
      * True when at least one token could not plausibly appear in unrelated

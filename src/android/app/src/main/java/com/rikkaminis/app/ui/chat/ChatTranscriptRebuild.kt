@@ -119,6 +119,9 @@ internal fun buildChatMessagesTranscript(
         val restoredImageUris = mutableListOf<Uri>()
         val restoredAttachmentNames = mutableListOf<String>()
         val restoredAttachmentUris = mutableListOf<Uri>()
+        // [fix/fold-paste-split-1114] Where the pasted block starts inside the
+        // display `text` accumulated below; null ⇒ fold the whole body.
+        var restoredPasteStart: Int? = null
 
         if (entity.role == "assistant" && !entity.reasoningContent.isNullOrEmpty()) {
             blocks.add(AssistantBlock(
@@ -150,6 +153,22 @@ internal fun buildChatMessagesTranscript(
                         // keep the raw text so the LLM still sees it.
                         val t = stripDisplayOnlyArtifacts(raw)
                         if (t.isEmpty()) continue
+                        // [fix/fold-paste-split-1114] Remember where the pasted
+                        // block starts in the ACCUMULATED display text. Checked
+                        // by content (`t` still starts with the raw prefix),
+                        // because `stripDisplayOnlyArtifacts` can delete text and
+                        // would otherwise shift the offset into the wrong place —
+                        // a shifted offset renders the user's own words as
+                        // "pasted material", which is the defect this field
+                        // exists to fix. On any doubt: null ⇒ fold the whole body
+                        // (pre-fix behaviour, nothing hidden that was not hidden
+                        // before).
+                        val pasteStart = part.pasteStart
+                        if (pasteStart != null && pasteStart in 1 until t.length &&
+                            t.startsWith(raw.take(pasteStart))
+                        ) {
+                            restoredPasteStart = text.length + pasteStart
+                        }
                         text += t
                         if (entity.role == "assistant") {
                             blocks.add(AssistantBlock(
@@ -234,6 +253,10 @@ internal fun buildChatMessagesTranscript(
             toolBlocks = blocks,
             sourceDbIds = listOf(entity.id),
             error = entity.errorInfo?.takeIf { it.isNotBlank() },
+            // [fix/fold-paste-split-1114] Null for assistant rows, for legacy
+            // user rows (no `pasteStart` key) and whenever the display text was
+            // rewritten enough that the offset cannot be trusted.
+            pasteStartIndex = restoredPasteStart.takeIf { entity.role == "user" },
         )
     }.let { messages ->
         // Merge consecutive assistant messages into one:
