@@ -1693,4 +1693,5 @@
     <string name="scheduled_enable_after_save">Включить после сохранения</string>
     <string name="scheduled_saved_disabled">Сохранено. Задача выключена — включите её переключателем в списке.</string>
     <string name="scheduled_saved_global_off">Сохранено. Общий переключатель запланированных задач выключен — без него задачи не запускаются.</string>
+    <string name="provider_detail_refresh_catalog_failed">Не удалось обновить: %1$s</string>
 </resources>

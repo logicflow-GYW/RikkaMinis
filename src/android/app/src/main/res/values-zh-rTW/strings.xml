@@ -1740,4 +1740,5 @@
     <string name="scheduled_enable_after_save">儲存後立即啟用</string>
     <string name="scheduled_saved_disabled">已儲存。任務處於關閉狀態，請在清單中開啟開關。</string>
     <string name="scheduled_saved_global_off">已儲存。定時任務的全域開關是關閉的，開啟後任務才會執行。</string>
+    <string name="provider_detail_refresh_catalog_failed">重新整理失敗：%1$s</string>
 </resources>

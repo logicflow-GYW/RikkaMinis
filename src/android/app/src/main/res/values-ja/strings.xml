@@ -1738,4 +1738,5 @@
     <string name="scheduled_enable_after_save">保存後に有効化</string>
     <string name="scheduled_saved_disabled">保存しました。タスクは無効です — 一覧のスイッチで有効にしてください。</string>
     <string name="scheduled_saved_global_off">保存しました。スケジュールタスクの全体スイッチがオフです — オンにしないと実行されません。</string>
+    <string name="provider_detail_refresh_catalog_failed">更新に失敗しました: %1$s</string>
 </resources>

@@ -1740,4 +1740,5 @@
     <string name="scheduled_enable_after_save">Nach dem Speichern aktivieren</string>
     <string name="scheduled_saved_disabled">Gespeichert. Die Aufgabe ist aus — im Listen-Schalter einschalten.</string>
     <string name="scheduled_saved_global_off">Gespeichert. Der Hauptschalter für geplante Aufgaben ist aus — erst dann läuft etwas.</string>
+    <string name="provider_detail_refresh_catalog_failed">Aktualisierung fehlgeschlagen: %1$s</string>
 </resources>

@@ -1739,4 +1739,5 @@
     <string name="scheduled_enable_after_save">저장 후 사용</string>
     <string name="scheduled_saved_disabled">저장했습니다. 작업이 꺼져 있습니다 — 목록의 스위치로 켜세요.</string>
     <string name="scheduled_saved_global_off">저장했습니다. 예약 작업 전역 스위치가 꺼져 있습니다 — 켜야 작업이 실행됩니다.</string>
+    <string name="provider_detail_refresh_catalog_failed">새로 고침 실패: %1$s</string>
 </resources>
