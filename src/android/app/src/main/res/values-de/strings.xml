@@ -1507,10 +1507,6 @@
     <string name="crash_freq_zip_failed">Fehler beim Packen der Protokolle: %1$s</string>
     <string name="crash_freq_save_failed">Fehler beim Speichern der Protokolle: %1$s</string>
     <string name="crash_freq_save_success">Protokolle gespeichert unter %1$s</string>
-    <string name="shortcut_new_chat_short">Neuer Chat</string>
-    <string name="shortcut_new_chat_long">Neuer Chat</string>
-    <string name="shortcut_camera_chat_short">Chat mit Kamera</string>
-    <string name="shortcut_camera_chat_long">Chat mit Kamera</string>
     <string name="ok">OK</string>
     <string name="chat_load_older_messages">↑ Ältere Nachrichten laden</string>
     <!-- [feat/chat-tuning-panel] Chat-Feintuning — Lese-/Scroll-/Eingabe-Parameter. -->

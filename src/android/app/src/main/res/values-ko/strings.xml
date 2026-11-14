@@ -1506,10 +1506,6 @@
     <string name="crash_freq_zip_failed">로그 패키징 실패: %1$s</string>
     <string name="crash_freq_save_failed">로그 저장 실패: %1$s</string>
     <string name="crash_freq_save_success">로그가 %1$s에 저장되었습니다</string>
-    <string name="shortcut_new_chat_short">새 채팅</string>
-    <string name="shortcut_new_chat_long">새 채팅</string>
-    <string name="shortcut_camera_chat_short">카메라로 채팅</string>
-    <string name="shortcut_camera_chat_long">카메라로 채팅</string>
     <string name="ok">확인</string>
     <string name="chat_load_older_messages">↑ 이전 메시지 불러오기</string>
     <!-- [feat/chat-tuning-panel] 채팅 미세 조정 — 읽기/스크롤/입력 항목. -->

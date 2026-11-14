@@ -1506,10 +1506,6 @@
     <string name="crash_freq_zip_failed">ログのパッケージ化に失敗しました: %1$s</string>
     <string name="crash_freq_save_failed">ログの保存に失敗しました: %1$s</string>
     <string name="crash_freq_save_success">ログを%1$sに保存しました</string>
-    <string name="shortcut_new_chat_short">新しいチャット</string>
-    <string name="shortcut_new_chat_long">新しいチャット</string>
-    <string name="shortcut_camera_chat_short">カメラでチャット</string>
-    <string name="shortcut_camera_chat_long">カメラでチャット</string>
     <string name="ok">OK</string>
     <string name="chat_load_older_messages">↑ 古いメッセージを読み込む</string>
     <!-- [feat/chat-tuning-panel] チャット調整 — 閲覧/スクロール/入力の調整項目。 -->
