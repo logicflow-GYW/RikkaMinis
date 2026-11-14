@@ -302,9 +302,9 @@ object MirrorStore {
      * the layout pref is written only after the legacy tree is out of the way,
      * so a run killed midway resumes instead of leaving two live trees.
      */
-    private fun migrateLegacyLayout(app: Context) {
+    private fun migrateLegacyLayout(app: Context): Boolean {
         val prefs = prefs(app)
-        if (prefs.getInt(KEY_LAYOUT, 1) >= LAYOUT_PLAIN_FILES) return
+        if (prefs.getInt(KEY_LAYOUT, 1) >= LAYOUT_PLAIN_FILES) return true
 
         val base = publicBase()
         val legacy = File(base, LEGACY_TREE)
@@ -332,7 +332,7 @@ object MirrorStore {
                 // Leave the rows alone too: this run changes nothing, and the
                 // next sync retries. Racing it would trade a retry for data.
                 Log.w(TAG, "legacy mirror tree is still at $legacy — retrying next sync")
-                return
+                return false
             }
             park = dest
         }
@@ -353,6 +353,7 @@ object MirrorStore {
                 (park?.let { "parked the old tree at $it (safe to delete from a file manager)" }
                     ?: "no legacy tree present"),
         )
+        return true
     }
 
     private fun uniqueParkDir(base: File): File {
@@ -362,8 +363,13 @@ object MirrorStore {
     }
 
     /**
-     * Delete the v1 `Downloads` rows under the mirror root. Returns how many
-     * were removed (0 on any device that never had them, including API 26–28).
+     * Delete the v1 `Downloads` rows under the **parked tree only**. Returns how
+     * many were removed (0 on any device that never had them, incl. API 26–28).
+     *
+     * The scope deliberately stops at `mirror/`: v1 also wrote the daily full
+     * snapshots under `auto/` through MediaStore, and deleting a row deletes the
+     * file it points at. Those files are not parked, so their rows must stay —
+     * the row is the only index left describing them.
      */
     private fun deleteLegacyRows(app: Context): Int {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
@@ -372,7 +378,7 @@ object MirrorStore {
             app.contentResolver.delete(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 selection,
-                arrayOf("$ROOT_REL/%"),
+                arrayOf("$MIRROR_REL/%"),
             )
         }.getOrDefault(0)
     }
@@ -399,7 +405,15 @@ object MirrorStore {
         if (!inFlight.compareAndSet(false, true)) return@withContext Outcome.Busy
         try {
             val target = openTarget(app) ?: return@withContext Outcome.Unavailable.also { record(app, "unavailable") }
-            migrateLegacyLayout(app)
+            // A legacy tree we could not move aside means the v1 paths are
+            // still live on top of the tree v2 writes into — and the next
+            // run's park would move our own fresh files into the "legacy"
+            // pile. Refuse this round; the next sync retries the move.
+            if (!migrateLegacyLayout(app)) {
+                val blocked = Outcome.Failed("legacy mirror tree could not be moved aside")
+                record(app, outcomeText(blocked))
+                return@withContext blocked
+            }
             val outcome = runLocked(app, target, force)
             record(app, outcomeText(outcome))
             outcome

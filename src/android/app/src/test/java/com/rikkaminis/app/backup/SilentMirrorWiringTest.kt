@@ -335,6 +335,41 @@ class SilentMirrorWiringTest {
     }
 
     @Test
+    fun aMigrationThatCannotParkTheOldTreeDoesNotSync() {
+        // The park can fail (tree in use, volume read-only). The previous shape
+        // logged, returned, and let syncNow write the plain layout into the very
+        // tree the next run would park as "legacy".
+        val code = withoutComments(readRepoFile(storeRel))
+        val sync = braced(code, code.indexOf("private suspend fun syncNow("))
+        val guardAt = sync.indexOf("if (!migrateLegacyLayout(app))")
+        assertTrue("the migration verdict must gate the write", guardAt >= 0)
+        assertTrue(
+            "the guard must run before anything is written",
+            guardAt < sync.indexOf("runLocked(app, target, force)"),
+        )
+        assertTrue(
+            "a blocked migration must surface as a failure, not a silent no-op",
+            sync.contains("Outcome.Failed(\"legacy mirror tree could not be moved aside\")"),
+        )
+    }
+
+    @Test
+    fun theRowCleanupStopsAtTheParkedTree() {
+        // Deleting a MediaStore row deletes the file behind it. `auto/` was never
+        // parked: those rows index the v1 daily snapshots we keep on purpose.
+        val code = withoutComments(readRepoFile(storeRel))
+        val cleanup = braced(code, code.indexOf("private fun deleteLegacyRows("))
+        assertTrue(
+            "only the parked tree's rows are ghosts",
+            cleanup.contains("arrayOf(\"\$MIRROR_REL/%\")"),
+        )
+        assertFalse(
+            "a backup-wide prefix would delete the v1 daily snapshots with their rows",
+            cleanup.contains("\$ROOT_REL/%"),
+        )
+    }
+
+    @Test
     fun unreadableSourceFilesAreNotRecordedAsSynced() {
         val code = withoutComments(readRepoFile(storeRel))
         val runLocked = braced(code, code.indexOf("private suspend fun runLocked("))
