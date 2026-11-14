@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.rikkaminis.app.sandbox.internalGuestTmpDeleteTreeNoFollow
 import com.rikkaminis.app.ui.settings.SharedFolderRegistry
 import com.rikkaminis.app.ui.settings.invalidateStorageSnapshot
 import java.io.File
@@ -645,8 +646,21 @@ class FileBrowserViewModel(
                 // directory-shaped link wiped the target directory's contents
                 // (measured: 2 files before, 0 after — report §3 arm A) while
                 // leaving the link's target in place. Unlink the name instead.
+                // [review-1114 A] The SAME reasoning applies one level down: a
+                // plain directory that CONTAINS a link to the outside was
+                // recursed into through that link, so deleting "this folder"
+                // also emptied an unrelated tree (measured: victim's own 2
+                // entries + outside's 2 files = 4 entries gone). The recursive
+                // arm now delegates to the sweeper's no-follow walker, which
+                // unlinks a nested link as a link and never enters its target.
+                //
+                // Deliberately INLINE (not extracted into a helper): the
+                // read-only guard two screens up must sit in the SAME function
+                // as a real removal call — `readonly_mount_write_guard` anchors
+                // on this pair, and a guard whose write moved elsewhere is a
+                // guard the scanner can no longer verify.
                 val deleted = if (shouldDeleteRecursively(item.isDirectory, item.isSymlink)) {
-                    item.file.deleteRecursively()
+                    internalGuestTmpDeleteTreeNoFollow(item.file.toPath())
                 } else {
                     item.file.delete()
                 }

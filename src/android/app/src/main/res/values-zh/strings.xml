@@ -1238,8 +1238,6 @@
     <string name="mcp_section_footer">MCP 服务器让 AI 通过 RikkaMinis-mcp-cli 调用外部工具。配置保存在 /var/minis/mcp-servers/servers.json（与 Claude Desktop 兼容）。</string>
     <string name="mcp_empty_title">暂无 MCP 服务器</string>
     <string name="mcp_empty_action">点击 + 按钮添加服务器。</string>
-    <string name="mcp_transport_http">HTTP</string>
-    <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
     <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">表单</string>

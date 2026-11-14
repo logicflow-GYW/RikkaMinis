@@ -60,6 +60,32 @@ internal object MarkdownMathHeuristic {
     private const val NATURAL_LANGUAGE_MIN_WORD_LENGTH = 3
 
     /**
+     * [review-1114 B] Tokens that are ordinary 3+ letter ASCII words AND the
+     * strongest possible evidence that the span is a formula.
+     *
+     * The prose guard below counts "ASCII words" as prose evidence. That rule
+     * has one blind spot it cannot see on its own: every mathematical function
+     * name IS such a word. `log x + log y` has four word tokens, one of them
+     * 3 letters long — so the guard called a two-logarithm sum a sentence and
+     * both `$` vanished from it. Same for `sin x cos x`, `max a b`,
+     * `lim n to inf`, `O(n log n)`. Five regressions, one cause.
+     *
+     * So these tokens are excluded from BOTH tests (word count and long-word):
+     * a formula may use any number of them and still be a formula.
+     *
+     * Exact-token match, case-insensitive — `maximum` is not `max`, `sine` is
+     * not `sin`, `logo` is not `log`. The list is deliberately closed: adding
+     * an ordinary English word here would re-open the hole in the other
+     * direction, which is why `for` / `and` / `the` can never join it.
+     */
+    private val MATH_FUNCTION_TOKENS: Set<String> = setOf(
+        "log", "ln", "lg", "sin", "cos", "tan", "cot", "sec", "csc",
+        "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh",
+        "exp", "max", "min", "sup", "inf", "lim", "det", "dim", "ker",
+        "mod", "gcd", "lcm", "deg", "arg", "re", "im", "pr", "var", "cov",
+    )
+
+    /**
      * Currency-skip heuristic: `$5` / `$10.99` should stay plain text. Treat the
      * `$ … $` content as math only if it has a math-ish character
      * (`\ ^ _ { }` / common big-symbol unicode) or is longer than 2 chars (so
@@ -139,13 +165,20 @@ internal object MarkdownMathHeuristic {
      *    hence the next bullet);
      *  - at least one word must be [NATURAL_LANGUAGE_MIN_WORD_LENGTH] letters or
      *    longer — a real formula's "words" are single variables (`x`, `pi`),
-     *    while prose always carries an ordinary word (`for`, `pass`, `day`).
+     *    while prose always carries an ordinary word (`for`, `pass`, `day`);
+     *  - [review-1114 B] a token in [MATH_FUNCTION_TOKENS] is not a prose word
+     *    at all: it neither counts toward the word total nor satisfies the
+     *    long-word test. Function names are the one class of 3+ letter ASCII
+     *    word that appears INSIDE formulas, so counting them as prose evidence
+     *    inverted the signal — it made `log x + log y` and `sin x cos x` read
+     *    as sentences while the `-` in `3-day` still reads as prose evidence.
      *
      * The two together keep `$x - y$`, `$x+y$`, `$1+1=2$`, `$x^2$` and
      * `$\frac{1}{2}$` classified as math (they fail the word-count or the
      * long-word test) while every multi-word English/Chinese-free sentence is
-     * rejected. Chinese prose has no spaces and is already excluded by the
-     * single-token path below (it is not ASCII letters).
+     * rejected, and a formula built out of function names (`log x + log y`,
+     * `lim n to inf`) survives. Chinese prose has no spaces and is already
+     * excluded by the single-token path below (it is not ASCII letters).
      */
     private fun looksLikeNaturalLanguage(content: String): Boolean {
         if (content.indexOf('\\') >= 0) return false
@@ -159,8 +192,11 @@ internal object MarkdownMathHeuristic {
             }
             var j = i
             while (j < content.length && content[j].isAsciiLetter()) j++
-            words++
-            if (j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH) hasLongWord = true
+            val token = content.substring(i, j)
+            if (token.lowercase() !in MATH_FUNCTION_TOKENS) {
+                words++
+                if (j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH) hasLongWord = true
+            }
             i = j
         }
         return words >= NATURAL_LANGUAGE_MIN_WORDS && hasLongWord
