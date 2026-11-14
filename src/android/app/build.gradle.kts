@@ -71,14 +71,6 @@ android {
         // Locale-specific values (values-zh etc.) still read "RikkaMinis"; the
         // applicationId is what truly guarantees co-existence.
         resValue("string", "app_name", minisAppLabel)
-        // [dual-appid] A resource alias for the runtime applicationId, so static
-        // XML (res/xml/shortcuts.xml) can reference our real package instead of
-        // hard-coding "com.rikkaminis.app". Resolves to the same value in both
-        // accounts; only meaningful because shortcuts targetPackage must match
-        // the installed applicationId to launch MainActivity from a launcher
-        // long-press. Mirrors AGP's own manifest placeholder expansion for
-        // build files that are not manifests.
-        resValue("string", "package_name", minisFinalAppId)
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
