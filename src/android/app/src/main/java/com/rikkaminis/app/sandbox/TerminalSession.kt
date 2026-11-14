@@ -1,5 +1,7 @@
 package com.rikkaminis.app.sandbox
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
@@ -769,6 +771,34 @@ class TerminalSession(private val context: Context) {
      * Termux TerminalView reads directly from the [termuxSession];
      * onTextChanged drives the view redraw (the only live output path).
      */
+    /**
+     * [fix/terminal-clipboard-1114] Android-clipboard helpers for the Termux
+     * client callbacks above.
+     *
+     * Failure policy: never throw. A clipboard that cannot be read (service
+     * missing, or Android 10+'s background-clipboard restriction while the app
+     * is not focused) must degrade to "nothing happened", exactly like the old
+     * no-op — it must not take down a terminal session.
+     *
+     * Note the read side is intentionally lazy about the restriction: Android
+     * only allows reading the clipboard for a focused app, and the paste menu
+     * can only be opened by a touch, so in practice we are focused. If we are
+     * not, the platform returns null/empty and we do nothing.
+     */
+    private fun readClipboardText(context: Context): String? = runCatching {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            ?: return@runCatching null
+        cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+    }.getOrNull()
+
+    private fun writeClipboardText(context: Context, text: String) {
+        runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                ?: return@runCatching
+            cm.setPrimaryClip(ClipData.newPlainText("terminal", text))
+        }.onFailure { Log.w(TAG, "clipboard write failed: ${it.message}") }
+    }
+
     private inner class TermuxSessionClient : TerminalSessionClient {
         override fun onTextChanged(changedSession: com.termux.terminal.TerminalSession) {
             // CRITICAL: this callback is what drives the TerminalView to
@@ -833,14 +863,66 @@ class TerminalSession(private val context: Context) {
         override fun onBell(session: com.termux.terminal.TerminalSession) {}
         override fun onColorsChanged(changedSession: com.termux.terminal.TerminalSession) {}
         override fun onTerminalCursorStateChange(state: Boolean) {}
+        // [fix/terminal-clipboard-1114] These two callbacks are the ONLY route
+        // Termux's own selection ActionMode (long-press → Copy / Paste) and the
+        // OSC 52 clipboard escape have into the Android clipboard. They used to
+        // be no-ops, which silently disabled both:
+        //
+        //   TextSelectionCursorController$1.onActionItemClicked (copy_text)
+        //     → TerminalSession.onCopyTextToClipboard(String)
+        //     → TerminalSessionClient.onCopyTextToClipboard(this, text)  ← was {}
+        //   TextSelectionCursorController$1.onActionItemClicked (paste_text)
+        //     → TerminalSession.onPasteTextFromClipboard()
+        //     → TerminalSessionClient.onPasteTextFromClipboard(this)     ← was {}
+        //   TerminalEmulator OSC 52 → TerminalOutput.onCopyTextToClipboard
+        //     → same client callback
+        //
+        // Verified by disassembling terminal-view-0.118.0.aar +
+        // terminal-emulator-0.118.0.aar (javap -c): the paste menu item's
+        // enabled state is decided by ClipboardManager.hasPrimaryClip() inside
+        // Termux, so the menu looked functional while both branches did nothing.
+        //
+        // The soft keyboard / IME path never went through these callbacks, which
+        // is why the terminal was still usable — only the selection menu and
+        // remote copy were dead.
         override fun onPasteTextFromClipboard(
             session: com.termux.terminal.TerminalSession,
-        ): Unit {} // returns Unit in Termux 0.118.0
+        ): Unit {
+            // `Unit` return is Termux 0.118.0's signature (it used to return a
+            // String in old forks).
+            val text = readClipboardText(context) ?: return
+            if (text.isEmpty()) return
+            // Route through the EMULATOR's paste(), not our sendText(): it is
+            // the same entry Termux's own app uses and it owns three behaviours
+            // we would otherwise have to reimplement (verified by disassembling
+            // terminal-emulator-0.118.0.aar):
+            //   1. strips ESC / C1 control characters from the clip, so pasting
+            //      hostile text cannot inject cursor/OSC sequences;
+            //   2. collapses CRLF/LF to CR (ICRNL-friendly);
+            //   3. wraps the payload in ESC[200~ … ESC[201~ when the guest has
+            //      enabled DECSET 2004 bracketed paste (vim, readline ≥ 8), so
+            //      the guest can distinguish paste from typing.
+            // Our sendText() only does (2).
+            val emulator = session.emulator
+            if (emulator != null) {
+                emulator.paste(text)
+                Log.i(TAG, "clipboard paste → PTY (${text.length} chars, emulator.paste)")
+            } else {
+                // No emulator yet (PTY still booting) — fall back to the raw
+                // write so the text is not silently dropped.
+                session.write(text.toByteArray(Charsets.UTF_8), 0, text.toByteArray(Charsets.UTF_8).size)
+                Log.i(TAG, "clipboard paste → PTY (${text.length} chars, raw write)")
+            }
+        }
 
         override fun onCopyTextToClipboard(
             session: com.termux.terminal.TerminalSession,
             text: String,
-        ) {}
+        ) {
+            if (text.isEmpty()) return
+            writeClipboardText(context, text)
+            Log.i(TAG, "terminal selection copied (${text.length} chars)")
+        }
 
         override fun getTerminalCursorStyle(): Int? = null
 
