@@ -380,13 +380,35 @@ private suspend fun importSkillFromCurrentUrl(
         // file (scripts/, references/, sub-directories) into the skill's
         // local directory — on the update path too, which the pre-fix
         // fallback's update() alone never did.
-        val skill = skillRepository.importFromGitHub(sourceUrl, preferredId = matchedId)
+        //
+        // [RC-U12] `importFromGitHub` now waits for that recursion and answers
+        // with the outcome. The HUD used to claim SUCCESS the moment SKILL.md
+        // landed; a 403 / dropped connection during the sibling walk left the
+        // skill without scripts/ and the only trace was a Log.w.
+        val result = skillRepository.importFromGitHub(sourceUrl, preferredId = matchedId)
+        val skill = when (result) {
+            is SkillRepository.UpdateResult.Success -> result.skill
+            is SkillRepository.UpdateResult.PartialSuccess -> result.skill
+            is SkillRepository.UpdateResult.Failure -> null
+        }
         if (skill != null) {
             val messageRes =
                 if (matchedId != null) R.string.skills_browser_success_updated
                 else R.string.skills_browser_success_imported
-            onStateChange(HudState.SUCCESS, context.getString(messageRes, skill.name))
-            delay(3000)
+            val partialReason =
+                (result as? SkillRepository.UpdateResult.PartialSuccess)?.reason
+            if (partialReason != null) {
+                // Imported, but not complete: name the missing half instead of
+                // reporting a clean success the run-time will contradict.
+                onStateChange(
+                    HudState.HINT,
+                    context.getString(R.string.skill_import_partial, partialReason),
+                )
+                delay(5000)
+            } else {
+                onStateChange(HudState.SUCCESS, context.getString(messageRes, skill.name))
+                delay(3000)
+            }
             onStateChange(HudState.HIDDEN, "")
             return
         }

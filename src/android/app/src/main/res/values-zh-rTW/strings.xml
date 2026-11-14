@@ -1736,4 +1736,5 @@
     <string name="mirror_fastest_hint">最快：%1$s（%2$d ms）</string>
     <string name="mirror_switch_to_fastest">啟用</string>
     <string name="file_print_renderer_gone">列印檢視已停止回應</string>
+    <string name="skill_import_partial">已匯入，但附屬檔案不完整：%1$s</string>
 </resources>

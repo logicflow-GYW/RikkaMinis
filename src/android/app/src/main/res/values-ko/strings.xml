@@ -1735,4 +1735,5 @@
     <string name="mirror_fastest_hint">가장 빠름: %1$s(%2$d ms)</string>
     <string name="mirror_switch_to_fastest">사용</string>
     <string name="file_print_renderer_gone">인쇄 뷰가 응답을 멈췄습니다</string>
+    <string name="skill_import_partial">가져왔지만 포함 파일이 불완전합니다: %1$s</string>
 </resources>

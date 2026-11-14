@@ -1844,4 +1844,5 @@
     <string name="mirror_fastest_hint">Fastest: %1$s (%2$d ms)</string>
     <string name="mirror_switch_to_fastest">Use</string>
     <string name="file_print_renderer_gone">the print view stopped responding</string>
+    <string name="skill_import_partial">Imported, but bundled files are incomplete: %1$s</string>
 </resources>

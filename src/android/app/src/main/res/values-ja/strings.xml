@@ -1734,4 +1734,5 @@
     <string name="mirror_fastest_hint">最速: %1$s（%2$d ms）</string>
     <string name="mirror_switch_to_fastest">使用</string>
     <string name="file_print_renderer_gone">印刷ビューが応答を停止しました</string>
+    <string name="skill_import_partial">インポートしましたが、同梱ファイルが不完全です: %1$s</string>
 </resources>
