@@ -673,6 +673,13 @@ object ConfigBackup {
             val obj = try {
                 JSONObject(json)
             } catch (t: Throwable) {
+                // [RC-U03] A provider that could not be serialized IS a
+                // partially failed export — it used to be dropped here with only
+                // this log line, while readFailures (the channel both manual
+                // export paths surface as "this backup may be incomplete")
+                // counted only per-field failures. The user's restore then
+                // simply lacked a provider, with nothing having said so.
+                readFailures++
                 Log.w(TAG, "export: unparseable provider ${instance.id}: ${t.message}")
                 continue
             }
@@ -912,6 +919,12 @@ object ConfigBackup {
                     // before importFromContent re-parses. "" when the source
                     // had none — the import side treats it as absent.
                     entry.put("frontmatter", skill.frontmatter)
+                    // [RC-U03] A skill that fell back to SKILL.md-only lost its
+                    // bundled scripts/references — a partially failed export,
+                    // so it must reach the same "may be incomplete" channel the
+                    // per-field failures use instead of stopping at this log
+                    // line. (An oversized archive is included: same loss.)
+                    readFailures++
                     Log.w(
                         TAG,
                         "export: ${if (zipBytes == null) "no archive" else "archive too large (${zipBytes.size} bytes)"} " +

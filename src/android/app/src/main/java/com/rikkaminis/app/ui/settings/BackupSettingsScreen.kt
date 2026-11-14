@@ -1949,6 +1949,42 @@ fun BackupSettingsScreen(
                             style = MaterialTheme.typography.bodyMedium,
                         )
                     }
+                    // [RC-U03] ImportResult has carried these four counts since
+                    // the restore paths landed; the dialog rendered none of
+                    // them, so a restore that DID bring back thinking rules,
+                    // scheduled tasks, artifact files and the WebDAV config
+                    // looked like it had skipped them — users went and re-checked
+                    // (or re-configured) those modules by hand.
+                    if (report.thinkingRulesImported > 0) {
+                        Text(
+                            stringResource(
+                                R.string.backup_done_thinking_rules,
+                                report.thinkingRulesImported,
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (report.scheduledTasksImported) {
+                        Text(
+                            stringResource(R.string.backup_done_scheduled_tasks),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (report.artifactFilesImported > 0) {
+                        Text(
+                            stringResource(
+                                R.string.backup_done_artifacts,
+                                report.artifactFilesImported,
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (report.webdavConfigImported) {
+                        Text(
+                            stringResource(R.string.backup_done_webdav),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                     if (report.skipped.isNotEmpty()) {
                         Text(
                             stringResource(R.string.backup_done_skipped, report.skipped.size),

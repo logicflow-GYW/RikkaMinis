@@ -1729,4 +1729,8 @@
     <string name="mirror_retry_busy">Eine Synchronisierung läuft bereits — bitte gleich erneut versuchen.</string>
     <string name="mirror_retry_done">Spiegel synchronisiert.</string>
     <string name="mirror_retry_nothing">Spiegel ist bereits aktuell.</string>
+    <string name="backup_done_thinking_rules">%1$d Denkregel(n) wiederhergestellt.</string>
+    <string name="backup_done_scheduled_tasks">Geplante Aufgaben wiederhergestellt.</string>
+    <string name="backup_done_artifacts">%1$d Artefaktdatei(en) wiederhergestellt.</string>
+    <string name="backup_done_webdav">WebDAV-Serverkonfiguration wiederhergestellt.</string>
 </resources>

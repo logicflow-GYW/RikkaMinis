@@ -1728,4 +1728,8 @@
     <string name="mirror_retry_busy">동기화가 이미 실행 중입니다 — 잠시 후 다시 시도하세요.</string>
     <string name="mirror_retry_done">미러를 동기화했습니다.</string>
     <string name="mirror_retry_nothing">미러가 이미 최신입니다.</string>
+    <string name="backup_done_thinking_rules">사고 규칙 %1$d개를 복원했습니다.</string>
+    <string name="backup_done_scheduled_tasks">예약 작업을 복원했습니다.</string>
+    <string name="backup_done_artifacts">산출물 파일 %1$d개를 복원했습니다.</string>
+    <string name="backup_done_webdav">WebDAV 서버 설정을 복원했습니다.</string>
 </resources>

@@ -1729,4 +1729,8 @@
     <string name="mirror_retry_busy">同步正在進行，請稍後再試。</string>
     <string name="mirror_retry_done">鏡像已同步。</string>
     <string name="mirror_retry_nothing">鏡像已是最新。</string>
+    <string name="backup_done_thinking_rules">已還原 %1$d 條思考規則。</string>
+    <string name="backup_done_scheduled_tasks">已還原定時任務。</string>
+    <string name="backup_done_artifacts">已還原 %1$d 個產物檔案。</string>
+    <string name="backup_done_webdav">已還原 WebDAV 伺服器設定。</string>
 </resources>
