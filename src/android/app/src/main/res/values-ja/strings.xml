@@ -625,6 +625,7 @@
     <string name="add_provider_custom_api_base_optional">カスタムAPIベース（オプション）</string>
     <string name="add_custom_model_model_id">モデルID</string>
     <string name="add_custom_model_display_name_optional">表示名（省略可）</string>
+    <string name="add_custom_model_capabilities_footer">空欄の場合はプロバイダーの報告値を使います。後からモデル詳細ページで変更できます。</string>
     <string name="model_entry_model_detail">モデルの詳細</string>
     <string name="model_entry_display_name">表示名</string>
     <string name="model_entry_max_output_tokens">最大出力トークン数</string>
@@ -1363,6 +1364,8 @@
     <string name="add_provider_endpoint_hint">空欄の場合は既定のエンドポイントを使用します。「/v1」は自動的に付加されるため、ベースホストのみを入力してください。</string>
     <string name="add_provider_endpoint_gemini_hint">空欄の場合は Google の既定のエンドポイントを使用します。バージョンパスを含む完全なベース URL を入力してください。</string>
     <string name="modeldetail_video_output">動画出力</string>
+    <string name="modeldetail_max_thinking_inherit">モデルの既定に従う</string>
+    <string name="modeldetail_max_thinking_level">思考強度の上限</string>
     <string name="quicktest_title">クイックテスト</string>
     <string name="quicktest_button">クイックテスト</string>
     <string name="quicktest_footer">このモデルの主な機能に一致するクイックテストを実行します。</string>

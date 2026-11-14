@@ -713,6 +713,7 @@
     <string name="add_provider_custom_api_base_optional">Свой базовый URL API (необязательно)</string>
     <string name="add_custom_model_model_id">ID модели</string>
     <string name="add_custom_model_display_name_optional">Отображаемое имя (необязательно)</string>
+    <string name="add_custom_model_capabilities_footer">Оставьте пустым, чтобы использовать значение от провайдера. Позже можно изменить на странице модели.</string>
     <string name="model_entry_model_detail">Сведения о модели</string>
     <string name="model_entry_display_name">Отображаемое имя</string>
     <string name="model_entry_max_output_tokens">Макс. токенов вывода</string>
@@ -740,6 +741,8 @@
     <string name="modeldetail_image_output">Вывод изображений</string>
     <string name="modeldetail_audio_output">Вывод аудио</string>
     <string name="modeldetail_video_output">Вывод видео</string>
+    <string name="modeldetail_max_thinking_inherit">Как в модели по умолчанию</string>
+    <string name="modeldetail_max_thinking_level">Максимальный уровень размышления</string>
     <string name="modeldetail_output_modality_footer">Включите для моделей, генерирующих изображения или аудио (например, gpt-image-1, TTS). Текстовый вывод доступен всегда.</string>
     <string name="modelgroup_speech_output">Речевой вывод</string>
     <string name="modelgroup_speech_transcription">Транскрипция речи</string>

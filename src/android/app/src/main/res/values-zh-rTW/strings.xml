@@ -260,6 +260,7 @@
     <string name="add_provider_custom_api_base_optional">自定義 API 地址（可選）</string>
     <string name="add_custom_model_model_id">模型 ID</string>
     <string name="add_custom_model_display_name_optional">顯示名稱（選填）</string>
+    <string name="add_custom_model_capabilities_footer">留空則使用服務商回報的值，之後也可以在模型詳情頁修改。</string>
     <string name="model_entry_model_detail">模型詳情</string>
     <string name="model_entry_display_name">顯示名稱</string>
     <string name="model_entry_max_output_tokens">最大輸出 Token 數</string>
@@ -1347,6 +1348,8 @@
     <string name="add_provider_endpoint_hint">留空則使用預設端點。會自動附加 “/v1” —— 只需填寫基礎主機位址。</string>
     <string name="add_provider_endpoint_gemini_hint">留空則使用 Google 預設端點。請填寫包含版本路徑的完整基礎 URL。</string>
     <string name="modeldetail_video_output">影片輸出</string>
+    <string name="modeldetail_max_thinking_inherit">跟隨模型預設</string>
+    <string name="modeldetail_max_thinking_level">最高思考檔位</string>
     <string name="model_group_detail_session_defaults">會話預設值</string>
     <string name="model_group_detail_session_defaults_footer">繫結到此分組的新會話將自動應用。</string>
     <string name="model_group_detail_enable_reasoning">啟用思考</string>

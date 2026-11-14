@@ -2,6 +2,7 @@ package com.rikkaminis.app.ui.settings
 
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelOverrides
+import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.data.model.inferContextWindowTokens
 import com.rikkaminis.app.data.model.normalizeModalityName
 
@@ -52,6 +53,17 @@ internal fun buildModelEntryOverrides(
     videoInput: Boolean,
     imageOutput: Boolean,
     audioOutput: Boolean,
+    // [RC-1114 U-18] The screen now exposes the video-output dimension it used
+    // to pass through untouched, so it is a TOGGLE like image/audio. The
+    // default keeps every existing call site (and every test that does not care
+    // about this dimension) byte-identical: it reproduces exactly what the
+    // screen would have seeded the switch with, i.e. "inherit the base".
+    videoOutput: Boolean = normalizeModalityList(baseModel.outputModalities).contains("video"),
+    // [RC-1114 U-18] User ceiling for this model's thinking intensity. Same
+    // rule as videoOutput: the default re-states the passthrough the callers
+    // already had (`previous.copy(...)` kept the field), so a caller that does
+    // not own the field cannot wipe it by omitting the argument.
+    maxThinkingLevel: ThinkingLevel? = previous.maxThinkingLevel,
 ): ModelOverrides {
     val baseInputs = normalizeModalityList(baseModel.inputModalities)
     val baseOutputs = normalizeModalityList(baseModel.outputModalities)
@@ -69,6 +81,11 @@ internal fun buildModelEntryOverrides(
         toggles = listOf(
             "image" to imageOutput,
             "audio" to audioOutput,
+            // [RC-1114 U-18] Video output is a real toggle now. The default
+            // value of `videoOutput` is derived from the base, so a caller that
+            // does not pass it gets byte-identical output to the old
+            // passthrough (see the parameter's KDoc).
+            "video" to videoOutput,
         ),
     )
     return previous.copy(
@@ -86,6 +103,11 @@ internal fun buildModelEntryOverrides(
         // otherwise leave null so the entry tracks future provider updates.
         inputModalities = if (newInputs.toSet() != baseInputs.toSet()) newInputs else null,
         outputModalities = if (newOutputs.toSet() != baseOutputs.toSet()) newOutputs else null,
+        // [RC-1114 U-18] The screen now owns this field. The parameter's
+        // default is `previous.maxThinkingLevel`, so this line is a no-op for
+        // every caller that does not pass it — the passthrough `previous.copy`
+        // already provided is preserved exactly.
+        maxThinkingLevel = maxThinkingLevel,
     )
 }
 
@@ -138,11 +160,14 @@ internal fun resolveContextWindowOverride(
  * Rebuild one modality list from its switches plus base passthrough.
  *
  * The switches only own the dimensions the screen exposes as toggles
- * (`toggles`); every other dimension in `base` — `"text"` on both sides,
- * `"video"` on the output side, and anything a future catalog adds — is
- * carried over untouched. That makes "user flipped nothing" a no-op: the
- * derived set equals the (normalized) base set, so the caller writes `null`
- * and the entry keeps inheriting.
+ * (`toggles`); every other dimension in `base` — `"text"` on both sides and
+ * anything a future catalog adds — is carried over untouched. That makes
+ * "user flipped nothing" a no-op: the derived set equals the (normalized) base
+ * set, so the caller writes `null` and the entry keeps inheriting.
+ *
+ * [RC-1114 U-18] Output `"video"` used to be in the passthrough list; it is a
+ * real toggle now (the screen has the switch), so it is listed in `toggles`
+ * and the caller passes the switch state.
  *
  * `base` must already be normalized ([normalizeModalityList]) — both the
  * toggle init in the screen and the comparison here work in the bare-name

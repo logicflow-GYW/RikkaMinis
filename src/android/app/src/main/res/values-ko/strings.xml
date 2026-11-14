@@ -625,6 +625,7 @@
     <string name="add_provider_custom_api_base_optional">사용자 정의 API 베이스 (선택 사항)</string>
     <string name="add_custom_model_model_id">모델 ID</string>
     <string name="add_custom_model_display_name_optional">표시 이름 (선택 사항)</string>
+    <string name="add_custom_model_capabilities_footer">비워 두면 공급자가 보고한 값을 사용합니다. 나중에 모델 상세 페이지에서 변경할 수 있습니다.</string>
     <string name="model_entry_model_detail">모델 세부 정보</string>
     <string name="model_entry_display_name">표시 이름</string>
     <string name="model_entry_max_output_tokens">최대 출력 토큰</string>
@@ -1355,6 +1356,8 @@
     <string name="add_provider_endpoint_hint">비워 두면 기본 엔드포인트를 사용합니다. “/v1”이 자동으로 추가되므로 베이스 호스트만 입력하세요.</string>
     <string name="add_provider_endpoint_gemini_hint">비워 두면 Google 기본 엔드포인트를 사용합니다. 버전 경로를 포함한 전체 베이스 URL을 입력하세요.</string>
     <string name="modeldetail_video_output">비디오 출력</string>
+    <string name="modeldetail_max_thinking_inherit">모델 기본값 따르기</string>
+    <string name="modeldetail_max_thinking_level">최대 사고 단계</string>
     <string name="quicktest_title">빠른 테스트</string>
     <string name="quicktest_button">빠른 테스트</string>
     <string name="quicktest_footer">이 모델의 주요 기능에 맞는 빠른 테스트를 실행합니다.</string>

@@ -157,9 +157,13 @@ class ModelEntryOverrideBuilderTest {
     }
 
     @Test
-    fun videoOutput_hasNoSwitch_soItPassesThroughBase() {
+    fun videoOutput_defaultsToBase_soAnUntouchedSaveKeepsInheriting() {
         val model = base(inputs = listOf("text"), outputs = listOf("text", "video"))
-        // No switch for video out: untouched save keeps inheriting.
+        // [RC-1114 U-18] The screen now HAS a video-output switch, seeded from
+        // the base — so an untouched save still writes nothing (the derived
+        // toggle equals the base), which is the property this test has always
+        // pinned. The switch only becomes an override when the user flips it
+        // (next test).
         assertNull(saveUntouched(model).outputModalities)
 
         // Enabling image output must not drop video.
@@ -178,6 +182,101 @@ class ModelEntryOverrideBuilderTest {
             audioOutput = false,
         )
         assertEquals(setOf("image", "text", "video"), edited.outputModalities!!.toSet())
+    }
+
+    @Test
+    fun videoOutput_turnedOff_becomesAnOverrideAndDropsVideo() {
+        // [RC-1114 U-18] The dimension is now user-writable. A model whose
+        // catalog row declares video can be told it does NOT produce video —
+        // the case that was impossible before (the screen passed the dimension
+        // through untouched, so "video" always survived from the base).
+        val model = base(inputs = listOf("text"), outputs = listOf("text", "video"))
+        val result = buildModelEntryOverrides(
+            baseModel = model,
+            previous = ModelOverrides(),
+            displayName = model.displayName,
+            maxOutputTokensText = "",
+            contextWindowText = "",
+            thinkingEnabled = false,
+            imageInput = false,
+            pdfInput = false,
+            audioInput = false,
+            videoInput = false,
+            imageOutput = false,
+            audioOutput = false,
+            videoOutput = false,
+        )
+        assertEquals(setOf("text"), result.outputModalities!!.toSet())
+    }
+
+    @Test
+    fun videoOutput_turnedOn_forAModelWithoutIt_becomesAnOverride() {
+        // The mirror direction: mark a text-only model as producing video.
+        val model = base(inputs = listOf("text"), outputs = listOf("text"))
+        val result = buildModelEntryOverrides(
+            baseModel = model,
+            previous = ModelOverrides(),
+            displayName = model.displayName,
+            maxOutputTokensText = "",
+            contextWindowText = "",
+            thinkingEnabled = false,
+            imageInput = false,
+            pdfInput = false,
+            audioInput = false,
+            videoInput = false,
+            imageOutput = false,
+            audioOutput = false,
+            videoOutput = true,
+        )
+        assertEquals(setOf("text", "video"), result.outputModalities!!.toSet())
+    }
+
+    @Test
+    fun maxThinkingLevel_omittedByCaller_isPreservedNotWiped() {
+        // [RC-1114 U-18] The new parameter defaults to `previous.maxThinkingLevel`,
+        // so a caller that does not own the field (every pre-existing call site)
+        // cannot wipe a value written by backup import / config restore / RPC.
+        // This is the same contract `previous.copy(...)` gave for free before
+        // the field became a named argument — pinned here because a named
+        // argument is exactly where that free passthrough can be lost.
+        val previous = ModelOverrides(maxThinkingLevel = ThinkingLevel.ULTRA)
+        val result = buildModelEntryOverrides(
+            baseModel = base(inputs = listOf("text"), outputs = listOf("text")),
+            previous = previous,
+            displayName = "Base Model",
+            maxOutputTokensText = "",
+            contextWindowText = "",
+            thinkingEnabled = false,
+            imageInput = false,
+            pdfInput = false,
+            audioInput = false,
+            videoInput = false,
+            imageOutput = false,
+            audioOutput = false,
+        )
+        assertEquals(ThinkingLevel.ULTRA, result.maxThinkingLevel)
+    }
+
+    @Test
+    fun maxThinkingLevel_setToNull_clearsTheOverride() {
+        // "Inherit model default" must actually clear, not freeze today's level.
+        val previous = ModelOverrides(maxThinkingLevel = ThinkingLevel.MAX)
+        val result = buildModelEntryOverrides(
+            baseModel = base(inputs = listOf("text"), outputs = listOf("text")),
+            previous = previous,
+            displayName = "Base Model",
+            maxOutputTokensText = "",
+            contextWindowText = "",
+            thinkingEnabled = false,
+            imageInput = false,
+            pdfInput = false,
+            audioInput = false,
+            videoInput = false,
+            imageOutput = false,
+            audioOutput = false,
+            maxThinkingLevel = null,
+        )
+        assertNull(result.maxThinkingLevel)
     }
 
     @Test

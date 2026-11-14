@@ -742,6 +742,7 @@
     <!-- T-android-codex-oauth-dns -->
     <string name="add_custom_model_model_id">模型 ID</string>
     <string name="add_custom_model_display_name_optional">显示名称（可选）</string>
+    <string name="add_custom_model_capabilities_footer">留空则使用服务商上报的值，之后也可以在模型详情页修改。</string>
     <string name="model_entry_model_detail">模型详情</string>
     <string name="model_entry_display_name">显示名称</string>
     <string name="model_entry_max_output_tokens">最大输出 Token 数</string>
@@ -1384,6 +1385,8 @@
     <string name="add_provider_endpoint_hint">留空则使用默认端点。会自动追加 “/v1” —— 只需填写基础主机地址。</string>
     <string name="add_provider_endpoint_gemini_hint">留空则使用 Google 默认端点。请填写包含版本路径的完整基础 URL。</string>
     <string name="modeldetail_video_output">视频输出</string>
+    <string name="modeldetail_max_thinking_inherit">跟随模型默认</string>
+    <string name="modeldetail_max_thinking_level">最高思考挡位</string>
     <string name="model_group_no_usable_models_badge">无可用模型</string>
     <string name="system_permissions_title">系统权限</string>
     <string name="system_permissions_section_a11y">无障碍服务</string>

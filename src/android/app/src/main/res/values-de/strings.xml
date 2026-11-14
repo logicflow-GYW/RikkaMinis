@@ -625,6 +625,7 @@
     <string name="add_provider_custom_api_base_optional">Benutzerdefinierte API-Basis (optional)</string>
     <string name="add_custom_model_model_id">Modell-ID</string>
     <string name="add_custom_model_display_name_optional">Anzeigename (optional)</string>
+    <string name="add_custom_model_capabilities_footer">Leer lassen, um den vom Anbieter gemeldeten Wert zu nutzen. Später auf der Detailseite des Modells änderbar.</string>
     <string name="model_entry_model_detail">Modelldetails</string>
     <string name="model_entry_display_name">Anzeigename</string>
     <string name="model_entry_max_output_tokens">Maximale Ausgabe-Tokens</string>
@@ -1356,6 +1357,8 @@
     <string name="add_provider_endpoint_hint">Leer lassen, um den Standard-Endpunkt zu verwenden. \"/v1\" wird automatisch angehängt – geben Sie nur den Basis-Host ein.</string>
     <string name="add_provider_endpoint_gemini_hint">Leer lassen, um den Standard-Google-Endpunkt zu verwenden. Geben Sie die vollständige Basis-URL einschließlich Versionspfad ein.</string>
     <string name="modeldetail_video_output">Videoausgabe</string>
+    <string name="modeldetail_max_thinking_inherit">Modellvorgabe übernehmen</string>
+    <string name="modeldetail_max_thinking_level">Maximale Denkstufe</string>
     <string name="quicktest_title">Schnelltest</string>
     <string name="quicktest_button">Schnelltest</string>
     <string name="quicktest_footer">Führen Sie einen Schnelltest aus, der der Hauptfunktion dieses Modells entspricht.</string>

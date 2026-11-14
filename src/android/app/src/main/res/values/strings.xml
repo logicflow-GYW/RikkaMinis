@@ -895,6 +895,7 @@
          OAuth provider fails with DNS / timeout. -->
     <string name="add_custom_model_model_id">Model ID</string>
     <string name="add_custom_model_display_name_optional">Display Name (optional)</string>
+    <string name="add_custom_model_capabilities_footer">Leave blank to use whatever the provider reports. You can change these later on the model\'s detail page.</string>
     <string name="model_entry_model_detail">Model Detail</string>
     <string name="model_entry_display_name">Display Name</string>
     <string name="model_entry_max_output_tokens">Max Output Tokens</string>
@@ -927,6 +928,8 @@
     <string name="modeldetail_image_output">Image Output</string>
     <string name="modeldetail_audio_output">Audio Output</string>
     <string name="modeldetail_video_output">Video Output</string>
+    <string name="modeldetail_max_thinking_inherit">Inherit model default</string>
+    <string name="modeldetail_max_thinking_level">Max Thinking Level</string>
     <string name="modeldetail_output_modality_footer">Enable for models that generate images or audio (e.g. gpt-image-1, TTS). Text output is always available.</string>
     <!-- [T-android-model-quick-test] Quick Test sheet -->
     <string name="quicktest_title">Quick Test</string>
