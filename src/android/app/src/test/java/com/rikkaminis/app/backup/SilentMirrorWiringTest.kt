@@ -276,7 +276,7 @@ class SilentMirrorWiringTest {
         assertTrue(
             "openTarget must resolve through the pure decision, so the row and the writer " +
                 "cannot disagree about which devices can write",
-            store.contains("MirrorPlan.targetKind(") && store.contains("FileTarget(publicBase())"),
+            store.contains("MirrorPlan.targetKind(") && store.contains("FileTarget(publicStorageRoot())"),
         )
     }
 

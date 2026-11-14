@@ -232,6 +232,38 @@ object MirrorStore {
     @Suppress("DEPRECATION")
     private fun publicBase(): File = File(Environment.getExternalStorageDirectory(), ROOT_REL)
 
+    /**
+     * The root of the shared volume, which is what the *writer* must be given.
+     *
+     * [publicBase] already appends [ROOT_REL], and every path
+     * `runLocked` hands to a [MirrorTarget] starts with that same prefix
+     * (`currentPath` = [CURRENT_REL] + relative name). Passing the appended
+     * directory as the base therefore applied it twice: on device the tree
+     * landed at `…/RikkaMinis/backup/Download/RikkaMinis/backup/mirror/…`
+     * (41 MB, verified 2026-11-14) while every reader kept looking at the
+     * un-nested path. `FileTarget` joins `base + relPath` verbatim, so the base
+     * for these storage-relative paths is the volume root itself.
+     *
+     * [publicBase] stays for the two places that address the mirror root
+     * directly — the v1 tree and its park destination.
+     */
+    @Suppress("DEPRECATION")
+    private fun publicStorageRoot(): File = Environment.getExternalStorageDirectory()
+
+    /**
+     * App-specific external dir — the 26–28 fallback **only**.
+     *
+     * Deliberately keeps the appended `RikkaMinis/backup`: every device that
+     * has ever run this fallback wrote its tree at `…/RikkaMinis/backup/` +
+     * the storage-relative `Download/RikkaMinis/backup/…` path, i.e. nested.
+     * Pointing the base at the plain `getExternalFilesDir` would be "tidier"
+     * and would strand every file already there, so the nesting is frozen.
+     * ponytail: 26–28 fallback writes one prefix deeper than necessary |
+     * 天花板: any device that actually grants WRITE_EXTERNAL_STORAGE is on the
+     * public tree instead, and 29+ never reaches this branch | 升级触发: the
+     * first 26–28 user report about the fallback's location, or a decision to
+     * delete that fallback entirely.
+     */
     private fun appExternalBase(app: Context): File? =
         app.getExternalFilesDir(null)?.let { File(it, "RikkaMinis/backup") }
 
@@ -289,7 +321,7 @@ object MirrorStore {
                 return null
             }
             val target = when (kind) {
-                MirrorPlan.TargetKind.PUBLIC_DOWNLOADS -> FileTarget(publicBase())
+                MirrorPlan.TargetKind.PUBLIC_DOWNLOADS -> FileTarget(publicStorageRoot())
                 MirrorPlan.TargetKind.APP_EXTERNAL -> appExternalBase(app)?.let { FileTarget(it) }
             } ?: run {
                 Log.w(TAG, "no mirror target: app-specific external dir unavailable")
