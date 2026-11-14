@@ -133,14 +133,44 @@ fun EnvironmentVariablesScreen(
             )
         }
 
-        // [RC-1114 U-11] Environment variables are injected when a terminal
-        // session STARTS; there is no live `export`/`unset` push into a running
-        // shell (unlike TZ and the proxy block, which have broadcast paths).
-        // Without this note the page looks like it applies changes everywhere
-        // immediately, so a user who adds a token and runs a command in an
-        // already-open terminal sees the old environment and concludes the
-        // save did not work. Stated once, above the list, rather than per row:
-        // it is a property of the whole page, not of any single entry.
+        // [RC-1114 U-11] Where a saved value takes effect, stated once above the
+        // list because it is a property of the whole page rather than of any
+        // single entry.
+        //
+        // Three injection points, three different moments:
+        //   * assistant commands — `ExecutionCoordinator.executeWithShellRetry`
+        //     re-reads `allAsDict()` and diffs against `lastInjectedKeys` before
+        //     EVERY command, so a save is live on the next one;
+        //   * the interactive PTY — `TerminalSession.buildTermuxEnv` bakes the
+        //     map into the env array at session start, so an already-open
+        //     terminal keeps the old one;
+        //   * fresh guest processes — `PRootKernel.customEnvironment` at spawn.
+        //
+        // Without this note the page reads as "applies everywhere immediately",
+        // so a user who adds a token and runs a command in an already-open
+        // terminal sees the old environment and concludes the save failed.
+        //
+        // [ponytail: note instead of a live `export`/`unset` broadcast to the
+        // PTY. 天花板: the note is wrong the day a terminal outlives this
+        // screen — see the trigger in backlog §RC1114-U11. 升级触发: the
+        // terminal gains tabs or a background/keep-alive mode, so a session can
+        // be alive while the user edits variables on another screen.]
+        //
+        // Why not broadcast, even though `broadcastProxy`/`broadcastTimezone`
+        // exist (see `TerminalSession.applyEnvMap` → `queueEnvUpdate`):
+        //   1. the PTY's lifetime is the Composable's — `TerminalScreen`'s
+        //      `DisposableEffect` calls `stop()` on dispose, so navigating here
+        //      already killed the only session a broadcast could reach;
+        //   2. a PTY broadcast is literally typed into the shell, so every value
+        //      would be echoed on screen and land in the scrollback — the wrong
+        //      trade for a page whose contents are API keys;
+        //   3. with no broadcast, an open terminal receives neither `export` nor
+        //      `unset` — and `unset` would not reach a running program anyway
+        //      (it keeps the `environ` it started with). That second half is
+        //      POSIX, not a missing feature, which is why the footer states the
+        //      limitation instead of promising a live delete. Deletion DOES take
+        //      effect on the assistant path: `PersistentShell.applyEnvironment`
+        //      diffs `previousKeys` and emits `unset` for the difference.
         SettingsSection(
             header = stringResource(R.string.env_var_restart_terminal_title),
             footer = stringResource(R.string.env_var_restart_terminal_note),
