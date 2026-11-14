@@ -257,24 +257,45 @@ object MirrorStore {
      * mutates the target belongs in `syncNow` instead.
      *
      * A device that cannot reach the public folder reports NO target instead of
-     * falling back to an app-private directory. That fallback still exists for
-     * API 26–28 (where public Downloads needs a runtime permission a background
-     * sync should not request); on 29+ the visible folder IS the feature, so
-     * quietly writing somewhere the user cannot see would rebuild the original
-     * defect — a copy that exists, but not where the user was told it is.
+     * falling back to an app-private directory — but only where the grant is
+     * what is missing on a version that can still be told about it. On 29+ the
+     * visible folder IS the feature, so quietly writing somewhere the user
+     * cannot see would rebuild the original defect (a copy that exists, but not
+     * where the user was told it is). On 26–28 an ungranted
+     * `WRITE_EXTERNAL_STORAGE` keeps the app-specific fallback, because there
+     * the alternative is not "write somewhere less visible", it is "fail every
+     * round with no reachable repair".
      */
-    internal fun openTarget(context: Context): MirrorTarget? {
+    internal fun openTarget(context: Context): MirrorTarget? = openTargetWithKind(context)?.second
+
+    /**
+     * [openTarget] plus the [MirrorPlan.TargetKind] it was built for.
+     *
+     * The kind travels with the target instead of being re-read by the caller:
+     * the grant is revocable from the system UI at any instant, so a second
+     * read could answer differently than the one that produced the target. The
+     * legacy-layout migration keys on "we are actually writing the public tree",
+     * and asking a second, independent question would allow the one state that
+     * must not exist — migrating the v1 tree away while the writer went
+     * somewhere else.
+     */
+    private fun openTargetWithKind(
+        context: Context,
+    ): Pair<MirrorPlan.TargetKind, MirrorTarget>? {
         val app = context.applicationContext
         return try {
-            val kind = currentTargetKind(app)
-            when (kind) {
+            val kind = currentTargetKind(app) ?: run {
+                Log.w(TAG, "no mirror target: all-files access not granted")
+                return null
+            }
+            val target = when (kind) {
                 MirrorPlan.TargetKind.PUBLIC_DOWNLOADS -> FileTarget(publicBase())
                 MirrorPlan.TargetKind.APP_EXTERNAL -> appExternalBase(app)?.let { FileTarget(it) }
-                null -> {
-                    Log.w(TAG, "no mirror target: all-files access not granted")
-                    null
-                }
+            } ?: run {
+                Log.w(TAG, "no mirror target: app-specific external dir unavailable")
+                return null
             }
+            kind to target
         } catch (t: Throwable) {
             Log.w(TAG, "no mirror target: ${t.message}")
             null
@@ -302,9 +323,16 @@ object MirrorStore {
      * the layout pref is written only after the legacy tree is out of the way,
      * so a run killed midway resumes instead of leaving two live trees.
      */
-    private fun migrateLegacyLayout(app: Context): Boolean {
+    private fun migrateLegacyLayout(app: Context, targetIsPublic: Boolean): Boolean {
         val prefs = prefs(app)
         if (prefs.getInt(KEY_LAYOUT, 1) >= LAYOUT_PLAIN_FILES) return true
+        // v1 only ever wrote into the public tree, so a device that is currently
+        // writing elsewhere has nothing here to migrate. It must NOT be marked
+        // v2 either: `File.exists()` answers false for a directory we cannot
+        // read, so marking it now would strand the real v1 files forever — the
+        // migration would never run again after the user granted the access it
+        // was waiting for. Deferring costs one predicate per sync.
+        if (!targetIsPublic) return true
 
         val base = publicBase()
         val legacy = File(base, LEGACY_TREE)
@@ -404,12 +432,13 @@ object MirrorStore {
         if (!isEnabled(app)) return@withContext Outcome.Disabled
         if (!inFlight.compareAndSet(false, true)) return@withContext Outcome.Busy
         try {
-            val target = openTarget(app) ?: return@withContext Outcome.Unavailable.also { record(app, "unavailable") }
+            val (kind, target) = openTargetWithKind(app)
+                ?: return@withContext Outcome.Unavailable.also { record(app, "unavailable") }
             // A legacy tree we could not move aside means the v1 paths are
             // still live on top of the tree v2 writes into — and the next
             // run's park would move our own fresh files into the "legacy"
             // pile. Refuse this round; the next sync retries the move.
-            if (!migrateLegacyLayout(app)) {
+            if (!migrateLegacyLayout(app, targetIsPublic = kind == MirrorPlan.TargetKind.PUBLIC_DOWNLOADS)) {
                 val blocked = Outcome.Failed("legacy mirror tree could not be moved aside")
                 record(app, outcomeText(blocked))
                 return@withContext blocked

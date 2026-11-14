@@ -197,7 +197,13 @@ internal object MirrorPlan {
      *  - **29 (Q)**: scoped storage still honours the legacy write grant for
      *    public dirs when `requestLegacyExternalStorage` is set (this app sets
      *    it), so a granted `WRITE_EXTERNAL_STORAGE` is enough.
-     *  - **26–28**: legacy storage is always on, no grant to check.
+     *  - **26–28**: the same `WRITE_EXTERNAL_STORAGE` grant as 29, and for the
+     *    same reason — "legacy storage" describes the *scoping* model, not the
+     *    runtime-permission model, which has required the grant since API 23.
+     *    Answering PUBLIC_DOWNLOADS without it would not make the directory
+     *    writable; it would turn a device that used to sync (into the
+     *    app-specific dir) into one that fails every round with a Retry button
+     *    that cannot help.
      *
      * Deliberately NOT gated on `Environment.isExternalStorageManager()` alone:
      * that API exists from R, and calling it on Q throws. The caller passes the
@@ -209,8 +215,10 @@ internal object MirrorPlan {
         legacyWriteGranted: Boolean,
     ): TargetKind? = when {
         sdkInt >= 30 -> if (allFilesAccess) TargetKind.PUBLIC_DOWNLOADS else null
-        sdkInt == 29 -> if (legacyWriteGranted) TargetKind.PUBLIC_DOWNLOADS else TargetKind.APP_EXTERNAL
-        else -> TargetKind.PUBLIC_DOWNLOADS
+        // 29 and 26–28 read the same grant. Keeping them distinguishable in the
+        // history (29 also needs `requestLegacyExternalStorage`, set in the
+        // manifest) is why the doc above splits them; the decision is identical.
+        else -> if (legacyWriteGranted) TargetKind.PUBLIC_DOWNLOADS else TargetKind.APP_EXTERNAL
     }
 
     // ---------------------------------------------------------------- health

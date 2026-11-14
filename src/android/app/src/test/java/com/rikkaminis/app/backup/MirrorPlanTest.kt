@@ -247,10 +247,18 @@ class MirrorPlanTest {
             MirrorPlan.TargetKind.APP_EXTERNAL,
             MirrorPlan.targetKind(sdkInt = 29, allFilesAccess = false, legacyWriteGranted = false),
         )
-        // 26–28: legacy storage is unconditional.
+        // 26–28: "legacy storage" names the scoping model, not the permission
+        // model — WRITE_EXTERNAL_STORAGE has been a runtime grant since API 23.
+        // Without it the public tree is no more writable here than on 29, so
+        // the fallback is the same one; answering PUBLIC_DOWNLOADS would make
+        // the row report a healthy target that fails on every write.
         for (sdk in 26..28) {
             assertEquals(
                 MirrorPlan.TargetKind.PUBLIC_DOWNLOADS,
+                MirrorPlan.targetKind(sdkInt = sdk, allFilesAccess = false, legacyWriteGranted = true),
+            )
+            assertEquals(
+                MirrorPlan.TargetKind.APP_EXTERNAL,
                 MirrorPlan.targetKind(sdkInt = sdk, allFilesAccess = false, legacyWriteGranted = false),
             )
         }

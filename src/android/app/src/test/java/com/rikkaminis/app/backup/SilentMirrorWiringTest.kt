@@ -286,18 +286,19 @@ class SilentMirrorWiringTest {
         // app-specific dir instead would rebuild the original defect: a copy that
         // exists, but not where the user was told it is.
         val code = withoutComments(readRepoFile(storeRel))
-        val openTarget = braced(code, code.indexOf("internal fun openTarget("))
+        val openTarget = braced(code, code.indexOf("private fun openTargetWithKind("))
         assertFalse(
-            "the null arm must not construct a target",
-            openTarget.contains("null -> appExternalBase(") ||
-                openTarget.contains("null -> FileTarget("),
+            "a missing grant must not construct a target",
+            openTarget.contains("?: appExternalBase(") ||
+                openTarget.contains("?: FileTarget("),
         )
         assertTrue(
-            "a null verdict must be a logged refusal",
-            openTarget.contains("null ->") && openTarget.contains("no mirror target"),
+            "a missing grant must be a logged refusal, not a silent null",
+            openTarget.contains("currentTargetKind(app) ?: run") &&
+                openTarget.contains("no mirror target"),
         )
         assertTrue(
-            "only the API-29/26-28 kind may fall back to the app-specific dir",
+            "only the APP_EXTERNAL kind may fall back to the app-specific dir",
             openTarget.contains("MirrorPlan.TargetKind.APP_EXTERNAL -> appExternalBase"),
         )
         assertTrue(
@@ -335,13 +336,38 @@ class SilentMirrorWiringTest {
     }
 
     @Test
+    fun aNonPublicTargetNeverMarksTheLayoutAsMigrated() {
+        // `File.exists()` answers false for a directory this process cannot read,
+        // so a v1 tree behind a revoked grant is indistinguishable from "no v1
+        // tree". Recording v2 from that state would strand the real files: the
+        // migration would never run again after the user granted the access it
+        // was waiting for, and the stale names would sit next to the new ones
+        // forever.
+        val code = withoutComments(readRepoFile(storeRel))
+        val migrate = braced(code, code.indexOf("private fun migrateLegacyLayout("))
+        val guardAt = migrate.indexOf("if (!targetIsPublic) return true")
+        assertTrue(
+            "the migration must refuse to touch the layout pref unless it is writing the " +
+                "public tree",
+            guardAt in 0 until migrate.indexOf("prefs.edit().putInt(KEY_LAYOUT"),
+        )
+        val sync = braced(code, code.indexOf("private suspend fun syncNow("))
+        assertTrue(
+            "the caller must derive the flag from the SAME read that produced the target, " +
+                "not from a second grant check that could disagree",
+            sync.contains("openTargetWithKind(app)") &&
+                sync.contains("kind == MirrorPlan.TargetKind.PUBLIC_DOWNLOADS"),
+        )
+    }
+
+    @Test
     fun aMigrationThatCannotParkTheOldTreeDoesNotSync() {
         // The park can fail (tree in use, volume read-only). The previous shape
         // logged, returned, and let syncNow write the plain layout into the very
         // tree the next run would park as "legacy".
         val code = withoutComments(readRepoFile(storeRel))
         val sync = braced(code, code.indexOf("private suspend fun syncNow("))
-        val guardAt = sync.indexOf("if (!migrateLegacyLayout(app))")
+        val guardAt = sync.indexOf("if (!migrateLegacyLayout(app,")
         assertTrue("the migration verdict must gate the write", guardAt >= 0)
         assertTrue(
             "the guard must run before anything is written",
