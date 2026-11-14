@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -18,10 +19,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
+import com.rikkaminis.app.data.model.ModelOverrides
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.ui.components.RowLabel
 import com.rikkaminis.app.ui.components.SectionTextField
@@ -63,6 +66,14 @@ fun AddCustomModelScreen(
 
     var modelId by remember { mutableStateOf("") }
     var displayName by remember { mutableStateOf("") }
+    // [RC-1114 U-19] Two capability values the detail screen already edits.
+    // The entry this screen mints had no overrides beyond displayName, so the
+    // ONLY way to set a custom model's context window / output cap was to save,
+    // find the model in the list, open its detail page and fill them in a
+    // second time. Both fields already exist on `ModelOverrides` — this is an
+    // input moved forward, not a new field (no four-layer sync involved).
+    var contextWindowText by remember { mutableStateOf("") }
+    var maxOutputTokensText by remember { mutableStateOf("") }
     // [deep-audit-1033 I05] The write below is a coroutine now; without this
     // the Save button stays live for the round trip and a double tap can add
     // the same custom model twice (addEntry has no uniqueness check).
@@ -118,6 +129,39 @@ fun AddCustomModelScreen(
             }
         }
 
+        // [RC-1114 U-19] The two capability values the detail screen already
+        // edits, moved forward to the creation form. Blank means "leave the
+        // override null" (inherit whatever the catalog/runtime resolves), so a
+        // user who only wants a name+id keeps exactly today's behaviour.
+        SettingsSection(
+            header = stringResource(R.string.modeldetail_section_capabilities),
+            footer = stringResource(R.string.add_custom_model_capabilities_footer),
+        ) {
+            SettingsCardBlock {
+                RowLabel(text = stringResource(R.string.modeldetail_context_window))
+                SectionTextField(
+                    value = contextWindowText,
+                    onValueChange = { contextWindowText = it.filter { c -> c.isDigit() } },
+                    placeholder = stringResource(R.string.modeldetail_provider_default),
+                    singleLine = true,
+                    // Same numeric keyboard the detail page uses for these two
+                    // fields — the input is a token count, and the filter above
+                    // only accepts digits, so offering a text keyboard invites
+                    // characters that are silently dropped.
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                Spacer(Modifier.height(12.dp))
+                RowLabel(text = stringResource(R.string.model_entry_max_output_tokens))
+                SectionTextField(
+                    value = maxOutputTokensText,
+                    onValueChange = { maxOutputTokensText = it.filter { c -> c.isDigit() } },
+                    placeholder = stringResource(R.string.modeldetail_provider_default),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+            }
+        }
+
         Spacer(Modifier.height(20.dp))
         MinisButton(
             onClick = {
@@ -129,10 +173,27 @@ fun AddCustomModelScreen(
                     displayName = name.trim(),
                     provider = instance.providerType.displayName,
                 )
+                // [RC-1114 U-19] Both capability inputs land in the SAME
+                // `ModelOverrides` fields the detail screen writes, with the
+                // same null-means-inherit rule: blank or non-positive input
+                // writes nothing.
+                //
+                // `displayName` is deliberately NOT written here: the name the
+                // user typed already IS `baseModel.displayName` on this entry
+                // (this screen mints the base from the form), so an override
+                // carrying the same string would be a no-op that nonetheless
+                // marks the entry `isUserModified` and freezes the name against
+                // any later catalog update. That is the same "persist only when
+                // it diverges from the base" rule the detail screen's builder
+                // applies.
                 val entry = ModelEntry(
                     providerInstanceId = instanceId,
                     baseModel = model,
                     isCustom = true,
+                    overrides = ModelOverrides(
+                        contextWindow = contextWindowText.trim().toIntOrNull()?.takeIf { it > 0 },
+                        maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
+                    ),
                 )
                 scope.launch {
                     try {

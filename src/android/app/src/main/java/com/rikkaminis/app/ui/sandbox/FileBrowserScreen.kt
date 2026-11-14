@@ -56,6 +56,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +68,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rikkaminis.app.ui.components.MinisTextButton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,6 +80,25 @@ fun FileBrowserScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     var deleteTarget by remember { mutableStateOf<FileItem?>(null) }
+    // [rc-1114 U-06] How many entries the pending delete removes from disk
+    // (0 for a file / a symlink, which are unlinked by name). Counted off the
+    // main thread when the dialog opens — a session workspace can hold
+    // thousands of files and the walk must not stall the frame that shows the
+    // dialog. `null` = still counting (the confirm button stays disabled so a
+    // mis-tap cannot land before the user has seen the number).
+    var pendingDeleteEntries by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(deleteTarget) {
+        val target = deleteTarget
+        if (target == null) {
+            pendingDeleteEntries = null
+            return@LaunchedEffect
+        }
+        pendingDeleteEntries = if (target.isDirectory && !target.isSymlink) {
+            withContext(Dispatchers.IO) { countEntriesUnder(target) }
+        } else {
+            0
+        }
+    }
     // T-pwa-3: long-press → "Add to Home Screen" sheet, hosted at screen
     // scope so the dropdown can dismiss before the bottom-sheet appears.
     var webAppSheetSource by remember { mutableStateOf<com.rikkaminis.app.webapp.WebAppSource.HostFile?>(null) }
@@ -196,15 +218,30 @@ fun FileBrowserScreen(
 
     // Delete confirmation
     deleteTarget?.let { item ->
+        val entryCount = pendingDeleteEntries
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text(stringResource(R.string.filebrowser_delete_title, item.name)) },
-            text = { Text(stringResource(R.string.filebrowser_delete_message)) },
+            text = {
+                // [rc-1114 U-06] A directory delete is recursive, so the dialog
+                // must say what goes with it. Three states, never a guess:
+                // still counting / empty directory / N entries inside.
+                Text(
+                    when {
+                        entryCount == null -> stringResource(R.string.filebrowser_delete_counting)
+                        entryCount == 0 -> stringResource(R.string.filebrowser_delete_message)
+                        else -> stringResource(R.string.filebrowser_delete_dir_message, entryCount)
+                    },
+                )
+            },
             confirmButton = {
-                MinisTextButton(onClick = {
-                    viewModel.deleteItem(item)
-                    deleteTarget = null
-                }) {
+                MinisTextButton(
+                    enabled = entryCount != null,
+                    onClick = {
+                        viewModel.deleteItem(item)
+                        deleteTarget = null
+                    },
+                ) {
                     Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error)
                 }
             },
@@ -359,16 +396,22 @@ private fun FileItemRow(
             }
         }
 
-        // Delete button for non-directory items
-        if (!item.isDirectory) {
-            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    Icons.Filled.Delete,
-                    contentDescription = stringResource(R.string.delete),
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+        // [rc-1114 U-06] Delete is offered for EVERY entry, directories
+        // included. It used to be gated on `!item.isDirectory`, which made
+        // `FileBrowserViewModel.deleteItem`'s recursive branch unreachable from
+        // the UI: the user could create a folder here ("New folder" in the ⋯
+        // menu) and then had no way at all to remove it — the long-press menu
+        // only offered "Copy Absolute Path". A non-empty directory is now
+        // removed only after the confirmation dialog states how many entries
+        // it takes with it (see `pendingDeleteEntries`), so the entry is not a
+        // one-tap disaster.
+        IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+            Icon(
+                Icons.Filled.Delete,
+                contentDescription = stringResource(R.string.delete),
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         // Chevron for directories

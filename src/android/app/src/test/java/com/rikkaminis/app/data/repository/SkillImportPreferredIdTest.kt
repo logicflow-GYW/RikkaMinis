@@ -110,10 +110,24 @@ class SkillImportPreferredIdTest {
     @Test
     fun importFromGitHub_signature_hasPreferredIdParameter() {
         val src = readRepoFile("app/src/main/java/com/rikkaminis/app/data/repository/SkillRepository.kt")
-        val sig = src.substringAfter("suspend fun importFromGitHub(").substringBefore("): Skill? =")
+        // [RC-U12] the return type is `UpdateResult` now (it used to be
+        // `Skill?`), so this marker moved with it — the passthrough this test
+        // exists for is unchanged.
+        val sig = src.substringAfter("suspend fun importFromGitHub(").substringBefore("): UpdateResult =")
         assertTrue(
             "importFromGitHub must accept preferredId: String? = null as the last parameter",
             sig.contains("preferredId: String? = null"),
+        )
+        val body = src.substringAfter("suspend fun importFromGitHub(")
+            .substringBefore("/** Outcome of [updateFromURL]")
+        assertFalse(
+            "importFromGitHub must not answer a bare null on failure — the UI cannot tell " +
+                "'nothing was imported' from 'imported, but scripts/ are missing' (RC-U12)",
+            body.contains("return@withContext null"),
+        )
+        assertTrue(
+            "importFromGitHub must be able to report the partial-sibling state",
+            body.contains("UpdateResult.PartialSuccess"),
         )
     }
 

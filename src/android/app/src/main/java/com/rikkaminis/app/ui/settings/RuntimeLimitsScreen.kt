@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import com.rikkaminis.app.R
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -28,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -134,6 +137,11 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
     var stallNoProgressSec by remember { mutableStateOf(AgentRuntimeLimitsPrefs.stallNoProgressSec()) }
     var shellIdleTimeoutMin by remember { mutableStateOf(AgentRuntimeLimitsPrefs.shellIdleTimeoutMin()) }
     var heavyGateTimeoutSec by remember { mutableStateOf(AgentRuntimeLimitsPrefs.heavyGateTimeoutSec()) }
+
+    // [RC-1114 U-17] Drives the "restore defaults" confirmation at the bottom
+    // of the page. Declared here (not inline in composition) so the dialog's
+    // open state survives recomposition like every other dialog on this screen.
+    var showRestoreDefaults by remember { mutableStateOf(false) }
 
     // [FIX-6 / F-241] Re-read every snapshot when the backing prefs change
     // OUTSIDE this screen — `minis-config set runtime.*` (ConfigBuiltins
@@ -787,7 +795,91 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
                 )
             }
             LimitsSectionFooter(stringResource(R.string.runtime_limits_sandbox_footer))
+
+            // ── Restore defaults ─────────────────────────────────────────
+            // [RC-1114 U-17] The page had no way back to the shipped values:
+            // every knob is a slider whose coarse step cannot land on the
+            // default again once dragged past it (e.g. `guestTmpMaxAgeMin`
+            // snaps in 30-minute slots, so the 60-minute default is only
+            // reachable if you never touched it). Reset is a STATE change,
+            // not a write — this page is a draft (every slider below edits
+            // local state, the top-bar Save persists all of it), so restoring
+            // the drafts and letting the user press Save is the same two-step
+            // shape as every other control here. Writing through immediately
+            // would be the inconsistent choice: one row in this page would
+            // persist itself while the other forty wait for Save.
+            LimitsSectionCard(title = stringResource(R.string.runtime_limits_section_reset)) {
+                LimitsActionRow(
+                    title = stringResource(R.string.runtime_limits_restore_defaults),
+                    subtitle = stringResource(R.string.runtime_limits_restore_defaults_desc),
+                    onClick = { showRestoreDefaults = true },
+                    showDivider = false,
+                )
+            }
+            LimitsSectionFooter(stringResource(R.string.runtime_limits_restore_defaults_footer))
         }
+    }
+
+    if (showRestoreDefaults) {
+        AlertDialog(
+            onDismissRequest = { showRestoreDefaults = false },
+            title = { Text(stringResource(R.string.runtime_limits_restore_confirm_title)) },
+            text = { Text(stringResource(R.string.runtime_limits_restore_confirm_body)) },
+            confirmButton = {
+                MinisTextButton(onClick = {
+                    // Every value below is the named `*_DEFAULT` constant from
+                    // AgentRuntimeLimitsPrefs / ConcurrencyPrefs — no second
+                    // copy of the numbers lives in the UI, so a default that
+                    // moves in the data layer moves here too.
+                    subagentEnabled = false
+                    maxSessions = ConcurrencyPrefs.DEFAULT
+                    maxTurns = AgentRuntimeLimitsPrefs.TURNS_DEFAULT
+                    maxProviderAttempts = AgentRuntimeLimitsPrefs.PROVIDER_ATTEMPTS_DEFAULT
+                    maxToolCalls = AgentRuntimeLimitsPrefs.TOOL_CALLS_DEFAULT
+                    maxShellCommands = AgentRuntimeLimitsPrefs.SHELL_COMMANDS_DEFAULT
+                    maxCompactionCalls = AgentRuntimeLimitsPrefs.COMPACTION_CALLS_DEFAULT
+                    maxConcurrentTools = AgentRuntimeLimitsPrefs.CONCURRENT_TOOLS_DEFAULT
+                    runDeadlineMin = AgentRuntimeLimitsPrefs.DEADLINE_DEFAULT_MIN
+                    lengthWallContinues = AgentRuntimeLimitsPrefs.LENGTH_WALL_DEFAULT
+                    eofStubContinues = AgentRuntimeLimitsPrefs.EOF_STUB_DEFAULT
+                    deterministicEmptyLimit = AgentRuntimeLimitsPrefs.DET_EMPTY_DEFAULT
+                    transientRetries = AgentRuntimeLimitsPrefs.TRANSIENT_RETRIES_DEFAULT
+                    verifyNudges = AgentRuntimeLimitsPrefs.VERIFY_NUDGES_DEFAULT
+                    generationTimeoutMin = AgentRuntimeLimitsPrefs.GENERATION_TIMEOUT_DEFAULT_MIN
+                    firstChunkDirectSec = AgentRuntimeLimitsPrefs.FIRST_CHUNK_DIRECT_DEFAULT_SEC
+                    firstChunkProxySec = AgentRuntimeLimitsPrefs.FIRST_CHUNK_PROXY_DEFAULT_SEC
+                    providerSlots = AgentRuntimeLimitsPrefs.PROVIDER_SLOTS_DEFAULT
+                    queueAdmission = AgentRuntimeLimitsPrefs.QUEUE_ADMISSION_DEFAULT
+                    autoCompactMinTailTokens = AgentRuntimeLimitsPrefs.COMPACT_TAIL_TOKENS_DEFAULT
+                    autoCompactMinIntervalMin = AgentRuntimeLimitsPrefs.COMPACT_INTERVAL_DEFAULT_MIN
+                    memoryInjectLines = AgentRuntimeLimitsPrefs.MEMORY_INJECT_LINES_DEFAULT
+                    memoryRollupInjectKb = AgentRuntimeLimitsPrefs.MEMORY_ROLLUP_KB_DEFAULT
+                    memorySearchLines = AgentRuntimeLimitsPrefs.MEMORY_SEARCH_LINES_DEFAULT
+                    memoryLookbackDays = AgentRuntimeLimitsPrefs.MEMORY_LOOKBACK_DAYS_DEFAULT
+                    imageMaxPerImageMb = AgentRuntimeLimitsPrefs.IMAGE_PER_IMAGE_MB_DEFAULT
+                    imageMaxTotalMb = AgentRuntimeLimitsPrefs.IMAGE_TOTAL_MB_DEFAULT
+                    imageMaxRequestMb = AgentRuntimeLimitsPrefs.IMAGE_REQUEST_MB_DEFAULT
+                    imageMaxEdgePx = AgentRuntimeLimitsPrefs.IMAGE_EDGE_DEFAULT
+                    imageJpegQuality = AgentRuntimeLimitsPrefs.IMAGE_QUALITY_DEFAULT
+                    browserNavTimeoutSec = AgentRuntimeLimitsPrefs.BROWSER_NAV_TIMEOUT_DEFAULT_SEC
+                    browserDomStableSec = AgentRuntimeLimitsPrefs.BROWSER_DOM_STABLE_DEFAULT_SEC
+                    browserScreenshotQuality = AgentRuntimeLimitsPrefs.BROWSER_SCREENSHOT_Q_DEFAULT
+                    shellOutputKb = AgentRuntimeLimitsPrefs.SHELL_OUTPUT_KB_DEFAULT
+                    shellTimeoutSec = AgentRuntimeLimitsPrefs.SHELL_TIMEOUT_DEFAULT_SEC
+                    guestTmpMaxAgeMin = AgentRuntimeLimitsPrefs.GUEST_TMP_MAX_AGE_DEFAULT_MIN
+                    guestTmpSweepIntervalSec = AgentRuntimeLimitsPrefs.GUEST_TMP_SWEEP_INTERVAL_DEFAULT_SEC
+                    stallNoProgressSec = AgentRuntimeLimitsPrefs.STALL_NO_PROGRESS_DEFAULT_SEC
+                    shellIdleTimeoutMin = AgentRuntimeLimitsPrefs.SHELL_IDLE_TIMEOUT_DEFAULT_MIN
+                    heavyGateTimeoutSec = AgentRuntimeLimitsPrefs.HEAVY_GATE_TIMEOUT_DEFAULT_SEC
+                    showRestoreDefaults = false
+                }) { Text(stringResource(R.string.runtime_limits_restore_defaults)) }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { showRestoreDefaults = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        )
     }
 }
 
@@ -830,6 +922,57 @@ internal fun LimitsSectionFooter(text: String) {
         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
         lineHeight = 16.sp,
     )
+}
+
+/**
+ * [RC-1114 U-17] A tappable row with no value — the shape a "restore
+ * defaults" action needs. Same paddings/dividers as [LimitsSwitchRow] so it
+ * sits in the card without looking like a different widget family.
+ */
+@Composable
+internal fun LimitsActionRow(
+    title: String,
+    subtitle: String?,
+    onClick: () -> Unit,
+    showDivider: Boolean = true,
+    titleColor: Color = MaterialTheme.colorScheme.primary,
+) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = titleColor,
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        if (showDivider) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp)
+                    .height(0.5.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+            )
+        }
+    }
 }
 
 @Composable

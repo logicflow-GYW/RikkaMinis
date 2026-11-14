@@ -228,6 +228,9 @@
     <string name="env_var_privacy_header">プライバシー</string>
     <string name="env_var_privacy_toggle">プライバシーモード</string>
     <string name="env_var_privacy_footer">有効にすると、shell-execute の出力に含まれる環境変数の値はモデルに渡される前にマスクされます（例: `sk-1********ajhks`）。8 文字未満の値はすべて `*` に置き換えられます。チャットに表示される出力は変更されません。</string>
+    <string name="env_var_restart_terminal_note">タイムゾーンとプロキシの変更は実行中のターミナルに反映されますが、環境変数は反映されません（export/unset を即時反映する経路がないため）。</string>
+    <string name="env_var_restart_terminal_body">変数はターミナルセッションの開始時に注入されます。すでに開いているターミナルは古い環境を保持するため、閉じて開き直す必要があります。</string>
+    <string name="env_var_restart_terminal_title">ターミナルセッション</string>
     <string name="env_var_section_header">変数</string>
     <string name="env_var_section_footer">環境変数はセッション開始時にサンドボックスシェルに注入されます。名前は大文字に変換され、POSIX シェル変数のルールに従う必要があります。</string>
     <string name="env_var_empty_title">環境変数なし</string>
@@ -254,6 +257,7 @@
     <string name="log_no_files">ログファイルなし</string>
     <string name="log_section_storage">ストレージ</string>
     <string name="log_section_storage_footer">ログ保存合計: %1$s</string>
+    <string name="log_hidden_files_note">この一覧には表示していません：デバッグ/スナップショットログ %1$d 件、%2$s。すべて削除するとこれらも消えます。</string>
     <string name="log_section_crash">クラッシュログ</string>
     <string name="log_section_crash_footer">最近 %1$d 件のクラッシュレポート（Java/Kotlin + native）</string>
     <string name="log_delete_all_title">すべてのログを削除</string>
@@ -376,6 +380,8 @@
     <string name="storage_no_media_files">メディアファイルなし</string>
     <string name="storage_clear_session_footer">このセッションで生成されたすべてのファイルを削除します。会話自体は保持されます。</string>
     <string name="storage_browse_files">ファイルを閲覧</string>
+    <string name="storage_media_browse_subtitle">このセッションの画像と添付ファイル</string>
+    <string name="storage_media_browse">メディア</string>
     <string name="storage_clearing_status">削除中…</string>
     <string name="storage_clear_session_button">セッションファイルを削除</string>
     <string name="storage_clear_confirm_title">セッションファイルを削除しますか？</string>
@@ -470,6 +476,8 @@
     <string name="filebrowser_empty_folder">空のフォルダ</string>
     <string name="filebrowser_delete_title">“%1$s” を削除しますか？</string>
     <string name="filebrowser_delete_message">この操作は元に戻せません。</string>
+    <string name="filebrowser_delete_dir_message">このフォルダーと中のすべて（%1$d 項目）が削除されます。この操作は元に戻せません。</string>
+    <string name="filebrowser_delete_counting">数えています…</string>
     <string name="filebrowser_error_title">エラー</string>
     <string name="filebrowser_sort_ascending">昇順</string>
     <string name="filebrowser_sort_descending">降順</string>
@@ -617,6 +625,7 @@
     <string name="add_provider_custom_api_base_optional">カスタムAPIベース（オプション）</string>
     <string name="add_custom_model_model_id">モデルID</string>
     <string name="add_custom_model_display_name_optional">表示名（省略可）</string>
+    <string name="add_custom_model_capabilities_footer">空欄の場合はプロバイダーの報告値を使います。後からモデル詳細ページで変更できます。</string>
     <string name="model_entry_model_detail">モデルの詳細</string>
     <string name="model_entry_display_name">表示名</string>
     <string name="model_entry_max_output_tokens">最大出力トークン数</string>
@@ -909,6 +918,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">フォーム</string>
     <string name="mcp_tab_import">JSON をインポート</string>
     <string name="mcp_form_name">名前</string>
@@ -934,6 +944,9 @@
     <string name="mcp_form_save">保存</string>
     <string name="mcp_form_oauth_section">OAuth（任意）</string>
     <string name="mcp_form_oauth_authorized">認証済み</string>
+    <string name="mcp_form_oauth_saved_failed">認証しましたが、サーバーを保存できませんでした。削除された可能性があります。シートを閉じて追加し直してください。</string>
+    <string name="mcp_form_oauth_saved_incomplete">認証しましたが、名前または URL が未入力のため保存されていません。入力して保存を押してください。</string>
+    <string name="mcp_form_oauth_saved">認証して保存しました</string>
     <string name="mcp_form_oauth_client_id">クライアント ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth クライアント ID</string>
     <string name="mcp_form_oauth_client_secret">クライアントシークレット</string>
@@ -1272,6 +1285,7 @@
     <string name="soul_cancel">キャンセル</string>
     <string name="soul_ok">OK</string>
     <string name="soul_restore_default">デフォルトに戻す</string>
+    <string name="soul_restored_default">デフォルトに戻しました</string>
     <string name="soul_restore_confirm_title">デフォルトのSOUL.mdを復元しますか？</string>
     <string name="soul_restore_confirm_body">現在の変更はデフォルトのパーソナリティファイルで上書きされます。オリジナルは出発点として提供されており、いつでも再編集できます。</string>
     <string name="soul_save_error_title">保存できませんでした</string>
@@ -1350,6 +1364,8 @@
     <string name="add_provider_endpoint_hint">空欄の場合は既定のエンドポイントを使用します。「/v1」は自動的に付加されるため、ベースホストのみを入力してください。</string>
     <string name="add_provider_endpoint_gemini_hint">空欄の場合は Google の既定のエンドポイントを使用します。バージョンパスを含む完全なベース URL を入力してください。</string>
     <string name="modeldetail_video_output">動画出力</string>
+    <string name="modeldetail_max_thinking_inherit">モデルの既定に従う</string>
+    <string name="modeldetail_max_thinking_level">思考強度の上限</string>
     <string name="quicktest_title">クイックテスト</string>
     <string name="quicktest_button">クイックテスト</string>
     <string name="quicktest_footer">このモデルの主な機能に一致するクイックテストを実行します。</string>
@@ -1573,6 +1589,12 @@
     <string name="runtime_limits_heavy_gate">サンドボックス：ヘビーゲート待ち</string>
     <string name="runtime_limits_heavy_gate_desc">重いコマンドがグローバルのヘビーゲートを待つ最大時間。超えると別の重いコマンドが実行中と報告します。</string>
     <string name="runtime_limits_sandbox_footer">これらの時間はメモリ圧迫を防ぐためのものです。既定値は以前の固定値と同じです。</string>
+    <string name="runtime_limits_restore_confirm_body">このページの全項目が編集画面で出荷時の値に戻ります。保存を押すまで何も書き込まれません。</string>
+    <string name="runtime_limits_restore_confirm_title">デフォルトに戻しますか？</string>
+    <string name="runtime_limits_restore_defaults_footer">復元はこのページの未保存の値だけを変更します。適用するには保存を押してください。スライダーの刻みは変わりません。一部の既定値（一時ディレクトリの回収年齢など）は一度動かすと戻せないため、この行があります。</string>
+    <string name="runtime_limits_restore_defaults_desc">このページの全項目を出荷時の値に戻します</string>
+    <string name="runtime_limits_restore_defaults">デフォルトに戻す</string>
+    <string name="runtime_limits_section_reset">リセット</string>
     <string name="runtime_limits_media_footer">画像上限を上げると高画質のままモデルへ届きますが、リクエストが大きくなります。</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
@@ -1718,4 +1740,25 @@
     <string name="manage_models_deselect_all">選択を解除</string>
     <string name="manage_models_remote_section_header">プロバイダーから取得可能 (%1$d)</string>
     <string name="manage_models_error_prefix">更新できませんでした: %1$s</string>
+    <string name="auto_backup_run_busy">バックアップは既に実行中です — 今回は何も保存されていません。</string>
+    <string name="auto_backup_run_partial">保存しましたが不完全です：\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d 件のフィールドを読み取れませんでした</string>
+    <string name="auto_backup_partial_mirror">外部ミラーが更新されていません</string>
+    <string name="auto_backup_partial_remote">リモートコピーが送信されていません</string>
+    <string name="auto_backup_partial_joiner">、</string>
+    <string name="mirror_retry_busy">同期が実行中です — 少し待ってから再試行してください。</string>
+    <string name="mirror_retry_done">ミラーを同期しました。</string>
+    <string name="mirror_retry_nothing">ミラーは最新です。</string>
+    <string name="backup_done_thinking_rules">%1$d 件の思考ルールを復元しました。</string>
+    <string name="backup_done_scheduled_tasks">スケジュールタスクを復元しました。</string>
+    <string name="backup_done_artifacts">%1$d 件の成果物ファイルを復元しました。</string>
+    <string name="backup_done_webdav">WebDAV サーバー設定を復元しました。</string>
+    <string name="mirror_fastest_hint">最速: %1$s（%2$d ms）</string>
+    <string name="mirror_switch_to_fastest">使用</string>
+    <string name="file_print_renderer_gone">印刷ビューが応答を停止しました</string>
+    <string name="skill_import_partial">インポートしましたが、同梱ファイルが不完全です: %1$s</string>
+    <string name="scheduled_enable_after_save">保存後に有効化</string>
+    <string name="scheduled_saved_disabled">保存しました。タスクは無効です — 一覧のスイッチで有効にしてください。</string>
+    <string name="scheduled_saved_global_off">保存しました。スケジュールタスクの全体スイッチがオフです — オンにしないと実行されません。</string>
+    <string name="provider_detail_refresh_catalog_failed">更新に失敗しました: %1$s</string>
 </resources>

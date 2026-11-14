@@ -1142,24 +1142,29 @@ fun AppNavigation(
                 sessionId = sessionId,
                 chatDao = chatRepository.dao,
                 onBack = { navController.safePopBackStack() },
-                onBrowseFiles = { rootPath ->
+                onBrowseFiles = { rootPath, displayPrefix ->
                     navController.safeNavigate(
                         Routes.fileBrowser(
                             rootPath = rootPath,
                             rootLabel = "Session Files",
-                            // [T-android-copy-abs-path-fullpath] This browser is
-                            // rooted at the per-session host dir
-                            // (filesDir/minis-sessions/<sid>), whose immediate
-                            // children (workspace/ attachments/ offloads/ browser/)
-                            // are exactly the PRoot /var/minis/* subdirs. The host
+                            // [T-android-copy-abs-path-fullpath] The per-session
+                            // host dir (filesDir/minis-sessions/<sid>) has
+                            // immediate children (workspace/ attachments/
+                            // offloads/ browser/) that are exactly the PRoot
+                            // /var/minis/* subdirs, so "Copy Absolute Path" is
+                            // rewritten to the agent-visible path. The host
                             // listing already resolves correctly so we keep the
-                            // root host-based (no linuxRoot re-routing — that would
-                            // redirect /var/minis to the global/empty placeholder
-                            // dir). We only pass displayPrefix = "/var/minis" so
-                            // "Copy Absolute Path" emits the agent-visible
-                            // /var/minis/workspace/foo.py instead of the opaque
-                            // /data/user/0/.../minis-sessions/<sid>/... host path.
-                            displayPrefix = "/var/minis",
+                            // root host-based (no linuxRoot re-routing — that
+                            // would redirect /var/minis to the global/empty
+                            // placeholder dir).
+                            //
+                            // [rc-1114 U-08] The prefix now comes from the
+                            // caller: the media tree (filesDir/media/...) has NO
+                            // guest counterpart, and the row that opens it
+                            // passes null so the copy emits the host path
+                            // instead of a /var/minis/... path that does not
+                            // exist in the sandbox.
+                            displayPrefix = displayPrefix,
                         ),
                     )
                 },

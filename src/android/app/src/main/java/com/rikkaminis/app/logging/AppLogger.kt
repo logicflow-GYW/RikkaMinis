@@ -961,6 +961,35 @@ object AppLogger {
     }
 
     /**
+     * [rc-1114 U-10] Count + total bytes for every log file whose name is NOT
+     * in [displayedNames] — i.e. exactly what "Delete All" removes but the page
+     * does not list.
+     *
+     * Expressed as a complement instead of an enumerated prefix list on
+     * purpose: the log directory holds `debug-<date>*.log` (up to ~100 MB/day of
+     * SSE deltas), `error-snapshot-<stamp>-<pid>.log`, `launch-beacon.log`,
+     * `memspike-*.log`, plus any file that fell past a listed family's
+     * 100-row cap. `clearLogs()` unlinks the whole directory, so an enumerated
+     * list would silently under-count the moment a new family appears — and the
+     * page's total would disagree with the disk again, which is the bug this
+     * exists to fix. The complement cannot drift.
+     *
+     * Pure data; safe to call from `Dispatchers.IO`.
+     */
+    data class LogFileSummary(val count: Int, val sizeBytes: Long)
+
+    fun summarizeLogFilesExcluding(displayedNames: Set<String>): LogFileSummary {
+        val dir = logDir ?: return LogFileSummary(0, 0L)
+        // No extension filter: `clearLogs()` unlinks EVERY entry in this
+        // directory, so the complement must cover every entry too. Filtering to
+        // `*.log` here would leave a stray non-log file counted by neither side
+        // — the same "total disagrees with the disk" defect in miniature.
+        val files = dir.listFiles { f -> f.name !in displayedNames }
+            ?: return LogFileSummary(0, 0L)
+        return LogFileSummary(files.size, files.sumOf { it.length() })
+    }
+
+    /**
      * Total size of all log files in bytes.
      */
     fun totalSize(): Long {

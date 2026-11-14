@@ -103,6 +103,8 @@
     <string name="filebrowser_empty_folder">空資料夾</string>
     <string name="filebrowser_delete_title">刪除 “%1$s”？</string>
     <string name="filebrowser_delete_message">此操作無法復原。</string>
+    <string name="filebrowser_delete_dir_message">該資料夾及其中全部內容（%1$d 項）將被刪除。此操作無法復原。</string>
+    <string name="filebrowser_delete_counting">統計中…</string>
     <string name="filebrowser_error_title">錯誤</string>
     <string name="filebrowser_sort_ascending">升序</string>
     <string name="filebrowser_sort_descending">降序</string>
@@ -258,6 +260,7 @@
     <string name="add_provider_custom_api_base_optional">自定義 API 地址（可選）</string>
     <string name="add_custom_model_model_id">模型 ID</string>
     <string name="add_custom_model_display_name_optional">顯示名稱（選填）</string>
+    <string name="add_custom_model_capabilities_footer">留空則使用服務商回報的值，之後也可以在模型詳情頁修改。</string>
     <string name="model_entry_model_detail">模型詳情</string>
     <string name="model_entry_display_name">顯示名稱</string>
     <string name="model_entry_max_output_tokens">最大輸出 Token 數</string>
@@ -587,6 +590,9 @@
     <string name="env_var_privacy_header">隱私</string>
     <string name="env_var_privacy_toggle">隱私模式</string>
     <string name="env_var_privacy_footer">開啟後，shell-execute 輸出中偵測到的環境變數值會在送達模型前被打碼（例如 `sk-1********ajhks`）。少於 8 個字元的值會被全部替換為 `*`。聊天中使用者可見的輸出維持不變。</string>
+    <string name="env_var_restart_terminal_note">時區和代理的改動會推送到已運行的終端；環境變數不會——沒有即時 export/unset 的通道。</string>
+    <string name="env_var_restart_terminal_body">變數在終端工作階段啟動時注入。已經開啟的終端會保留舊的環境變數，需要關閉並重新開啟才會生效。</string>
+    <string name="env_var_restart_terminal_title">終端工作階段</string>
 
     <!-- T288 — 日誌 / 設定變更 -->
     <string name="logs_config_revert">撤銷</string>
@@ -673,6 +679,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">表單</string>
     <string name="mcp_tab_import">匯入 JSON</string>
     <string name="mcp_form_name">名稱</string>
@@ -698,6 +705,9 @@
     <string name="mcp_form_save">儲存</string>
     <string name="mcp_form_oauth_section">OAuth（選填）</string>
     <string name="mcp_form_oauth_authorized">已授權</string>
+    <string name="mcp_form_oauth_saved_failed">已授權，但伺服器儲存失敗 —— 可能已被刪除。請關閉面板後重新新增。</string>
+    <string name="mcp_form_oauth_saved_incomplete">已授權，但名稱或 URL 未填完，伺服器未儲存 —— 請補齊後按儲存。</string>
+    <string name="mcp_form_oauth_saved">已授權並儲存</string>
     <string name="mcp_form_oauth_client_id">用戶端 ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth 用戶端 ID</string>
     <string name="mcp_form_oauth_client_secret">用戶端密鑰</string>
@@ -996,6 +1006,7 @@
     <string name="soul_cancel">取消</string>
     <string name="soul_ok">好</string>
     <string name="soul_restore_default">恢復預設</string>
+    <string name="soul_restored_default">已恢復預設</string>
     <string name="soul_restore_confirm_title">恢復預設 SOUL.md？</string>
     <string name="soul_restore_confirm_body">當前修改將被覆蓋為預設人格檔案。該模板可作為出發點，隨時可再次修改。</string>
     <string name="soul_save_error_title">儲存失敗</string>
@@ -1139,6 +1150,7 @@
     <string name="log_no_files">無日誌檔案</string>
     <string name="log_section_storage">儲存</string>
     <string name="log_section_storage_footer">日誌儲存總量: %1$s</string>
+    <string name="log_hidden_files_note">本清單未顯示：%1$d 個除錯/快照日誌，共 %2$s。全部刪除時一併清除。</string>
     <string name="log_section_crash">崩潰日誌</string>
     <string name="log_section_crash_footer">最近 %1$d 條崩潰報告（Java/Kotlin + native）</string>
     <string name="log_delete_all_title">刪除所有日誌</string>
@@ -1280,6 +1292,8 @@
     <string name="storage_no_media_files">無媒體檔案</string>
     <string name="storage_clear_session_footer">刪除此會話生成的所有檔案。對話內容本身將保留。</string>
     <string name="storage_browse_files">瀏覽檔案</string>
+    <string name="storage_media_browse_subtitle">該工作階段的圖片與附件</string>
+    <string name="storage_media_browse">媒體</string>
     <string name="storage_clearing_status">清除中…</string>
     <string name="storage_clear_session_button">清除會話檔案</string>
     <string name="storage_clear_confirm_title">清除會話檔案？</string>
@@ -1334,6 +1348,8 @@
     <string name="add_provider_endpoint_hint">留空則使用預設端點。會自動附加 “/v1” —— 只需填寫基礎主機位址。</string>
     <string name="add_provider_endpoint_gemini_hint">留空則使用 Google 預設端點。請填寫包含版本路徑的完整基礎 URL。</string>
     <string name="modeldetail_video_output">影片輸出</string>
+    <string name="modeldetail_max_thinking_inherit">跟隨模型預設</string>
+    <string name="modeldetail_max_thinking_level">最高思考檔位</string>
     <string name="model_group_detail_session_defaults">會話預設值</string>
     <string name="model_group_detail_session_defaults_footer">繫結到此分組的新會話將自動應用。</string>
     <string name="model_group_detail_enable_reasoning">啟用思考</string>
@@ -1579,6 +1595,12 @@
     <string name="runtime_limits_heavy_gate">沙箱：重負載閘門等待</string>
     <string name="runtime_limits_heavy_gate_desc">重負載指令等待全域重負載閘門的最長時間，逾時則回報另一重負載仍在執行。</string>
     <string name="runtime_limits_sandbox_footer">這些視窗用於防止記憶體壓力，預設值與先前的固定值一致。</string>
+    <string name="runtime_limits_restore_confirm_body">本頁所有參數在編輯器裡回到出廠值。在你按儲存之前不會寫入任何內容。</string>
+    <string name="runtime_limits_restore_confirm_title">恢復預設？</string>
+    <string name="runtime_limits_restore_defaults_footer">恢復只改動本頁尚未儲存的數值，需要再按儲存才會生效。滑桿步長未變：部分預設值（如暫存目錄收割年齡）一旦拖過就再也拖不回來，這一列就是為此存在的。</string>
+    <string name="runtime_limits_restore_defaults_desc">把本頁所有參數改回出廠值</string>
+    <string name="runtime_limits_restore_defaults">恢復預設</string>
+    <string name="runtime_limits_section_reset">重設</string>
     <string name="runtime_limits_media_footer">調高圖片上限可讓更高品質圖片進入模型，代價是請求體積變大。</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
@@ -1720,4 +1742,25 @@
     <string name="manage_models_deselect_all">取消全選</string>
     <string name="manage_models_remote_section_header">服務商提供的模型（%1$d）</string>
     <string name="manage_models_error_prefix">重新整理失敗：%1$s</string>
+    <string name="auto_backup_run_busy">已有備份正在執行，本次未寫入新檔案。</string>
+    <string name="auto_backup_run_partial">已儲存，但不完整：\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d 個欄位讀取失敗</string>
+    <string name="auto_backup_partial_mirror">外部鏡像未更新</string>
+    <string name="auto_backup_partial_remote">遠端副本未推送</string>
+    <string name="auto_backup_partial_joiner">；</string>
+    <string name="mirror_retry_busy">同步正在進行，請稍後再試。</string>
+    <string name="mirror_retry_done">鏡像已同步。</string>
+    <string name="mirror_retry_nothing">鏡像已是最新。</string>
+    <string name="backup_done_thinking_rules">已還原 %1$d 條思考規則。</string>
+    <string name="backup_done_scheduled_tasks">已還原定時任務。</string>
+    <string name="backup_done_artifacts">已還原 %1$d 個產物檔案。</string>
+    <string name="backup_done_webdav">已還原 WebDAV 伺服器設定。</string>
+    <string name="mirror_fastest_hint">最快：%1$s（%2$d ms）</string>
+    <string name="mirror_switch_to_fastest">啟用</string>
+    <string name="file_print_renderer_gone">列印檢視已停止回應</string>
+    <string name="skill_import_partial">已匯入，但附屬檔案不完整：%1$s</string>
+    <string name="scheduled_enable_after_save">儲存後立即啟用</string>
+    <string name="scheduled_saved_disabled">已儲存。任務處於關閉狀態，請在清單中開啟開關。</string>
+    <string name="scheduled_saved_global_off">已儲存。定時任務的全域開關是關閉的，開啟後任務才會執行。</string>
+    <string name="provider_detail_refresh_catalog_failed">重新整理失敗：%1$s</string>
 </resources>

@@ -90,6 +90,13 @@ class SessionFileStore internal constructor(
     /** Test-only accessor for the media root (mirrors [mediaRoot]). */
     internal fun mediaRootForTesting(): File = mediaRoot
 
+    /**
+     * [rc-1114 U-08] The media root itself, for callers that need to browse
+     * the tree (the storage detail page roots the file browser at it when a
+     * session's media is spread over several day folders).
+     */
+    val mediaRootDir: File get() = mediaRoot
+
     /** Test-only accessor for the browser-tabs root (mirrors [browserTabsRoot]). */
     internal fun browserTabsRootForTesting(): File = browserTabsRoot
 
@@ -240,8 +247,14 @@ class SessionFileStore internal constructor(
      * (delete), so the size shown and the bytes deleted always refer to the
      * same set of dirs — no drift between "displayed footprint" and what
      * Clear removes.
+     *
+     * [rc-1114 U-08] Also the browse entry point: the storage detail page's
+     * Media row used to display these bytes with no way to reach them (the
+     * session file browser is rooted at `minis-sessions/<sid>`, which does not
+     * contain `media/`). A session that lives across several days has one dir
+     * per day, hence a list rather than a single dir.
      */
-    private fun mediaSessionDirs(sessionId: String): List<File> {
+    internal fun mediaSessionDirs(sessionId: String): List<File> {
         if (!mediaRoot.exists()) return emptyList()
         val out = mutableListOf<File>()
         fun walk(dir: File) {

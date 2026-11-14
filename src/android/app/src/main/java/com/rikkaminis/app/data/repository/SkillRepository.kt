@@ -10,11 +10,11 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -1173,34 +1173,60 @@ class SkillRepository(private val context: Context) {
      * frontmatter / importSource / sourceURL in place, so the sibling
      * recursion below lands in the existing skill's directory.
      */
-    suspend fun importFromGitHub(urlString: String, preferredId: String? = null): Skill? = withContext(Dispatchers.IO) {
-        val rawURL = githubToRawURL(urlString) ?: return@withContext null
-        val content = httpGetString(rawURL) ?: return@withContext null
-        val skill = importFromContent(content, ImportSource.URL, sourceURL = urlString, preferredId = preferredId) ?: return@withContext null
+    /**
+     * Import a skill from a GitHub SKILL.md URL, including its sibling files
+     * (`scripts/`, `references/`, …).
+     *
+     * [RC-U12] Returns a typed outcome, not `Skill?`. The old shape answered
+     * "imported" the instant SKILL.md landed while the sibling recursion ran
+     * detached in [backgroundScope]; when the GitHub Contents API rate-limited
+     * or the network died, only a `Log.w` recorded it and both import surfaces
+     * had already told the user the import succeeded (green "Imported" HUD /
+     * dismissed sheet). The user then hit a skill whose `scripts/` were empty.
+     *
+     * The walk still runs in [backgroundScope] — [T152] is intact: navigating
+     * away cancels the caller's await, NOT the download (which is exactly the
+     * truncation that fix removed). What changed is that a caller who stays
+     * gets the truth instead of a guess.
+     */
+    suspend fun importFromGitHub(urlString: String, preferredId: String? = null): UpdateResult = withContext(Dispatchers.IO) {
+        val rawURL = githubToRawURL(urlString)
+            ?: return@withContext UpdateResult.Failure("Could not build a raw download URL from $urlString")
+        val content = httpGetString(rawURL)
+            ?: return@withContext UpdateResult.Failure("Download failed for $rawURL")
+        val skill = importFromContent(content, ImportSource.URL, sourceURL = urlString, preferredId = preferredId)
+            ?: return@withContext UpdateResult.Failure(
+                "Downloaded SKILL.md is not valid (missing YAML frontmatter or 'name:' field)",
+            )
 
-        val ghInfo = parseGitHubURL(urlString) ?: return@withContext skill
+        val ghInfo = parseGitHubURL(urlString) ?: return@withContext UpdateResult.Success(skill)
         val skillDir = File(skillsDir, skill.id)
         // Detach the sibling-file download from the caller's coroutine scope.
-        // The previous design ran the recursion inline, so any navigation
-        // away from the import screen — or a ViewModel finishing its initial
+        // The previous design ran the recursion inline, so any navigation away
+        // from the import screen — or a ViewModel finishing its initial
         // composition — would cancel the recursion mid-flight and leave the
-        // skill with only SKILL.md (T152 root cause).
-        backgroundScope.launch {
-            val outcome = downloadSiblingFiles(ghInfo, skillDir, skill)
-            val bumped = skill.copy(updatedAt = System.currentTimeMillis())
-            db.execSQL(
-                "UPDATE skills SET updated_at=? WHERE id=?",
-                arrayOf<Any>(bumped.updatedAt, skill.id)
-            )
-            _skills.value = _skills.value.map { if (it.id == skill.id) bumped else it }
-            if (!outcome.isComplete) {
-                Log.w(TAG, "importFromGitHub partial for ${skill.id}: ${outcome.reason ?: "${outcome.filesFailed} file(s) failed"}")
-            }
+        // skill with only SKILL.md (T152 root cause). Awaiting the detached job
+        // keeps that property: cancellation here abandons the wait, not the work.
+        val job = backgroundScope.async { downloadSiblingFiles(ghInfo, skillDir, skill) }
+        val outcome = job.await()
+        val bumped = skill.copy(updatedAt = System.currentTimeMillis())
+        db.execSQL(
+            "UPDATE skills SET updated_at=? WHERE id=?",
+            arrayOf<Any>(bumped.updatedAt, skill.id)
+        )
+        _skills.value = _skills.value.map { if (it.id == skill.id) bumped else it }
+        if (!outcome.isComplete) {
+            val reason = outcome.reason ?: "${outcome.filesFailed} sibling file(s) failed to download"
+            Log.w(TAG, "importFromGitHub partial for ${skill.id}: $reason")
+            return@withContext UpdateResult.PartialSuccess(bumped, reason)
         }
-        skill
+        UpdateResult.Success(bumped)
     }
 
-    /** Outcome of [updateFromURL]: either an updated skill or a human-readable reason. */
+    /** Outcome of [updateFromURL] and [importFromGitHub]: a landed write, a
+     *  landed write whose bundled files are incomplete, or a refusal with the
+     *  reason. One type for both so the two surfaces cannot drift into showing
+     *  different degrees of truth for the same outcome. */
     sealed class UpdateResult {
         data class Success(val skill: Skill) : UpdateResult()
         /**

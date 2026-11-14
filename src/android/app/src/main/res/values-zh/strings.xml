@@ -99,6 +99,7 @@
     <string name="soul_cancel">取消</string>
     <string name="soul_ok">好</string>
     <string name="soul_restore_default">恢复默认</string>
+    <string name="soul_restored_default">已恢复默认</string>
     <string name="soul_restore_confirm_title">恢复默认 SOUL.md？</string>
     <string name="soul_restore_confirm_body">当前修改将被覆盖为默认人格文件。该模板可作为出发点，随时可再次修改。</string>
     <string name="soul_save_error_title">保存失败</string>
@@ -276,6 +277,9 @@
     <string name="env_var_privacy_header">隐私</string>
     <string name="env_var_privacy_toggle">隐私模式</string>
     <string name="env_var_privacy_footer">开启后，shell-execute 输出中检测到的环境变量值在送达模型前会被打码（例如 `sk-1********ajhks`）。少于 8 个字符的值会被全部替换为 `*`。聊天中用户可见的输出保持不变。</string>
+    <string name="env_var_restart_terminal_note">时区和代理的改动会推送到已运行的终端；环境变量不会——没有实时 export/unset 的通道。</string>
+    <string name="env_var_restart_terminal_body">变量在终端会话启动时注入。已经打开的终端会保留旧的环境变量，需要关闭并重新打开才会生效。</string>
+    <string name="env_var_restart_terminal_title">终端会话</string>
     <string name="env_var_section_header">变量</string>
     <string name="env_var_section_footer">环境变量在会话开始时被注入到沙箱 shell。名称将被转为大写，并且必须符合 POSIX shell 变量规则。</string>
     <string name="env_var_empty_title">无环境变量</string>
@@ -302,6 +306,7 @@
     <string name="log_no_files">无日志文件</string>
     <string name="log_section_storage">存储</string>
     <string name="log_section_storage_footer">日志存储总量: %1$s</string>
+    <string name="log_hidden_files_note">本列表未显示：%1$d 个调试/快照日志，共 %2$s。全部删除时一并清除。</string>
     <string name="log_section_crash">崩溃日志</string>
     <string name="log_section_crash_footer">最近 %1$d 条崩溃报告（Java/Kotlin + native）</string>
     <string name="log_delete_all_title">删除所有日志</string>
@@ -469,6 +474,8 @@
     <string name="storage_no_media_files">无媒体文件</string>
     <string name="storage_clear_session_footer">删除此会话生成的所有文件。对话内容本身将保留。</string>
     <string name="storage_browse_files">浏览文件</string>
+    <string name="storage_media_browse_subtitle">该会话的图片与附件</string>
+    <string name="storage_media_browse">媒体</string>
     <string name="storage_clearing_status">清除中…</string>
     <string name="storage_clear_session_button">清除会话文件</string>
     <string name="storage_clear_confirm_title">清除会话文件？</string>
@@ -571,6 +578,8 @@
     <string name="filebrowser_empty_folder">空文件夹</string>
     <string name="filebrowser_delete_title">删除 “%1$s”？</string>
     <string name="filebrowser_delete_message">此操作无法撤销。</string>
+    <string name="filebrowser_delete_dir_message">该文件夹及其中全部内容（%1$d 项）将被删除。此操作无法撤销。</string>
+    <string name="filebrowser_delete_counting">统计中…</string>
     <string name="filebrowser_error_title">错误</string>
     <string name="filebrowser_sort_ascending">升序</string>
     <string name="filebrowser_sort_descending">降序</string>
@@ -733,6 +742,7 @@
     <!-- T-android-codex-oauth-dns -->
     <string name="add_custom_model_model_id">模型 ID</string>
     <string name="add_custom_model_display_name_optional">显示名称（可选）</string>
+    <string name="add_custom_model_capabilities_footer">留空则使用服务商上报的值，之后也可以在模型详情页修改。</string>
     <string name="model_entry_model_detail">模型详情</string>
     <string name="model_entry_display_name">显示名称</string>
     <string name="model_entry_max_output_tokens">最大输出 Token 数</string>
@@ -1231,6 +1241,7 @@
     <string name="mcp_transport_http">HTTP</string>
     <string name="mcp_transport_sse">SSE</string>
     <string name="mcp_transport_stdio">STDIO</string>
+    <string name="mcp_transport_url">HTTP/SSE</string>
     <string name="mcp_tab_form">表单</string>
     <string name="mcp_tab_import">导入 JSON</string>
     <string name="mcp_form_name">名称</string>
@@ -1256,6 +1267,9 @@
     <string name="mcp_form_save">保存</string>
     <string name="mcp_form_oauth_section">OAuth（可选）</string>
     <string name="mcp_form_oauth_authorized">已授权</string>
+    <string name="mcp_form_oauth_saved_failed">已授权，但服务器保存失败 —— 可能已被删除。请关闭面板后重新添加。</string>
+    <string name="mcp_form_oauth_saved_incomplete">已授权，但名称或 URL 未填完，服务器未保存 —— 请补充后点保存。</string>
+    <string name="mcp_form_oauth_saved">已授权并保存</string>
     <string name="mcp_form_oauth_client_id">客户端 ID</string>
     <string name="mcp_form_oauth_client_id_placeholder">OAuth 客户端 ID</string>
     <string name="mcp_form_oauth_client_secret">客户端密钥</string>
@@ -1371,6 +1385,8 @@
     <string name="add_provider_endpoint_hint">留空则使用默认端点。会自动追加 “/v1” —— 只需填写基础主机地址。</string>
     <string name="add_provider_endpoint_gemini_hint">留空则使用 Google 默认端点。请填写包含版本路径的完整基础 URL。</string>
     <string name="modeldetail_video_output">视频输出</string>
+    <string name="modeldetail_max_thinking_inherit">跟随模型默认</string>
+    <string name="modeldetail_max_thinking_level">最高思考挡位</string>
     <string name="model_group_no_usable_models_badge">无可用模型</string>
     <string name="system_permissions_title">系统权限</string>
     <string name="system_permissions_section_a11y">无障碍服务</string>
@@ -1602,6 +1618,12 @@
     <string name="runtime_limits_heavy_gate">沙箱：重活闸门等待</string>
     <string name="runtime_limits_heavy_gate_desc">重活命令等待全局重活闸门的最长时间，超时则报告另一重活仍在运行。</string>
     <string name="runtime_limits_sandbox_footer">这些窗口用于防止内存压力，默认值与之前的固定值一致。</string>
+    <string name="runtime_limits_restore_confirm_body">本页所有参数在编辑器里回到出厂值。在你点保存之前不会写入任何内容。</string>
+    <string name="runtime_limits_restore_confirm_title">恢复默认？</string>
+    <string name="runtime_limits_restore_defaults_footer">恢复只改动本页尚未保存的数值，需要再点保存才会生效。滑块步长未变：部分默认值（如临时目录收割年龄）一旦拖过就再也拖不回来，这一行就是为此存在的。</string>
+    <string name="runtime_limits_restore_defaults_desc">把本页所有参数改回出厂值</string>
+    <string name="runtime_limits_restore_defaults">恢复默认</string>
+    <string name="runtime_limits_section_reset">重置</string>
     <string name="runtime_limits_media_footer">调高图片上限可让更高质量图片进入模型，代价是请求体积变大。</string>
 
     <!-- [fix/render-ui F-275/F-276/F-277] user-facing strings that
@@ -1743,4 +1765,25 @@
     <string name="manage_models_deselect_all">取消全选</string>
     <string name="manage_models_remote_section_header">服务商提供的模型（%1$d）</string>
     <string name="manage_models_error_prefix">刷新失败：%1$s</string>
+    <string name="auto_backup_run_busy">已有备份正在运行，本次未写入新文件。</string>
+    <string name="auto_backup_run_partial">已保存，但不完整：\n%1$s</string>
+    <string name="auto_backup_partial_fields">%1$d 个字段读取失败</string>
+    <string name="auto_backup_partial_mirror">外部镜像未更新</string>
+    <string name="auto_backup_partial_remote">远端副本未推送</string>
+    <string name="auto_backup_partial_joiner">；</string>
+    <string name="mirror_retry_busy">同步正在进行，请稍后再试。</string>
+    <string name="mirror_retry_done">镜像已同步。</string>
+    <string name="mirror_retry_nothing">镜像已是最新。</string>
+    <string name="backup_done_thinking_rules">已恢复 %1$d 条思考规则。</string>
+    <string name="backup_done_scheduled_tasks">已恢复定时任务。</string>
+    <string name="backup_done_artifacts">已恢复 %1$d 个产物文件。</string>
+    <string name="backup_done_webdav">已恢复 WebDAV 服务器配置。</string>
+    <string name="mirror_fastest_hint">最快：%1$s（%2$d ms）</string>
+    <string name="mirror_switch_to_fastest">启用</string>
+    <string name="file_print_renderer_gone">打印视图已停止响应</string>
+    <string name="skill_import_partial">已导入，但附属文件不完整：%1$s</string>
+    <string name="scheduled_enable_after_save">保存后立即启用</string>
+    <string name="scheduled_saved_disabled">已保存。任务处于关闭状态，请在列表里打开开关。</string>
+    <string name="scheduled_saved_global_off">已保存。定时任务的全局开关是关闭的，打开后任务才会运行。</string>
+    <string name="provider_detail_refresh_catalog_failed">刷新失败：%1$s</string>
 </resources>

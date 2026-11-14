@@ -133,6 +133,31 @@ fun EnvironmentVariablesScreen(
             )
         }
 
+        // [RC-1114 U-11] Environment variables are injected when a terminal
+        // session STARTS; there is no live `export`/`unset` push into a running
+        // shell (unlike TZ and the proxy block, which have broadcast paths).
+        // Without this note the page looks like it applies changes everywhere
+        // immediately, so a user who adds a token and runs a command in an
+        // already-open terminal sees the old environment and concludes the
+        // save did not work. Stated once, above the list, rather than per row:
+        // it is a property of the whole page, not of any single entry.
+        SettingsSection(
+            header = stringResource(R.string.env_var_restart_terminal_title),
+            footer = stringResource(R.string.env_var_restart_terminal_note),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.env_var_restart_terminal_body),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
         // Variables render grouped by their optional `group` label: each
         // named group gets its own section header (in first-appearance
         // order), and entries without a group collect under the generic
