@@ -998,6 +998,7 @@
     <string name="soul_cancel">取消</string>
     <string name="soul_ok">好</string>
     <string name="soul_restore_default">恢復預設</string>
+    <string name="soul_restored_default">已恢復預設</string>
     <string name="soul_restore_confirm_title">恢復預設 SOUL.md？</string>
     <string name="soul_restore_confirm_body">當前修改將被覆蓋為預設人格檔案。該模板可作為出發點，隨時可再次修改。</string>
     <string name="soul_save_error_title">儲存失敗</string>

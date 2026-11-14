@@ -99,6 +99,7 @@
     <string name="soul_cancel">取消</string>
     <string name="soul_ok">好</string>
     <string name="soul_restore_default">恢复默认</string>
+    <string name="soul_restored_default">已恢复默认</string>
     <string name="soul_restore_confirm_title">恢复默认 SOUL.md？</string>
     <string name="soul_restore_confirm_body">当前修改将被覆盖为默认人格文件。该模板可作为出发点，随时可再次修改。</string>
     <string name="soul_save_error_title">保存失败</string>

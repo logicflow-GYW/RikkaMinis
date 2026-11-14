@@ -1276,6 +1276,7 @@
     <string name="soul_cancel">キャンセル</string>
     <string name="soul_ok">OK</string>
     <string name="soul_restore_default">デフォルトに戻す</string>
+    <string name="soul_restored_default">デフォルトに戻しました</string>
     <string name="soul_restore_confirm_title">デフォルトのSOUL.mdを復元しますか？</string>
     <string name="soul_restore_confirm_body">現在の変更はデフォルトのパーソナリティファイルで上書きされます。オリジナルは出発点として提供されており、いつでも再編集できます。</string>
     <string name="soul_save_error_title">保存できませんでした</string>

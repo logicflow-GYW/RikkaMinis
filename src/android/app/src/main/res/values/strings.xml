@@ -203,6 +203,7 @@
     <string name="soul_cancel">Cancel</string>
     <string name="soul_ok">OK</string>
     <string name="soul_restore_default">Restore Default</string>
+    <string name="soul_restored_default">Restored to defaults</string>
     <string name="soul_restore_confirm_title">Restore default SOUL.md?</string>
     <string name="soul_restore_confirm_body">Your current changes will be overwritten with the default personality file. The original is provided as a starting point and can be re-edited at any time.</string>
     <string name="soul_save_error_title">Couldn\'t save</string>

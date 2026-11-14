@@ -1269,6 +1269,7 @@
     <string name="soul_cancel">Abbrechen</string>
     <string name="soul_ok">OK</string>
     <string name="soul_restore_default">Standard wiederherstellen</string>
+    <string name="soul_restored_default">Auf Standard zurückgesetzt</string>
     <string name="soul_restore_confirm_title">Standard-SOUL.md wiederherstellen?</string>
     <string name="soul_restore_confirm_body">Ihre aktuellen Änderungen werden durch die Standard-Persönlichkeitsdatei überschrieben. Das Original dient als Ausgangspunkt und kann jederzeit erneut bearbeitet werden.</string>
     <string name="soul_save_error_title">Speichern nicht möglich</string>

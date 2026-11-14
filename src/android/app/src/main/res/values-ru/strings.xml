@@ -103,6 +103,7 @@
     <string name="soul_cancel">Отмена</string>
     <string name="soul_ok">ОК</string>
     <string name="soul_restore_default">Сбросить к стандартным</string>
+    <string name="soul_restored_default">Восстановлены значения по умолчанию</string>
     <string name="soul_restore_confirm_title">Восстановить стандартный SOUL.md?</string>
     <string name="soul_restore_confirm_body">Ваши текущие изменения будут перезаписаны стандартным файлом личности. Оригинал служит отправной точкой, и его можно отредактировать заново в любой момент.</string>
     <string name="soul_save_error_title">Не удалось сохранить</string>
