@@ -58,18 +58,23 @@ class L2sBackingDirWiringTest {
     }
 
     @Test
-    fun theBackingDirectoryLivesInPersistentStorage() {
+    fun theBackingDirectoryLivesInsideTheGuestRootfs() {
         val src = sandboxSource("PRootKernel.kt")
         val body = src.substringAfter("internal fun getL2sBackingDir(context: Context): File {")
             .substringBefore("\n    }")
+        // A faked hard link is a symbolic link to this host path, and a guest
+        // cannot reach a path outside its root: with `filesDir/l2s-backing`
+        // every chain of that build resolved to ENOENT on device (measured
+        // 2026-11-15, 1.0.0+3125). The upstream tests use `-r /`, which hides
+        // the mistake.
         assertTrue(
-            "the backing directory must survive restarts: a wiped directory turns every " +
-                "existing faked hard link into a dangling symlink",
-            body.contains("filesDir"),
+            "the backing directory must live inside the guest rootfs: " +
+                "the links point at it and a guest cannot leave its root",
+            body.contains("rootfsDir"),
         )
         assertFalse(
-            "cacheDir is evictable; a wipe disconnects every existing chain",
-            body.contains("cacheDir"),
+            "filesDir is outside the rootfs -- every link through it resolves to ENOENT",
+            body.contains("filesDir"),
         )
         assertTrue("the directory must be created before PRoot opens it", body.contains("mkdirs()"))
     }

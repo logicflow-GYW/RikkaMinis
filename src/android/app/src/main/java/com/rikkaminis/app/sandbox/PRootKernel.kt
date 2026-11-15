@@ -1456,31 +1456,40 @@ object PRootKernel {
      * Host directory where link2symlink keeps the files behind faked hard
      * links, passed to PRoot as `PROOT_L2S_DIR`.
      *
-     * Without it every backing file (`.<PREFIX><name><NNNN>` and its counted
-     * `.<count>` sibling) lives next to the name it was faked from.  The
-     * chain owner -- the name the first `link(2)` was made from -- then owns
-     * the backing files of the whole chain, so any directory holding that
-     * name cannot be removed while another name of the same chain still
-     * exists: `rm -rf` visits the directory, its backing file is still
-     * referenced, and `rmdir(2)` reports "Directory not empty".  Tools that
-     * copy trees while preserving hard links (`cp -a`, `cp -al`,
-     * `git clone --local`) put the owner wherever their readdir order lands
-     * -- the failure was reproduced on a real device, 2026-11-15, with the
-     * owner inside a subdirectory: one `rm -rf` failed, a second pass
-     * succeeded.
+     * **It must live inside the guest rootfs.**  A faked hard link is a
+     * symbolic link whose content is the host path of its backing file;
+     * a guest can't reach a path outside its root, so with the directory
+     * next to the rootfs (`filesDir/l2s-backing`, the first attempt) every
+     * chain made by that build resolved to ENOENT -- measured on device
+     * 1.0.0+3125, 2026-11-15: `ln a b` returned 0, `stat` reported the
+     * emulated count, and both `a` and `b` could not be opened.  The
+     * upstream tests start PRoot with `-r /`, which puts any host
+     * directory inside the root, hence they never saw this.
+     *
+     * Without the variable every backing file lives next to the name it
+     * was faked from.  The chain owner -- the name the first `link(2)`
+     * was made from -- then owns the backing files of the whole chain, so
+     * any directory holding that name cannot be removed while another
+     * name of the same chain still exists: `rm -rf` visits that
+     * directory, its backing file is still referenced, and `rmdir(2)`
+     * reports "Directory not empty".  Tools that copy trees while
+     * preserving hard links (`cp -a`, `cp -al`, `git clone --local`) put
+     * the owner wherever their readdir order lands -- reproduced on the
+     * device, the owner inside a subdirectory: one `rm -rf` failed, a
+     * second pass succeeded.
      *
      * With the directory configured the backing files live outside every
-     * path a tracee can name: guest directories hold only the symbolic
-     * links.  PRoot keeps working with chains an older build left next to
-     * their names -- `l2s_entry()` falls back to the plain path -- so
-     * nothing on an existing rootfs has to be migrated.
+     * directory a tracee works in: guest directories hold only the
+     * symbolic links.  PRoot keeps working with chains an older build
+     * left next to their names -- `l2s_entry()` falls back to the plain
+     * path -- so nothing on an existing rootfs has to be migrated.
      *
      * Persistence: the directory must survive restarts (a wiped backing
      * directory turns every existing faked hard link into a dangling
-     * symlink), hence `filesDir` and not `cacheDir`/`/tmp`.
+     * symlink), hence the rootfs and not `cacheDir`/`/tmp`.
      */
     internal fun getL2sBackingDir(context: Context): File {
-        val dir = File(context.filesDir, "l2s-backing")
+        val dir = File(RootfsManager.getInstance(context).rootfsDir, ".l2s-backing")
         dir.mkdirs()
         return dir
     }
