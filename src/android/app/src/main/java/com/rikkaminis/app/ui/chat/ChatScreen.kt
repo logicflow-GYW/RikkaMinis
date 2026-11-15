@@ -143,6 +143,10 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.onSizeChanged
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import com.rikkaminis.app.offload.OffloadPermissionManager
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
@@ -261,6 +265,33 @@ fun ChatScreen(
     // across forward navigation (file preview, env vars, etc.); see
     // ChatViewModel.listState for the why.
     val listState = viewModel.listState
+
+    // [composer-glass-1115] Single HazeState shared by the two ends of the
+    // frosted-glass composer: the message list records into it (hazeSource,
+    // on the LazyColumn) and the composer card samples it (hazeEffect, in
+    // ChatInputArea). One state, one source — a second source would make the
+    // blur pick up whatever else registered, and a second state would leave
+    // the card sampling nothing.
+    //
+    // The source is the list *inside* the composer-arc clip on purpose:
+    // hazeSource records the source node's own content (HazeSourceNode
+    // .record { drawContent }), and an ancestor's clip is applied when that
+    // layer is composited into the parent — so the card still blurs the
+    // message rows that the arc clip hides underneath it, while the clip keeps
+    // its old job of terminating content on the arc. Verified against the
+    // library source (haze 1.6.10), not assumed.
+    val hazeState = rememberHazeState()
+
+    // [composer-glass-1115] Measured height of the composer, in px → dp. The
+    // list needs it for two things that must move together:
+    //   1. how far it may draw underneath the composer (composerArcTail), and
+    //   2. the bottom content padding that keeps the last row resting where it
+    //      did before the viewport grew.
+    // Measuring beats a constant: the composer grows with a multi-line draft
+    // and with attachment chips, and a fixed estimate would either leave a
+    // visible band of un-blurred card or push the last row up too far.
+    var composerHeightPx by remember { mutableStateOf(0) }
+    val composerHeightDp = with(LocalDensity.current) { composerHeightPx.toDp() }
 
     // ─── T51: Share Injection + Move-to capsule ───────────────────────
     // Drain any pending share buffered by ShareCoordinator (cold start =
@@ -3582,8 +3613,15 @@ fun ChatScreen(
                 // would drop them ComposerArcOverlap down under the card.
                 AlwaysStretchOverscrollBox(
                     modifier = Modifier
-                        .composerArcTail()
-                        .clip(composerArcClipShape),
+                        // [composer-glass-1115] The list now runs the WHOLE
+                        // composer height underneath it instead of the 22dp arc
+                        // band, and is no longer clipped there: the card is
+                        // frosted glass, so the rows it covers are the blur
+                        // source rather than something to hide. The clip (and
+                        // with it the arc-notch geometry) is gone on purpose —
+                        // keeping it would clip exactly the pixels the glass
+                        // samples, leaving a flat tint.
+                        .composerArcTail(overlap = composerHeightDp),
                 ) { sharedEffect ->
                 // [render-churn-1] Tool-pill progress flow (LocalToolProgressById)
                 // provided ONCE with a stable reference — the flow instance
@@ -3615,16 +3653,24 @@ fun ChatScreen(
                     // message spacing are untouched.
                     contentPadding = PaddingValues(
                         top = 4.dp,
-                        // [composer-arc-1114] The viewport is ComposerArcOverlap
-                        // taller than the space it occupies (it slides under the
-                        // composer), so the clearance has to grow by the same
-                        // amount to keep the last row exactly where it was.
+                        // [composer-glass-1115] The viewport is the composer's
+                        // full height taller than the space it occupies (it
+                        // slides under the card), so the clearance grows by the
+                        // same amount to keep the last row exactly where it was.
+                        // Before the port this was the constant arc band
+                        // (ComposerArcOverlap).
                         bottom = (if (bottomReserve == 0.dp) 12.dp else bottomReserve) +
-                            ComposerArcOverlap,
+                            composerHeightDp,
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
+                        // [composer-glass-1115] Record the message rows so the
+                        // composer card can blur whatever sits behind it. The
+                        // recorded layer is the list's own content — the
+                        // composer-arc clip above it is a parent-level clip and
+                        // does not appear inside the recording.
+                        .hazeSource(hazeState)
                         .onGloballyPositioned {
                             listRootCoords = it
                             if (perfFirstLayoutFired.compareAndSet(false, true)) {
@@ -4579,8 +4625,21 @@ fun ChatScreen(
             // StateFlow subscription lives INSIDE the composer leaf instead of
             // at ChatScreen scope — typing no longer re-executes the whole
             // message-list body (the long-session input jank root cause).
+            // [composer-glass-1115] The wrapper exists only to MEASURE: the list
+            // above needs the composer's height to know how far to draw under it
+            // (and to pad its bottom by the same amount). `onSizeChanged` fires
+            // after layout, one frame after the first composition — the list's
+            // tail and its bottom padding move together in that recomposition,
+            // so the last row does not shift.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged { composerHeightPx = it.height },
+            ) {
             ChatInputArea(
                 viewModel = viewModel,
+                // [composer-glass-1115] Input-bar background effect (haze).
+                hazeState = hazeState,
                 // [da1023-F] Active id, not the route arg: the composer's
                 // downstream consumers (MoveToSessionSheet's self-filter,
                 // attachment add) must follow the promoted session.
@@ -4611,6 +4670,7 @@ fun ChatScreen(
                 coroutineScope = coroutineScope,
                 inputFocusRequester = inputFocusRequester,
             )
+            } // end [composer-glass-1115] measuring wrapper
 
             // [T-context-exhausted-dialog] iOS 'Context Full' alert parity:
             // the context reached its capacity and the user tried to send.

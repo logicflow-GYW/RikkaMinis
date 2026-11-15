@@ -93,6 +93,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -122,10 +126,39 @@ import com.rikkaminis.app.util.ExternalIntent
 // ChatScreen.kt; the 2026-10-27 dead-import sweep pruned it to the symbols this
 // file actually uses. Comment archaeology elsewhere is left intact.
 
+// ─── [composer-glass-1115] Frosted-glass composer card ───────────────────
+//
+// Port of rikkahub's input-bar background effect (their ChatInputHaze.kt):
+// the composer card stops being an opaque rounded rect and becomes a blurred
+// sample of whatever the message list drew behind it, tinted with the palette's
+// own input fill so text contrast survives.
+//
+// Haze pipeline: the LazyColumn is the SOURCE (records its content every frame
+// into a GraphicsLayer), the card is the EFFECT (draws that recording back,
+// blurred, as its own background). Both ends live in ChatScreen + this file.
+//
+// Hardware blur needs Android 12+ (RenderEffect). Below that haze falls back to
+// an opaque tint — the pre-glass card — so API 26-30 devices keep a readable,
+// if unglamorous, composer rather than a translucent smear.
+
+/** Blur radius of the card's backdrop sample. 16dp ≈ rikkahub's Glass arm. */
+private val COMPOSER_GLASS_BLUR_RADIUS = 16.dp
+
+/**
+ * How much of the blurred sample is blended over the card's fill colour.
+ * 0f = opaque card, 1f = pure blur. 0.55 keeps the input text dominant.
+ */
+private const val COMPOSER_GLASS_TINT_ALPHA = 0.55f
+
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
 @Composable
 internal fun ChatInputArea(
     viewModel: ChatViewModel,
+    // [composer-glass-1115] Source state for the card's frosted-glass
+    // background. Populated by the message list's hazeSource in ChatScreen; a
+    // state with no registered source degrades to a solid card (haze draws
+    // nothing and the fallback tint covers), so passing a fresh one is safe.
+    hazeState: HazeState,
     sessionId: String,
     chatRepository: com.rikkaminis.app.data.repository.ChatRepository,
     chatActions: ChatActionState,
@@ -1100,11 +1133,35 @@ internal fun ChatInputArea(
             // from the backdrop by a symmetric soft shadow painted by hand
             // (Android's Modifier.shadow only casts downward).
             val inputBgArgb = ChatColors.inputBg.toArgb()
+            val inputBgColor = ChatColors.inputBg
             val shadowPaint = remember(inputBgArgb) {
                 android.graphics.Paint().apply {
                     color = inputBgArgb
                     isAntiAlias = true
                 }
+            }
+            // [composer-glass-1115] Frosted-glass recipe for the card, ported
+            // from rikkahub's ChatInputHaze:
+            //
+            //   backgroundColor = the palette's own input fill, so the card
+            //     never loses its contrast against the message list;
+            //   tint alpha       = how much of the BLURRED sample is blended
+            //     over that fill. 0f = plain opaque card (blur invisible),
+            //     1f = pure blur (message text underneath reads through and
+            //     fights the input text). 0.55 is the legibility midpoint —
+            //     rikkahub uses 0.3 over a Material3 container in its Glass
+            //     arm and container-only in its Blur arm; we sit between.
+            //   fallbackTint     = what platforms without RenderEffect blur
+            //     (API < 31) draw instead. Flat card, i.e. today's look,
+            //     rather than a half-transparent smear.
+            val composerGlassStyle = remember(inputBgArgb, inputBgColor) {
+                HazeStyle(
+                    backgroundColor = inputBgColor,
+                    tint = HazeTint(inputBgColor.copy(alpha = COMPOSER_GLASS_TINT_ALPHA)),
+                    blurRadius = COMPOSER_GLASS_BLUR_RADIUS,
+                    noiseFactor = 0f,
+                    fallbackTint = HazeTint(inputBgColor),
+                )
             }
             // T185: Move-to-session capsule mirrors iOS
             // AIChatView.swift:1816 (.overlay(alignment: .topTrailing))
@@ -1201,9 +1258,13 @@ internal fun ChatInputArea(
                     }
                 },
             ) {
-            Column(
+            // [composer-glass-1115] Shadow is drawn by a sibling layer, not by
+            // the card itself: the card is now clipped to its arc (see below)
+            // and a clip would cut the halo off at the corners. Splitting them
+            // keeps the two-pass iOS-ish shadow byte-identical to before.
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .matchParentSize()
                     .drawBehind {
                         // [composer-arc-1114] Shared with the list's arc clip —
                         // see ComposerArcOcclusion.kt.
@@ -1229,7 +1290,20 @@ internal fun ChatInputArea(
                             radiusPx, radiusPx,
                             shadowPaint,
                         )
-                    }
+                    },
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // [composer-glass-1115] The card carves its shape first, so
+                    // the haze below is cut by the SAME arc the message list is
+                    // clipped to — the blur can never spill into the corners.
+                    .clip(RoundedCornerShape(ComposerCardCornerRadius))
+                    // …and then samples the message list behind it. `hazeEffect`
+                    // draws the blurred recording as this node's background;
+                    // children draw on top unchanged.
+                    .hazeEffect(state = hazeState, style = composerGlassStyle)
+                    .border(0.5.dp, ChatColors.inputBorder, RoundedCornerShape(ComposerCardCornerRadius))
                     .padding(top = if (attachments.isNotEmpty()) 8.dp else 4.dp),
             ) {
                 // T185: Move-to capsule lives INSIDE the composer card,
