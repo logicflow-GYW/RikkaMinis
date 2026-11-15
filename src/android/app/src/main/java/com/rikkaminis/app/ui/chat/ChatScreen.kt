@@ -292,15 +292,6 @@ fun ChatScreen(
     var composerHeightPx by remember { mutableStateOf(0) }
     val composerHeightDp = with(LocalDensity.current) { composerHeightPx.toDp() }
 
-    // [composer-glass-1115] One read of the switch, used by all four places
-    // that must agree: the list's tail depth, whether the list is clipped at
-    // the card's arc, whether it records into the haze state, and the bottom
-    // clearance. They are read separately on purpose (a boolean, not a mode
-    // flag threaded through the layout) but MUST be the same boolean — a
-    // mismatch is either a dead effect (clip still on) or content bleeding
-    // past the card (tail still 22dp).
-    val composerGlassOn = tuning.composerGlassEnabled
-
     // ─── T51: Share Injection + Move-to capsule ───────────────────────
     // Drain any pending share buffered by ShareCoordinator (cold start =
     // bufferVersion already non-zero on first composition; warm start =
@@ -871,6 +862,19 @@ fun ChatScreen(
     // Chat Tuning); the default is the T128 value (32). The helper registers
     // its own minis_chat_tuning_prefs listener, so a knob change recomposes here.
     val tuning = rememberChatTuning(context)
+
+    // [composer-glass-1115] One read of the switch, used by all four places
+    // that must agree: the list's tail depth, whether the list is clipped at
+    // the card's arc, whether it records into the haze state, and the bottom
+    // clearance. They are read separately on purpose (a boolean, not a mode
+    // flag threaded through the layout) but MUST be the same boolean — a
+    // mismatch is either a dead effect (clip still on) or content bleeding
+    // past the card (tail still 22dp).
+    //
+    // Declared HERE, after `tuning`: reading it next to the other composer
+    // state (≈300 lines up) put it before `tuning` exists — a compile error the
+    // first CI run caught (`Unresolved reference 'tuning'`).
+    val composerGlassOn = tuning.composerGlassEnabled
     val nearBottomThresholdPx = with(LocalDensity.current) { tuning.scrollNearBottomDp.dp.toPx() }
     // T138 phase 2 v3: ground-truth bottom test via layoutInfo. If
     // LazyList currently renders the visual-bottom item (data-index 0

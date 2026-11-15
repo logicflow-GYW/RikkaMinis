@@ -617,6 +617,12 @@ internal fun ChatInputArea(
         // is raised from 12dp to 16dp to line up its edges with the message
         // list's 16dp gutter — the list and the composer previously sat on
         // different rails, which read as a narrower input box than the chat.
+        // [composer-glass-1115] Read the palette colour OUT here: `ChatColors.*`
+        // is a @Composable getter (LocalChatPalette), and a drawBehind/`then`
+        // lambda is not composable — reading it inside was a compile error
+        // (`@Composable invocations can only happen from the context of a
+        // @Composable function`) that the first CI run caught.
+        val composerScrimColor = ChatColors.background
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -632,10 +638,12 @@ internal fun ChatInputArea(
                 .then(
                     if (composerGlassEnabled) {
                         Modifier.drawBehind {
-                            val scrim = ChatColors.background
                             drawRect(
                                 Brush.verticalGradient(
-                                    colors = listOf(scrim.copy(alpha = 0f), scrim),
+                                    colors = listOf(
+                                        composerScrimColor.copy(alpha = 0f),
+                                        composerScrimColor,
+                                    ),
                                     startY = 0f,
                                     endY = size.height,
                                 ),
