@@ -29,7 +29,7 @@ class PersistentShellStallTest {
     @Test
     fun `parse proc stat reads ppid and sums utime plus stime`() {
         val parsed = internalParseProcStat(statLine("sh", ppid = 1200, utime = 5, stime = 3))
-        assertEquals(ProcCpu(ppid = 1200, jiffies = 8), parsed)
+        assertEquals(ProcCpu(ppid = 1200, jiffies = 8, startTimeTicks = 12345), parsed)
     }
 
     @Test
@@ -37,7 +37,7 @@ class PersistentShellStallTest {
         // A real WebView/PRoot child is literally named "(Web Content)" — the
         // fields after it must be located from the LAST ')' or ppid/utime shift.
         val parsed = internalParseProcStat(statLine("Web Content)", ppid = 7, utime = 11, stime = 1))
-        assertEquals(ProcCpu(ppid = 7, jiffies = 12), parsed)
+        assertEquals(ProcCpu(ppid = 7, jiffies = 12, startTimeTicks = 12345), parsed)
     }
 
     @Test

@@ -61,7 +61,12 @@ internal const val TIMEOUT_EXIT_CODE = 124
 internal const val STALL_EXIT_CODE = 125
 
 /** One process's `(ppid, utime+stime jiffies)` from /proc/<pid>/stat. */
-internal data class ProcCpu(val ppid: Int, val jiffies: Long)
+internal data class ProcCpu(
+    val ppid: Int,
+    val jiffies: Long,
+    /** Kernel starttime (field 22); zero means identity is unavailable. */
+    val startTimeTicks: Long = 0L,
+)
 
 /**
  * Parse a `/proc/<pid>/stat` body into [ProcCpu], or null when malformed.
@@ -81,7 +86,8 @@ internal fun internalParseProcStat(text: String): ProcCpu? {
     val ppid = fields[1].toIntOrNull() ?: return null
     val utime = fields[11].toLongOrNull() ?: return null
     val stime = fields[12].toLongOrNull() ?: return null
-    return ProcCpu(ppid, utime + stime)
+    val startTimeTicks = fields.getOrNull(19)?.toLongOrNull() ?: 0L
+    return ProcCpu(ppid, utime + stime, startTimeTicks)
 }
 
 /**
@@ -156,6 +162,41 @@ internal fun internalDescendantPidsAtDepth(
         if (depth > 64) break // defensive: a malformed ppid map can't spin forever
     }
     return out
+}
+
+/**
+ * Signal a shell's snapshot descendants deepest-first, then its tracer root.
+ * Process.destroyForcibly() is not a reliable SIGKILL on every Android ROM:
+ * on the verified device it sent SIGTERM and a blocked tracee kept the whole
+ * PRoot tree alive after the caller had already reported a timeout.
+ *
+ * Reuse the stall guard's tree snapshot instead of another process registry.
+ * Verify kernel starttime immediately before each signal to reduce PID-reuse
+ * risk. Unknown identities are refused; Java's Process teardown remains the
+ * fallback. Matching descendants may have been reparented since the snapshot,
+ * but are still the same owned tasks. Signal/wait is not atomic without pidfd.
+ * [signalPid] supplies Android's explicit SIGNAL_KILL in production.
+ */
+internal fun internalKillProcessTree(
+    rootPid: Int,
+    procs: Map<Int, ProcCpu>,
+    currentProcess: (Int) -> ProcCpu?,
+    rootIsAlive: () -> Boolean,
+    signalPid: (Int) -> Unit,
+): Int {
+    if (rootPid <= 1 || procs[rootPid]?.startTimeTicks?.takeIf { it > 0L } == null) return 0
+    if (!runCatching { rootIsAlive() }.getOrDefault(false)) return 0
+    val descendants = internalDescendantPidsAtDepth(rootPid, procs, minDepth = 1)
+        .asReversed().filter { it > 1 && it != rootPid }.distinct()
+    var sent = 0
+    for (pid in descendants + rootPid) {
+        val expected = procs[pid]?.startTimeTicks?.takeIf { it > 0L } ?: continue
+        val current = runCatching { currentProcess(pid) }.getOrNull() ?: continue
+        if (current.startTimeTicks != expected) continue
+        if (pid == rootPid && !runCatching { rootIsAlive() }.getOrDefault(false)) continue
+        if (runCatching { signalPid(pid) }.isSuccess) sent++
+    }
+    return sent
 }
 
 /**
