@@ -731,6 +731,9 @@ class TerminalSession(private val context: Context) {
     private fun buildTermuxEnv(rootfsManager: RootfsManager, sessionId: String? = null): List<String> {
         val envMap = LinkedHashMap<String, String>()
         envMap["PROOT_TMP_DIR"] = PRootKernel.getProotTmpDir(context).absolutePath
+        // [fix/l2s-backed-dir-1115] Keep the files behind faked hard links
+        // out of the guest directories -- see getL2sBackingDir().
+        envMap["PROOT_L2S_DIR"] = PRootKernel.getL2sBackingDir(context).absolutePath
         if (PRootKernel.nativeLibDir.isNotEmpty())
             envMap["LD_LIBRARY_PATH"] = PRootKernel.nativeLibDir
         if (PRootKernel.prootLoaderPath.isNotEmpty())
