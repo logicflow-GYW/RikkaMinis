@@ -1,5 +1,6 @@
 package com.rikkaminis.app.sandbox
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,6 +56,22 @@ class L2sBackingDirWiringTest {
                 src.contains("PRootKernel.getL2sBackingDir(context)"),
             )
         }
+    }
+
+    @Test
+    fun rootfsReinstallUsesTheL2sPreservingClearPath() {
+        val src = sandboxSource("RootfsManager.kt")
+        assertEquals(
+            "the install choke point must preserve the L2S carrier",
+            1,
+            Regex("(?m)^\\s*clearRootfsForReinstall\\(rootfsDir\\)\\s*$").findAll(src).count(),
+        )
+        val reset = src.substringAfter("suspend fun reset(): Unit").substringBefore("fun getRootfsSize")
+        assertTrue("manual reset must force the install choke point", reset.contains("installIfNeeded(forceReinstall = true)"))
+        assertFalse(
+            "RootfsManager must not recursively delete the rootfs and its L2S carrier",
+            Regex("(?m)^\\s*rootfsDir\\.deleteRecursively\\(\\)\\s*$").containsMatchIn(src),
+        )
     }
 
     @Test

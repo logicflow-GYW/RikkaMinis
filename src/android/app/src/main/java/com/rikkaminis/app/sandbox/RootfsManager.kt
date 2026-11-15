@@ -116,8 +116,8 @@ class RootfsManager private constructor(private val context: Context) {
      * Progress is published to [installState] (Preparing → Extracting(f) →
      * Finalizing → Installed / Failed).
      */
-    suspend fun installIfNeeded() = withContext(Dispatchers.IO) {
-        if (isInstalled) {
+    suspend fun installIfNeeded(forceReinstall: Boolean = false) = withContext(Dispatchers.IO) {
+        if (!forceReinstall && isInstalled) {
             Log.d(TAG, "Rootfs already installed at $rootfsDir")
             _installState.value = RootfsInstallState.Installed
             return@withContext
@@ -155,11 +155,13 @@ class RootfsManager private constructor(private val context: Context) {
             _installState.value = RootfsInstallState.Preparing
             Log.i(TAG, "Installing Alpine rootfs...")
 
-            // Clean up any partial install
-            if (rootfsDir.exists()) {
-                rootfsDir.deleteRecursively()
-            }
-            rootfsDir.mkdirs()
+            // Stop every consumer before deleting the tree. A live shell can
+            // still create an L2S link while the reset walk is in progress.
+            if (forceReinstall || rootfsDir.exists()) beforeRootfsWiped?.invoke()
+            // Keep the link2symlink data carrier in place. A host-side bind mount
+            // can contain a symlink whose absolute target points into this rootfs;
+            // deleting the carrier would silently destroy that persistent file.
+            clearRootfsForReinstall(rootfsDir)
 
             // Extract rootfs from assets.
             // AAPT may decompress .tar.gz → .tar automatically, so try both names.
@@ -952,15 +954,14 @@ class RootfsManager private constructor(private val context: Context) {
     }
 
     /**
-     * Reset rootfs to factory state: delete everything and reinstall.
+     * Reset the disposable rootfs tree to factory state and reinstall it.
      *
      * [M-rootfs-drop-backup] Backup / restore ("Reset & Backup") was removed
      * deliberately — real persistent data lives in the cross-session shared
-     * area (/var/minis/shared) outside the rootfs, so backing up the in-container
-     * /root backed up a disposable temp layer for zero practical value. The old
-     * back up path also crashed on dangling runtime links (pulse runtime
-     * socket under .config/pulse) inside /root via copyRecursively.
-     * Reset is now a pure delete + reinstall; there is nothing to restore.
+     * area (/var/minis/shared) outside the rootfs. The one exception is the
+     * `.l2s-backing` carrier: host-side bind mounts can contain symlinks whose
+     * absolute targets point into that directory, so [clearRootfsForReinstall]
+     * preserves it while removing the rest of the disposable tree.
      */
     /**
      * Instance shim kept for the instrumented tests (which call
@@ -994,6 +995,10 @@ class RootfsManager private constructor(private val context: Context) {
      * and this is the only event it needs to publish. Null (unset) is the
      * legitimate pre-boot state — nothing to invalidate yet.
      */
+    /** Called before the rootfs tree is destructively rewritten. */
+    var beforeRootfsWiped: (() -> Unit)? = null
+
+    /** Called after a rootfs wipe and reinstall completed. */
     var afterRootfsReinstalled: (suspend () -> Unit)? = null
 
     suspend fun reset(): Unit = withContext(Dispatchers.IO) {
@@ -1005,14 +1010,17 @@ class RootfsManager private constructor(private val context: Context) {
         // screen; log them so a wipe is always attributable to a human action
         // vs an automatic repair.
         RootfsEventLog.logEvent(eventLogsDir, RootfsEventLog.Events.MANUAL_RESET)
-        rootfsDir.deleteRecursively()
-        installIfNeeded()
+        installIfNeeded(forceReinstall = true)
         // [meta1028 D3-F02] The tree on disk is new; everything the boot
         // critical section materialized inside it is gone. Publish BEFORE
         // returning so a caller that immediately runs a command can't observe
         // "installed" with a booted-but-stubless kernel.
-        runCatching { afterRootfsReinstalled?.invoke() }
-            .onFailure { Log.w(TAG, "[Reset] post-reinstall hook failed: ${it.message}") }
+        if (installState.value is RootfsInstallState.Installed) {
+            runCatching { afterRootfsReinstalled?.invoke() }
+                .onFailure { Log.w(TAG, "[Reset] post-reinstall hook failed: ${it.message}") }
+        } else {
+            Log.w(TAG, "[Reset] reinstall did not reach Installed; rebuild hook withheld")
+        }
     }
 
     /**

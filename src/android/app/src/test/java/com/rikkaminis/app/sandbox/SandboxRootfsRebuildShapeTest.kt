@@ -77,13 +77,16 @@ class SandboxRootfsRebuildShapeTest {
     fun `reset announces the rebuild after the re-install has landed`() {
         val src = repoFile(rootfsRel)
         val reset = sliceFrom(src, "suspend fun reset(): Unit", "getRootfsSize")
-        assertTrue("reset must still delete + reinstall:\n$reset", reset.contains("installIfNeeded()"))
+        assertTrue(
+            "reset must still force delete + reinstall:\n$reset",
+            reset.contains("installIfNeeded(forceReinstall = true)"),
+        )
         val hook = reset.indexOf("afterRootfsReinstalled?.invoke()")
         assertTrue("reset must publish the rebuild:\n$reset", hook > 0)
         assertTrue(
             "the publish must come AFTER installIfNeeded(), or a hook that re-boots would " +
                 "race the extraction",
-            hook > reset.indexOf("installIfNeeded()"),
+            hook > reset.indexOf("installIfNeeded(forceReinstall = true)"),
         )
         assertTrue(
             "a hook failure must not fail the reset the user asked for:\n$reset",

@@ -139,6 +139,11 @@ object PRootKernel {
         // found` and read-only mount guards were gone until the app restarted.
         // The hook only re-arms the gate; the next `boot()` (command, terminal)
         // re-runs this whole body, which is idempotent by design.
+        rootfsManager.beforeRootfsWiped = {
+            ExecutionCoordinator.stopCurrentCommand()
+            TerminalSession.stopAll()
+            bootGate.invalidate()
+        }
         rootfsManager.afterRootfsReinstalled = {
             onRootfsReinstalled(context)
         }
@@ -1489,7 +1494,7 @@ object PRootKernel {
      * symlink), hence the rootfs and not `cacheDir`/`/tmp`.
      */
     internal fun getL2sBackingDir(context: Context): File {
-        val dir = File(RootfsManager.getInstance(context).rootfsDir, ".l2s-backing")
+        val dir = File(RootfsManager.getInstance(context).rootfsDir, L2S_BACKING_DIR_NAME)
         dir.mkdirs()
         // PRoot compares this path against the host paths it resolves
         // itself, which are canonical.  `filesDir` goes through
