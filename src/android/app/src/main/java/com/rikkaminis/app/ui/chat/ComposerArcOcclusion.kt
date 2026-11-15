@@ -16,16 +16,11 @@ import androidx.compose.ui.unit.dp
 /**
  * [composer-arc-1114] Geometry shared by the message list and the composer.
  *
- * ponytail: [composerArcClipShape] is NOT applied any more — since
- * [composer-glass-1115] the composer is a frosted-glass card, and the clip
- * removed exactly the rows the glass samples (the blur went flat). Content now
- * runs the full composer height underneath the card and is blurred rather than
- * hidden, so the arc-notch geometry has no job. It is kept, with its unit test
- * (`ComposerArcBandTest`), as the one-line revert path if the glass is dropped.
- * | 天花板: the band math stays correct only for the old "list ends at the card
- * top + 22dp" layout | 升级触发: if the glass survives one release, delete
- * [ArcClipShape] / [ComposerArcBand] / [arcNotchPath] and that test together —
- * dead geometry that still passes its own test is the worst kind of dead code.
+ * ponytail: [composerArcClipShape] runs only while the [composer-glass-1115]
+ * switch is OFF; ON, the clip would erase the rows the glass samples.
+ * | 天花板: the band math is only exercised by the OFF path.
+ * | 升级触发: glass becomes the only mode → delete [ArcClipShape] /
+ * [ComposerArcBand] / [arcNotchPath] together with [ComposerArcBandTest].
  *
  * Before that file, the list and the composer were plain siblings in a Column:
  * the LazyColumn's viewport ended exactly at the composer's top edge, so the

@@ -144,7 +144,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.onSizeChanged
-import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import com.rikkaminis.app.offload.OffloadPermissionManager
@@ -292,6 +291,15 @@ fun ChatScreen(
     // visible band of un-blurred card or push the last row up too far.
     var composerHeightPx by remember { mutableStateOf(0) }
     val composerHeightDp = with(LocalDensity.current) { composerHeightPx.toDp() }
+
+    // [composer-glass-1115] One read of the switch, used by all four places
+    // that must agree: the list's tail depth, whether the list is clipped at
+    // the card's arc, whether it records into the haze state, and the bottom
+    // clearance. They are read separately on purpose (a boolean, not a mode
+    // flag threaded through the layout) but MUST be the same boolean — a
+    // mismatch is either a dead effect (clip still on) or content bleeding
+    // past the card (tail still 22dp).
+    val composerGlassOn = tuning.composerGlassEnabled
 
     // ─── T51: Share Injection + Move-to capsule ───────────────────────
     // Drain any pending share buffered by ShareCoordinator (cold start =
@@ -3613,15 +3621,23 @@ fun ChatScreen(
                 // would drop them ComposerArcOverlap down under the card.
                 AlwaysStretchOverscrollBox(
                     modifier = Modifier
-                        // [composer-glass-1115] The list now runs the WHOLE
-                        // composer height underneath it instead of the 22dp arc
-                        // band, and is no longer clipped there: the card is
-                        // frosted glass, so the rows it covers are the blur
-                        // source rather than something to hide. The clip (and
-                        // with it the arc-notch geometry) is gone on purpose —
-                        // keeping it would clip exactly the pixels the glass
-                        // samples, leaving a flat tint.
-                        .composerArcTail(overlap = composerHeightDp),
+                        // [composer-glass-1115] The extent and the clip depend on
+                        // the Chat Tuning switch:
+                        //  • glass ON  — the list runs the WHOLE composer height
+                        //    underneath the card and is NOT clipped there, so the
+                        //    rows the card covers become the blur source.
+                        //  • glass OFF — the original composer-arc-1114 shape:
+                        //    22dp of extra drawing room plus a clip that reveals
+                        //    only the two corner notches.
+                        // Clipping under glass ON would remove exactly the pixels
+                        // the card samples, i.e. a flat tint instead of a blur.
+                        .composerArcTail(
+                            overlap = if (composerGlassOn) composerHeightDp else ComposerArcOverlap,
+                        )
+                        .then(
+                            if (composerGlassOn) Modifier
+                            else Modifier.clip(composerArcClipShape),
+                        ),
                 ) { sharedEffect ->
                 // [render-churn-1] Tool-pill progress flow (LocalToolProgressById)
                 // provided ONCE with a stable reference — the flow instance
@@ -3653,24 +3669,23 @@ fun ChatScreen(
                     // message spacing are untouched.
                     contentPadding = PaddingValues(
                         top = 4.dp,
-                        // [composer-glass-1115] The viewport is the composer's
-                        // full height taller than the space it occupies (it
-                        // slides under the card), so the clearance grows by the
-                        // same amount to keep the last row exactly where it was.
-                        // Before the port this was the constant arc band
-                        // (ComposerArcOverlap).
+                        // [composer-glass-1115] With the effect on, the viewport
+                        // is the composer's full height taller than the space it
+                        // occupies (it slides under the card), so the clearance
+                        // grows by the same amount and the last row stays put.
+                        // With it off, the pre-existing arc band is the extent.
                         bottom = (if (bottomReserve == 0.dp) 12.dp else bottomReserve) +
-                            composerHeightDp,
+                            if (composerGlassOn) composerHeightDp else ComposerArcOverlap,
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
                         // [composer-glass-1115] Record the message rows so the
-                        // composer card can blur whatever sits behind it. The
-                        // recorded layer is the list's own content — the
-                        // composer-arc clip above it is a parent-level clip and
-                        // does not appear inside the recording.
-                        .hazeSource(hazeState)
+                        // composer card can blur whatever sits behind it. Only
+                        // while the effect is ON: the recording is a per-frame
+                        // GraphicsLayer copy of the whole list, which is exactly
+                        // the cost a user who left the switch off should not pay.
+                        .then(if (composerGlassOn) Modifier.hazeSource(hazeState) else Modifier)
                         .onGloballyPositioned {
                             listRootCoords = it
                             if (perfFirstLayoutFired.compareAndSet(false, true)) {
@@ -4638,8 +4653,12 @@ fun ChatScreen(
             ) {
             ChatInputArea(
                 viewModel = viewModel,
-                // [composer-glass-1115] Input-bar background effect (haze).
+                // [composer-glass-1115] Input-bar background effect (haze) +
+                // its two knobs from Settings → Appearance → Chat Tuning.
                 hazeState = hazeState,
+                composerGlassEnabled = composerGlassOn,
+                composerGlassBlurDp = tuning.composerGlassBlurDp,
+                composerGlassTintPct = tuning.composerGlassTintPct,
                 // [da1023-F] Active id, not the route arg: the composer's
                 // downstream consumers (MoveToSessionSheet's self-filter,
                 // attachment add) must follow the promoted session.

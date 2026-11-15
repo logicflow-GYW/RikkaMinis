@@ -47,6 +47,9 @@ fun ChatTuningScreen(onBack: () -> Unit) {
     var markdownLineHeightSp by remember { mutableStateOf(ChatTuningPrefs.markdownLineHeightSp(context)) }
     var inputMaxLines by remember { mutableStateOf(ChatTuningPrefs.inputMaxLines(context)) }
     var sendSwipeThresholdDp by remember { mutableStateOf(ChatTuningPrefs.sendSwipeThresholdDp(context)) }
+    var composerGlassEnabled by remember { mutableStateOf(ChatTuningPrefs.composerGlassEnabled(context)) }
+    var composerGlassBlurDp by remember { mutableStateOf(ChatTuningPrefs.composerGlassBlurDp(context)) }
+    var composerGlassTintPct by remember { mutableStateOf(ChatTuningPrefs.composerGlassTintPct(context)) }
 
     // [FIX-6 / F-241] Re-read the snapshots when the prefs file changes
     // OUTSIDE this screen (`minis-config set chat.*`, backup-restore, the
@@ -77,6 +80,12 @@ fun ChatTuningScreen(onBack: () -> Unit) {
                         inputMaxLines = ChatTuningPrefs.inputMaxLines(context)
                     ChatTuningPrefs.KEY_SEND_SWIPE_THRESHOLD_DP ->
                         sendSwipeThresholdDp = ChatTuningPrefs.sendSwipeThresholdDp(context)
+                    ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED ->
+                        composerGlassEnabled = ChatTuningPrefs.composerGlassEnabled(context)
+                    ChatTuningPrefs.KEY_COMPOSER_GLASS_BLUR_DP ->
+                        composerGlassBlurDp = ChatTuningPrefs.composerGlassBlurDp(context)
+                    ChatTuningPrefs.KEY_COMPOSER_GLASS_TINT_PCT ->
+                        composerGlassTintPct = ChatTuningPrefs.composerGlassTintPct(context)
                 }
             }
         prefs.registerOnSharedPreferenceChangeListener(listener)
@@ -168,6 +177,44 @@ fun ChatTuningScreen(onBack: () -> Unit) {
             }
             LimitsSectionFooter(stringResource(R.string.chat_tuning_composer_footer))
 
+            // ── 3. Composer background effect [composer-glass-1115] ──────
+            //
+            // rikkahub parity: their Settings → Display has a switch plus a
+            // Blur / Glass picker. We ship a switch plus the two numbers that
+            // actually exist in haze 1.x — the AGSL "glass" preset needs haze
+            // 2.x (Compose 1.12 / Kotlin 2.4), which this app cannot take yet.
+            // Both sliders stay visible while the master switch is off, greyed
+            // by their own value labels: a user should be able to see what
+            // they'd be tuning before turning it on.
+            LimitsSectionCard(title = stringResource(R.string.chat_tuning_section_composer_glass)) {
+                LimitsSwitchRow(
+                    title = stringResource(R.string.chat_tuning_glass_enabled),
+                    subtitle = stringResource(R.string.chat_tuning_glass_enabled_desc),
+                    checked = composerGlassEnabled,
+                    onCheckedChange = { composerGlassEnabled = it },
+                )
+                LimitsSliderRow(
+                    title = stringResource(R.string.chat_tuning_glass_blur),
+                    subtitle = stringResource(R.string.chat_tuning_glass_blur_desc),
+                    valueLabel = "$composerGlassBlurDp dp",
+                    value = composerGlassBlurDp,
+                    min = ChatTuningPrefs.COMPOSER_GLASS_BLUR_MIN,
+                    max = ChatTuningPrefs.COMPOSER_GLASS_BLUR_MAX,
+                    onCommit = { composerGlassBlurDp = it },
+                )
+                LimitsSliderRow(
+                    title = stringResource(R.string.chat_tuning_glass_tint),
+                    subtitle = stringResource(R.string.chat_tuning_glass_tint_desc),
+                    valueLabel = "$composerGlassTintPct%",
+                    value = composerGlassTintPct,
+                    min = ChatTuningPrefs.COMPOSER_GLASS_TINT_MIN,
+                    max = ChatTuningPrefs.COMPOSER_GLASS_TINT_MAX,
+                    onCommit = { composerGlassTintPct = it },
+                    showDivider = false,
+                )
+            }
+            LimitsSectionFooter(stringResource(R.string.chat_tuning_glass_footer))
+
             // ── Save ─────────────────────────────────────────────────────
             Row(
                 modifier = Modifier
@@ -187,6 +234,9 @@ fun ChatTuningScreen(onBack: () -> Unit) {
                                 markdownLineHeightSp = markdownLineHeightSp,
                                 inputMaxLines = inputMaxLines,
                                 sendSwipeThresholdDp = sendSwipeThresholdDp,
+                                composerGlassEnabled = composerGlassEnabled,
+                                composerGlassBlurDp = composerGlassBlurDp,
+                                composerGlassTintPct = composerGlassTintPct,
                             ),
                         )
                         onBack()

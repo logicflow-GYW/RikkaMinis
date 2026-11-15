@@ -1530,7 +1530,14 @@
     <string name="chat_tuning_swipe_threshold">위로 밀어 보내기 거리(dp)</string>
     <string name="chat_tuning_swipe_threshold_desc">입력창 안에서 위로 얼마나 밀어야 보내기 제스처가 작동하는지. 기본 120.</string>
     <string name="chat_tuning_composer_footer">앱 내 입력창에만 영향을 줍니다. 전송 버튼과 Enter 키 동작은 별도 설정입니다.</string>
-    <!-- [feat/chat-tuning-panel-b] 런타임 제한 — 컨텍스트/메모리 및 미디어/도구 예산 섹션. -->
+    <string name="chat_tuning_section_composer_glass">입력창 유리</string>
+    <string name="chat_tuning_glass_enabled">반투명 유리 입력창</string>
+    <string name="chat_tuning_glass_enabled_desc">입력 카드 뒤로 지나가는 메시지를 흐리게 표시합니다. Android 12 이상이 필요하며, 이전 기기에서는 불투명 카드로 유지됩니다.</string>
+    <string name="chat_tuning_glass_blur">흐림 반경</string>
+    <string name="chat_tuning_glass_blur_desc">배경이 번지는 정도. rikkahub은 블러 12 dp, 글래스 16 dp를 사용합니다.</string>
+    <string name="chat_tuning_glass_tint">유리 농도</string>
+    <string name="chat_tuning_glass_tint_desc">카드 색이 흐림을 덮는 정도. 0%는 불투명 카드, 100%는 순수 흐림입니다.</string>
+    <string name="chat_tuning_glass_footer">켜져 있는 동안 매 프레임 메시지 목록을 기록하므로 긴 대화에서는 프레임이 떨어질 수 있습니다. 기본값은 꺼짐입니다.</string>    <!-- [feat/chat-tuning-panel-b] 런타임 제한 — 컨텍스트/메모리 및 미디어/도구 예산 섹션. -->
     <string name="runtime_limits_section_context">컨텍스트와 메모리</string>
     <string name="runtime_limits_compact_tail">자동 압축 꼬리 토큰 하한</string>
     <string name="runtime_limits_compact_tail_desc">자동 압축은 이 수치 미만으로 꼬리 토큰을 자르지 않습니다 — 최신 대화는 그대로 유지됩니다. 기본 8000.</string>

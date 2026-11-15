@@ -1558,7 +1558,14 @@
     <string name="chat_tuning_swipe_threshold">上滑发送距离（dp）</string>
     <string name="chat_tuning_swipe_threshold_desc">在输入框内上滑多远才触发发送手势。默认 120。</string>
     <string name="chat_tuning_composer_footer">仅影响应用内输入框；发送按钮与回车键行为是另外的设置项。</string>
-    <!-- [feat/chat-tuning-panel-b] 运行时限制 — 上下文/记忆 与 媒体/工具预算段。 -->
+    <string name="chat_tuning_section_composer_glass">输入框玻璃</string>
+    <string name="chat_tuning_glass_enabled">毛玻璃输入栏</string>
+    <string name="chat_tuning_glass_enabled_desc">把滚动到输入卡片后面的消息做模糊。需要 Android 12 及以上；更早的设备保持实心卡片。</string>
+    <string name="chat_tuning_glass_blur">模糊半径</string>
+    <string name="chat_tuning_glass_blur_desc">背景被抹开的程度。rikkahub 的模糊预设是 12 dp，玻璃预设 16 dp。</string>
+    <string name="chat_tuning_glass_tint">玻璃浓度</string>
+    <string name="chat_tuning_glass_tint_desc">卡片底色覆盖模糊的多少。0% 就是实心卡片，100% 是纯模糊。</string>
+    <string name="chat_tuning_glass_footer">开启后每帧都会录制一遍消息列表，超长会话可能掉帧；默认关闭。</string>    <!-- [feat/chat-tuning-panel-b] 运行时限制 — 上下文/记忆 与 媒体/工具预算段。 -->
     <string name="runtime_limits_section_context">上下文与记忆</string>
     <string name="runtime_limits_compact_tail">自动压缩保留尾部 token</string>
     <string name="runtime_limits_compact_tail_desc">自动压缩不会砍掉低于此数量的尾部 token——最新对话保持原样。默认 8000。</string>

@@ -1530,7 +1530,14 @@
     <string name="chat_tuning_swipe_threshold">上スワイプ送信の距離（dp）</string>
     <string name="chat_tuning_swipe_threshold_desc">入力欄内でどれだけ上にスワイプすると送信ジェスチャが有効になるか。既定 120。</string>
     <string name="chat_tuning_composer_footer">アプリ内の入力欄のみに影響します。送信ボタンと Enter キーの動作は別の設定です。</string>
-    <!-- [feat/chat-tuning-panel-b] 実行時リミット — コンテキスト/メモリ・メディア/ツール予算セクション。 -->
+    <string name="chat_tuning_section_composer_glass">入力欄ガラス</string>
+    <string name="chat_tuning_glass_enabled">すりガラス調の入力欄</string>
+    <string name="chat_tuning_glass_enabled_desc">入力カードの背後を流れるメッセージをぼかします。Android 12 以降が必要です。それ以前の端末では塗りつぶしのカードのままです。</string>
+    <string name="chat_tuning_glass_blur">ぼかし半径</string>
+    <string name="chat_tuning_glass_blur_desc">背景をどれだけぼかすか。rikkahub は 12 dp（ブラー）と 16 dp（グラス）を使っています。</string>
+    <string name="chat_tuning_glass_tint">ガラスの濃さ</string>
+    <string name="chat_tuning_glass_tint_desc">カードの色でぼかしをどれだけ覆うか。0% は塗りつぶし、100% はぼかしのみ。</string>
+    <string name="chat_tuning_glass_footer">オンの間は毎フレームでメッセージ一覧を記録するため、長い会話ではフレームが落ちることがあります。既定はオフです。</string>    <!-- [feat/chat-tuning-panel-b] 実行時リミット — コンテキスト/メモリ・メディア/ツール予算セクション。 -->
     <string name="runtime_limits_section_context">コンテキストとメモリ</string>
     <string name="runtime_limits_compact_tail">自動圧縮の末尾トークン下限</string>
     <string name="runtime_limits_compact_tail_desc">自動圧縮はこの数の末尾トークンを下回って切り詰めません — 直近の会話はそのまま残ります。既定 8000。</string>
