@@ -62,6 +62,10 @@ class L2sBackingDirWiringTest {
         val src = sandboxSource("PRootKernel.kt")
         val body = src.substringAfter("internal fun getL2sBackingDir(context: Context): File {")
             .substringBefore("\n    }")
+        // Comments talk about the mistakes; only the code decides.
+        val code = body.lines()
+            .filterNot { it.trimStart().startsWith("//") || it.trimStart().startsWith("*") }
+            .joinToString("\n")
         // A faked hard link is a symbolic link to this host path, and a guest
         // cannot reach a path outside its root: with `filesDir/l2s-backing`
         // every chain of that build resolved to ENOENT on device (measured
@@ -70,13 +74,13 @@ class L2sBackingDirWiringTest {
         assertTrue(
             "the backing directory must live inside the guest rootfs: " +
                 "the links point at it and a guest cannot leave its root",
-            body.contains("rootfsDir"),
+            code.contains("rootfsDir"),
         )
         assertFalse(
             "filesDir is outside the rootfs -- every link through it resolves to ENOENT",
-            body.contains("filesDir"),
+            code.contains("filesDir"),
         )
-        assertTrue("the directory must be created before PRoot opens it", body.contains("mkdirs()"))
+        assertTrue("the directory must be created before PRoot opens it", code.contains("mkdirs()"))
         // PRoot matches this path against canonical host paths; `filesDir`
         // goes through /data/user/0 -> /data/data, and with the literal
         // spelling no path matched: every chain broke on device
@@ -84,7 +88,7 @@ class L2sBackingDirWiringTest {
         // build made, since both spellings resolve to the same directory.
         assertTrue(
             "the path must be canonical: PRoot compares it against resolved host paths",
-            body.contains("canonicalFile"),
+            code.contains("canonicalFile"),
         )
     }
 }
