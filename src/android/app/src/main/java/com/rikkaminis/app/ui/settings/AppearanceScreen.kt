@@ -221,6 +221,8 @@ internal fun applyLanguageChange(context: Context, prefs: SharedPreferences, cod
 fun AppearanceScreen(
     onBack: () -> Unit,
     onChatMenuClick: () -> Unit = {},
+    // [composer-glass-1115] Appearance → Chat appearance sub-page.
+    onChatSurfaceClick: () -> Unit = {},
     onThemeChanged: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -557,6 +559,25 @@ fun AppearanceScreen(
                 title = stringResource(R.string.appearance_section_chat_menu),
                 subtitle = stringResource(R.string.appearance_chat_menu_summary),
                 onClick = onChatMenuClick,
+                showChevron = true,
+                showDivider = false,
+            )
+        }
+
+        // [composer-glass-1115] -- Chat appearance (sub-page) --
+        // The frosted-glass switch lives one level down: it is a secondary
+        // option that changes the whole chat surface (composer card + top bar),
+        // and the main page stays one switch per primary decision. The entry row
+        // carries the summary so the state is visible without opening it.
+        SettingsSection(
+            header = stringResource(R.string.appearance_section_chat_surface),
+        ) {
+            SettingsRow(
+                icon = Icons.Outlined.ChatBubbleOutline,
+                iconColor = tileBlue,
+                title = stringResource(R.string.appearance_chat_surface_title),
+                subtitle = stringResource(R.string.appearance_chat_surface_summary),
+                onClick = onChatSurfaceClick,
                 showChevron = true,
                 showDivider = false,
             )

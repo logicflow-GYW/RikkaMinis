@@ -1646,14 +1646,19 @@
     <string name="chat_tuning_swipe_threshold_desc">How far you must swipe up inside the input to arm the send gesture. Default 120.</string>
     <string name="chat_tuning_composer_footer">Only the in-app composer is affected. The send button and the return-key behaviour are separate settings.</string>
     <string name="chat_tuning_section_composer_glass">COMPOSER GLASS</string>
-    <string name="chat_tuning_glass_enabled">Frosted-glass input bar</string>
-    <string name="chat_tuning_glass_enabled_desc">Blur the messages that scroll behind the input card. Needs Android 12 or newer; older devices keep the solid card.</string>
     <string name="chat_tuning_glass_blur">Blur radius</string>
     <string name="chat_tuning_glass_blur_desc">How far the backdrop smears. Rikkahub uses 12 dp for its blur preset and 16 dp for glass.</string>
     <string name="chat_tuning_glass_tint">Glass density</string>
     <string name="chat_tuning_glass_tint_desc">How much of the card colour covers the blur. 0% is a solid card, 100% is pure blur.</string>
-    <string name="chat_tuning_glass_footer">Records the message list every frame while on, so very long chats may drop frames. Off by default.</string>    <!-- [feat/chat-tuning-panel-b] Runtime Limits — context/memory & media/tool budget sections. -->
-    <string name="runtime_limits_section_context">Context &amp; memory</string>
+    <string name="chat_tuning_glass_footer">The on/off switch is in Appearance → Chat appearance. With it off, these two numbers have no effect.</string>    <!-- [feat/chat-tuning-panel-b] Runtime Limits — context/memory & media/tool budget sections. -->
+    <string name="appearance_section_chat_surface">CHAT APPEARANCE</string>
+    <string name="appearance_chat_surface_title">Chat appearance</string>
+    <string name="appearance_chat_surface_summary">Input bar and top-bar styling — the frosted-glass switch, and where its numbers live.</string>
+    <string name="chat_surface_title">Chat appearance</string>
+    <string name="chat_surface_section_glass">SURFACES</string>
+    <string name="chat_surface_glass_title">Frosted glass</string>
+    <string name="chat_surface_glass_subtitle">Blur the messages that scroll behind the input card and the top bar. Needs Android 12 or newer; older devices keep the solid surfaces.</string>
+    <string name="chat_surface_glass_footer">Blur radius and glass density are in Appearance → Chat Tuning. With this off, both surfaces keep their original solid look.</string>    <string name="runtime_limits_section_context">Context &amp; memory</string>
     <string name="runtime_limits_compact_tail">Auto-compact tail floor (tokens)</string>
     <string name="runtime_limits_compact_tail_desc">Auto-compaction never cuts below this many tail tokens — the newest conversation stays verbatim. Default 8000.</string>
     <string name="runtime_limits_compact_interval">Auto-compact interval (min)</string>

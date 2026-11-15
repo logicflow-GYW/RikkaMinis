@@ -1398,8 +1398,8 @@ internal object ConfigBuiltins {
             PrefsIntField(
                 path = "chat.composerGlassBlurDp",
                 displayName = "Chat: composer glass blur radius (dp)",
-                description = "How far the backdrop smears behind the input card. Default 16 " +
-                    "(rikkahub uses 12 for its Blur preset, 16 for Glass).",
+                description = "How far the backdrop smears behind the input card and the top bar. " +
+                    "Default 12 (rikkahub's Blur preset).",
                 prefs = chatTuningPrefs,
                 key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_BLUR_DP,
                 defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_BLUR_DEFAULT,
@@ -1413,7 +1413,7 @@ internal object ConfigBuiltins {
                 displayName = "Chat: composer glass density (%)",
                 description = "How much of the card colour covers the blur. 0 = solid card " +
                     "(effect invisible), 100 = pure blur (message text fights the draft). " +
-                    "Default 55.",
+                    "Default 30 (rikkahub's Glass tint).",
                 prefs = chatTuningPrefs,
                 key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_TINT_PCT,
                 defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_TINT_DEFAULT,

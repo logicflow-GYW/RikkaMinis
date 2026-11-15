@@ -34,6 +34,17 @@ class ComposerGlassTest {
     }
 
     @Test
+    fun `the top bar takes a fixed density margin over the shared knob`() {
+        // 30% is the shipped default; the bar adds 25 points because it has
+        // three lines of small text and no scrim underneath it.
+        assertEquals(0.55f, ComposerGlass.topBarTintAlpha(30), 1e-6f)
+        assertEquals(0.25f, ComposerGlass.topBarTintAlpha(0), 1e-6f)
+        // …and the margin must never push the tint past opaque: 100% stays 1f.
+        assertEquals(1f, ComposerGlass.topBarTintAlpha(100), 0f)
+        assertEquals(1f, ComposerGlass.topBarTintAlpha(250), 0f)
+    }
+
+    @Test
     fun `blur radius is clamped to the range the panel offers`() {
         assertEquals(16, ComposerGlass.blurDp(16))
         assertEquals("below the floor", 4, ComposerGlass.blurDp(1))

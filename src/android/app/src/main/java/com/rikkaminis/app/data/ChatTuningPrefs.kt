@@ -84,20 +84,31 @@ object ChatTuningPrefs {
     // OFF by default — same call rikkahub makes (`enableBlurEffect = false`):
     // the blur records the whole message list every frame, and a user who never
     // asked for it pays that cost for a look they may not want.
+    //
+    // The switch lives in Settings → APPEARANCE (it is a look, not a tuning
+    // knob); only the two numbers live in Chat Tuning.
 
     /** Master switch for the frosted-glass composer card. */
     const val KEY_COMPOSER_GLASS_ENABLED = "chat_composer_glass_enabled"
     const val COMPOSER_GLASS_ENABLED_DEFAULT = false
 
-    /** Backdrop blur radius, dp. rikkahub uses 12 (blur) and 16 (glass). */
+    /**
+     * Backdrop blur radius, dp. Default 12 = rikkahub's Blur preset (its Glass
+     * preset is 16; we have no Glass arm — see ComposerGlass).
+     */
     const val KEY_COMPOSER_GLASS_BLUR_DP = "chat_composer_glass_blur_dp"
-    const val COMPOSER_GLASS_BLUR_DEFAULT = 16
+    const val COMPOSER_GLASS_BLUR_DEFAULT = 12
     const val COMPOSER_GLASS_BLUR_MIN = 4
     const val COMPOSER_GLASS_BLUR_MAX = 40
 
-    /** How much of the card colour covers the blur, in percent (0 = solid card). */
+    /**
+     * How much of the card colour covers the blur, in percent (0 = solid card).
+     * Default 30 = rikkahub's Glass tint (containerColor at alpha 0.3); its Blur
+     * arm has no tint at all, but haze 1.x needs an opaque base or the rows
+     * under the card show through as a double image.
+     */
     const val KEY_COMPOSER_GLASS_TINT_PCT = "chat_composer_glass_tint_pct"
-    const val COMPOSER_GLASS_TINT_DEFAULT = 55
+    const val COMPOSER_GLASS_TINT_DEFAULT = 30
     const val COMPOSER_GLASS_TINT_MIN = 0
     const val COMPOSER_GLASS_TINT_MAX = 100
 

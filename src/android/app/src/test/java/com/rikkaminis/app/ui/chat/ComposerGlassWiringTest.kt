@@ -37,10 +37,20 @@ class ComposerGlassWiringTest {
 
     private val composerSrc: String by lazy { readRepoFile("ChatInputArea.kt") }
 
+    /** The switch's home since the round-2 move: Appearance → Chat appearance. */
+    private val surfaceSrc: String by lazy { readRepoFile("ChatSurfaceSettingsScreen.kt") }
+
+    /** Where the two numbers are edited (and where the Save button now lives). */
+    private val tuningSrc: String by lazy { readRepoFile("ChatTuningScreen.kt") }
+
     /** Whitespace-collapsed view: these chains wrap across lines by design. */
     private val screenFlat: String by lazy { screenSrc.replace(Regex("\\s+"), " ") }
 
     private val composerFlat: String by lazy { composerSrc.replace(Regex("\\s+"), " ") }
+
+    private val surfaceFlat: String by lazy { surfaceSrc.replace(Regex("\\s+"), " ") }
+
+    private val tuningFlat: String by lazy { tuningSrc.replace(Regex("\\s+"), " ") }
 
     @Test
     fun `the screen owns exactly one haze state and hands it to the composer`() {
@@ -158,17 +168,81 @@ class ComposerGlassWiringTest {
         )
     }
 
+    @Test
+    fun `the master switch lives in Appearance - Chat appearance, not in the tuning page`() {
+        assertTrue(
+            "the switch is a look decision, so it lives on the chat-appearance sub-page",
+            surfaceFlat.contains("ChatTuningPrefs.prefs(context).edit() .putBoolean(ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED,"),
+        )
+        assertFalse(
+            "a second switch on the tuning page would let the two disagree about who owns the value",
+            tuningFlat.contains("composerGlassEnabled = it"),
+        )
+        assertTrue(
+            "the numbers stay on the tuning page, but the page must say where the switch went",
+            tuningFlat.contains("R.string.chat_tuning_glass_footer"),
+        )
+        assertTrue(
+            "…and the tuning page must read the switch FRESH when saving: a remembered copy would clobber an external write",
+            tuningFlat.contains("composerGlassEnabled = ChatTuningPrefs.composerGlassEnabled(context),"),
+        )
+    }
+
+    @Test
+    fun `the tuning page saves from the top bar, once`() {
+        assertTrue(
+            "Save belongs in the actions slot (Runtime Limits pattern): a tall page must not force a scroll to commit",
+            tuningFlat.contains("onBack = onBack, actions = { MinisTextButton(onClick = {"), 
+        )
+        // Exactly one Save affordance: the bottom Row with the button is gone.
+        assertEquals(
+            "two Save buttons (top bar + page bottom) is the ambiguity this move removed",
+            1,
+            Regex("MinisTextButton\\(").findAll(tuningSrc).count(),
+        )
+    }
+
+    @Test
+    fun `the top bar shares the state, extends the list upward and gates the glass on scroll`() {
+        assertTrue(
+            "the bar must sample the SAME recording as the card",
+            screenFlat.contains("hazeEffect(state = hazeState, style = topBarGlassStyle)"),
+        )
+        assertTrue(
+            "without the upward extension nothing is behind the bar — the glass would blur air",
+            screenFlat.contains(".topBarTail(if (composerGlassOn) topBarHeightDp else 0.dp)"),
+        )
+        assertTrue(
+            "the viewport grew upward by the bar height, so the top padding must grow by the same value or every row shifts up",
+            screenFlat.contains("top = 4.dp + if (composerGlassOn) topBarHeightDp else 0.dp,"),
+        )
+        assertTrue(
+            "at scroll 0 there is nothing to blur, so the glass fades in only once the list can scroll up",
+            screenFlat.contains("listState.canScrollBackward"),
+        )
+        assertTrue(
+            "the bar's own density margin comes from the shared helper, not from a second knob",
+            screenFlat.contains("ComposerGlass.topBarTintAlpha(tuning.composerGlassTintPct)"),
+        )
+        assertTrue(
+            "glass on -> the bar paints nothing itself; the haze layer is its surface",
+            screenFlat.contains("containerColor = if (composerGlassOn) Color.Transparent"),
+        )
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────
 
     private fun readRepoFile(name: String): String {
         var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
-            for (relative in listOf(
-                "src/android/app/src/main/java/com/rikkaminis/app/ui/chat",
-                "app/src/main/java/com/rikkaminis/app/ui/chat",
+            for (base in listOf(
+                "src/android/app/src/main/java/com/rikkaminis/app",
+                "app/src/main/java/com/rikkaminis/app",
             )) {
-                val hit = File(dir, "$relative/$name")
-                if (hit.isFile) return hit.readText()
+                for (pkg in listOf("ui/chat", "ui/settings")) {
+                    val hit = File(dir, "$base/$pkg/$name")
+                    if (hit.isFile) return hit.readText()
+                }
             }
             dir = dir.parentFile
         }

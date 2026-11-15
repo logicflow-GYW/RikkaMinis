@@ -1,6 +1,5 @@
 package com.rikkaminis.app.ui.settings
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -47,7 +46,6 @@ fun ChatTuningScreen(onBack: () -> Unit) {
     var markdownLineHeightSp by remember { mutableStateOf(ChatTuningPrefs.markdownLineHeightSp(context)) }
     var inputMaxLines by remember { mutableStateOf(ChatTuningPrefs.inputMaxLines(context)) }
     var sendSwipeThresholdDp by remember { mutableStateOf(ChatTuningPrefs.sendSwipeThresholdDp(context)) }
-    var composerGlassEnabled by remember { mutableStateOf(ChatTuningPrefs.composerGlassEnabled(context)) }
     var composerGlassBlurDp by remember { mutableStateOf(ChatTuningPrefs.composerGlassBlurDp(context)) }
     var composerGlassTintPct by remember { mutableStateOf(ChatTuningPrefs.composerGlassTintPct(context)) }
 
@@ -80,8 +78,6 @@ fun ChatTuningScreen(onBack: () -> Unit) {
                         inputMaxLines = ChatTuningPrefs.inputMaxLines(context)
                     ChatTuningPrefs.KEY_SEND_SWIPE_THRESHOLD_DP ->
                         sendSwipeThresholdDp = ChatTuningPrefs.sendSwipeThresholdDp(context)
-                    ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED ->
-                        composerGlassEnabled = ChatTuningPrefs.composerGlassEnabled(context)
                     ChatTuningPrefs.KEY_COMPOSER_GLASS_BLUR_DP ->
                         composerGlassBlurDp = ChatTuningPrefs.composerGlassBlurDp(context)
                     ChatTuningPrefs.KEY_COMPOSER_GLASS_TINT_PCT ->
@@ -92,9 +88,43 @@ fun ChatTuningScreen(onBack: () -> Unit) {
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
+    // [composer-glass-1115] Save moved into the top bar, mirroring Runtime
+    // Limits: this page is tall enough that a bottom-of-page Save forced a full
+    // scroll after every edit, and the two pages are entered from the same
+    // place. One Save, in the corner — a second one at the bottom would create
+    // the usual "did I save?" ambiguity.
+    fun saveAndExit() {
+        ChatTuningPrefs.save(
+            context,
+            ChatTuningValues(
+                scrollNearBottomDp = scrollNearBottomDp,
+                prewarmRowLimit = prewarmRowLimit,
+                codePreviewLines = codePreviewLines,
+                tablePreviewRows = tablePreviewRows,
+                markdownLineHeightSp = markdownLineHeightSp,
+                inputMaxLines = inputMaxLines,
+                sendSwipeThresholdDp = sendSwipeThresholdDp,
+                // Not edited on this page any more (switch lives in
+                // Appearance → Chat appearance). Read it FRESH at save time:
+                // carrying a stale remembered value would clobber an external
+                // write (`minis-config`, backup restore) with the value this
+                // screen happened to open with.
+                composerGlassEnabled = ChatTuningPrefs.composerGlassEnabled(context),
+                composerGlassBlurDp = composerGlassBlurDp,
+                composerGlassTintPct = composerGlassTintPct,
+            ),
+        )
+        onBack()
+    }
+
     SettingsScaffold(
         title = stringResource(R.string.chat_tuning_title),
         onBack = onBack,
+        actions = {
+            MinisTextButton(onClick = { saveAndExit() }) {
+                Text(stringResource(R.string.common_save))
+            }
+        },
     ) {
         Column(
             modifier = Modifier
@@ -187,12 +217,6 @@ fun ChatTuningScreen(onBack: () -> Unit) {
             // by their own value labels: a user should be able to see what
             // they'd be tuning before turning it on.
             LimitsSectionCard(title = stringResource(R.string.chat_tuning_section_composer_glass)) {
-                LimitsSwitchRow(
-                    title = stringResource(R.string.chat_tuning_glass_enabled),
-                    subtitle = stringResource(R.string.chat_tuning_glass_enabled_desc),
-                    checked = composerGlassEnabled,
-                    onCheckedChange = { composerGlassEnabled = it },
-                )
                 LimitsSliderRow(
                     title = stringResource(R.string.chat_tuning_glass_blur),
                     subtitle = stringResource(R.string.chat_tuning_glass_blur_desc),
@@ -215,36 +239,6 @@ fun ChatTuningScreen(onBack: () -> Unit) {
             }
             LimitsSectionFooter(stringResource(R.string.chat_tuning_glass_footer))
 
-            // ── Save ─────────────────────────────────────────────────────
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 16.dp),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                MinisTextButton(
-                    onClick = {
-                        ChatTuningPrefs.save(
-                            context,
-                            ChatTuningValues(
-                                scrollNearBottomDp = scrollNearBottomDp,
-                                prewarmRowLimit = prewarmRowLimit,
-                                codePreviewLines = codePreviewLines,
-                                tablePreviewRows = tablePreviewRows,
-                                markdownLineHeightSp = markdownLineHeightSp,
-                                inputMaxLines = inputMaxLines,
-                                sendSwipeThresholdDp = sendSwipeThresholdDp,
-                                composerGlassEnabled = composerGlassEnabled,
-                                composerGlassBlurDp = composerGlassBlurDp,
-                                composerGlassTintPct = composerGlassTintPct,
-                            ),
-                        )
-                        onBack()
-                    },
-                ) {
-                    Text(stringResource(R.string.common_save))
-                }
-            }
         }
     }
 }
@@ -254,8 +248,8 @@ fun ChatTuningScreen(onBack: () -> Unit) {
  * [ChatTuningPrefs.ALL_KEYS] changes in the chat-tuning prefs file. Call from the
  * chat screen; the returned values feed layout math (scroll threshold),
  * composition locals (markdown folds / line height) and the composer
- * parameters. One listener for all seven keys keeps ChatScreen's existing
- * per-key listener block from growing seven more `when` arms.
+ * parameters. One listener for all ten keys keeps ChatScreen's existing
+ * per-key listener block from growing ten more `when` arms.
  */
 @Composable
 internal fun rememberChatTuning(context: android.content.Context): ChatTuningValues {

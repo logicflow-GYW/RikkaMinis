@@ -267,6 +267,9 @@ object Routes {
     const val LOG_DETAIL = "log_detail/{fileName}"
     const val APPEARANCE = "appearance"
     const val CHAT_MENU = "appearance/chat_menu"
+
+    // [composer-glass-1115] Appearance → Chat appearance (chat-surface look).
+    const val CHAT_SURFACE = "appearance/chat_surface"
     const val BACKGROUND = "background"
     const val ONBOARDING_MODELS = "onboarding_models"
     /** T219-2: Mount external folders settings + detail. */
@@ -1592,11 +1595,20 @@ fun AppNavigation(
             AppearanceScreen(
                 onBack = { navController.safePopBackStack() },
                 onChatMenuClick = { navController.safeNavigate(Routes.CHAT_MENU) },
+                // [composer-glass-1115] Secondary look options live one level
+                // down; the main page keeps one switch per primary decision.
+                onChatSurfaceClick = { navController.safeNavigate(Routes.CHAT_SURFACE) },
             )
         }
 
         composable(Routes.CHAT_MENU) {
             ChatMenuSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+
+        composable(Routes.CHAT_SURFACE) {
+            ChatSurfaceSettingsScreen(
                 onBack = { navController.safePopBackStack() },
             )
         }
