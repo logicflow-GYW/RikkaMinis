@@ -63,6 +63,18 @@ class ChatTuningPrefsTest {
             ChatTuningPrefs.SEND_SWIPE_THRESHOLD_DEFAULT,
             ChatTuningPrefs.SEND_SWIPE_THRESHOLD_MAX,
         )
+        // [composer-glass-1115] The composer-glass pair. The switch itself has no
+        // bounds; the two numbers it drives do.
+        assertBounds(
+            ChatTuningPrefs.COMPOSER_GLASS_BLUR_MIN,
+            ChatTuningPrefs.COMPOSER_GLASS_BLUR_DEFAULT,
+            ChatTuningPrefs.COMPOSER_GLASS_BLUR_MAX,
+        )
+        assertBounds(
+            ChatTuningPrefs.COMPOSER_GLASS_TINT_MIN,
+            ChatTuningPrefs.COMPOSER_GLASS_TINT_DEFAULT,
+            ChatTuningPrefs.COMPOSER_GLASS_TINT_MAX,
+        )
     }
 
     @Test
@@ -75,6 +87,13 @@ class ChatTuningPrefsTest {
         assertEquals(ChatTuningPrefs.MARKDOWN_LINE_HEIGHT_DEFAULT, v.markdownLineHeightSp)
         assertEquals(ChatTuningPrefs.INPUT_MAX_LINES_DEFAULT, v.inputMaxLines)
         assertEquals(ChatTuningPrefs.SEND_SWIPE_THRESHOLD_DEFAULT, v.sendSwipeThresholdDp)
+        // [composer-glass-1115] A default-on effect would bill every user for a
+        // per-frame recording of the message list; the default pair must also be
+        // the values the panel shows, or a user's first open of the switch
+        // produces a look nobody chose.
+        assertEquals(ChatTuningPrefs.COMPOSER_GLASS_ENABLED_DEFAULT, v.composerGlassEnabled)
+        assertEquals(ChatTuningPrefs.COMPOSER_GLASS_BLUR_DEFAULT, v.composerGlassBlurDp)
+        assertEquals(ChatTuningPrefs.COMPOSER_GLASS_TINT_DEFAULT, v.composerGlassTintPct)
     }
 
     @Test
@@ -87,6 +106,14 @@ class ChatTuningPrefsTest {
             ChatTuningPrefs.KEY_MARKDOWN_LINE_HEIGHT_SP,
             ChatTuningPrefs.KEY_INPUT_MAX_LINES,
             ChatTuningPrefs.KEY_SEND_SWIPE_THRESHOLD_DP,
+            // [composer-glass-1115] Three knobs, three keys. This list is the
+            // guard that ALL_KEYS covers every declared key — adding a knob to
+            // the object without wiring its key here fails HERE rather than
+            // silently missing the ChatScreen listener (the effect would then
+            // never appear until the next cold start).
+            ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED,
+            ChatTuningPrefs.KEY_COMPOSER_GLASS_BLUR_DP,
+            ChatTuningPrefs.KEY_COMPOSER_GLASS_TINT_PCT,
         )
         assertEquals(keys.size, keys.toSet().size)
         assertEquals(keys.toSet(), ChatTuningPrefs.ALL_KEYS)
