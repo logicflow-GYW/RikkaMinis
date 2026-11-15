@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
 import com.rikkaminis.app.R
+import com.rikkaminis.app.data.ChatTuningPrefs
 import com.rikkaminis.app.ui.components.MinisTextButton
 
 import android.content.Context
@@ -240,6 +241,11 @@ fun AppearanceScreen(
     var messageLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_MESSAGE, 0)) }
     var appBaseLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_APP_BASE, 0)) }
     var selectedLanguage by remember { mutableStateOf(prefs.getString(KEY_LANGUAGE, "") ?: "") }
+    // [composer-glass-1115] The frosted-glass switch. Its value lives in
+    // ChatTuningPrefs (the Chat Tuning page edits the two numbers), so it has
+    // its own file + listener — `prefs` above is appearance_prefs and would
+    // never see this key.
+    var composerGlassEnabled by remember { mutableStateOf(ChatTuningPrefs.composerGlassEnabled(context)) }
 
     val fontsModified = chatInputLevel != 0 || messageLevel != 0 || appBaseLevel != 0
 
@@ -288,6 +294,19 @@ fun AppearanceScreen(
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
+    // External writes (`minis-config set chat.composerGlassEnabled`, a restored
+    // backup) must move this switch too — same contract as the block above.
+    DisposableEffect(context) {
+        val glassPrefs = ChatTuningPrefs.prefs(context)
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED) {
+                composerGlassEnabled = ChatTuningPrefs.composerGlassEnabled(context)
+            }
+        }
+        glassPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { glassPrefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
     val tilePurple = Color(0xFF5856D6)
     val tileBlue = ChatColors.link
     val tileOrange = Color(0xFFFF9500)
@@ -331,6 +350,30 @@ fun AppearanceScreen(
                     showDivider = idx < themeRows.size - 1,
                 )
             }
+        }
+
+        // [composer-glass-1115] -- Glass --
+        // Its own card: a Switch does not belong inside a card of radio rows
+        // (the first attempt put it under Light/Dark and read as "a fourth
+        // theme option"), and the row itself carries a TITLE ONLY — every
+        // explanation lives in the card footer, like the Theme card above it.
+        SettingsSection(
+            header = stringResource(R.string.appearance_section_glass),
+            footer = stringResource(R.string.appearance_glass_footer),
+        ) {
+            SettingsSwitchRow(
+                icon = Icons.Outlined.ChatBubbleOutline,
+                iconColor = tileBlue,
+                title = stringResource(R.string.appearance_glass_title),
+                checked = composerGlassEnabled,
+                onCheckedChange = {
+                    composerGlassEnabled = it
+                    ChatTuningPrefs.prefs(context).edit()
+                        .putBoolean(ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED, it)
+                        .apply()
+                },
+                showDivider = false,
+            )
         }
 
         // -- Launch Session --

@@ -267,6 +267,7 @@ object Routes {
     const val LOG_DETAIL = "log_detail/{fileName}"
     const val APPEARANCE = "appearance"
     const val CHAT_MENU = "appearance/chat_menu"
+
     const val BACKGROUND = "background"
     const val ONBOARDING_MODELS = "onboarding_models"
     /** T219-2: Mount external folders settings + detail. */
@@ -1600,6 +1601,7 @@ fun AppNavigation(
                 onBack = { navController.safePopBackStack() },
             )
         }
+
 
         composable(Routes.BACKGROUND) {
             BackgroundSettingsScreen(

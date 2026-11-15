@@ -1379,6 +1379,48 @@ internal object ConfigBuiltins {
                 maxValue = com.rikkaminis.app.data.ChatTuningPrefs.SEND_SWIPE_THRESHOLD_MAX,
             )
         )
+        // [composer-glass-1115] Frosted-glass composer card — same three knobs
+        // the Chat Tuning panel edits, exposed so the agent can flip them
+        // without the UI (and so backup carries them).
+        r.register(
+            PrefsBoolField(
+                path = "chat.composerGlassEnabled",
+                displayName = "Chat: frosted-glass composer card",
+                description = "Blur the message rows that scroll behind the composer card " +
+                    "(the rikkahub input-bar effect). Off by default: the blur records the " +
+                    "message list every frame. Needs Android 12+; older devices keep a solid card.",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_ENABLED_DEFAULT,
+            )
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.composerGlassBlurDp",
+                displayName = "Chat: composer glass blur radius (dp)",
+                description = "How far the backdrop smears behind the input card and the top bar. " +
+                    "Default 12 (rikkahub's Blur preset).",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_BLUR_DP,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_BLUR_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_BLUR_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_BLUR_MAX,
+            )
+        )
+        r.register(
+            PrefsIntField(
+                path = "chat.composerGlassTintPct",
+                displayName = "Chat: composer glass density (%)",
+                description = "How much of the card colour covers the blur. 0 = solid card " +
+                    "(effect invisible), 100 = pure blur (message text fights the draft). " +
+                    "Default 30 (rikkahub's Glass tint).",
+                prefs = chatTuningPrefs,
+                key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_TINT_PCT,
+                defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_TINT_DEFAULT,
+                minValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_TINT_MIN,
+                maxValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_TINT_MAX,
+            )
+        )
     }
 
     /** Mirrors iOS `fontScaleField` — exposes the integer scale level

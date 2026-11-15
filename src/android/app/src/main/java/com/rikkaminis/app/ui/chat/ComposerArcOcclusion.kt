@@ -16,7 +16,13 @@ import androidx.compose.ui.unit.dp
 /**
  * [composer-arc-1114] Geometry shared by the message list and the composer.
  *
- * Before this file, the list and the composer were plain siblings in a Column:
+ * ponytail: [composerArcClipShape] runs only while the [composer-glass-1115]
+ * switch is OFF; ON, the clip would erase the rows the glass samples.
+ * | 天花板: the band math is only exercised by the OFF path.
+ * | 升级触发: glass becomes the only mode → delete [ArcClipShape] /
+ * [ComposerArcBand] / [arcNotchPath] together with [ComposerArcBandTest].
+ *
+ * Before that file, the list and the composer were plain siblings in a Column:
  * the LazyColumn's viewport ended exactly at the composer's top edge, so the
  * message content was terminated by a straight horizontal line and the card's
  * 20dp rounded corners only decorated the card's own background. Side by side

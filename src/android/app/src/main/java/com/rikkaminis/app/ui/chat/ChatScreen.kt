@@ -15,6 +15,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -121,6 +122,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -143,6 +145,12 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.onSizeChanged
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import com.rikkaminis.app.offload.OffloadPermissionManager
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.ModelEntry
@@ -261,6 +269,33 @@ fun ChatScreen(
     // across forward navigation (file preview, env vars, etc.); see
     // ChatViewModel.listState for the why.
     val listState = viewModel.listState
+
+    // [composer-glass-1115] Single HazeState shared by the two ends of the
+    // frosted-glass composer: the message list records into it (hazeSource,
+    // on the LazyColumn) and the composer card samples it (hazeEffect, in
+    // ChatInputArea). One state, one source — a second source would make the
+    // blur pick up whatever else registered, and a second state would leave
+    // the card sampling nothing.
+    //
+    // The source is the list *inside* the composer-arc clip on purpose:
+    // hazeSource records the source node's own content (HazeSourceNode
+    // .record { drawContent }), and an ancestor's clip is applied when that
+    // layer is composited into the parent — so the card still blurs the
+    // message rows that the arc clip hides underneath it, while the clip keeps
+    // its old job of terminating content on the arc. Verified against the
+    // library source (haze 1.6.10), not assumed.
+    val hazeState = rememberHazeState()
+
+    // [composer-glass-1115] Measured height of the composer, in px → dp. The
+    // list needs it for two things that must move together:
+    //   1. how far it may draw underneath the composer (composerArcTail), and
+    //   2. the bottom content padding that keeps the last row resting where it
+    //      did before the viewport grew.
+    // Measuring beats a constant: the composer grows with a multi-line draft
+    // and with attachment chips, and a fixed estimate would either leave a
+    // visible band of un-blurred card or push the last row up too far.
+    var composerHeightPx by remember { mutableStateOf(0) }
+    val composerHeightDp = with(LocalDensity.current) { composerHeightPx.toDp() }
 
     // ─── T51: Share Injection + Move-to capsule ───────────────────────
     // Drain any pending share buffered by ShareCoordinator (cold start =
@@ -832,6 +867,59 @@ fun ChatScreen(
     // Chat Tuning); the default is the T128 value (32). The helper registers
     // its own minis_chat_tuning_prefs listener, so a knob change recomposes here.
     val tuning = rememberChatTuning(context)
+
+    // [composer-glass-1115] One read of the switch, used by all four places
+    // that must agree: the list's tail depth, whether the list is clipped at
+    // the card's arc, whether it records into the haze state, and the bottom
+    // clearance. They are read separately on purpose (a boolean, not a mode
+    // flag threaded through the layout) but MUST be the same boolean — a
+    // mismatch is either a dead effect (clip still on) or content bleeding
+    // past the card (tail still 22dp).
+    //
+    // Declared HERE, after `tuning`: reading it next to the other composer
+    // state (≈300 lines up) put it before `tuning` exists — a compile error the
+    // first CI run caught (`Unresolved reference 'tuning'`).
+    val composerGlassOn = tuning.composerGlassEnabled
+
+    // [composer-glass-1115] Top-bar glass: same switch, same HazeState, same
+    // source as the composer card — the message list. Two things differ, both
+    // forced by the geometry:
+    //  • the bar extends the list UPWARDS (topBarTail) instead of downwards, so
+    //    rows can run underneath it; the top content padding grows by the same
+    //    amount, so no row actually moves;
+    //  • the glass only fades in once the list can scroll up. At the very top
+    //    there is nothing behind the bar to blur, and a translucent bar over an
+    //    empty strip reads as a rendering bug. rikkahub gates its top-bar
+    //    capsule the same way (`showCapsuleBackground = listScrolledUnderTopBar`).
+    var topBarHeightPx by remember { mutableStateOf(0) }
+    val topBarHeightDp = with(LocalDensity.current) { topBarHeightPx.toDp() }
+    val topBarScrolled by remember { derivedStateOf { listState.canScrollBackward } }
+    val topBarGlassAlpha by animateFloatAsState(
+        targetValue = if (composerGlassOn && topBarScrolled) 1f else 0f,
+        label = "topBarGlassAlpha",
+    )
+    // `ChatColors` is a @Composable getter (LocalChatPalette), and a remember{}
+    // calculation lambda is NOT composable — reading it inside is a compile
+    // error (the same one that bit the composer scrim in round 1). Hoisted.
+    val topBarGlassBase = ChatColors.background
+    val topBarGlassStyle = remember(
+        composerGlassOn,
+        tuning.composerGlassBlurDp,
+        tuning.composerGlassTintPct,
+        topBarGlassBase,
+    ) {
+        HazeStyle(
+            backgroundColor = topBarGlassBase,
+            tint = HazeTint(
+                topBarGlassBase.copy(
+                    alpha = ComposerGlass.topBarTintAlpha(tuning.composerGlassTintPct),
+                ),
+            ),
+            blurRadius = ComposerGlass.blurDp(tuning.composerGlassBlurDp).dp,
+            noiseFactor = 0f,
+            fallbackTint = HazeTint(topBarGlassBase),
+        )
+    }
     val nearBottomThresholdPx = with(LocalDensity.current) { tuning.scrollNearBottomDp.dp.toPx() }
     // T138 phase 2 v3: ground-truth bottom test via layoutInfo. If
     // LazyList currently renders the visual-bottom item (data-index 0
@@ -2093,6 +2181,24 @@ fun ChatScreen(
             // scope so a title/model change recomposes only this lambda, not
             // the whole message list below.
             val topBarSessionTitle by viewModel.sessionTitle.collectAsState()
+            // [composer-glass-1115] Measured here because the list above needs
+            // the bar's real height (status-bar inset included) to know how far
+            // to extend upward. The glass layer is a sibling BEHIND the bar, so
+            // the bar itself can stay transparent; its alpha follows the scroll
+            // position (see topBarGlassAlpha).
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged { topBarHeightPx = it.height },
+            ) {
+                if (composerGlassOn) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .graphicsLayer { alpha = topBarGlassAlpha }
+                            .hazeEffect(state = hazeState, style = topBarGlassStyle),
+                    )
+                }
             TopAppBar(
                 title = {
                     // RikkaHub-style LEFT-aligned nav title, sitting directly
@@ -2873,8 +2979,13 @@ fun ChatScreen(
                 },
                 windowInsets = WindowInsets.statusBars,
                 colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
-                    containerColor = ChatColors.background.copy(alpha = 0.92f),
-                    scrolledContainerColor = ChatColors.background.copy(alpha = 0.92f),
+                    // [composer-glass-1115] Glass on -> the bar paints nothing of
+                    // its own; the haze layer behind it IS its surface. Off ->
+                    // the pre-existing 92% wash, byte for byte.
+                    containerColor = if (composerGlassOn) Color.Transparent
+                    else ChatColors.background.copy(alpha = 0.92f),
+                    scrolledContainerColor = if (composerGlassOn) Color.Transparent
+                    else ChatColors.background.copy(alpha = 0.92f),
                 ),
                 // [T-android-topbar-shrink] 76dp → 68dp. The earlier
                 // T-topbar-model-row-clip fix bumped 60dp → 76dp to give the
@@ -2891,6 +3002,7 @@ fun ChatScreen(
                 // Font sizes + lineHeights stay untouched per spec.
                 expandedHeight = 68.dp,
             )
+            } // [composer-glass-1115] end measuring Box around TopAppBar
         },
         // [T-error-no-permanent-scars] SnackbarHost is NOT registered here —
         // it's rendered inside the content Box aligned to the TOP (below the
@@ -3582,8 +3694,28 @@ fun ChatScreen(
                 // would drop them ComposerArcOverlap down under the card.
                 AlwaysStretchOverscrollBox(
                     modifier = Modifier
-                        .composerArcTail()
-                        .clip(composerArcClipShape),
+                        // [composer-glass-1115] The extent and the clip depend on
+                        // the Chat Tuning switch:
+                        //  • glass ON  — the list runs the WHOLE composer height
+                        //    underneath the card and is NOT clipped there, so the
+                        //    rows the card covers become the blur source.
+                        //  • glass OFF — the original composer-arc-1114 shape:
+                        //    22dp of extra drawing room plus a clip that reveals
+                        //    only the two corner notches.
+                        // Clipping under glass ON would remove exactly the pixels
+                        // the card samples, i.e. a flat tint instead of a blur.
+                        // [composer-glass-1115] Upward first (outermost): the
+                        // list has to reach the screen top before it can run
+                        // under the top bar. Its own content padding grows by
+                        // the same amount below.
+                        .topBarTail(if (composerGlassOn) topBarHeightDp else 0.dp)
+                        .composerArcTail(
+                            overlap = if (composerGlassOn) composerHeightDp else ComposerArcOverlap,
+                        )
+                        .then(
+                            if (composerGlassOn) Modifier
+                            else Modifier.clip(composerArcClipShape),
+                        ),
                 ) { sharedEffect ->
                 // [render-churn-1] Tool-pill progress flow (LocalToolProgressById)
                 // provided ONCE with a stable reference — the flow instance
@@ -3614,17 +3746,24 @@ fun ChatScreen(
                     // breath under the title bar. Bottom padding and inter-
                     // message spacing are untouched.
                     contentPadding = PaddingValues(
-                        top = 4.dp,
-                        // [composer-arc-1114] The viewport is ComposerArcOverlap
-                        // taller than the space it occupies (it slides under the
-                        // composer), so the clearance has to grow by the same
-                        // amount to keep the last row exactly where it was.
+                        top = 4.dp + if (composerGlassOn) topBarHeightDp else 0.dp,
+                        // [composer-glass-1115] With the effect on, the viewport
+                        // is the composer's full height taller than the space it
+                        // occupies (it slides under the card), so the clearance
+                        // grows by the same amount and the last row stays put.
+                        // With it off, the pre-existing arc band is the extent.
                         bottom = (if (bottomReserve == 0.dp) 12.dp else bottomReserve) +
-                            ComposerArcOverlap,
+                            if (composerGlassOn) composerHeightDp else ComposerArcOverlap,
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
+                        // [composer-glass-1115] Record the message rows so the
+                        // composer card can blur whatever sits behind it. Only
+                        // while the effect is ON: the recording is a per-frame
+                        // GraphicsLayer copy of the whole list, which is exactly
+                        // the cost a user who left the switch off should not pay.
+                        .then(if (composerGlassOn) Modifier.hazeSource(hazeState) else Modifier)
                         .onGloballyPositioned {
                             listRootCoords = it
                             if (perfFirstLayoutFired.compareAndSet(false, true)) {
@@ -4579,8 +4718,25 @@ fun ChatScreen(
             // StateFlow subscription lives INSIDE the composer leaf instead of
             // at ChatScreen scope — typing no longer re-executes the whole
             // message-list body (the long-session input jank root cause).
+            // [composer-glass-1115] The wrapper exists only to MEASURE: the list
+            // above needs the composer's height to know how far to draw under it
+            // (and to pad its bottom by the same amount). `onSizeChanged` fires
+            // after layout, one frame after the first composition — the list's
+            // tail and its bottom padding move together in that recomposition,
+            // so the last row does not shift.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged { composerHeightPx = it.height },
+            ) {
             ChatInputArea(
                 viewModel = viewModel,
+                // [composer-glass-1115] Input-bar background effect (haze) +
+                // its two knobs from Settings → Appearance → Chat Tuning.
+                hazeState = hazeState,
+                composerGlassEnabled = composerGlassOn,
+                composerGlassBlurDp = tuning.composerGlassBlurDp,
+                composerGlassTintPct = tuning.composerGlassTintPct,
                 // [da1023-F] Active id, not the route arg: the composer's
                 // downstream consumers (MoveToSessionSheet's self-filter,
                 // attachment add) must follow the promoted session.
@@ -4611,6 +4767,7 @@ fun ChatScreen(
                 coroutineScope = coroutineScope,
                 inputFocusRequester = inputFocusRequester,
             )
+            } // end [composer-glass-1115] measuring wrapper
 
             // [T-context-exhausted-dialog] iOS 'Context Full' alert parity:
             // the context reached its capacity and the user tried to send.

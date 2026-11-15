@@ -338,6 +338,14 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
+    // [composer-glass-1115] Haze = background blur / frosted glass for the
+    // composer card, i.e. the rikkahub input-bar effect. Pinned to the 1.6.x
+    // line on purpose: 1.6.10 is built against Compose 1.8 / Kotlin 2.1, which
+    // is what this app compiles with (BOM 2025.09.00, Kotlin 2.1.0). Haze 2.x
+    // is built against Compose 1.12 / Kotlin 2.4 and would drag both past our
+    // compiler version. Upgrade trigger: a Compose BOM + Kotlin bump.
+    implementation("dev.chrisbanes.haze:haze:1.6.10")
+
     // Core
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")

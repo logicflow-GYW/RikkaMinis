@@ -1484,9 +1484,15 @@
     <string name="chat_tuning_swipe_threshold">Дистанция свайпа вверх для отправки (dp)</string>
     <string name="chat_tuning_swipe_threshold_desc">Как далеко нужно свайпнуть вверх в поле ввода, чтобы сработал жест отправки. По умолчанию 120.</string>
     <string name="chat_tuning_composer_footer">Влияет только на поле ввода в приложении. Кнопка отправки и поведение Enter — отдельные настройки.</string>
-    <!-- [feat/chat-tuning-panel-b] Лимиты рантайма — бюджеты контекста/памяти и медиа/инструментов. -->
-    <string name="runtime_limits_section_context">Контекст и память</string>
-    <string name="runtime_limits_compact_tail">Нижний порог хвостовых токенов</string>
+    <string name="chat_tuning_section_composer_glass">СТЕКЛО ПОЛЯ ВВОДА</string>
+    <string name="chat_tuning_glass_blur">Радиус размытия</string>
+    <string name="chat_tuning_glass_blur_desc">Насколько сильно размывается фон. В rikkahub — 12 dp для размытия и 16 dp для стекла.</string>
+    <string name="chat_tuning_glass_tint">Плотность стекла</string>
+    <string name="chat_tuning_glass_tint_desc">Насколько цвет карточки перекрывает размытие. 0 % — непрозрачная карточка, 100 % — чистое размытие.</string>
+    <string name="chat_tuning_glass_footer">Переключатель находится в разделе Оформление → Внешний вид чата. Когда он выключен, эти два значения ни на что не влияют.</string>    <!-- [feat/chat-tuning-panel-b] Лимиты рантайма — бюджеты контекста/памяти и медиа/инструментов. -->
+    <string name="appearance_glass_title">Поле ввода и верхняя панель</string>    <string name="runtime_limits_section_context">Контекст и память</string>
+    <string name="appearance_section_glass">Матовое стекло</string>
+    <string name="appearance_glass_footer">Действует для поля ввода и верхней панели. Радиус и плотность — в «Настройке чата»; ниже Android 12 поверхности остаются непрозрачными.</string>    <string name="runtime_limits_compact_tail">Нижний порог хвостовых токенов</string>
     <string name="runtime_limits_compact_tail_desc">Автосжатие никогда не урезает ниже этого числа хвостовых токенов — свежий диалог остаётся дословным. По умолчанию 8000.</string>
     <string name="runtime_limits_compact_interval">Интервал автосжатия (мин)</string>
     <string name="runtime_limits_compact_interval_desc">Минимум минут между автосжатиями одного диалога. По умолчанию 5.</string>
