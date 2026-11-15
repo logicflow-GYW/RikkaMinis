@@ -81,6 +81,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
@@ -618,6 +619,25 @@ internal fun ChatInputArea(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // [composer-glass-1115] Scrim, straight out of rikkahub's
+                // ChatInput: the message list now runs underneath this whole
+                // column (see composerArcTail(overlap = composerHeightDp) in
+                // ChatScreen), and without a fade the rows would also show
+                // through the 8dp gap under the card and behind the system
+                // navigation bar. Transparent at the column's top edge →
+                // background at its bottom, so content dissolves before it
+                // reaches the card, and the glass is the only thing that
+                // reveals it (blurred) once it is behind the card.
+                .drawBehind {
+                    val scrim = ChatColors.background
+                    drawRect(
+                        Brush.verticalGradient(
+                            colors = listOf(scrim.copy(alpha = 0f), scrim),
+                            startY = 0f,
+                            endY = size.height,
+                        ),
+                    )
+                }
                 .navigationBarsPadding()
                 // [composer-arc-1114] These two insets are not free numbers any
                 // more: the message list overlaps the composer by
