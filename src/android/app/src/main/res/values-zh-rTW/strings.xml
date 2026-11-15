@@ -1542,14 +1542,8 @@
     <string name="chat_tuning_glass_tint">玻璃濃度</string>
     <string name="chat_tuning_glass_tint_desc">卡片底色覆蓋模糊的程度。0% 是實心卡片，100% 是純模糊。</string>
     <string name="chat_tuning_glass_footer">開關在 外觀 → 聊天外觀。關掉時這兩個數值不生效。</string>    <!-- [feat/chat-tuning-panel-b] 執行時限制 — 上下文/記憶 與 媒體/工具預算段。 -->
-    <string name="appearance_section_chat_surface">聊天外觀</string>
-    <string name="appearance_chat_surface_title">聊天外觀</string>
-    <string name="appearance_chat_surface_summary">輸入列與頂部標題列的樣式——毛玻璃開關，以及數值在哪裡調。</string>
-    <string name="chat_surface_title">聊天外觀</string>
-    <string name="chat_surface_section_glass">表面效果</string>
-    <string name="chat_surface_glass_title">毛玻璃</string>
-    <string name="chat_surface_glass_subtitle">把捲動到輸入卡片和頂部標題列後面的訊息做模糊。需要 Android 12 以上；較舊的裝置維持實心表面。</string>
-    <string name="chat_surface_glass_footer">模糊半徑與玻璃濃度在 外觀 → 聊天微調 裡。關閉時兩處都保持原本的實心樣式。</string>    <string name="runtime_limits_section_context">上下文與記憶</string>
+    <string name="appearance_glass_title">毛玻璃</string>
+    <string name="appearance_glass_subtitle">把捲動到輸入卡片和頂部標題列後面的訊息做模糊。需要 Android 12 以上；較舊的裝置維持實心表面。模糊半徑與濃度在 聊天微調 裡。</string>    <string name="runtime_limits_section_context">上下文與記憶</string>
     <string name="runtime_limits_compact_tail">自動壓縮保留尾部 token</string>
     <string name="runtime_limits_compact_tail_desc">自動壓縮不會砍掉低於此數量的尾部 token——最新對話保持原樣。預設 8000。</string>
     <string name="runtime_limits_compact_interval">自動壓縮間隔（分鐘）</string>

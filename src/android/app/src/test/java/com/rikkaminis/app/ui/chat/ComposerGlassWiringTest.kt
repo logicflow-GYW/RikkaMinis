@@ -37,8 +37,8 @@ class ComposerGlassWiringTest {
 
     private val composerSrc: String by lazy { readRepoFile("ChatInputArea.kt") }
 
-    /** The switch's home since the round-2 move: Appearance → Chat appearance. */
-    private val surfaceSrc: String by lazy { readRepoFile("ChatSurfaceSettingsScreen.kt") }
+    /** The switch's home since the round-3 move: Appearance → THEME section. */
+    private val appearanceSrc: String by lazy { readRepoFile("AppearanceScreen.kt") }
 
     /** Where the two numbers are edited (and where the Save button now lives). */
     private val tuningSrc: String by lazy { readRepoFile("ChatTuningScreen.kt") }
@@ -48,7 +48,7 @@ class ComposerGlassWiringTest {
 
     private val composerFlat: String by lazy { composerSrc.replace(Regex("\\s+"), " ") }
 
-    private val surfaceFlat: String by lazy { surfaceSrc.replace(Regex("\\s+"), " ") }
+    private val appearanceFlat: String by lazy { appearanceSrc.replace(Regex("\\s+"), " ") }
 
     private val tuningFlat: String by lazy { tuningSrc.replace(Regex("\\s+"), " ") }
 
@@ -169,11 +169,18 @@ class ComposerGlassWiringTest {
     }
 
     @Test
-    fun `the master switch lives in Appearance - Chat appearance, not in the tuning page`() {
+    fun `the master switch lives in the Appearance THEME section, not in the tuning page`() {
         assertTrue(
-            "the switch is a look decision, so it lives on the chat-appearance sub-page",
-            surfaceFlat.contains("ChatTuningPrefs.prefs(context).edit() .putBoolean(ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED,"),
+            "the switch belongs with the theme rows — same kind of decision, and the section already owns the palette",
+            appearanceFlat.contains("ChatTuningPrefs.prefs(context).edit() .putBoolean(ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED,"),
         )
+        val themeSection = appearanceSrc.indexOf("R.string.appearance_section_theme")
+        val launchSection = appearanceSrc.indexOf("R.string.appearance_section_launch")
+        // lastIndexOf: the listener near the top names the key too; the WRITE is the
+        // occurrence inside the theme section.
+        val switchRow = appearanceSrc.lastIndexOf("ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED")
+        assertTrue("theme / launch section markers not found", themeSection >= 0 && launchSection > themeSection)
+        assertTrue("the switch row must sit between the theme rows and the Launch Session section", switchRow > themeSection && switchRow < launchSection)
         assertFalse(
             "a second switch on the tuning page would let the two disagree about who owns the value",
             tuningFlat.contains("composerGlassEnabled = it"),

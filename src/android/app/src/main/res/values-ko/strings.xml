@@ -1536,14 +1536,8 @@
     <string name="chat_tuning_glass_tint">유리 농도</string>
     <string name="chat_tuning_glass_tint_desc">카드 색이 흐림을 덮는 정도. 0%는 불투명 카드, 100%는 순수 흐림입니다.</string>
     <string name="chat_tuning_glass_footer">켜기/끄기 스위치는 모양 → 채팅 모양에 있습니다. 꺼져 있으면 이 두 값은 아무 효과도 없습니다.</string>    <!-- [feat/chat-tuning-panel-b] 런타임 제한 — 컨텍스트/메모리 및 미디어/도구 예산 섹션. -->
-    <string name="appearance_section_chat_surface">채팅 모양</string>
-    <string name="appearance_chat_surface_title">채팅 모양</string>
-    <string name="appearance_chat_surface_summary">입력창과 상단 제목 표시줄의 모양 — 반투명 유리 스위치와 값을 조정하는 위치.</string>
-    <string name="chat_surface_title">채팅 모양</string>
-    <string name="chat_surface_section_glass">표면 효과</string>
-    <string name="chat_surface_glass_title">반투명 유리</string>
-    <string name="chat_surface_glass_subtitle">입력 카드와 상단 제목 표시줄 뒤로 지나가는 메시지를 흐리게 표시합니다. Android 12 이상이 필요하며, 이전 기기에서는 불투명 표면으로 유지됩니다.</string>
-    <string name="chat_surface_glass_footer">흐림 반경과 유리 농도는 모양 → 채팅 조정에 있습니다. 꺼져 있으면 두 표면 모두 원래의 불투명 모양을 유지합니다.</string>    <string name="runtime_limits_section_context">컨텍스트와 메모리</string>
+    <string name="appearance_glass_title">반투명 유리</string>
+    <string name="appearance_glass_subtitle">입력 카드와 상단 제목 표시줄 뒤로 지나가는 메시지를 흐리게 표시합니다. Android 12 이상이 필요하며, 이전 기기에서는 불투명 표면으로 유지됩니다. 흐림 반경과 농도는 채팅 조정에 있습니다.</string>    <string name="runtime_limits_section_context">컨텍스트와 메모리</string>
     <string name="runtime_limits_compact_tail">자동 압축 꼬리 토큰 하한</string>
     <string name="runtime_limits_compact_tail_desc">자동 압축은 이 수치 미만으로 꼬리 토큰을 자르지 않습니다 — 최신 대화는 그대로 유지됩니다. 기본 8000.</string>
     <string name="runtime_limits_compact_interval">자동 압축 간격(분)</string>

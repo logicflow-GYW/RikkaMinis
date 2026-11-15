@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
 import com.rikkaminis.app.R
+import com.rikkaminis.app.data.ChatTuningPrefs
 import com.rikkaminis.app.ui.components.MinisTextButton
 
 import android.content.Context
@@ -221,8 +222,6 @@ internal fun applyLanguageChange(context: Context, prefs: SharedPreferences, cod
 fun AppearanceScreen(
     onBack: () -> Unit,
     onChatMenuClick: () -> Unit = {},
-    // [composer-glass-1115] Appearance → Chat appearance sub-page.
-    onChatSurfaceClick: () -> Unit = {},
     onThemeChanged: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -242,6 +241,11 @@ fun AppearanceScreen(
     var messageLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_MESSAGE, 0)) }
     var appBaseLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_APP_BASE, 0)) }
     var selectedLanguage by remember { mutableStateOf(prefs.getString(KEY_LANGUAGE, "") ?: "") }
+    // [composer-glass-1115] The frosted-glass switch. Its value lives in
+    // ChatTuningPrefs (the Chat Tuning page edits the two numbers), so it has
+    // its own file + listener — `prefs` above is appearance_prefs and would
+    // never see this key.
+    var composerGlassEnabled by remember { mutableStateOf(ChatTuningPrefs.composerGlassEnabled(context)) }
 
     val fontsModified = chatInputLevel != 0 || messageLevel != 0 || appBaseLevel != 0
 
@@ -290,6 +294,19 @@ fun AppearanceScreen(
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
+    // External writes (`minis-config set chat.composerGlassEnabled`, a restored
+    // backup) must move this switch too — same contract as the block above.
+    DisposableEffect(context) {
+        val glassPrefs = ChatTuningPrefs.prefs(context)
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED) {
+                composerGlassEnabled = ChatTuningPrefs.composerGlassEnabled(context)
+            }
+        }
+        glassPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { glassPrefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
     val tilePurple = Color(0xFF5856D6)
     val tileBlue = ChatColors.link
     val tileOrange = Color(0xFFFF9500)
@@ -314,7 +331,7 @@ fun AppearanceScreen(
                 ThemeRow(stringResource(R.string.appearance_theme_light), Icons.Outlined.LightMode, tileOrange),
                 ThemeRow(stringResource(R.string.appearance_theme_dark), Icons.Outlined.DarkMode, tilePurple),
             )
-            themeRows.forEachIndexed { idx, row ->
+            themeRows.forEach { row ->
                 SettingsChoiceRow(
                     title = row.label,
                     selected = themeMode == idx,
@@ -330,9 +347,31 @@ fun AppearanceScreen(
                             tint = row.tint,
                         )
                     },
-                    showDivider = idx < themeRows.size - 1,
+                    // Divider under every theme row: the switch below is the last
+                    // row of the same section, so it needs a separator above it.
+                    showDivider = true,
                 )
             }
+            // [composer-glass-1115] Frosted glass lives WITH the theme rows: it
+            // is the same kind of decision (how the chat looks), and the section
+            // already owns the visual palette. Secondary, so it is one switch at
+            // the end of the section — not a section of its own, and not a
+            // separate sub-page (a page with a single switch is a page you have
+            // to open to flip one bit).
+            SettingsSwitchRow(
+                icon = Icons.Outlined.ChatBubbleOutline,
+                iconColor = tileBlue,
+                title = stringResource(R.string.appearance_glass_title),
+                subtitle = stringResource(R.string.appearance_glass_subtitle),
+                checked = composerGlassEnabled,
+                onCheckedChange = {
+                    composerGlassEnabled = it
+                    ChatTuningPrefs.prefs(context).edit()
+                        .putBoolean(ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED, it)
+                        .apply()
+                },
+                showDivider = false,
+            )
         }
 
         // -- Launch Session --
@@ -559,25 +598,6 @@ fun AppearanceScreen(
                 title = stringResource(R.string.appearance_section_chat_menu),
                 subtitle = stringResource(R.string.appearance_chat_menu_summary),
                 onClick = onChatMenuClick,
-                showChevron = true,
-                showDivider = false,
-            )
-        }
-
-        // [composer-glass-1115] -- Chat appearance (sub-page) --
-        // The frosted-glass switch lives one level down: it is a secondary
-        // option that changes the whole chat surface (composer card + top bar),
-        // and the main page stays one switch per primary decision. The entry row
-        // carries the summary so the state is visible without opening it.
-        SettingsSection(
-            header = stringResource(R.string.appearance_section_chat_surface),
-        ) {
-            SettingsRow(
-                icon = Icons.Outlined.ChatBubbleOutline,
-                iconColor = tileBlue,
-                title = stringResource(R.string.appearance_chat_surface_title),
-                subtitle = stringResource(R.string.appearance_chat_surface_summary),
-                onClick = onChatSurfaceClick,
                 showChevron = true,
                 showDivider = false,
             )

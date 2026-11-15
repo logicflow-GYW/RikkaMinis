@@ -1536,14 +1536,8 @@
     <string name="chat_tuning_glass_tint">ガラスの濃さ</string>
     <string name="chat_tuning_glass_tint_desc">カードの色でぼかしをどれだけ覆うか。0% は塗りつぶし、100% はぼかしのみ。</string>
     <string name="chat_tuning_glass_footer">オン/オフのスイッチは 外観 → チャットの外観 にあります。オフのとき、この 2 つの数値は効果がありません。</string>    <!-- [feat/chat-tuning-panel-b] 実行時リミット — コンテキスト/メモリ・メディア/ツール予算セクション。 -->
-    <string name="appearance_section_chat_surface">チャットの外観</string>
-    <string name="appearance_chat_surface_title">チャットの外観</string>
-    <string name="appearance_chat_surface_summary">入力欄と上部タイトルバーの見た目 — すりガラスのスイッチと、数値の調整場所。</string>
-    <string name="chat_surface_title">チャットの外観</string>
-    <string name="chat_surface_section_glass">表面の効果</string>
-    <string name="chat_surface_glass_title">すりガラス</string>
-    <string name="chat_surface_glass_subtitle">入力カードと上部タイトルバーの背後を流れるメッセージをぼかします。Android 12 以降が必要です。それ以前の端末では塗りつぶしの表面のままです。</string>
-    <string name="chat_surface_glass_footer">ぼかし半径とガラスの濃さは 外観 → チャット調整 にあります。オフのときは両方とも元の塗りつぶし表示のままです。</string>    <string name="runtime_limits_section_context">コンテキストとメモリ</string>
+    <string name="appearance_glass_title">すりガラス</string>
+    <string name="appearance_glass_subtitle">入力カードと上部タイトルバーの背後を流れるメッセージをぼかします。Android 12 以降が必要です。それ以前の端末では塗りつぶしの表面のままです。ぼかし半径と濃さは チャット調整 にあります。</string>    <string name="runtime_limits_section_context">コンテキストとメモリ</string>
     <string name="runtime_limits_compact_tail">自動圧縮の末尾トークン下限</string>
     <string name="runtime_limits_compact_tail_desc">自動圧縮はこの数の末尾トークンを下回って切り詰めません — 直近の会話はそのまま残ります。既定 8000。</string>
     <string name="runtime_limits_compact_interval">自動圧縮の間隔（分）</string>
