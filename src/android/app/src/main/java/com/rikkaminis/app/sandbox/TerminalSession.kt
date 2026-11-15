@@ -102,6 +102,16 @@ class TerminalSession(private val context: Context) {
             }
             liveSessions.removeAll(dead)
         }
+
+        /** Stop every PTY before RootfsManager rewrites the shared rootfs tree. */
+        fun stopAll() {
+            val snapshot = liveSessions.toList()
+            for (ref in snapshot) ref.get()?.stop()
+            liveSessions.removeAll {
+                val session = it.get()
+                session == null || !session.isRunning
+            }
+        }
     }
 
     enum class State { IDLE, BOOTING, RUNNING, STOPPED }
