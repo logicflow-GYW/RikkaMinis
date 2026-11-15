@@ -347,22 +347,24 @@ fun AppearanceScreen(
                             tint = row.tint,
                         )
                     },
-                    // Divider under every theme row: the switch below is the last
-                    // row of the same section, so it needs a separator above it.
-                    showDivider = true,
+                    showDivider = idx < themeRows.size - 1,
                 )
             }
-            // [composer-glass-1115] Frosted glass lives WITH the theme rows: it
-            // is the same kind of decision (how the chat looks), and the section
-            // already owns the visual palette. Secondary, so it is one switch at
-            // the end of the section — not a section of its own, and not a
-            // separate sub-page (a page with a single switch is a page you have
-            // to open to flip one bit).
+        }
+
+        // [composer-glass-1115] -- Glass --
+        // Its own card: a Switch does not belong inside a card of radio rows
+        // (the first attempt put it under Light/Dark and read as "a fourth
+        // theme option"), and the row itself carries a TITLE ONLY — every
+        // explanation lives in the card footer, like the Theme card above it.
+        SettingsSection(
+            header = stringResource(R.string.appearance_section_glass),
+            footer = stringResource(R.string.appearance_glass_footer),
+        ) {
             SettingsSwitchRow(
                 icon = Icons.Outlined.ChatBubbleOutline,
                 iconColor = tileBlue,
                 title = stringResource(R.string.appearance_glass_title),
-                subtitle = stringResource(R.string.appearance_glass_subtitle),
                 checked = composerGlassEnabled,
                 onCheckedChange = {
                     composerGlassEnabled = it

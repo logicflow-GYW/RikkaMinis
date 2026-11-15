@@ -1651,9 +1651,9 @@
     <string name="chat_tuning_glass_tint">Glass density</string>
     <string name="chat_tuning_glass_tint_desc">How much of the card colour covers the blur. 0% is a solid card, 100% is pure blur.</string>
     <string name="chat_tuning_glass_footer">The on/off switch is in Appearance → Chat appearance. With it off, these two numbers have no effect.</string>    <!-- [feat/chat-tuning-panel-b] Runtime Limits — context/memory & media/tool budget sections. -->
-    <string name="appearance_glass_title">Frosted glass</string>
-    <string name="appearance_glass_subtitle">Blur the messages that scroll behind the input card and the top bar. Needs Android 12 or newer; older devices keep solid surfaces. Blur radius and density are in Chat Tuning.</string>    <string name="runtime_limits_section_context">Context &amp; memory</string>
-    <string name="runtime_limits_compact_tail">Auto-compact tail floor (tokens)</string>
+    <string name="appearance_glass_title">Input bar and top bar</string>    <string name="runtime_limits_section_context">Context &amp; memory</string>
+    <string name="appearance_section_glass">Glass</string>
+    <string name="appearance_glass_footer">Applies to the input bar and the top bar. Blur radius and density are in Chat Tuning; below Android 12 the surfaces stay solid.</string>    <string name="runtime_limits_compact_tail">Auto-compact tail floor (tokens)</string>
     <string name="runtime_limits_compact_tail_desc">Auto-compaction never cuts below this many tail tokens — the newest conversation stays verbatim. Default 8000.</string>
     <string name="runtime_limits_compact_interval">Auto-compact interval (min)</string>
     <string name="runtime_limits_compact_interval_desc">Minimum minutes between auto-compactions of the same conversation. Default 5.</string>

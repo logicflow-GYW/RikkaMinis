@@ -193,6 +193,23 @@ class ComposerGlassWiringTest {
             "…and the tuning page must read the switch FRESH when saving: a remembered copy would clobber an external write",
             tuningFlat.contains("composerGlassEnabled = ChatTuningPrefs.composerGlassEnabled(context),"),
         )
+        // Its own card, not a row inside the theme card: a Switch among three
+        // radio rows reads as a fourth theme option.
+        assertTrue(
+            "the switch needs its own SettingsSection with a header and a footer",
+            appearanceFlat.contains(
+                "SettingsSection( header = stringResource(R.string.appearance_section_glass), " +
+                    "footer = stringResource(R.string.appearance_glass_footer), ) {",
+            ),
+        )
+        // Title only in the row; every explanation goes to the card footer.
+        val rowStart = appearanceSrc.indexOf("title = stringResource(R.string.appearance_glass_title)")
+        val rowEnd = appearanceSrc.indexOf("showDivider = false", rowStart)
+        assertTrue("glass switch row not found", rowStart >= 0 && rowEnd > rowStart)
+        assertFalse(
+            "the switch row must stay a bare title — explanations belong to the card footer",
+            appearanceSrc.substring(rowStart, rowEnd).contains("subtitle ="),
+        )
     }
 
     @Test
