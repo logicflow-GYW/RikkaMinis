@@ -236,6 +236,18 @@ jobs:
           LOG="$RUNNER_TEMP/fake-id0-width-test.log" \
             sh deps/proot/tests/run_fake_id0_getresuid_width_test.sh
 
+      # Run native behaviour on the untraced Linux runner, not inside a
+      # nested PRoot: failed rename, same-inode rename, getdents types and
+      # legacy on-disk links must work before the Android binary is built.
+      - name: Test PRoot link2symlink data integrity
+        run: |
+          sudo apt-get install -y --no-install-recommends clang lld
+          sh deps/proot/tests/l2s/run_l2s_handler_test.sh
+          python3 deps/proot/tests/l2s/run_l2s_handler_mutations.py
+          python3 deps/proot/tests/probe/l2s_wiring_check.py
+          python3 deps/proot/tests/probe/l2s_mutation_check.py
+          nice -n 10 sh deps/proot/tests/run_link2symlink_regression_test.sh
+
       - name: Build proot from source
         run: ./deps/build_proot.sh clean
 
