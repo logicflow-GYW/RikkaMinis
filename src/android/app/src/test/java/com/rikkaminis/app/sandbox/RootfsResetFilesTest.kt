@@ -23,7 +23,8 @@ class RootfsResetFilesTest {
         val shared = temp.newFolder("shared")
         val externalLink = File(shared, "model-link")
         Files.createSymbolicLink(externalLink.toPath(), target.toPath())
-        File(rootfs, "etc/obsolete.conf").apply { parentFile.mkdirs(); writeText("old") }
+        File(rootfs, "etc").mkdirs()
+        File(rootfs, "etc/obsolete.conf").writeText("old")
 
         clearRootfsForReinstall(rootfs)
 
