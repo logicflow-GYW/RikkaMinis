@@ -224,6 +224,18 @@ jobs:
           sdkmanager "ndk;28.0.12433566" > /dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.12433566" >> "$GITHUB_ENV"
 
+      # Exercise the production fake_id0 handlers on the runner as well as
+      # compiling the actual Android/arm64 binary below. The ID-width test
+      # covers legacy 16-bit ABI calls versus 32-bit uid_t calls and an ID
+      # above 65535; returning to unconditional 16-bit writes must fail here.
+      - name: Test PRoot getresuid and getresgid ID widths
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libtalloc-dev
+          OUT="$RUNNER_TEMP/fake-id0-width-test" \
+          LOG="$RUNNER_TEMP/fake-id0-width-test.log" \
+            sh deps/proot/tests/run_fake_id0_getresuid_width_test.sh
+
       - name: Build proot from source
         run: ./deps/build_proot.sh clean
 

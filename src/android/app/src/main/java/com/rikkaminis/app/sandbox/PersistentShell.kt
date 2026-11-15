@@ -954,29 +954,43 @@ class PersistentShell(
      */
     fun stop() {
         generation++
-        try { stdinWriter?.close() } catch (_: Exception) {}
-        stdinWriter = null
         val proc = process
+        val writer = stdinWriter
         process = null
+        stdinWriter = null
         if (proc != null) {
-            // [P2-pipe-leak] 关闭所有流防止管道泄漏
+            // Keep stdin open until the owned tree has been snapshotted and
+            // signalled: EOF could let the shell exit and reparent its children.
+            val rootPid = processPid(proc)
+            val processSnapshot = if (runCatching { proc.isAlive }.getOrDefault(false)) {
+                readAllProcStats()
+            } else emptyMap()
+            val signalled = internalKillProcessTree(
+                rootPid = rootPid,
+                procs = processSnapshot,
+                currentProcess = { pid ->
+                    runCatching { internalParseProcStat(File("/proc/$pid/stat").readText()) }.getOrNull()
+                },
+                rootIsAlive = { proc.isAlive },
+            ) { pid -> android.os.Process.sendSignal(pid, android.os.Process.SIGNAL_KILL) }
+            Log.i(TAG, "Stopping shell pid=$rootPid with explicit SIGKILL (targets=$signalled)")
+            // [P2-pipe-leak] Close the captured generation's streams only.
+            try { writer?.close() } catch (_: Exception) {}
             try { proc.inputStream.close() } catch (_: Exception) {}
             try { proc.outputStream.close() } catch (_: Exception) {}
             try { proc.errorStream.close() } catch (_: Exception) {}
-            // [fix/stop-lag] `destroyForcibly()` only sends SIGKILL — the PRoot
-            // tracer's process-tree teardown takes 1–2 s on long tasks. The old
-            // code synchronously `waitFor(3s)` here, and this path runs on the
-            // UI main thread (cancelStream → stopCurrentCommand → stop), so a
-            // user tapping Stop froze for 1–2 s. Now: SIGKILL then return
-            // immediately; a daemon reaper does a bounded waitFor to reap the
-            // zombie, and readLoop() also clears `process`/`pendingCallback` at
-            // EOF, so nothing depends on this wait having happened here.
-            proc.destroyForcibly()
+            // Keep Java's teardown as a fallback, not the source of the kill
+            // guarantee: it emitted SIGTERM on the verified Android runtime.
+            // Preserve [fix/stop-lag]: never wait for exit on the UI thread;
+            // the daemon reaper below owns the bounded wait.
+            runCatching { proc.destroyForcibly() }
             val reaper = Thread({
                 try { proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {}
             }, "PersistentShell-reaper")
             reaper.isDaemon = true
             reaper.start()
+        } else {
+            try { writer?.close() } catch (_: Exception) {}
         }
         pendingCallback?.let {
             it.finishOnce(it.output.toString(), -1, it.truncated)
