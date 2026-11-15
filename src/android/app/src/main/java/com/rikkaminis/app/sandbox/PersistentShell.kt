@@ -408,6 +408,9 @@ class PersistentShell(
 
         val env = processBuilder.environment()
         env["PROOT_TMP_DIR"] = PRootKernel.getProotTmpDir(context).absolutePath
+        // [fix/l2s-backed-dir-1115] Keep the files behind faked hard links
+        // out of the guest directories -- see getL2sBackingDir().
+        env["PROOT_L2S_DIR"] = PRootKernel.getL2sBackingDir(context).absolutePath
         // [feat/storage-budget-loop L0] TMPDIR/TMP must be a GUEST path.
         //
         // PROOT_TMP_DIR above is correct as a host path: proot itself runs on

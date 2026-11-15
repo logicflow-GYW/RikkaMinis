@@ -65,6 +65,9 @@ object ShellExecutor {
         // Set required environment for PRoot
         val env = processBuilder.environment()
         env["PROOT_TMP_DIR"] = PRootKernel.getProotTmpDir(context).absolutePath
+        // [fix/l2s-backed-dir-1115] Keep the files behind faked hard links
+        // out of the guest directories -- see getL2sBackingDir().
+        env["PROOT_L2S_DIR"] = PRootKernel.getL2sBackingDir(context).absolutePath
         if (PRootKernel.nativeLibDir.isNotEmpty()) {
             env["LD_LIBRARY_PATH"] = PRootKernel.nativeLibDir
         }
