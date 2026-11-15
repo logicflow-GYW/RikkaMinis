@@ -106,8 +106,17 @@ class FileDateBucketTest {
     fun `a future mtime renders Just now and never a weekday name`() {
         // Timezone-independent: "future" is future in every zone, so this
         // assertion needs no default-zone pinning.
+        //
+        // [flaky-clock-1115] The margins start at 60 s, not 1 ms: `formattedDate`
+        // re-reads `System.currentTimeMillis()` INSIDE the getter (it takes no
+        // `now`), so `now + 1` could already be in the past by the time the
+        // bucket is computed — on CI it landed a whole millisecond behind and
+        // the assertion read `5:28 PM`. Sub-second futures are covered
+        // deterministically by `no future offset falls into a past bucket`
+        // below, which passes an explicit `now` (offsets 1L..30d), so nothing
+        // is lost by keeping this label test out of the race.
         val now = System.currentTimeMillis()
-        for (offset in listOf(1L, 1_000L, HOUR, 23 * HOUR, 9 * DAY)) {
+        for (offset in listOf(60_000L, HOUR, 23 * HOUR, 9 * DAY)) {
             val label = fileItem(now + offset).formattedDate
             assertEquals("now+$offset ms", "Just now", label)
             for (weekday in WEEKDAYS) {
