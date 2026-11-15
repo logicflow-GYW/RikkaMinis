@@ -159,6 +159,31 @@ internal fun internalDescendantPidsAtDepth(
 }
 
 /**
+ * Signal a shell's snapshot descendants deepest-first, then its tracer root.
+ * Process.destroyForcibly() is not a reliable SIGKILL on every Android ROM:
+ * on the verified device it sent SIGTERM and a blocked tracee kept the whole
+ * PRoot tree alive after the caller had already reported a timeout.
+ *
+ * Reuse the stall guard's tree snapshot instead of another process registry.
+ * A failed or vanished child must not prevent signalling its siblings/root.
+ * [signalPid] supplies Android's explicit SIGNAL_KILL in production.
+ */
+internal fun internalKillProcessTree(
+    rootPid: Int,
+    procs: Map<Int, ProcCpu>,
+    signalPid: (Int) -> Unit,
+): Int {
+    if (rootPid <= 1) return 0
+    val descendants = internalDescendantPidsAtDepth(rootPid, procs, minDepth = 1)
+        .asReversed().filter { it > 1 && it != rootPid }.distinct()
+    var sent = 0
+    for (pid in descendants + rootPid) {
+        if (runCatching { signalPid(pid) }.isSuccess) sent++
+    }
+    return sent
+}
+
+/**
  * Message appended to the output of a command the stall guard interrupted, so
  * the agent knows why its command came back early instead of assuming the task
  * completed.
