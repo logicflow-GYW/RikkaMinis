@@ -1491,7 +1491,20 @@ object PRootKernel {
     internal fun getL2sBackingDir(context: Context): File {
         val dir = File(RootfsManager.getInstance(context).rootfsDir, ".l2s-backing")
         dir.mkdirs()
-        return dir
+        // PRoot compares this path against the host paths it resolves
+        // itself, which are canonical.  `filesDir` goes through
+        // /data/user/0 -> /data/data here, so the literal path never
+        // matched and every chain broke: `ln a b` returned 0, `stat`
+        // reported the emulated count, and neither name could be opened
+        // (measured on device, 1.0.0+3126).  Resolving the directory
+        // makes the literal path canonical, and it also heals the chains
+        // the 3126 build made: they point into the same directory, only
+        // spelled the other way, and both spellings resolve to it.
+        return try {
+            dir.canonicalFile
+        } catch (e: IOException) {
+            dir
+        }
     }
 }
 

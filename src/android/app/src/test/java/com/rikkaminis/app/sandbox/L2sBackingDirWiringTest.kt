@@ -77,5 +77,14 @@ class L2sBackingDirWiringTest {
             body.contains("filesDir"),
         )
         assertTrue("the directory must be created before PRoot opens it", body.contains("mkdirs()"))
+        // PRoot matches this path against canonical host paths; `filesDir`
+        // goes through /data/user/0 -> /data/data, and with the literal
+        // spelling no path matched: every chain broke on device
+        // (1.0.0+3126). The canonical spelling also heals the chains that
+        // build made, since both spellings resolve to the same directory.
+        assertTrue(
+            "the path must be canonical: PRoot compares it against resolved host paths",
+            body.contains("canonicalFile"),
+        )
     }
 }
