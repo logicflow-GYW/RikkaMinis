@@ -82,7 +82,7 @@ internal class OffloadTmpFileLedger(
         if (discard(file)) runCatching { deleteFn(file) }
     }
 
-    /** [register] + delete the overflow, the pre-[meta1028-B04 F-11] shape. */
+    /** Register the new reply and delete the displaced old file outside the lock. */
     fun rotate(file: File) {
         register(file)?.let { old -> runCatching { deleteFn(old) } }
     }
@@ -164,8 +164,10 @@ internal fun writeFileText(file: File, text: String) {
  * whole reason this is a function and not two lines at the call site is that
  * the failure path has to delete the file it created.
  *
- * Order: register FIRST ([OffloadTmpFileLedger.register]), then write. The
- * write is the only step that can throw (ENOSPC on the tmpfs, an interrupted
+ * Order: rotate FIRST ([OffloadTmpFileLedger.rotate]), then write. Rotation
+ * also deletes the displaced old reply: calling register() alone bounds the
+ * in-memory ring but leaks every evicted file on disk. The
+ * write is the only step that can throw (ENOSPC, an interrupted
  * thread), and a file registered before it is reclaimed on failure — whereas
  * a file registered after it is leaked by exactly that throw. The old
  * `tmpHost.writeText(...)` + `rotate(...)` pair leaked the partial file, and
@@ -188,7 +190,7 @@ internal fun writeResponseFile(
     ledger: OffloadTmpFileLedger,
     writeFn: (File, String) -> Unit = ::writeFileText,
 ): Result<Int> {
-    ledger.register(file)
+    ledger.rotate(file)
     return try {
         writeFn(file, text)
         Result.success(text.length)
