@@ -60,6 +60,7 @@ import com.rikkaminis.app.ui.sandbox.RootfsManagementScreen
 import com.rikkaminis.app.ui.settings.EnvironmentVariablesScreen
 import com.rikkaminis.app.ui.settings.AppearanceScreen
 import com.rikkaminis.app.ui.settings.ChatMenuSettingsScreen
+import com.rikkaminis.app.ui.settings.ChatSurfaceSettingsScreen
 import com.rikkaminis.app.ui.settings.SettingsScreen
 import com.rikkaminis.app.ui.settings.SystemPermissionsScreen
 import com.rikkaminis.app.ui.settings.SessionStorageDetailScreen
