@@ -331,7 +331,7 @@ fun AppearanceScreen(
                 ThemeRow(stringResource(R.string.appearance_theme_light), Icons.Outlined.LightMode, tileOrange),
                 ThemeRow(stringResource(R.string.appearance_theme_dark), Icons.Outlined.DarkMode, tilePurple),
             )
-            themeRows.forEach { row ->
+            themeRows.forEachIndexed { idx, row ->
                 SettingsChoiceRow(
                     title = row.label,
                     selected = themeMode == idx,
