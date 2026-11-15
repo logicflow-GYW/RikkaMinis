@@ -1497,9 +1497,13 @@ object PRootKernel {
         // matched and every chain broke: `ln a b` returned 0, `stat`
         // reported the emulated count, and neither name could be opened
         // (measured on device, 1.0.0+3126).  Resolving the directory
-        // makes the literal path canonical, and it also heals the chains
-        // the 3126 build made: they point into the same directory, only
-        // spelled the other way, and both spellings resolve to it.
+        // makes the literal path canonical.
+        //
+        // The chains the two broken builds made stay broken (measured on
+        // device, 1.0.0+3128): their symbolic links were never written
+        // with a usable target, so only the backing files survive under
+        // the directory above -- those still hold the data, but which
+        // internal name belonged to which link is not recorded.
         return try {
             dir.canonicalFile
         } catch (e: IOException) {
