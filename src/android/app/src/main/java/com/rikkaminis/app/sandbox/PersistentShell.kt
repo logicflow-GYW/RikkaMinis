@@ -954,22 +954,28 @@ class PersistentShell(
      */
     fun stop() {
         generation++
-        try { stdinWriter?.close() } catch (_: Exception) {}
-        stdinWriter = null
         val proc = process
+        val writer = stdinWriter
         process = null
+        stdinWriter = null
         if (proc != null) {
-            // Snapshot while the root still owns its children. Closing streams
-            // or signalling only the tracer first can leave blocked commands
-            // alive or reparent them before we enumerate the owned tree.
+            // Keep stdin open until the owned tree has been snapshotted and
+            // signalled: EOF could let the shell exit and reparent its children.
             val rootPid = processPid(proc)
-            val signalled = if (runCatching { proc.isAlive }.getOrDefault(false)) {
-                internalKillProcessTree(rootPid, readAllProcStats()) { pid ->
-                    android.os.Process.sendSignal(pid, android.os.Process.SIGNAL_KILL)
-                }
-            } else 0
+            val processSnapshot = if (runCatching { proc.isAlive }.getOrDefault(false)) {
+                readAllProcStats()
+            } else emptyMap()
+            val signalled = internalKillProcessTree(
+                rootPid = rootPid,
+                procs = processSnapshot,
+                currentProcess = { pid ->
+                    runCatching { internalParseProcStat(File("/proc/$pid/stat").readText()) }.getOrNull()
+                },
+                rootIsAlive = { proc.isAlive },
+            ) { pid -> android.os.Process.sendSignal(pid, android.os.Process.SIGNAL_KILL) }
             Log.i(TAG, "Stopping shell pid=$rootPid with explicit SIGKILL (targets=$signalled)")
-            // [P2-pipe-leak] 关闭所有流防止管道泄漏
+            // [P2-pipe-leak] Close the captured generation's streams only.
+            try { writer?.close() } catch (_: Exception) {}
             try { proc.inputStream.close() } catch (_: Exception) {}
             try { proc.outputStream.close() } catch (_: Exception) {}
             try { proc.errorStream.close() } catch (_: Exception) {}
@@ -983,6 +989,8 @@ class PersistentShell(
             }, "PersistentShell-reaper")
             reaper.isDaemon = true
             reaper.start()
+        } else {
+            try { writer?.close() } catch (_: Exception) {}
         }
         pendingCallback?.let {
             it.finishOnce(it.output.toString(), -1, it.truncated)
