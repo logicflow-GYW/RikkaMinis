@@ -51,3 +51,32 @@ internal fun clearRootfsForReinstall(rootfsDir: File) {
 }
 
 internal const val L2S_BACKING_DIR_NAME = ".l2s-backing"
+
+/**
+ * [incr1116-CD F-01] The name prefix link2symlink gives the file it keeps
+ * behind a faked hard link (`PREFIX` in `link2symlink.c`, non-USERLAND build).
+ */
+internal const val L2S_FILE_PREFIX = ".l2s."
+
+/**
+ * True when [resolvedPath] is one of the extension's own backing files, i.e.
+ * `<something>/.l2s-backing/.l2s.<name><n>.<n>`.
+ *
+ * This is the shape a faked hard link RESOLVES to. `safeResolveWithin` refuses
+ * anything that canonicalises outside its base, which is right for an escape
+ * and wrong for these: a guest file the shell hard-linked is a symlink straight
+ * into this directory, so every host-side tool that resolved guest paths
+ * (`file_read`/`file_edit`, the browser, chat link previews) turned the file
+ * into "not found" while the guest could still `cat` it.
+ *
+ * Structural, not a config lookup: both segments are the extension's own
+ * constants, and the check stays testable without a Context.
+ */
+internal fun isL2sBackingTarget(resolvedPath: String): Boolean {
+    if (resolvedPath.isEmpty()) return false
+    val separator = java.io.File.separatorChar
+    val name = resolvedPath.substringAfterLast(separator)
+    if (!name.startsWith(L2S_FILE_PREFIX)) return false
+    val parent = resolvedPath.substringBeforeLast(separator, "")
+    return parent.substringAfterLast(separator) == L2S_BACKING_DIR_NAME
+}

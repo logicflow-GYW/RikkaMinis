@@ -566,6 +566,35 @@ object PRootKernel {
     }
 
     /**
+     * True when [linuxPath] IS a PRoot bind-mount target, or an ANCESTOR of one.
+     *
+     * [incr1116-A F-01] The file browser grew a delete button on directories
+     * this window, and `/var/minis/{workspace,attachments,offloads,browser,shared}`
+     * are exactly that: the guest paths PRoot binds a session directory onto.
+     * Deleting one from the host side removes the placeholder inside the rootfs,
+     * and PRoot silently SKIPS a bind whose target does not exist — so a single
+     * tap on the trash icon made the agent's `/var/minis/workspace` disappear
+     * from every session (the files are still on disk; the view is gone) until
+     * the directory is recreated.
+     *
+     * Ancestors are included for the same reason: `/var/minis` and `/var` are
+     * one tap away in the rootfs browser, and removing them takes the whole
+     * mount table with it. `"/"` therefore always answers true — there is no
+     * delete that is not also a mount removal.
+     *
+     * Only the live table is consulted ([bindMounts]): a mounted folder that is
+     * currently unmounted has no placeholder worth protecting, and
+     * [applyMountedFoldersSnapshot] recreates `/var/minis/mounts/<name>` on the
+     * next reconcile.
+     */
+    fun isLinuxPathMountPointOrAncestor(linuxPath: String): Boolean {
+        val normalized = normalizeLinuxPath(linuxPath) ?: return false
+        val exact = normalized.trimEnd('/')
+        if (exact.isEmpty()) return true
+        return bindMounts.keys.any { target -> target == exact || target.startsWith("$exact/") }
+    }
+
+    /**
      * Snapshot of mount roots for the @-mention index. Skips entries
      * whose tree URI doesn't resolve to a POSIX path on this device.
      */
@@ -912,7 +941,21 @@ object PRootKernel {
         val basePath = try { base.canonicalPath } catch (e: IOException) { return null }
         val resolvedPath = try { resolved.canonicalPath } catch (e: IOException) { return null }
         if (resolvedPath == basePath) return resolved
-        if (!resolvedPath.startsWith("$basePath${File.separator}")) return null
+        if (!resolvedPath.startsWith("$basePath${File.separator}")) {
+            // [incr1116-CD F-01] A faked hard link is a symlink whose target is
+            // the file's real inode inside `<rootfs>/.l2s-backing`, i.e. always
+            // outside the session/mount base. Reading THROUGH that link is what
+            // the guest does with the same name, so refusing it here made every
+            // hard-linked file unreadable to the host-side tools while the shell
+            // could still open it.
+            //
+            // Only the extension's own bookkeeping is admitted (one
+            // `.l2s-backing` segment + a `.l2s.` leaf): every other target
+            // outside the base stays refused, which is the escape this guard
+            // exists for. Both constants live in RootfsResetFiles.kt next to the
+            // directory the reset preserves, so the two cannot drift.
+            if (!isL2sBackingTarget(resolvedPath)) return null
+        }
         return resolved
     }
 

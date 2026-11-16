@@ -71,4 +71,34 @@ class RootfsResetFilesTest {
         assertFalse(File(rootfs, "external-link").exists())
         assertEquals("keep", File(external, "user-data").readText())
     }
+
+    @Test
+    fun `only the extension's own backing files are recognised`() {
+        // [incr1116-CD F-01] `safeResolveWithin` refuses anything that
+        // canonicalises outside its base — correct for an escape, wrong for a
+        // faked hard link, which resolves to the backing file by construction.
+        // The predicate admits exactly one shape: a `.l2s.` leaf directly in a
+        // `.l2s-backing` directory.
+        val sep = File.separatorChar
+        assertTrue(
+            isL2sBackingTarget("/data/user/0/pkg/files/alpine-rootfs/.l2s-backing/.l2s.notes0001.0002"),
+        )
+        assertFalse("a normal file is never admitted", isL2sBackingTarget("/etc/passwd"))
+        assertFalse(
+            "the directory itself is not a file target",
+            isL2sBackingTarget("/data/user/0/pkg/files/alpine-rootfs/.l2s-backing"),
+        )
+        assertFalse(
+            "a nested path under the backing dir is not the shape link2symlink writes",
+            isL2sBackingTarget("/rootfs/.l2s-backing/nested/.l2s.x0001.0002"),
+        )
+        assertFalse(
+            "the prefix alone, in any other directory, is not enough",
+            isL2sBackingTarget("/var/minis/workspace/.l2s.something"),
+        )
+        assertTrue(
+            "Windows-style separators are not built here, but the check must not depend on the leaf hanging off '/'",
+            isL2sBackingTarget("/rootfs${sep}.l2s-backing${sep}.l2s.a0001.0002"),
+        )
+    }
 }
