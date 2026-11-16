@@ -36,6 +36,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -298,7 +299,22 @@ fun BackupSettingsScreen(
     // once a minute while this screen is open. pendingCount walks the source
     // tree (~1810 stats) on IO — one walk a minute is the price of a row that
     // answers "is it alive" without being asked.
-    LaunchedEffect(mirrorEnabled) {
+    // [incr1116-A F-04] Returning from the system grant page must not wait for
+    // the 60 s beat: the user has just done the one thing this row asks for, and
+    // a red "grant missing" that survives the fix is the same dead control the
+    // grant action exists to remove. Process-scope is deliberate (same signal as
+    // ChatScreen's visibility gate): coming back from Settings resumes the app.
+    var mirrorRefreshTick by remember { mutableIntStateOf(0) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) mirrorRefreshTick++
+        }
+        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(observer)
+        onDispose {
+            androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(observer)
+        }
+    }
+    LaunchedEffect(mirrorEnabled, mirrorRefreshTick) {
         if (!mirrorEnabled) {
             mirrorPending = null
             return@LaunchedEffect
@@ -1128,11 +1144,22 @@ fun BackupSettingsScreen(
                                             val pendingNow = withContext(Dispatchers.IO) {
                                                 com.rikkaminis.app.backup.MirrorStore.pendingCount(context)
                                             }
+                                            // [incr1116-A F-04] The verdict is
+                                            // `MissingGrant` or `Failed` based on
+                                            // this flag, and a retry that just
+                                            // answered Unavailable while the flag
+                                            // still said "reachable" rendered the
+                                            // useless retry button instead of the
+                                            // grant action.
+                                            val reachableNow = withContext(Dispatchers.IO) {
+                                                com.rikkaminis.app.backup.MirrorStore.isTargetReachable(context)
+                                            }
                                             withContext(Dispatchers.Main) {
                                                 mirrorLastMs = ms
                                                 mirrorLastSync = label
                                                 mirrorOutcomeRaw = raw
                                                 mirrorPending = pendingNow
+                                                mirrorTargetReachable = reachableNow
                                                 // [RC-U02] Say what this retry
                                                 // did. Busy is a normal
                                                 // concurrency guard, NOT an

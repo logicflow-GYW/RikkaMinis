@@ -402,6 +402,15 @@ object MirrorStore {
         //    plain-file writer is about to reuse — a UNIQUE-constraint fight with
         //    MediaProvider, which is what the 2026-11-14 incident actually was.
         val rows = deleteLegacyRows(app)
+        if (rows == null) {
+            // [incr1116-A F-05] MediaProvider refused the delete. Marking the
+            // layout as migrated here would be permanent — every later run
+            // returns at the version check above — while the v1 rows keep
+            // pointing at the names v2 is about to reuse. The tree is already
+            // parked, so the retry costs one delete and no data.
+            Log.w(TAG, "legacy mirror rows could not be dropped — retrying next sync")
+            return false
+        }
 
         // 3. Only now is the device on v2. A run killed before this line simply
         //    re-enters: the tree is already parked (`legacy.exists()` false), so
@@ -424,14 +433,19 @@ object MirrorStore {
 
     /**
      * Delete the v1 `Downloads` rows under the **parked tree only**. Returns how
-     * many were removed (0 on any device that never had them, incl. API 26–28).
+     * many were removed (0 on any device that never had them, incl. API 26–28),
+     * or null when MediaProvider refused the delete.
      *
      * The scope deliberately stops at `mirror/`: v1 also wrote the daily full
      * snapshots under `auto/` through MediaStore, and deleting a row deletes the
      * file it points at. Those files are not parked, so their rows must stay —
      * the row is the only index left describing them.
+     *
+     * [incr1116-A F-05] The null is the difference between "nothing to delete"
+     * and "the delete failed", which the caller needs: only the former may mark
+     * the layout as migrated.
      */
-    private fun deleteLegacyRows(app: Context): Int {
+    private fun deleteLegacyRows(app: Context): Int? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
         val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
         return runCatching {
@@ -440,7 +454,7 @@ object MirrorStore {
                 selection,
                 arrayOf("$MIRROR_REL/%"),
             )
-        }.getOrDefault(0)
+        }.getOrNull()
     }
 
     // ---------------------------------------------------------------- sync
@@ -471,7 +485,7 @@ object MirrorStore {
             // run's park would move our own fresh files into the "legacy"
             // pile. Refuse this round; the next sync retries the move.
             if (!migrateLegacyLayout(app, targetIsPublic = kind == MirrorPlan.TargetKind.PUBLIC_DOWNLOADS)) {
-                val blocked = Outcome.Failed("legacy mirror tree could not be moved aside")
+                val blocked = Outcome.Failed("legacy mirror migration incomplete")
                 record(app, outcomeText(blocked))
                 return@withContext blocked
             }
