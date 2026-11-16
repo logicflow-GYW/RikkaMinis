@@ -29,8 +29,9 @@ class ComposerGlassTest {
 
     @Test
     fun `density outside 0-100 is clamped, not wrapped`() {
-        assertEquals("a negative density must read as a solid card", 0f, ComposerGlass.tintAlpha(-20), 0f)
-        assertEquals("over 100 must read as pure blur, not as alpha > 1", 1f, ComposerGlass.tintAlpha(250), 0f)
+        // 0 is "no card colour": pure blur. A negative value clamps to the same end.
+        assertEquals("a negative density must read as pure blur, not as alpha < 0", 0f, ComposerGlass.tintAlpha(-20), 0f)
+        assertEquals("over 100 must read as the solid card, not as alpha > 1", 1f, ComposerGlass.tintAlpha(250), 0f)
     }
 
     @Test

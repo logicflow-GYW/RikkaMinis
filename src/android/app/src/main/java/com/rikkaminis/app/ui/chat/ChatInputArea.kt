@@ -1182,7 +1182,7 @@ internal fun ChatInputArea(
             //   backgroundColor = the palette's own input fill, so the card
             //     never loses its contrast against the message list;
             //   tint alpha       = how much of the BLURRED sample is covered by
-            //     that fill (knob: density %, 0 = solid card, 100 = pure blur);
+            //     that fill (knob: density %, 0 = pure blur, 100 = the card colour alone);
             //   blurRadius       = how far the backdrop smears (knob: dp);
             //   fallbackTint     = what platforms without RenderEffect blur
             //     (API < 31) draw instead: the flat card, not a smear.

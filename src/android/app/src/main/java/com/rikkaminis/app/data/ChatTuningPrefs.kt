@@ -102,7 +102,8 @@ object ChatTuningPrefs {
     const val COMPOSER_GLASS_BLUR_MAX = 40
 
     /**
-     * How much of the card colour covers the blur, in percent (0 = solid card).
+     * How much of the card colour covers the blur, in percent (0 = pure blur,
+     * 100 = only the card colour, i.e. a solid card).
      * Default 30 = rikkahub's Glass tint (containerColor at alpha 0.3); its Blur
      * arm has no tint at all, but haze 1.x needs an opaque base or the rows
      * under the card show through as a double image.

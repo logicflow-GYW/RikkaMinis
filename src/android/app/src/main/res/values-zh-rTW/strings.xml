@@ -1540,7 +1540,7 @@
     <string name="chat_tuning_glass_blur">模糊半徑</string>
     <string name="chat_tuning_glass_blur_desc">背景被抹開的程度。rikkahub 的模糊預設是 12 dp，玻璃預設 16 dp。</string>
     <string name="chat_tuning_glass_tint">玻璃濃度</string>
-    <string name="chat_tuning_glass_tint_desc">卡片底色覆蓋模糊的程度。0% 是實心卡片，100% 是純模糊。</string>
+    <string name="chat_tuning_glass_tint_desc">卡片底色覆蓋模糊的程度。0% 是純模糊，100% 只剩卡片底色（實心）。</string>
     <string name="chat_tuning_glass_footer">開關在 外觀 → 聊天外觀。關掉時這兩個數值不生效。</string>    <!-- [feat/chat-tuning-panel-b] 執行時限制 — 上下文/記憶 與 媒體/工具預算段。 -->
     <string name="appearance_glass_title">輸入列與頂部標題列</string>    <string name="runtime_limits_section_context">上下文與記憶</string>
     <string name="appearance_section_glass">毛玻璃</string>

@@ -40,6 +40,30 @@ class PasteTextBufferTest {
         )
 
     /**
+     * Same fold with the selections the edit ACTUALLY had.
+     *
+     * [incr1116-B F-01] The selection is evidence, not decoration: the fold now
+     * derives (and then verifies) the inserted run from the caret, because the
+     * prefix/suffix diff mis-attributes the boundary whenever the pasted text
+     * shares characters with the field around it. A fixture that leaves the
+     * caret at the end of the field while the text grew in the middle describes
+     * an edit no TextField produces — it would take the inline fallback, not the
+     * detached arm — so the realistic fixtures below pass both ends.
+     */
+    private fun foldAt(
+        old: String,
+        oldSelection: TextRange,
+        new: String,
+        newSelection: TextRange,
+        stash: (String, Boolean) -> String?,
+    ): TextFieldValue =
+        foldLongPasteIfNeeded(
+            old = TextFieldValue(old, oldSelection),
+            new = TextFieldValue(new, newSelection),
+            stash = stash,
+        )
+
+    /**
      * Mirrors the ViewModel: an inline paste gets a marker, a detached one
      * (empty field) is stored but yields null, which is what keeps the field
      * empty. Ids follow paste order, like the smallest-free-value allocator
@@ -168,9 +192,20 @@ class PasteTextBufferTest {
         // time, so the marker's position was decorative. Detached everywhere is
         // the honest form — the field keeps what the user typed, the chip row
         // holds the material.
+        //
+        // [incr1116-B F-01] The caret now says WHERE ("HEAD|TAIL", caret after
+        // HEAD); a fixture with the caret at the end of the field would describe
+        // an edit the text field cannot produce and would take the inline
+        // fallback instead of the detached arm this test is about.
         val (mint, stored) = sequentialStash()
         val block = englishWords(1200)
-        val out = fold("HEAD|TAIL", "HEAD" + block + "|TAIL", mint)
+        val out = foldAt(
+            old = "HEAD|TAIL",
+            oldSelection = TextRange("HEAD".length),
+            new = "HEAD" + block + "|TAIL",
+            newSelection = TextRange("HEAD".length + block.length),
+            stash = mint,
+        )
 
         assertEquals("HEAD|TAIL", out.text)
         assertEquals(TextRange("HEAD".length), out.selection)
@@ -192,10 +227,84 @@ class PasteTextBufferTest {
         // Do not "fix" this to expect the selection being deleted: deleting
         // here would mean the fold chose to edit the user's draft on a gesture
         // it already decided not to insert.
+        //
+        // [incr1116-B F-01] "selected" IS selected here — the caret range is
+        // what makes the inserted run verifiable, and a fixture with the caret
+        // parked at the end would silently test the inline fallback instead.
         val (mint, stored) = sequentialStash()
-        val out = fold("AselectedB", "A" + cjkChars(1500) + "B", mint)
+        val block = cjkChars(1500)
+        val out = foldAt(
+            old = "AselectedB",
+            oldSelection = TextRange(1, "Aselected".length),
+            new = "A" + block + "B",
+            newSelection = TextRange(1 + block.length),
+            stash = mint,
+        )
         assertEquals("AselectedB", out.text)
-        assertEquals(cjkChars(1500), stored.single())
+        assertEquals(block, stored.single())
+    }
+
+    @Test
+    fun `a paste after text that opens with the same words keeps the block intact`() {
+        // [incr1116-B F-01] The regression this pins, verbatim from the review:
+        // field "Hello world", caret at the head, paste "Hello " + 1500 chars.
+        //
+        // The prefix/suffix diff answers "which region is unexplained" with
+        // prefix = 6 ("Hello "), suffix = 5 ("world") — so it hands the chip row
+        // `x…x` + "Hello ": the block loses its head and gains it at the tail,
+        // the typed body keeps the original "Hello", and the model receives
+        // scrambled material (the old inline arm hid this, because the marker
+        // went back into the same region it was cut from).
+        val (mint, stored) = sequentialStash()
+        val block = "Hello " + "x".repeat(1500)
+        val out = foldAt(
+            old = "Hello world",
+            oldSelection = TextRange(0),
+            new = block + "Hello world",
+            newSelection = TextRange(block.length),
+            stash = mint,
+        )
+
+        assertEquals("the field must not be edited by a detached paste", "Hello world", out.text)
+        assertEquals(
+            "the stashed block must be the bytes the user pasted — a rotated run ships " +
+                "garbage to the model",
+            block,
+            stored.single(),
+        )
+    }
+
+    @Test
+    fun `an edit the caret cannot explain falls back to the inline marker`() {
+        // [incr1116-B F-01] The caret is evidence, so it is also fallible: IME
+        // composition and autocorrect can hand the fold an old/new pair the
+        // selection does not explain. Detached folding would then mean appending
+        // a guessed run, so the arm refuses instead and keeps the marker — exact
+        // by construction, because expansion writes the block back into the very
+        // region it was cut from.
+        //
+        // Here the text grew at the head while the caret sat in the middle: the
+        // reconstruction check fails, so nothing is detached.
+        val (mint, stored) = sequentialStash()
+        val block = "Hello " + "x".repeat(1500)
+        val out = foldAt(
+            old = "Hello world",
+            oldSelection = TextRange(5),
+            new = block + "Hello world",
+            newSelection = TextRange(block.length),
+            stash = mint,
+        )
+
+        assertEquals(1, stored.size)
+        assertTrue(
+            "the marker is the only arm that survives a boundary it cannot verify",
+            out.text.contains(PastedText.placeholderFor(1)),
+        )
+        assertEquals(
+            "expansion must reproduce the edit exactly",
+            block + "Hello world",
+            out.text.replace(PastedText.placeholderFor(1), stored.single()),
+        )
     }
 
     @Test

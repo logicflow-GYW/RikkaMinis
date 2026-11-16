@@ -1534,7 +1534,7 @@
     <string name="chat_tuning_glass_blur">흐림 반경</string>
     <string name="chat_tuning_glass_blur_desc">배경이 번지는 정도. rikkahub은 블러 12 dp, 글래스 16 dp를 사용합니다.</string>
     <string name="chat_tuning_glass_tint">유리 농도</string>
-    <string name="chat_tuning_glass_tint_desc">카드 색이 흐림을 덮는 정도. 0%는 불투명 카드, 100%는 순수 흐림입니다.</string>
+    <string name="chat_tuning_glass_tint_desc">카드 색이 흐림을 덮는 정도. 0%는 순수 흐림, 100%는 카드 색만(불투명)입니다.</string>
     <string name="chat_tuning_glass_footer">켜기/끄기 스위치는 모양 → 채팅 모양에 있습니다. 꺼져 있으면 이 두 값은 아무 효과도 없습니다.</string>    <!-- [feat/chat-tuning-panel-b] 런타임 제한 — 컨텍스트/메모리 및 미디어/도구 예산 섹션. -->
     <string name="appearance_glass_title">입력창과 상단 제목 표시줄</string>    <string name="runtime_limits_section_context">컨텍스트와 메모리</string>
     <string name="appearance_section_glass">반투명 유리</string>

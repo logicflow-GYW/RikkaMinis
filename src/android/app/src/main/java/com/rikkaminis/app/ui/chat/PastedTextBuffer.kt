@@ -351,46 +351,87 @@ fun foldLongPasteIfNeeded(
         oldText[oldText.length - 1 - suffix] == newText[newText.length - 1 - suffix]
     ) suffix++
 
-    val insertedStart = prefix
-    val insertedEnd = newText.length - suffix
-    if (insertedEnd <= insertedStart) return new
-    val inserted = newText.substring(insertedStart, insertedEnd)
+    // [incr1116-B F-01] Identify the run this edit inserted, EXACTLY.
+    //
+    // The prefix/suffix diff below answers "which region of newText is not
+    // explained by oldText". That was exact enough while the marker went back
+    // into the same region it was cut from: expansion put the same bytes back
+    // at the same offset, so a mis-attributed boundary cancelled out. The
+    // detached arm has no such cancellation — it leaves the field as it was
+    // and appends the stashed run at send time — so the run itself has to be
+    // right, or the model receives a rotated block.
+    //
+    // Measured shape (reproduced in PasteTextBufferTest): field "Hello world",
+    // caret at 0, paste "Hello " + 1500 chars. Common prefix = 6 ("Hello "),
+    // common suffix = 5 ("world"), so the diff calls the inserted run
+    // `x…x + "Hello "` — the block loses its head and gains it at the tail,
+    // while the body keeps the original "Hello" and the two now disagree.
+    //
+    // The missing evidence is the caret: `TextFieldValue` reports the
+    // selection the edit started from, so the inserted length is
+    // `new.length - old.length + removed`, and the whole parse can be
+    // VERIFIED by rebuilding newText out of oldText. When verification fails
+    // (IME composition, autocorrect, a multi-region edit) the old INLINE
+    // marker arm is used instead — exact by construction, because the marker
+    // goes back into the very region it was cut from.
+    val caretInsertedLength: Int? = run {
+        val sel = old.selection
+        val removed = sel.max - sel.min
+        val insertedLength = newText.length - oldText.length + removed
+        if (insertedLength <= 0 || sel.min < 0 || sel.max > oldText.length) return@run null
+        if (sel.min + insertedLength > newText.length) return@run null
+        val candidate = newText.substring(sel.min, sel.min + insertedLength)
+        val rebuilt = oldText.substring(0, sel.min) + candidate + oldText.substring(sel.max)
+        if (rebuilt != newText) return@run null
+        insertedLength
+    }
+
+    val insertAt: Int
+    val insertEnd: Int
+    val exactRun: Boolean
+    if (caretInsertedLength != null) {
+        insertAt = old.selection.min
+        insertEnd = insertAt + caretInsertedLength
+        exactRun = true
+    } else {
+        insertAt = prefix
+        insertEnd = newText.length - suffix
+        exactRun = false
+    }
+    if (insertEnd <= insertAt) return new
+    val inserted = newText.substring(insertAt, insertEnd)
     if (!isLongPastedText(inserted)) return new
 
     // An empty field is the "paste the material, then say what to do with it"
     // case: there is no position worth remembering, so the block stays out of
     // the text and the composer reads as empty.
     //
-    // [fix/fold-paste-split-1114] ALWAYS take that arm — even when the field
-    // already had text.
+    // [fix/fold-paste-split-1114] A long block is "attach this material", so
+    // it goes to the chip row and the field keeps the typed body. What that
+    // arm deliberately gives up is the caret POSITION: the block is appended
+    // after the body at send time (`appendUnlinkedPastes`), whatever the
+    // paste point was. That is the trade this switch makes, not a property of
+    // the pipeline.
     //
-    // The old rule wrote a `[Pasted#N]` literal whenever the field was
-    // non-empty, which the user reads as the app spraying bookkeeping into
-    // their prompt: paste first → nothing appears, type first → `[Pasted#1]`
-    // appears, and the same action produces two different-looking composers.
-    // Worse, the literal marks a POSITION the fold cannot honour anyway: the
-    // pasted block is always appended after the typed body at send time
-    // ([appendUnlinkedPastes]), so an inline marker that says "this block sits
-    // in the middle of my sentence" is a promise the pipeline does not keep.
-    //
-    // What the inline arm did buy — remembering the caret — is now carried by
-    // the `pasteStart` offset persisted with the message, which survives to the
-    // bubble. Nothing is lost by dropping the literal, and the composer stops
-    // showing machine text in what is supposed to be the user's own words.
-    val marker = stash(inserted, false)
+    // [incr1116-B F-01] Only when the run above was verified against the
+    // caret, though: the detached arm cannot tolerate a guessed boundary,
+    // while the inline arm can. `stash(…, inlineMarker = !exactRun)` is that
+    // decision — an unverifiable edit keeps the literal (and expands it back
+    // into place), a verified one stays out of the user's words.
+    val marker = stash(inserted, !exactRun)
     if (marker == null) {
         // Detached: the inserted run never reaches the field. A long block is
         // "attach this material", not a mid-sentence insertion, so the field is
         // left exactly as it was — including a selection the paste would have
         // replaced. Nothing is deleted and the block is preserved in the chip
         // row, which is the least destructive reading of an ambiguous gesture.
-        val caret = minOf(insertedStart, oldText.length)
+        val caret = minOf(insertAt, oldText.length)
         return TextFieldValue(text = oldText, selection = TextRange(caret))
     }
-    val folded = newText.substring(0, insertedStart) + marker + newText.substring(insertedEnd)
+    val folded = newText.substring(0, insertAt) + marker + newText.substring(insertEnd)
     // Caret goes just after the marker — where the user's next keystroke
     // belongs, and what they would expect had they typed the marker by hand.
-    val caret = insertedStart + marker.length
+    val caret = insertAt + marker.length
     return TextFieldValue(
         text = folded,
         selection = TextRange(caret),

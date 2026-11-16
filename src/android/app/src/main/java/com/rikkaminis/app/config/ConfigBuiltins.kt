@@ -1411,8 +1411,8 @@ internal object ConfigBuiltins {
             PrefsIntField(
                 path = "chat.composerGlassTintPct",
                 displayName = "Chat: composer glass density (%)",
-                description = "How much of the card colour covers the blur. 0 = solid card " +
-                    "(effect invisible), 100 = pure blur (message text fights the draft). " +
+                description = "How much of the card colour covers the blur. 0 = pure blur " +
+                    "(message text fights the draft), 100 = the card colour alone (effect invisible). " +
                     "Default 30 (rikkahub's Glass tint).",
                 prefs = chatTuningPrefs,
                 key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_TINT_PCT,
