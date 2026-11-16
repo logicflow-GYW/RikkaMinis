@@ -389,78 +389,40 @@ private suspend fun importSkillFromCurrentUrl(
         val skill = when (result) {
             is SkillRepository.UpdateResult.Success -> result.skill
             is SkillRepository.UpdateResult.PartialSuccess -> result.skill
-            is SkillRepository.UpdateResult.Failure -> null
-        }
-        if (skill != null) {
-            val messageRes =
-                if (matchedId != null) R.string.skills_browser_success_updated
-                else R.string.skills_browser_success_imported
-            val partialReason =
-                (result as? SkillRepository.UpdateResult.PartialSuccess)?.reason
-            if (partialReason != null) {
-                // Imported, but not complete: name the missing half instead of
-                // reporting a clean success the run-time will contradict.
-                onStateChange(
-                    HudState.HINT,
-                    context.getString(R.string.skill_import_partial, partialReason),
-                )
-                delay(5000)
-            } else {
-                onStateChange(HudState.SUCCESS, context.getString(messageRes, skill.name))
-                delay(3000)
+            is SkillRepository.UpdateResult.Failure -> {
+                // [incr1116-A F-06] Terminal, like every other refusal on this
+                // path. The old shape treated "no skill" as "no adoptable id"
+                // and fell through to a SKILL.md-only in-place update that ended
+                // in HudState.SUCCESS — so a re-download that timed out showed
+                // green "updated" while the sibling scripts/references were
+                // never fetched, which is exactly the lie [RC-U12] set out to
+                // remove. The fallback could not fire for its stated reason
+                // anyway: the pre-fetch above already resolved the id, and a
+                // blank slug reaches this branch as the same Failure.
+                onStateChange(HudState.ERROR, result.reason)
+                delay(4000)
+                onStateChange(HudState.HIDDEN, "")
+                return
             }
-            onStateChange(HudState.HIDDEN, "")
-            return
         }
-
-        // importFromGitHub returned null — the parsed name yields no
-        // adoptable id (blank slug, e.g. a pure-CJK name) and nothing matched
-        // at dedup time. Last-resort in-place refresh: re-resolve against a
-        // FRESH snapshot (a concurrent import may have landed the skill
-        // between the pre-dedup read and here) and write the parsed document,
-        // so a manual-id record still gets refreshed instead of erroring out.
-        // [FIX-R22 B32b] Resolve the real record id by name OR slug (pure
-        // helper below, JVM-covered) — skills whose local id differs from the
-        // name slug (renamed or imported with a custom id) never matched
-        // when the old call used `slugify(parsed)` as the id — and pass the
-        // full ParsedSkill, running the repository write on IO (db.execSQL +
-        // writeSkillMd are disk IO).
-        // [da1030-A ISSUE-02] The landing document's frontmatter block
-        // travels with the managed fields: update() re-seeds its copy from
-        // the on-disk SKILL.md when no block is passed, so omitting it would
-        // shadow `subagent` / `max_turns` / `allowed_tools` with whatever the
-        // disk already said. Same contract as updateFromURL /
-        // "update from file".
-        val targetId = resolveUpdateTargetId(
-            skillRepository.skills.value.map { it.id to it.name },
-            slug = slugify(parsed.name),
-            incomingName = parsed.name,
-        ) ?: slugify(parsed.name)
-        val updated = withContext(Dispatchers.IO) {
-            skillRepository.update(
-                id = targetId,
-                name = parsed.name,
-                description = parsed.description,
-                // [rv1014-E3] The other in-place update paths (refreshFromDisk,
-                // importFromContent, importFromArchive) all refresh version
-                // too — keep the browser refresh consistent. parseSkillMd
-                // defaults a missing frontmatter version to "1.0.0", so a
-                // SKILL.md without one resets the stored version to that
-                // default (accepted: same exposure as refreshFromDisk).
-                version = parsed.version,
-                body = parsed.body,
-                frontmatter = parsed.frontmatter.ifBlank { null },
+        val messageRes =
+            if (matchedId != null) R.string.skills_browser_success_updated
+            else R.string.skills_browser_success_imported
+        val partialReason =
+            (result as? SkillRepository.UpdateResult.PartialSuccess)?.reason
+        if (partialReason != null) {
+            // Imported, but not complete: name the missing half instead of
+            // reporting a clean success the run-time will contradict.
+            onStateChange(
+                HudState.HINT,
+                context.getString(R.string.skill_import_partial, partialReason),
             )
-        }
-        if (updated) {
-            onStateChange(HudState.SUCCESS, context.getString(R.string.skills_browser_success_updated, parsed.name))
-            delay(3000)
-            onStateChange(HudState.HIDDEN, "")
+            delay(5000)
         } else {
-            onStateChange(HudState.ERROR, context.getString(R.string.skills_browser_error_invalid))
-            delay(4000)
-            onStateChange(HudState.HIDDEN, "")
+            onStateChange(HudState.SUCCESS, context.getString(messageRes, skill.name))
+            delay(3000)
         }
+        onStateChange(HudState.HIDDEN, "")
     } catch (e: Exception) {
         onStateChange(HudState.ERROR, e.message ?: "Import failed")
         delay(4000)
