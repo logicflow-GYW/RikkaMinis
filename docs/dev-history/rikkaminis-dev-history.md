@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-14）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-16）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-11-14，共 102 天
-- 条目总数：2631（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：4242076 / 总行数：49510
+- 合并范围：2026-08-03 ～ 2026-11-16，共 104 天
+- 条目总数：2694（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：4328113 / 总行数：50704
 
 ---
 
@@ -49503,6 +49503,1200 @@ backup/legacy-mirror-v1/                               ← 50MB，v1 park 树（
 - 第 2 项 = 文件浏览器每行的垃圾桶图标（目录现在也有），确认框文案 `filebrowser_delete_dir_message`："This folder and everything inside it (%1$d entries) will be deleted"。
 - 第 3 项 = Termux 选中菜单 Copy / OSC52 → Android 剪贴板的桥（原来两个回调是空实现）；不是"终端里能选中字符"。
 - 第 4 项 = 我措辞错了：不是保存后弹提示，而是设置页常驻 `SettingsSection("Terminal sessions")` 卡片（body + footer），所以用户"看到文案但没看到提示"完全符合实现。
+
+## 2026-11-15
+
+<!-- 2026-11-15 00:31:17 -->
+## 记忆层停摆修复（2026-11-15 凌晨，用户批准 ABC）
+
+
+**起因**：用户直觉「记忆蒸馏好长时间没搞」，让我检查。机械取证证实：七层里三层停摆。
+
+### 诊断（`shared/tools/mem_health.py` 新建，停摆 exit 1）
+- 蒸馏 ROLLUP 停 10-16（30 天），且 **238016 B ≫ app 注入上限 12288 B**；尾部 12 KB 里 **0 个 `## Rollup` 头**（10-16 单段 166 KB 占 70%，窗口落在表格中段）⇒ 实际注入的是半句碎片，8–9 月规则全不可见。append-only ⇒ **越蒸馏越忘**。
+- 语义索引停 10-10（36 天，1629 条）。
+- 14 项未蒸馏日报缺口共 44 天。其余五层（日报/backlog/缺陷表/LEARNINGS/GLOBAL/dev-history）都活。
+- 根因：这两层是唯二**无写入触发点、无机械门**的层（app 侧 `minis-config topic-help memory` 只有 `enabled`）。
+
+### 修复
+- **ROLLUP 重建为按主题的规则索引**（合并与分支/CI 判读/门与变异负控/测试与装置/沙箱与工具/数据 UI 模型/流程与记忆 7 组 60 条），**11644 B**，107 个 `## Rollup` 锚点全覆盖日报日期（工具不再 append）。锚点放正文**之前**：将来超窗口先截正文尾部，不会因锚点丢失触发重蒸馏。原件备份 `shared/work/memory-audit-1115/MEMORY-ROLLUP.bak-1115.md`。
+- **蒸馏流程可重跑**：`extract.py`（机械提高信号行，忠实不臆造）→ `mk_prompt.py`（每天≤2 条/批≤10 条/带锚点）→ `run_batches.sh`（9 批 × 5 天）→ 人工归并。产 100 条原始规则 → 60 条入索引。
+- **语义索引 1629 → 2642 条**，覆盖到 11-14（CF bge-m3，1021 条新向量）。验证：`search "粘贴折叠 发送时被清空"` 首位命中 11-14。
+
+### 顺手修的两个工具缺陷（`semantic_memory.py`）
+1. `cf_embed` 无单批重试 → batch 12 一次 `Remote end closed connection` 让整轮 1021 条在 68% 中止（守卫不写盘 = 白跑）。加 3 次退避。
+2. 上传 HF 失败会**吞掉本地写盘**（`httpx2.RemoteProtocolError` 抛在 `INDEX_FILE.write_bytes` 之前）→ 改为上传降级为警告 + 本地照常落盘 + 打印补传命令。
+
+### 遗留
+HF Dataset 远端备份停在 10-10：写 commit `Server disconnected`（读通写不通；`HF_HUB_DISABLE_XET=1`、`HF_ENDPOINT=hf-mirror.com` 均无效）。补传命令：`cd /var/minis/skills/semantic-memory && python3 semantic_memory.py build --incremental`（复用旧向量，只重传）。
+
+### ★ gcli2api 实测结论（用户以为已失效）
+**仍可用**：`models` 返回 63 个（plain 21），`chat gemini-2.5-flash "只回复两个字：可用"` 真实返回「可用」，exit=0。**技能保留，不删**。但按用户指示，批量蒸馏改用内置模型 `codebuddy-global/deepseek-v4.1-flash`（`minis-model-use run --input msgs.json`，9 批约 11s/批，中文规则摘要质量好）。
+
+### 纪律
+- 会话启动顺手跑 `python3 /var/minis/shared/tools/mem_health.py`；gap > 14 天或 ROLLUP > 12288 B 即 P1。
+- ROLLUP 维护规则：每条一行、总长 ≤ 12288 B、锚点只增不删。
+
+<!-- 2026-11-15 00:46:47 -->
+## 长按应用图标快捷方式：确认是死的，按用户倾向删除（2026-11-15）
+
+
+**用户报告**：长按应用图标弹「新建对话 / 拍照对话」，点两个都失效。
+
+**根因（设备实测，不是猜）**：
+```
+cmd shortcut get-shortcuts --user 0 com.rikkaminis.app
+  intents=[Intent { act=VIEW dat=minis://action/... cmp=@2131559347/com.rikkaminis.app.MainActivity }]
+```
+`res/xml/shortcuts.xml` 里 `<intent android:targetPackage="@string/package_name">` 用了资源引用
+（`package_name` 是 gradle `resValue("string", ...)` 生成的），而 launcher 侧 `ShortcutParser`
+读 targetPackage 是**原始文本不清算资源**，于是组件名成了不存在的包 `@2131559347` ⇒ 点了什么都不会发生。
+**结论：这两个入口自诞生以来从未能工作**（不是本次回归）。修法本可以极简（写字面量 applicationId）。
+
+**用户决定：删掉而不是修好**。理由成立且与本机规则一致：冷启动已直接落在新草稿上（New Chat 零收益），
+拍照对话只是省两下点击（+ 号里就有 camera / photos / file）；**坏入口比没有入口更差**。
+
+**改动**（分支 `chore/remove-app-shortcuts-1115` @ ff1cd190，14 文件 +16−160）：
+删 `res/xml/shortcuts.xml`、两对自适应图标、manifest `android.app.shortcuts` meta-data、
+4 个 `shortcut_*` 字符串 × 7 语言。**保留** `minis://action/{new_chat,camera_chat}` 解析链（外部链接仍可达），
+KDoc 改写说明入口已删。
+
+**可复用手法**：
+1. **「快捷方式点了没反应」先跑 `cmd shortcut get-shortcuts --user 0 <pkg>`**，直接看 `intents=` 里的
+   `cmp=`；组件名里出现 `@2131…` 就是资源引用未清算，比读 manifest 猜快一个数量级。
+2. **`@string/...` 不能用在静态快捷方式的 `targetPackage`**（launcher 解析不通资源），必须写字面量包名。
+3. 判断入口留不留：用用户自己的交互入口频率门——「内容是否已在应用内一步可达」是比频次更快的否决判据。
+4. 删 i18n key 时按 locale 逐个删；用全局正则会顺手压掉无关空行，diff 里要逐条核（本次踩到，已回退重做）。
+
+<!-- 2026-11-15 01:20:34 -->
+## 长按快捷方式问题的归类与同族扫描（2026-11-15）
+
+
+**用户问**：这一类问题属于哪类、别处有没有。
+
+**归类（一句话）**：**声明期与消费方的契约断裂**——写方用资源引用（`@string/x`），读方按**原始文本**取值，
+两者跨在编译单元之外（launcher / 系统服务解析我们的静态 XML），编译器与 aapt 都不校验语义 ⇒ 静默失效：
+不报错、不崩溃、文件看起来很正规。本仓的元族叫「声明了但运行期不读/读法不同」。
+
+**同族的三个面 + 扫描结论**（脚本 `/tmp/family_scan.py`、`/tmp/family_scan2.py`，可重跑）：
+1. **资源引用被原始文本读取**（本条的直接类）：
+   - manifest 里「必须字面量」的属性（targetPackage/targetClass/authorities/scheme/host/path/mimeType/
+     parentActivityName/action/category）→ **0 处**资源引用；仅 2 处 `${applicationId}`，那是 manifest
+     占位符，构建期合并时展开，安全。
+   - `meta-data android:value="@…"`（经典陷阱：getString 拿到资源 id 的十进制串）→ **0 处**（全仓只有 2 个 meta-data，
+     都用 `android:resource`，是正确姿势）。
+   - `res/xml/` 剩下 6 个框架配置，只有 accessibility service 用 `@string/x`（它的解析器走 TypedArray 会清算资源）。
+   ⇒ **这一类全仓只有 shortcuts.xml 一处，已删。**
+2. **构建期生成但无人消费**：`package_name` resValue（0 引用，是为 shortcuts.xml 而生）→ 分支
+   `chore/drop-dead-package-name-resvalue-1115` @ c114eed1 删除；`ANTHROPIC_OAUTH_IDENTIFIER_PROMPT`
+   buildConfigField（0 引用，`AnthropicProvider.resolveSystemPrompt` 只有 API-key 路径）→ 登记 backlog
+   §BUILDCONF-DEAD-1115，要求"实现或删除，不留半截"。
+3. **入口存在但不可达**（更宽同族）：manifest 6 个组件全部有代码引用，无孤儿；无 AppWidget/QS tile/静态快捷方式残留；
+   WebApp 快捷方式是动态 pin，生产者 `AddToHomeSheet → ShortcutPinner.pin` 真实存在 ⇒ 活的。
+
+**同族复发的证据**：同一个 shortcuts.xml 里 `voice_chat` 早前就因为"mic 按钮被砍、它只会打开空草稿"删过一次
+（注释还在）。所以这是**第二次**。但建门的判断 = 不建：目标物（静态快捷方式）整文件已不存在，
+给消失的资产建检测器违反装置比例。
+**替代做法（设备侧一条命令，成本≈0）**：新增任何 launcher 可见入口后跑
+`cmd shortcut get-shortcuts --user 0 <pkg>`，看 `cmp=` 是否是**真包名**——出现 `@2134…` 就是资源引用没清算。
+
+**可复用手法**：`dumpsys`/`cmd` 能直接把"声明有没有生效"变成可判定事实（`get-shortcuts` 的 `cmp=`、
+`dumpsys package` 的 versionName/lastUpdateTime）。别用读 XML 来推断生效性。
+
+<!-- 2026-11-15 01:38:49 -->
+## 收口：长按快捷方式两批（2026-11-15，用户令「该走流程走流程」）
+
+
+| merge | sha | parents | CI | 证据 |
+|---|---|---|---|---|
+| 删快捷方式入口 | `0bfd3f09` | `419c3112 ff1cd190`（=2 ✓） | main #3104 五 job success，publish 真跑 | run 3103 产物 APK：shortcut 条目 0、arsc 无 shortcut_*、manifest 无 app.shortcuts |
+| 删 package_name resValue | `d41eca44` | `0bfd3f09 c114eed1`（=2 ✓） | main #3106 五 job success，publish 真跑 | run 3105 产物：`resources.arsc` 无 `package_name`、`app_name` 仍在、shortcut 0 |
+
+- #3106 日志逐条核：`BUILD SUCCESSFUL`、9251 PASSED、真实 `FAILED` 用例 0、scan-gate `115 passed, 0 failed`；夹具自检 skipped（本批未改 `scripts/scan/**`，符合机制，不构成夹具证据）。
+- 两批的树等价都做过：`git diff <分支tip> <merge>` = 0 行。
+- 清理：两个远端分支 API DELETE 204，本地 -D，远端只剩 `main`，本地 main == origin/main == `d41eca44`，工作区干净。
+- 设备侧独立事实：装的 `1.0.0+3103`（= run 3103），`cmd shortcut get-shortcuts` 返回 0 条。
+
+**遗留（不修，已登记）**：`backlog §SHORTCUTS-1115`（DeepLinkAction.{NewChat,NewCameraChat} 消费链成无生产者死码，触发条件=下次动 DeepLinkHandler/ColdStartDispatch）；`backlog §BUILDCONF-DEAD-1115`（ANTHROPIC_OAUTH_IDENTIFIER_PROMPT buildConfigField 零消费者，二选一：实现 OAuth 前缀或连模板删）。
+
+<!-- 2026-11-15 09:56:07 -->
+## 沙箱缺陷表解决路径研究（2026-11-15）
+
+- A1–A19 大多数是已有旁路/识别规则，不需要突破 Android 权限；B1–B5 是跨层限制，换 Shizuku/CI/JVM/Termux/远程执行或直接读取原语，不能靠 PRoot `-0` 获取 root。
+- PRoot 当前主树快照 `review-today-1114` 的 S34 仍未在 guest `$?` 传播 native-offload exit code；host 返回行/JSON 错误可作旁路。其他 OpenMinis fork 有 `OffloadShellPrelude` guest 函数包装先例，但不在 RikkaMinis 当前代码。应用层 POSIX shell wrapper 可作为窄修候选；直接修 native C 扩展需要补齐 PRoot 子模块/NDK 构建面。
+- Sxx DNS：RootfsManager.refreshDns + NetworkMonitor 已在启动和网络变化时刷新 resolv.conf；手工更换 resolver 是临时旁路，避免静默改写用户 VPN/DNS 路由。需新现场证明系统 DNS 配置被转发器故障固定污染，才考虑应用自愈。
+- Termux 已安装，但 MCP 桥文件缺失，Minis 源码未声明 com.termux.permission.RUN_COMMAND；官方 RUN_COMMAND 还要求 Termux allow-external-apps=true。外部执行可行但需明确授权和文件共享方案。
+- 登记表有两个不同条目都命名 S36，DNS 条目仍叫 Sxx；编号需后续整理但不能影响症状召回。
+
+<!-- 2026-11-15 11:23:14 -->
+## 沙箱缺陷表研究与 S34 修复分支（2026-11-15）
+
+- 报告写入 `/var/minis/shared/work/sandbox-limits-research-1115/REPORT.md`，逐项归纳 A1–A19、B1–B5、S26–S36/Sxx 的现成旁路、平台边界和后续候选。
+- 对比发现 S32 已在当前源码经 `resolvePathForSession` 修复；Sxx DNS 已有 NetworkMonitor 在启动/网络变化时刷新 `resolv.conf`，剩余仅“转发器挂死但无网络事件”的未证区间。
+- S34 上游 PRoot 修复 `a9e68cbb2bcba0a9a02d7e0c5bc3ce80da7898a6` 是 RikkaMinis 锁定基线 `8cf13e9` 的直接后继，改非零 handler 调用为输出文件后以该码退出，0 码保持 cat 快路径。修复分支 `fix/native-offload-exit-status-1115` @ `87f6fa0ac8f27ddba586681160fbc7fcbf1e75f9`，仅改 gitlink；未合并 main。
+- CI #3107 / run `43670755742` head_sha 匹配，lint/unit-tests/build-apk/scan-gate/publish jobs 均 success。build-apk 明确 clean + NDK r28 重编 PRoot、assembleRelease 成功、APK 内 libproot.so SHA 与 source binary 一致。unit-tests 日志 9251 PASSED；scan-gate 115/115；夹具自测因未改 scripts/scan 被跳过，不声称跑过。尚缺真机安装后 shell `$?` 端到端复验。
+
+<!-- 2026-11-15 11:30:53 -->
+## 终端执行方式偏好（2026-11-15 用户纠正）
+
+用户不愿为使用 Minis 的终端执行能力，再手动打开/切换外置 Termux，认为摩擦太大。后续优先研究单应用内的 PRoot 修复、原生 offload 和任务生命周期改进；不要把恢复外置 Termux SSH/MCP 桥当默认方案。此偏好针对跨应用操作摩擦，不等同于用户已否决所有无感后台后端。当前仅检查了旧桥与本地端口，未生成 SSH 密钥、启动服务或更改授权。
+
+<!-- 2026-11-15 12:03:38 -->
+## 单应用沙箱研究：回复回收修复 CI 绿（2026-11-15）
+
+用户要求继续仅用 Minis 内置执行能力研究优化。报告与可复跑探针：`shared/work/sandbox-native-1115/REPORT.md`。
+- 新发现P1：生产`writeResponseFile`裸调`ledger.register`丢弃旧文件返回值，内存ring有界而磁盘泄漏。真机40次只读minis-config让回复文件16→56。独立分支`fix/offload-reply-reclaim-1115` @ `f580a5d3879ac0ca00cb473cda9b6f00a7c6c336`，复用已有rotate，2文件+79/−4，无第二执行器。27局部tests OK，改回一行恰两条红，精确恢复。CI #3108/run43673964230 head一致、五job success，9254 PASSED/0 FAILED，三新例逐条PASSED，115门绿；夹具自测skipped（未改扫描器）。未合main/未装新包。
+- 原生快路径实测：2000小文件/41目录/539100文件字节，热缓存3轮交替顺序：cp guest中位1646.52ms/native256.58ms=6.42x；容量遍历338.68/71.20ms=4.76x。du口径不能混：当前guest du报680632=539100文件+141532目录，fastio只报文件字节。fixture已清，bench结果保留。
+- 环境事实订正：***PRIVATE_IP***经设备dumpsys确认是Clash VPN LinkProperties DNS，非PRoot内置转发器；旧超时只能证端点无响应。statfs直接测/tmp/shared/workspace均0xf2f52010(F2FS)，不以tmpfs推导RAM泄漏。缺陷表已订正DNS、补A19复核及S37。
+- A19本机4/8路只读并发4/4、8/8全JSON，未复现旧丢输出；不承诺任意压力安全。
+- 上轮S34依赖范围纠错：8cf13e9→a9e68cb实际9提交8文件+803/−41，非直接父子。a9e68cb父=883e56b。旧报告已更正，旧退出码分支87f6fa0a仍保留；本轮新支不夹带其依赖升级。
+- 负决策落backlog §SANDBOX-NATIVE-1115（机械门该段OK）：DNS仅属性变化回调、自动fastio分流、第二运行时/通用exec、上游ENOSYS诊断均有触发/方案/搁置理由，不自动立项。
+
+<!-- 2026-11-15 12:15:25 -->
+## PRoot fork 研究收口（2026-11-15）
+
+- 对象 ***OWNER***/proot @ 2ca3bae（= OpenMinis master）；deps/proot 切自有 fork 由用户分支处理，不重复。
+- 应用实际只启用 link2symlink + native-offload；-H/-p/ashmem/sysvipc/fake-netlink/xnet 全未接线 → 外部报告的 P0（hidden_files VLA / ashmem fall-through / port_switch sizeof 截断）全部降为「启用前必修」。
+- 唯一本机实锤复现：link2symlink 数据完整性三条（失败 rename 丢数据 / 同文件 rename 删名 / readdir 类型撒谎），探针 shared/work/proot-research-1115/l2s-observations.json。termux 上游 52d65a4 有整套修复+15 个回归测试 → 第一波移植。
+- openat2 是真边界洞且上游已有补丁（termux 114a7c6 系），报告手写补丁有 bug 不可照抄。
+- 采纳顺序：①l2s 修复组 + openat2/execveat；②offload socket 超时（handler 卡死=tracer 冻结）+ d4d2a19/61681c6 内核兼容；③性能项（PID 哈希 / seccomp BST / canon 缓存 / thinlto）全部 A/B 后才合。
+- 否掉：exit 拦截退出码、clear_mem 零页、tmpfile C 侧 unlink（与 OffloadTmpFileLedger + offload-reply-reclaim-1115 撞车）。
+- 报告与探针：shared/work/proot-research-1115/REPORT.md。termux 37c09de（arm64 加载地址）是 08-26 VSZ/MAP_NORESERVE backlog 的现成替代方案。
+
+<!-- 2026-11-15 12:39:41 -->
+## 两支合并 main 收口：proot a9e68cb + 回复文件回收（2026-11-15）
+
+
+用户「检查云端两个分支，没问题就合并」。两支单提交、文件集互斥（`deps/proot` gitlink vs Kotlin 沙箱 writer），
+逐行读完两个 diff 后合并。
+
+| 阶段 | sha | 证据 |
+|---|---|---|
+| 分支 A `fix/native-offload-exit-status-1115` | `87f6fa0a` | CI #3107 / run 43670755742 五 job success，head_sha 逐字符一致；9251 PASSED / 0 FAILED；115 门 0 红 |
+| 分支 B `fix/offload-reply-reclaim-1115` | `f580a5d3` | CI #3108 / run 43673964230 五 job success；9254 PASSED / 0 FAILED；3 条新用例逐条 PASSED |
+| 并集 `integration/branches-1115` | `6bbfdf48`（octopus，parents=3） | CI #3109 / run 43675881912 五 job success；build-apk 检出 a9e68cb + clean 重编 + `fake_netlink.o` 编译 + APK 内 libproot 与源一致 |
+| main | `79fd1772`（`--no-ff`，parents=2 ✓，树与并集 tip 完全一致） | main CI #3110 / run 43676869678 五 job success；9254 PASSED / 0 FAILED；115/115 门；publish 真跑（tag android-latest → 79fd1772，旧 asset 被替换） |
+
+- **夹具自测 skipped**（三批都未改 `scripts/scan/**`）：`##[notice]scripts/scan/** untouched in this push` 在册，
+  所以「CI 绿」不含夹具跑过的证据，不写成「夹具全绿」。
+- **子模块跳段的连带面**：8cf13e9→a9e68cb 是 9 提交 / 8 文件 +803−41，除 `$?` 传播外还带 fake_netlink（668 行，
+  opt-in `--fake-netlink`，应用未传 ⇒ 不激活）、link2symlink errno 修正、talloc 报告改 env 门控、native_offload INFO 行删除。
+  已核 app 侧无任何代码解析被删的 INFO 行、无 `--fake-netlink` 传参点。
+- 登记 `backlog §PROOT-A9E68CB-1115`：①真机 `$?` 端到端未验（需装 `android-latest` @ 79fd1772 后跑一个必失败的 offload 调用）；②`--fake-netlink` 负决策（触发条件=guest 内 `net.Interfaces()` 真的需要）；③`OffloadTmpFileLedger` 类级 KDoc 与「成功路径改用 rotate」不一致（P2 文档漂移，登记不修）。机械门 528 段全 OK。
+- 清理：远端三支 DELETE 204、本地 `-D`（先要把 `review-today-1114/repo` 这个**主 working tree** 从该分支 detach，
+  linked worktree 不能与主树共用同名分支）；远端只剩 main，本地 main == origin/main == 79fd1772。
+
+**可复用手法**：①gitlink 分支的 diff 只有一行，真正的 payload 要拿 `compare/<old>...<new>` 去上游仓库看——
+否则会把 9 个提交的连带面当成「一个修复」；②查「被删的日志行是否有人解析」要用删掉的**原文片段**去 grep app 代码，
+不是 grep 功能名；③子模块 bump 的验证靠 CI 日志三连：`checked out '<sha>'` + `Cleaning build artifacts` + `libproot.so matches the source-built binary`。
+
+<!-- 2026-11-15 13:33:47 -->
+## PRoot 外部 Part2 报告核实收口（2026-11-15）
+
+- 12 条判定：成立 4（D-02 sysnum off-by-one+线性反查 / D-04A statx gid 误比 uid=上游 1a41a19 已修 / D-04B chroot path_guest 未初始化（fake_id0 活跃面，-0 即启用）/ D-06 socket 长路径 AF_UNIX 绑定泄漏+bind/connect 脱节 / D-10 xnet close 漏 TCP 位图）· 部分成立 5 · 证伪 2（D-01 shebang 下溢按控制流不可达，读风暴属实但一次性；D-03 ldso 无 strcpy 溢出——循环只在见 NUL 时退出）· 未证实 1（D-12 行号对不上真树）。
+- 启用面更正：-0 → fake_id0 是活的（handle_option_0→option_i("0:0")→initialize fake_id0）；sysvipc/xnet/mountinfo/fix_symlink_size/hidden/port_switch 全未接线。
+- 第一波扩为：l2s 上游组 + openat2 + **fake_id0 上游重写移植**（覆盖 D-04A/B、D-08；上游 2026-10-17 起有 statx 九连 + rename 记录迁移 + 嵌套 chroot 整组）。
+- 第二波新增：D-02（性价比最高：1 字符 + 反查表）、D-06（复用 binding + 挂 tracee->fs；真实代价是 bind/connect 脱节不只泄漏）、D-07（len 上限 + -errno；errno 检查其实存在，报告说错）、D-09（前缀 / 边界 + getcwd；触发面≈0）。
+- D-05 页掩码 bug 在 /proc 统计渲染里是显示错误非 Critical；arm64 无 red zone，SP-8 直写的真风险是信号帧冲突。
+- 报告：shared/work/proot-research-1115/REPORT-2.md。规律复确认：外部报告行号准、机制多半真、严重度虚高一档、手写补丁不可照抄。
+
+<!-- 2026-11-15 13:44:22 -->
+## PRoot 外部 Part3 报告核实收口（2026-11-15，三辑完结）
+
+- S-01..S-12 判定：成立 8（S-05 getresuid 16 位截断=上游 c1cd48d 已修 / S-06 clone3 peek_word 未查 errno + new_child 漏拷 host_exe / S-07 renameat2 漏更 cwd（exit.c 只有 rename+renameat 两 case，本辑对 app 最实用）+ chdir lstat 返 -1 / S-08 sysvipc_msg sizeof(long) 硬编码 / S-09 f2fs waitpid EINTR / S-10 statx CURRENT/ORIGINAL 混用 / S-11 canon readlink 返 -1 / S-12 loader argv[0] 当 AT_EXECFN=上游 eec6fcd 已修）· 部分 2（S-02 statfs 返回值属实但「select/poll 挂死」证伪——write_data(0) 失败走 EFAULT 无死锁；S-04 helper_functions 全属 USERLAND 死码，本构建未定义）· 不采纳 1（S-03 页对齐公式=上游原版行为，链接器 pad 使其无害）。
+- S-02 的 sendmmsg/ftruncate 问题全在 x86 分支——app 只产 arm64，ARM EABI 寄存器对下现写法正确，N/A。
+- 本辑行号失真最重：S-02 引用行号超文件长度（fork seccomp.c 仅 568 行）、S-07 929-955 为空段——全部按真树重定位。
+- 三辑收口波次：第一波=l2s+openat2+fake_id0 上游重写+AT_EXECFN+tracee 生命周期组；第二波新增「-errno 扫尾支」（chdir/canon/ldso/ptrace 合一支）+renameat2 cwd+clone3/host_exe+statfs 返回值+f2fs EINTR+statx regVersion；启用前必修=sysvipc/xnet/mountinfo/fix_symlink_size/hidden_files；不采纳清单见报告。
+- 三份外部报告共性问题三次复现：机制多数真、严重度虚高、行号常指向别的版本、补丁各有小错——吸收方只取我的核实报告的成立项与真实行号。
+- 报告：shared/work/proot-research-1115/REPORT-{1→REPORT.md,2,3}.md + l2s-observations.json（唯一设备实锤）。
+
+<!-- 2026-11-15 13:52:01 -->
+## PRoot 外部 Part4 报告核实收口（2026-11-15，四辑完结）
+
+- F-01..F-12 判定：成立 7（F-01 binding 析构 TRACEE abort——唯一真崩溃面：daemonize+shell 重启窗口，修法=按 pending/guest/host 三独立析构器去 TRACEE 依赖 / F-03+F-04 USERLAND 死码 / F-05 单槽信号覆盖+sigaction 边界 / F-06 compat.h 宏交叉但 x86-only / F-07a poke_word 绕过修复桩 / F-08 降级登记）· 部分 3（F-02 ldso 降为加固 / F-09 仅 faccessat2 可去掉 FILTER_SYSEXIT，chdir 需先证 void 结果管道，不动 / F-11 warned 项报告指错分支，正确分支在 GETVFPREGS）· 降级 2（F-10/F-12 talloc 有界滞留非泄漏）· 证伪 1（F-07b SYSTRAP_SIZE Thumb 路径被 aarch32 拒绝门挡住，不可达）。
+- 本辑「致命」全部名不副实；行号失真第四次复现（F-06 差 20 行、F-09 差 1700 行、F-11 指错分支）。
+- 四辑累计：外部 45 项主张 → 成立≈26（含 latent/死码变体）、部分≈12、证伪/不采纳≈8、未证实 1；无一条 Critical 按原判级成立。
+- 最终行动清单固化在 REPORT-4 §2：第一波=上游已验证组移植（l2s+openat2+fake_id0 重写+AT_EXECFN+tracee 生命周期，覆盖外部~14 条）；第二波=-errno 扫尾支+F-01 析构安全化（带 daemonize 复现用例）+renameat2 cwd 等十几处小加固；性能项全部 A/B 后才合；登记不修清单明确。
+- 验证欠账两个 grep：F-09 faccessat2 的 exit.c 零消费者确认、F-11 PTRACE_KILL 逐行核；F-01 动手前先写 daemonize 复现用例实证。
+- 报告四份：shared/work/proot-research-1115/REPORT.md、REPORT-2.md、REPORT-3.md、REPORT-4.md + l2s-observations.json。
+
+<!-- 2026-11-15 13:59:47 -->
+## PRoot 外部 Part5 报告核实收口（2026-11-15，五辑完结）
+
+- E-01..E-12 判定：成立 9（其中 7 条属接线前必修、E-04 被 l2s 上游移植覆盖、E-12 顺手）· 部分/降级 2 · 证伪 1（E-05 envp NULL——handle_execve_enter 对 envp 的 read_stringv 返回值 (void) 丢弃，走 envc=0 无崩溃）。
+- E-04 是本辑唯一活跃扩展真发现：l2s 的 statx 处理改 stx_nlink 不设 updated_stats → statx.c:133 门控下原生 statx 路径修正静默丢弃；上游 termux link2symlink.c:1580 已修。errno 覆盖为 0 同真（move_and_symlink 尾部用陈旧 errno）。两条都被第一波 l2s 上游组覆盖。strlen-4 下溢实际不可达（final 恒为长 l2s 路径）。
+- E-05 execveat 副作用分裂属实：扩展宿主执行后不set_sysnum(PR_execve)，dirfd≠AT_FDCWD 时 enter.c 返 ENOSYS → 一行修入第二波。
+- E-01 fake_netlink：sendmsg 分支把 msghdr* 当 nlmsghdr* 且 poke RESULT=flags（报告漏了后者）；INHERIT_PARENT 返回 0 框架共享 config 与无 CLONE_FILES fork 语义冲突。接线前必修。
+- E-03 补了 H-1 的关键触发面：对普通文件 getdents 即 ENOTDIR → 启用 -H 即必炸（启用前必修清单首位）。
+- 跨卷自我重复 2 条（E-02=H-2、E-03=H-1）——外部五卷 4% 重复率，去重以我的账本为准。
+- 终版行动清单在 REPORT-5 §2（取代前四辑分波表述）：第一波上游移植组（验收探针加第 4 条 statx nlink）；第二波扫尾支+binding 析构+execveat 行+socket 超时等；接线前必修包按扩展分五张小清单；登记不修/已证伪清单防重开。
+- 五卷总账：56 项主张 → 成立≈34、部分≈15、证伪/登记≈10、重复 2；无一条 Critical 原判级成立；真「在烧」= l2s 族（设备实锤）+ E-04 两条（上游已修）。
+- 报告五份：REPORT.md / REPORT-2..5.md + l2s-observations.json @ shared/work/proot-research-1115/。
+
+<!-- 2026-11-15 14:32:37 -->
+## TASK-A 审计收口：PRoot l2s / statx / openat2 / execveat（2026-11-15）
+
+
+报告：`shared/work/proot-audit-1115/reports/TASK-A.md`（STATUS: DONE，19 条判定）。
+
+**基线纠偏**（任务书写错）：`verify-sandbox-3109/repo` HEAD 实为 `7ad15c9f`（分支 `fix/proot-timeout-tree-kill-1115`，main 是父 `79fd1772`），但两处 `deps/proot` gitlink 都是 `a9e68cb`；`git diff a9e68cb..2ca3bae` 只有 8 文件 +2298/−20 且全在 xnet/fake_netlink/cli ⇒ **fork 在被审路径上与安装 pin 逐字节相同**，行号可直接用于装包。
+
+**核心结论**：
+- 上游 l2s 19 条提交**一条也没进 pin**（文件 827 行 vs 上游 2003 行）；3 条已有设备实锤（`032f82d` 失败 rename 丢数据 + 同文件 rename 删名、`1ce2525` readdir d_type 撒谎）。
+- 新增最高价值项 **A10**：pin 无 `READLINK_PROC_FD`/`SYMLINK_DEREFERENCED`（grep=0）⇒ `/proc/pid/fd` 与 **musl `realpath()`** 回灌 `/.l2s/...`（Alpine guest 是设计性暴露；pnpm+typescript-go 报 TS6054）。跨 5 个源文件，五辑都没提。
+- statx nlink 被丢（`link2symlink.c:496` 无 `updated_stats`）可从 `894e578` 单句取用，但依赖 `7ff389a` 的 `is_l2s_file()`，硬 cherry-pick 会缺符号。
+- openat2（437）**完全没映射**（`sysnums-arm64.h` 280:[291]→281:[435]），且缺 seccomp 过滤项与 SIGSYS 转换；今天表现为 ENOSYS 还是穿透取决于 Android app seccomp 是否拦 437（**未证实**）。
+- execveat 非 AT_FDCWD 成立但触发面≈0；**第 5 辑"一行 set_sysnum"修法错**（寄存器错位），正确最小改法是 poke `SYSARG_1 = AT_FDCWD` 让 enter.c 自己转换。第 1 辑"上游也有 execveat fd 相对支持"= **证伪**（52d65a4 同款 ENOSYS）。
+
+**移植可行性实测（可复用手法）**：把 pin 的 l2s.c 复制到 /tmp，逐条 `git show <sha> -- <path> | git apply -p1`——**8/19 冲突**，且拼出的终态 ≠ 上游 ⇒ 渐进重写类修复不能 cherry-pick，只能整文件 + 支撑点（extension.h / syscall.h / exit.c / execve.{h,c} / canon.c）+ tests，且必须落 tip（中途态含上游 `dot[-i]` SIGSEGV 回归）。
+**风险登记**：移植后必重测 OpenMinis#375（`-0` 下 `.git/objects/pack` 0555 的 -errno 场景，pin 的 `d6c632e` 会被上游整体重写覆盖）；openat2 丢 `how.resolve` 属已知 fail-open 取舍。
+**边界**：statx 的 fake_id0 侧（D-04A）= TASK-B；native_offload socket/生命周期 = TASK-C；`1d0e732`（which()）横跨 A10 与 C 的 AT_EXECFN 面，两支要合并需求再施工。
+
+<!-- 2026-11-15 14:38:41 -->
+## PRoot fake_id0 只读复核（TASK-B）收口 — 2026-11-15
+
+
+报告：`/var/minis/shared/work/proot-audit-1115/reports/TASK-B.md`（首行 STATUS: DONE）。只读，未改任何源码（三棵源码树 `git status` 均 0）。
+
+### 判定（本 app 修复门，非外部 severity）
+- **S-05a `getres[ug]id` 16 位截断 = P1（唯一要动手的）**：LIVE（`fake_id0.c:75-79` `POKE_MEM_ID` 恒 `poke_uint16`；过滤表 `:307-310` 不受门保护）。主用户 uid=11627<65536 掩盖；工作资料 uid=`userId*100000+appId`（1011627=0x000F6FAB）高半残留 ⇒ guest 读到 EUID=983040、apt 降权失败。上游 `c1cd48d` 一笔可背，**实测 apply-clean**。
+- **D-04B chroot 未初始化 = P2（降级）**：机制成立（两向量汇入 `compare_paths2` 的 `assert(length>0)`），但设备探针：`chroot /var/minis`→ENOSYS(38) ⇒ 走 `from_sigsys` 分支（`path_guest` 笔误在 Android 不可达）；`chroot /nonexistent`→ENOENT(2)（`realpath` 失败那一半真跑，realpath 失败时目标缓冲一字未改）；同路径 ×20 → 20/20 ENOENT、0 崩。外部"可 abort"**未复现**。
+- **D-04A statx gid 误比 uid = P3**：Android 进程 uid==gid 恒成立 ⇒ 行为等价，无可观察差异（statx 钩子实测真跑：真实 uid 11627 → 报 uid=0/gid=0）。
+- **S-04 / F-03 / F-04 / S-05b 全是 `USERLAND` 死码 = P3**：本构建未定义 USERLAND（三重证据：build_proot.sh CPPFLAGS / GNUmakefile 无该宏 / CI 走同一脚本）。`tools/gate_map.py` 核出 37 个门内调用点，LIVE 仅 6 处。
+- **E-02 ashmem 与 fake_id0 无关**，未接线，归"启用前必修"。
+
+### 版本与移植范围（可复用结论）
+- fork `fake_id0/` **整目录 36 文件**与上游 `f30ce3e` 逐 blob 相同 ⇒ fork 精确停在窗口起点，cherry-pick 不撞基线。
+- 上游重写窗口 = `f30ce3e..52d65a4` **26 提交 / 12 文件 / +714−57**；仅 3 个越出 fake_id0（`7fca80c` 跨 syscall/+6 sysnums、`b5af02e` 跨 syscall/enter.c、`1f25aa4` 只碰 tests）。
+- **换 gitlink 不可行**：整棵 src 树逐 blob 比对 = identical 83 / differing 58 / **only_fork 6**（fake_netlink×2、native_offload×2、xnet×2）⇒ 切上游会删掉 app 在用的 `--native-offload`。只能 backport。
+- **D-04B 上游没修**：上游 `52d65a4` 的 `chroot.c` 与 fork sha256 相同（`034b656e…`）；REPORT-2 说"上游已整体重写"是错的 —— `8261bb4`/`d3fc468` 恰是**引入**缺陷的提交。必须自写补丁（`chroot.c:54` 查 realpath + `:76` path→path_guest）。
+- **S-04/F-03/F-04 的"随上游重写消解"也是错的**：上游仍留 29 处 USERLAND，`helper_functions.c` 的 `F_OK` 恒假与 `fscanf` 不查返回值原样还在，`utimensat.c` 逐字节未变。
+
+### 两条口径更正（前几辑需回改）
+1. **32-on-64 是支持的**：已装 APK 的 `lib/arm64/` 实测有 `libproot-loader32.so`（`arch.h` ARCH_ARM64 段 `HAS_LOADER_32BIT true`）。F-04 不可达的唯一理由是 USERLAND 门，**不是**架构 —— 前几辑"双重不可达"的说法要改。
+2. **S-04 的 `:240` 同址 `get_dir_path` 是有意的原地截断**，不构成数据损坏；真正成立的是 `access.c:35`（`F_OK==0` 恒假）与 `helper_functions.c:322`（`fscanf` 不查返回值）。
+
+### 产物
+`reports/TASK-B.md` · `tools/{gate_map,tree_cmp,statx_probe,realpath_probe}.py` · `probe-chroot-{A,B,B2}.log` · `artifacts/applytest-final.diff`（两笔上游补丁在临时副本上的落地 diff；临时副本与临时 ref 均已清理）。
+
+<!-- 2026-11-15 14:39:19 -->
+## TASK-A 交付收口（2026-11-15，只读核验已交付）
+
+
+报告：`/var/minis/shared/work/proot-audit-1115/reports/TASK-A.md`（STATUS: DONE，278 行 / 46KB）。三棵树（app repo / proot fork / termux 上游）`git status` 全空——未改源码、未提交、未构建、未装包、未跑设备探针。
+
+**新增到报告里的四块**（本轮不再扩展取证）：
+1. **§1.0 判级总表**：每条 = P 级 + 触发证据 + 来源 SHA（pin / 上游 / 前辑）+ 处置。汇总 **P0=2（A1/A2）· P1=6（A3/A4/A5/A6/A10/B1+B2+B3）· P2=5（A7/A8/A11/A13/C1）· P3/约束=2（A9 移植约束、A12 未启用面）· 证伪=1（C2）· 更正=2（C1a、B2 措辞）**。设备实锤仅 3 条（`l2s-observations.json`），**不需新装置**。
+2. **§1.4 重复对照表**：与 REPORT.md/2..5 逐条对应；A5 的 D-08/E-04b 是同族两条（同被 `bffb58d` 覆盖，合并计数）；本范围**无新跨卷重复对**。
+3. **§2.1 冲突清单（按原因归类）**：8 条冲突全是"依赖链中途态"造成（`7266fb3`/`87c4109`/`03aea83`/`05a93ed`/`fa47780`/`8f10290`/`c6880fc`/`bffb58d`），其中 `bffb58d` 是"上游 vs 本地 `d6c632e` 分叉" ⇒ 整文件替换后必重测 #375。可单独取用的只有 `894e578`，但它依赖 `7ff389a` 的 `is_l2s_file()`。
+4. **§5 缺口表扩到 6 项（U1–U6）**，每项写明"关掉它影响哪条判定"：U1 openat2 穿透与否（定排期顺序）、U2 A10 命中率、U3 A3 影响半径（A3 的 P1/P0 分界）、U4 A5(b) 假成功序列、U5 statx 开销、U6 **#375 回归 = 移植合入前置门**。**0 项阻塞**。
+
+**最高优先级结论**：A1/A2（上游 `032f82d`）—— link2symlink 在 `SYSCALL_ENTER_END`（`link2symlink.c:702/714`）就扣链数，失败 rename 已扣过、同文件 rename 又删源名 ⇒ 活跃路径数据丢失，装置已复现两次。次高 A3（`1ce2525`）`rg/find` 静默漏文件；再次 A10（`7ff389a` 系）musl `realpath()` 回灌 `/.l2s/...`（前五辑 0 命中）；B1+B2+B3（`114a7c6`）唯一边界级缺口但**三层必须一起补**，只补 `enter.c` = 假修复。
+
+<!-- 2026-11-15 14:40:36 -->
+## 五辑 PRoot 报告收口与并行核验（2026-11-15）
+
+用户补充 REPORT-2..5，内容与 `shared/work/proot-research-1115/REPORT-2..5.md` SHA256 一致。已派三个只读会话按源码域核验：A=link2symlink/statx/openat2，B=fake_id0/USERLAND，C=syscall/ELF/lifecycle/offload。A/B 已交 `shared/work/proot-audit-1115/reports/TASK-A.md`、`TASK-B.md`；C 报告由主会话按已取证内容写入 `TASK-C.md`。核心结论：当前 app 活跃面最强实锤仍是 link2symlink 三条数据/枚举错误（rename失败丢硬链接数据、同文件rename删名、readdir d_type撒谎），A1/A2 P0、A3 P1；openat2 是 P1但 Android seccomp 分支需真机判定，不能只补 enter.c；execveat 非AT_FDCWD是P2 latent；fake_id0 的 getresuid/gid 16位截断是活跃P1（工作资料/副用户 uid>=65536），D-04A uid/gid误比在Android uid==gid时P3，chroot未初始化P2且20/20未崩，USERLAND问题对当前构建多为死码；native-offload socket无超时是P2待受控卡死现场；未接线扩展不自动修。上游link2symlink 19提交不能逐条cherry-pick，需整文件/支撑点/测试移植，A报告实测8/19补丁冲突。S38超时进程树分支 `7ad15c9` CI #3111绿但未合main/装机。
+
+<!-- 2026-11-15 14:44:42 -->
+## TASK-C 完成：PRoot syscall/ELF/lifecycle 只读复核（2026-11-15）
+
+
+报告：`/var/minis/shared/work/proot-audit-1115/reports/TASK-C.md`（STATUS: DONE，45 条判定）。
+
+**只读，未改任何源码**（repo 与 proot 仓库 git status 均干净；PRoot 源码经 `git archive a9e68cb` 导出到 /tmp/pc/src 检视）。
+
+### 启用面（真源码三入口确认）
+`PRootKernel.buildProotCommand` / `PersistentShell.startProcess` / `TerminalSession.buildTermuxArgs` 三处都只传
+`-0 --link2symlink --kill-on-exit -r -b /dev /proc /sys -w /root` + `--native-offload`。
+⇒ fake_id0 / link2symlink / native_offload / kompat 活跃；fake_netlink / xnet / port_switch / sysvipc /
+hidden_files / ashmem_memfd / fix_symlink_size / mountinfo **未接线**。
+`USERLAND` 未定义 ⇒ fake_id0 的 meta-file 权限族（F-03/F-04/S-04）是**死码**。
+`PROOT_NO_SECCOMP` 未设 ⇒ seccomp mode 2 全面启用（活跃面）。
+talloc 2.4.2 的 `talloc_get_type_abort` 是真 abort（NOOP 未定义）。
+
+### S38 状态
+`fix/proot-timeout-tree-kill-1115` @ 7ad15c9f **未进 main**（`merge-base --is-ancestor` → 否），
+main tip = 79fd1772（deps/proot = a9e68cb，S34 已上线）。CI #3111 绿与「未装机」本次**未独立复核**（D 级）。
+
+### 两条新发现（前五辑账本里没有）
+1. **C-44**：fork 的 `tracee/seccomp.c` SIGSYS 仿真**缺 mount/umount/pivot_root/unshare/setns 分支**
+   → 落 default → `-ENOSYS`（enter.c:503 的正常 mount 路径走不到）。
+   **本机实测**：宿主 `mount()` → errno 38 ENOSYS、`chroot()` → "Function not implemented" ⇒ 路径真实存在。
+   上游已修：`e754452` + `5c7b2fd`（必须成对，后者修前者的 bindings 污染）。风险**中**，建议独立成支并入第一波。
+2. **C-45**：ARM64 寄存器表 `reg.c:121-132` 显示 **`SYSARG_1` 与 `SYSARG_RESULT` 同为 regs[0]**（x0）；
+   event.c:646-663 的合成 sysexit 会用结果值覆盖被挡 syscall 的 arg1，SIGSYS 分支随后读到的就是脏值。
+   fork 完全没有 `restore_sysarg1_after_sigsys` 机制；上游 `cd02c79` 已修 ⇒ 随 C-44 同批带（成本≈0）。
+3. **C-14**：`tracee/tracee.c:421-430` 的 `assert(child->exe == NULL)` + `get_tracee()` 复用 PID 条目 ⇒
+   PID 复用时 abort 整个 proot。上游 `b27d81a` 已修（10 行，加 `terminate_tracee(child)`）⇒ 独立小支先做。
+
+### 与前五辑的冲突（以 TASK-C 为准）
+- **D-04B**：前五辑判「活跃面 latent 崩溃」；TASK-C 判「仍应修，但**触发面未证**，需先有现场」
+  （`chroot.c:48-51` 的 SIGSYS 路径**确实**写了 path_guest；未初始化的是非 SIGSYS 路径的栈垃圾）。
+- **S-02 statfs**：降级为「部分成立」（fork 缺的是上游的 `set_original_regs_after_seccomp`，
+  `translate_path` 未查的后果被后续 `errno != 0` 兜住大半）。
+
+### 未证实清单（明确列出）
+S38 的 CI #3111 绿 / 未装机（转述）· C-44 与 C-45 的 guest 侧失败现场（未复现，只有宿主侧 ENOSYS 实测）·
+C-13 binding 析构 abort（B 级 talloc 语义推演，**动手前必须先写 daemonize 复现用例**）·
+F-11 PTRACE_KILL 逐行 · F-02 read_ldso_rpaths 的 `<=0` · D-12 aoxp O(N²) · 第一波覆盖度对拍。
+本轮**未产出新的设备复现**，累计设备实锤仍只有第一辑 l2s 三条。
+
+### 可执行结论排序
+1) 移植 `e754452`+`5c7b2fd`+`cd02c79`（C-44/C-45，风险中，独立成支）
+2) 移植 `b27d81a`（C-14，10 行，独立文件，低风险）
+3) 写 daemonize 复现用例（C-13 前置，唯一可能带走全部 guest 进程的活跃面缺陷，至今零实锤）
+4) C-05 D-02（1 字符 + 反查表，性价比最高）
+5) C-06 execveat→execve 一行（修「宿主已执行、客户机收 -ENOSYS」的分裂语义）
+6) C-03 renameat2 cwd 一行 case（用户可感知）
+
+**外部报告行号失真第五次复现**（F-06 差 20 行 / F-09 差 1700 行 / F-11 指错分支 / S-02 超文件长度 / S-07 指向空段）——
+本报告全部按 a9e68cb 真树重定位。
+
+<!-- 2026-11-15 14:49:14 -->
+## 子代理调用方式纠正（2026-11-15）
+
+用户明确不喜欢进程内 `spawn_agent`，要求使用独立会话子代理；后续派发统一走 `minis-sessions-cli send --async`，并回读 `messages --id` 确认送达。刚才 spawn_agent 中断，未留下代码改动；S05a 已改用独立会话派发。
+
+<!-- 2026-11-15 15:08:46 -->
+## S05a 施工：fake_id0 getresuid/getresgid 16 位截断（2026-11-15，独立 PRoot 分支）
+
+
+**工作树**：`/var/minis/shared/work/proot-fix-s05a-1115/repo`，分支 `fix/fake-id0-getresuid-1115`，基线 `a9e68cb`。
+**上游补丁来源**：`/var/minis/shared/work/proot-research-1115/termux`（termux/proot，含 `c1cd48d`），
+`git format-patch -1 c1cd48d --stdout > c1cd48d.patch` → fork `git apply --check` = CLEAN → 已 apply。
+**改动面**：`src/extension/fake_id0/fake_id0.c` 单文件 +37−13（`is_16bit_id_syscall` + `POKE_MEM_ID` 宽度分流 + 两 handler 传 sysnum）。
+
+### 已完成的验证
+1. **arm64 真实编译路径通过**：沙箱本身是 aarch64（正是 app 的 `ARCH_ARM64` 路径）。
+   `gcc -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -Wall -Wextra -O2 -c extension/fake_id0/fake_id0.c` → EXIT=0，
+   仅 2 条既有 `-Wimplicit-fallthrough` 警告（与本次改动无关）。已用 `#error` 探针确认 `ARCH_ARM64` 生效。
+   （依赖：apk add gcc / linux-headers / libbsd-dev / talloc-dev / make）
+2. **完整 proot 二进制构建成功**（scratch 副本 `/tmp/pb`，musl/Alpine 适配：shim 掉 `linux/ashmem.h`、
+   `MSG_COPY`、`TEMP_FAILURE_RETRY`、`HAS_LOADER_32BIT`）→ `/tmp/pb/src/proot` 374856 字节。
+   **注意：这些 musl 适配项与本次补丁无关，不要误记进 fork。**
+
+### 走不通的路（用户已明令放弃，勿重试）
+- 嵌套 proot：在 PRoot 内跑 proot → `terminated with signal 11`（ptrace 嵌套）。
+- setuid/setresuid 高位 uid 复现：宿主 PRoot 的 fake_id0 自己就在模拟，**测不到副用户真机语义**，不能当证据。
+- 沙箱里 `getresuid` 返回 28587=0x6FAB 而 `getuid` 返回 1011627=0xF6FAB —— 是宿主 libc/musl 语义，不是本补丁问题。
+
+### 最终验证方案（用户指定）
+`#include fake_id0.c` + `-ffunction-sections -fdata-sections` + 链接 `--gc-sections`，
+桩 `get_abi`/`peek_reg`/`poke_uint16`/`poke_uint32`/`get_sysnum`，直接驱动生产的
+`handle_getresuid_exit_end` / `handle_getresgid_exit_end`。
+矩阵：ARM64 `ABI_DEFAULT` × `ABI_2` × legacy/`*32`，断言固定写宽 + `0xF6FAB` 高位哨兵。
+**基线（恒 16 位）必须红 · 修复（32 位）必须绿 · 改回 poke_uint16 负控后逐字恢复。**
+
+### 边界（不代主会话收口）
+不碰 RikkaMinis 主仓、不做 gitlink 更新 / 并集 / CI / 合并 / 清理。
+
+<!-- 2026-11-15 15:21:11 -->
+## S05a 收口：fake_id0 getresuid/getresgid 16 位截断修复（2026-11-15，独立 PRoot 分支）
+
+
+**交付**：`/var/minis/shared/work/proot-fix-s05a-1115/REPORT.md`（首行 `STATUS: DONE`）
+**分支**：`fix/fake-id0-getresuid-1115` @ `e2155e6d62b523254e36c523dc659e277ae0e620`（**未推送、未合并**）
+基线 `a9e68cb`（= app `deps/proot` pin）。
+
+### 改动
+上游 `c1cd48d`（termux/proot）经 `git format-patch` → `git apply --check` CLEAN → apply，
+**只改 `src/extension/fake_id0/fake_id0.c`（+37−13，逐字等于上游）**。
+新增 `tests/fake_id0_getresuid_width_test.c` + `tests/run_fake_id0_getresuid_width_test.sh`。
+
+### 三态验证（同一份断言）
+| 生产代码 | 结果 |
+|---|---|
+| 基线 `a9e68cb`（恒 16 位） | **红** 30 checks / 10 failures |
+| 修复态 | **绿** 30 checks / 0 failures |
+| 变异（`poke_uint32`→`poke_uint16`） | **红** 30 checks / 10 failures；逐字恢复后 sha256 一致、`git diff --check` 干净 |
+
+哨兵：`0xF6FAC` 被写成 `0x6FAC`（高位 `0xF0000`=983040 残留，与上游描述的 EUID=983040 吻合）。
+**没红的两条恰是「ABI_2 + legacy ⇒ 应 16 位」** ⇒ 断言不是无差别拒绝 16 位。
+
+### 装置手法（可复用）
+`#include "extension/fake_id0/fake_id0.c"` **直接驱动生产的 static 函数**，
+桩 `get_abi`/`peek_reg`/`poke_uint16`/`poke_uint32`/`get_sysnum`，
+`-ffunction-sections -fdata-sections` + `-Wl,--gc-sections` 让链接器丢掉走不到的分支
+⇒ **不需要 tracee / ptrace / 整套运行时**。
+坑：①`get_abi` 是 `static inline`，必须用宏重命名而非重定义（重定义报 redefinition）；
+②桩必须**先声明再 include 生产文件**，宏在 include **之后**安装（改写调用点，不改头文件声明）；
+③复合字面量 `&(Config){...}` 的逗号会被宏当参数分隔 ⇒ 改用局部变量；
+④C 无函数元数重载 ⇒ 基线/修复态 handler 形参不同，用**从生产源码内容 grep 推导**的 `-DS05A_FIXED` 开关，
+开关不与被测代码漂移。
+
+### 关键边界（不可当证据的三条路）
+嵌套 proot（ptrace 嵌套 → SIGSEGV）· setuid 高位 uid（宿主 fake_id0 **自己就在模拟**，测不到副用户真机）·
+沙箱 `getresuid` 返回 28587（宿主 musl 语义）。**要真机副用户验证需装 APK。**
+
+### 未验证
+真机副用户实拍 · ABI_2 真机 AArch32 guest · `ARCH_X86_64` 分支编译 · arm/i386 的 `return true` 分支 ·
+`make check` 全量（装置**不被** `test-*.c` glob 捕获，需显式跑脚本）· app 侧 gitlink/CI/装机。
+
+### 纪律提醒
+本会话两次用错工具：①文件搬运用了 shell `cp`（应 `minis-fastio cp`），
+且那行还把文件复制到它自己所在目录 = 纯无效操作；②`cp` 备份源码做变异恢复，
+比 `git checkout -- <单文件>` 弱（后者可防误伤同文件其他改动）。
+
+<!-- 2026-11-15 16:42:24 -->
+## 沙箱修复交接给新会话（2026-11-15 下午）
+
+
+本会话过长，用户另开会话继续。交接档：`/var/minis/shared/work/HANDOFF-SANDBOX-1115.md`（自包含，新会话只读它 + `proot-audit-1115/FINAL.md` 即可）。
+
+**交接时状态**（origin/main `79fd1772`，设备装 1.0.0+3109，不含下面两条）：
+- `fix/proot-timeout-tree-kill-1115` @ `c626b97bf662472db293e0851a4592bf479144df`，CI #3113/run43692485953 五 job 绿（9268 PASSED / 115 门 / APK 库哈希一致）
+- `fix/proot-getresuid-width-1115` @ `21d673a5e5dff8c9ad9731504f8ae010372d5d1d`，CI #3112/run43690190664 五 job 绿；`deps/proot` 钉 PRoot 分支 `fix/fake-id0-getresuid-1115` @ `e2155e6d`
+- **两分支零冲突**（merge-tree 预演 tree `784333d3`，文件集不重叠）→ 可 octopus 合并
+
+**下一战场**：link2symlink 三项 P0（3109 实机复现：rename 失败丢硬链接数据 / 同文件 rename 删名 / readdir d_type 撒谎）。上游 19 提交手工试补丁 11 成功 8 冲突，**禁止逐条 cherry-pick**，取终态行为+回归用例作规格。
+
+**三棵树**：verify-sandbox-3109/repo、proot-fix-s05a-1115/app、proot-fix-s05a-1115/repo，全部干净。
+
+<!-- 2026-11-15 16:44:04 -->
+## 云端两 PRoot 分支审查 + 并集合并 main（2026-11-15）
+
+
+**输入**：用户「检查云端上的两个分支，有问题就改，没问题就合并」→「跑完了，没问题就合并吧」→「合并了，触发之后就不用再等了」。
+
+### 两支审查结论：均无缺陷（0 处修改）
+1. `fix/proot-getresuid-width-1115` @ 21d673a5：gitlink a9e68cb→e2155e6d（S05a fake_id0 宽度修复，= 上游 c1cd48d 逐字）+ .gitmodules URL 换 ***OWNER***/proot + CI 加宽度测试步骤。
+   - 疑点排除：CI runner x86_64 与目标 aarch64 的 `is_16bit_id_syscall` 分支差异——`src/arch.h` 从 `__x86_64__`/`__aarch64__` 自动定义 ARCH 宏，两边同走 ABI_2 判定，`#else` 只有 32 位宿主才会进（app 不会）。
+2. `fix/proot-timeout-tree-kill-1115` @ c626b97b：stop() 先快照 /proc → deepest-first SIGKILL（starttime 身份复核防 PID 复用）→ 后关管道；`destroyForcibly` 降为 fallback；UI 线程仍不等 waitFor。
+   - 接线核实：stall stage-2 → stop() 调用链真实存在；`ProcCpu.startTimeTicks` fields[19] = 内核第 22 字段（man proc 核对无误）；快照失败（emptyMap）fail-closed 拒绝发号。
+
+### 证据链
+- 两支分支 CI（43690190664 / 43692485953）head_sha 与远端逐字符一致，5 job success，publish 发布两步 skipped（main 门控完好）。
+- **本地第二源**：①宽度测试沙箱 aarch64 实跑 30 checks/0 failures PASS；变异（回退基线）红 30/10 后恢复 sha256 一致；②JVM 装置（stub AgentRuntimeLimitsPrefs）31 tests OK；删身份复核行变异 → 恰好 2 个 reused-pid 测试红，恢复后 31 绿。
+- 并集 octopus `56fecc1b`（parents=3 零冲突）CI 43694839651 五 job success：14/14 新测试 PASSED、宽度测试 30 checks 0 failures、scan-gate 115 门全过、9268 单测 0 failed。
+- main merge `d5d411c5`（parents=79fd1772 56fecc1b，父数 2 ✓），树 hash 与并集 tip 逐字节一致（784333d3）。push 已触发 main CI 43695789180，**用户明示不等**。
+
+### 清理（main push 确认后执行）
+远端三支 DELETE 204（ahead_by=0 已核），远端只剩 main；本地只剩 main，工作树干净。
+
+### 教训（两条）
+1. **`git checkout <old-commit> -- <path>` 会把旧 blob 写进 index，之后 `git checkout -- <path>` 恢复的是 index（旧版）不是 HEAD**——变异恢复必须 `git checkout HEAD -- <path>` + 哈希对拍，否则盘上留着被测的基线版（本次 sha256 对拍当场抓住）。
+2. gh_ci_wait 加 `| tail` 管道 = skill 明文的禁区，当场被 stall-guard 杀（exit 130）；dispatch 已先发出未损失，但正确姿势是原样透传输出。
+
+<!-- 2026-11-15 17:04:44 -->
+## 3114装机复验：S38通过，S05a副用户前置缺失（2026-11-15）
+
+用户要求按HANDOFF第二节推进，但live核实两支已由另一会话合完：并集56fecc1b（3父，CI43694839651/#3114 success），main d5d411c5（2父、tree=784333d3与并集相同）。本轮未新合并/dispatch/安装。main CI43695789180/#3115已success并发布，9268 PASSED/0 FAILED、115门绿、14终止用例在册；夹具因未改scripts/scan被跳过。
+用户已装1.0.0+3114，16:44:30更新。下载CI artifact14153794621核ZIP digest并解包，已装APK SHA256 f4ca9277…与产物逐字节一致，libproot769ea286…与#3114/#3115源码/产物相同。
+S38真机timeout5s：父6464/子6465/shell6462/PRoot31866全部退出；日志16:53:49.710 explicit SIGKILL(targets=5)；执行次数1、后续shell成功。S05a主用户host11627，guest id及getresuid/getresgid均0，生产handler宽度装置30/0；真实高UID副用户仍未验：现有user999 XSpace未安装Minis(installed=false)，未擅自改变profile配置。额外S34/S37轻量回归8/8，48次回执有效、回复文件稳定34、旧文件存活0。
+报告shared/work/verify-sandbox-3114/REPORT.md；HANDOFF首页、backlog两条及sandbox-limits S38均已回填当前状态。link2symlink新战场未开工。
+
+<!-- 2026-11-15 17:12:55 -->
+## PRoot 外部 Part6 报告核实收口（2026-11-15，六辑完结、外部审计收敛）
+
+- G-01..G-12 判定：重复 7（G-01=S-01、G-02=F-04、G-03=F-03、G-05=S-08、G-06=D-08 后半、G-09 半=D-09、G-10=D-06 族——外部跨卷重复累计 9 条/13%）· 新成立 5 全部非 P0：G-04 exec.c（USERLAND 死码，但活跃面同构点= fake_id0.c:1057 adjust_elf_auxv 对 host_exe 的 SUID 也是「成功前生效+硬编码 0」，随 fake_id0 移植评估）/ G-07 kompat 两条（结果 int 截断 + auxv 栈指针不恢复，-k 未接线）/ G-08 aoxp（**关键元发现：构建无 -DNDEBUG，assert 在发布二进制是活的**，修法优先加该开关）/ G-11 rlimit 陈旧 errno 误杀（活跃路径，errno=0 一行，唯一新的一行修）/ G-12 statx 空路径+AT_FDCWD（低频；报告补丁引用的 getcwd2 助手在 fork 不存在）。
+- G-01 的 SYS_SOCKET read_data「未检查」子项与我读到的真树不符（有检查），存疑待动手时核。
+- 六卷总账：外部 68 项主张 → 去重 59 独立 → 成立≈39（接线前必修~14、latent/死码~10、被第一波覆盖~15）、部分≈15、证伪/登记≈11；无一条 Critical 原判级成立。
+- 结论：新发现率与严重度逐卷递减，第 6 辑已无新增高危 → **外部审计信息增益收敛，停止追卷，转入第一波施工**（l2s+openat2+fake_id0 重写+AT_EXECFN+tracee 生命周期；验收探针 4 条：三条 l2s + statx nlink）。
+- 报告六份：REPORT.md、REPORT-2..6.md + l2s-observations.json @ shared/work/proot-research-1115/；REPORT-5 §2 为唯一权威行动清单，REPORT-6 §2 为增量。
+
+<!-- 2026-11-15 17:24:51 -->
+## S05a 副用户真机验收通过：设备自带 XSpace 可复用（2026-11-15 17:24）
+
+
+用户提示「当初好像装过那些东西」，查实：设备已有 `user 999`（XSpace，`profile.CLONE`，parentId=0），无需新建工作资料；主用户也有 gcc/静态编译能力。
+
+**复用路径（比新建 profile 省事，可复用）**：
+1. `cmd package install-existing --user 999 com.rikkaminis.app` —— 把**已安装的同一份 APK**挂到该用户，不下载不重装，得到 `uid:99911627`。
+2. `am start -W --user 999 -a android.intent.action.VIEW -d 'minis://open_terminal?init_command=<urlencoded>' -n com.rikkaminis.app/.MainActivity` 预填命令 → `input tap 300 800` 聚焦 → `input keyevent 66` 回车执行。深链只预填不执行，必须显式回车。
+3. **TerminalView 是 canvas 绘制，uiautomator/`a11y extract text` 读不到终端内容**（只读到顶部栏与按键条）；本会话模型也读不了截图 ⇒ 可靠观测通道 = 让 guest 把结果**回传本机 loopback**（`nohup python3 relay.py` 只绑 `127.0.0.1`，`GET /identity_probe` 下发二进制、`GET /result?b64=…` 回传并落盘），看 relay.log 与服务端文件，不靠像素。
+4. 坑：base64 换行会截断 URL（`tr -d '\\n'` 在 bash 里写成 `tr -d "\n"` 只删字面反斜杠和 n）；中转改成"base64 解不开就当原始 JSON"最省事。端口占用时 `pkill -f relay.py` 可能不生效，用 `/proc/*/cmdline` 扫描兜底。
+
+**验收结果**（`shared/work/verify-sandbox-3114/profile/`）：宿主 `Uid/Gid=99911627`×4（≫65535），guest `getuid/geteuid/getgid/getegid` 全 0，libc 与裸 syscall `getresuid/getresgid` 全 `[0,0,0]`，四调用返回码 0，`identity_pass=true`。探针用 `0xA5A5A5A5`/`0x5A5A5A5A` 哨兵预填 ⇒ 修复前只写低 16 位会残留 `0xF0000`（上游 983040 症状），故不是"恰好 0"。主用户 11627 对照组同结构。
+
+**遗留**：ABI_2（AArch32 guest）真机未覆盖（设备 arm64 单架构，未出现场景）。XSpace 里的 Minis 副本仍保留，如需清理：`cmd package uninstall --user 999 com.rikkaminis.app`。报告 `shared/work/verify-sandbox-3114/REPORT.md`，台账、缺陷注册表已回填。
+
+<!-- 2026-11-15 17:26:25 -->
+## PRoot 外部 Part7 报告核实收口（2026-11-15，七辑完结、正式终止追卷）
+
+- H-01..H-12 判定：重复 7（H-01=S-05、H-03=D-04A、H-06/H-07=旧账、H-11 死码、H-02 大部、H-09 半）· 新成立 4 全部非 P0：H-04 chown 缺 group==-1 保护（写 4294967295 进 meta，死码）/ H-05 rename 先删旧 meta（上游 66b112e 系已重写，死码）/ H-08 proc.c strtol 尾随字符放行 /proc/self/fd/3abc（活跃面低危，一行）/ H-12 binding.c 日志打空串（一行）· 降级 H-09（brk 前 load_info 必已就位，理论场景）· 登记 H-10（-0 参数 strtol 静默 0:0，app 硬编码无输入面）。
+- H-03 引用代码带 updated_stats=true 证明外部读的是上游版本源码——第六次确认行号/代码段指向别的版本。
+- 七卷总账：80 项主张 → 去重 ~64 独立（重复 16 条，整体 20%，第 6-7 卷单卷 58%+）→ 成立≈44（接线前必修~14、latent/死码~13、第一波覆盖~17）、部分≈17、证伪/登记≈12；无一条 Critical 原判级成立；第 5 辑后活跃面零新增。
+- **正式判定：外部审计边际收益归零，终止追卷，转入第一波施工**（l2s+openat2+fake_id0 重写+AT_EXECFN+tracee 生命周期；验收探针 4 条）。
+- 报告七份 @ shared/work/proot-research-1115/：REPORT.md、REPORT-2..7.md + l2s-observations.json；行动清单以 REPORT-5 §2 + REPORT-6/7 §2 增量为准。
+
+<!-- 2026-11-15 17:32:20 -->
+## PRoot 外部 Part8+9 核实收口（2026-11-15，九卷封账）
+
+- Part8（I-01..12）：唯一高价值新发现 = I-03 proot_sysnums 缺 PR_openat2（BPF 放行，与 H-4 同根——正解仍是 114a7c6 enter/exit 移植+补表项）；I-01 sendmmsg 栈溢出属实但 x86-only N/A；I-10 cli -b 失败静默（本 app 有真实价值：挂载失败=沙箱静默缺块，改硬错误）；I-07 信号处理器 note() 非异步安全（删一行）；其余为重复（I-02/I-05/I-08）或防御式登记。
+- Part9（J-01..12）：**J-12 是全系列最后一条重要新发现**——transfer_load_script 的 padding 只对齐 strings 区，最终 SP=stack_pointer-(script_size+strings_size) 而 script_size 仅 8B 对齐 → ARM64 SP 违反 16B 对齐 AAPCS → 「某些 guest 二进制莫名 SIGBUS」的强候选解释；修法=padding 计入 script_size，建议独立小支+对齐断言测试。J-02 INHERIT_CHILD 失败不清理（OOM 面，框架 3 行）；J-03 mappings[0] 防御 guard；J-05 目录被当可执行（access(dir,X_OK) 成功）；J-09 aarch32 RESTORE 宏 8B 写待核；J-10 pokedata waitpid EINTR（第 3 处同族）；J-01=D-02 重复。G-08 的元发现在本批坐实：**发布构建无 NDEBUG、assert 活跃**。
+- 九卷终账：92 项主张 → 去重 75 独立（重复 17 条/21%）→ 成立≈49（接线前必修~15、latent/死码~14、第一波覆盖~17）、部分≈19、证伪/存疑≈12；无一条 Critical 原判级成立；活跃面真问题=l2s 族+statx/errno+J-12 SP 对齐+I-03/I-10 静默降级。
+- 终版行动清单 v3 在 REPORT-8-9.md §4：第一波加 openat2 表项；第二波新增构建支（-DNDEBUG + -b 硬错误）与 J-12 对齐独立小支；待核 J-09。
+- **系列正式封账**：方法论四条沉淀在 REPORT-8-9 §5（Critical 全虚高 9/9、重复率随卷线性涨至 21%、行号指向别版本是常态须逐条回真树、高价值集中在四类源头）。
+- 报告八份 @ shared/work/proot-research-1115/：REPORT.md、REPORT-2..7.md、REPORT-8-9.md + l2s-observations.json。
+
+<!-- 2026-11-15 17:45:19 -->
+## PRoot 外部 Part8/9 独立复核（I-01..I-12 / J-01..J-12，2026-11-15 傍晚）
+
+
+报告 `/var/minis/shared/work/proot-l2s-1115/REPORT89-REVIEW.md`（固定树 e2155e6d，只读、未编译、未改源码）。24 条判定：成立 13 / 部分 5 / 重复 4 / N/A 1 / 证伪 1。**我的判级：P0 0 · P1 3（I-03 已排期、J-03、J-05）· P2 18 · P3/N/A/关闭 3**。报告原判 5 条 P0（I-01/I-03/J-01/J-02/J-03）**无一维持**。
+
+**J-12（SP 16 对齐）= 证伪 + 源码已修**，三层拆解（别只看算术）：
+1) 四类 load 语句 16/48/16/64B 全为 16 倍数 ⇒ `script_size % 16 == 0`（arm64），非"只 8B"；
+2) 上游 `28baec5 Align SP to 16 bytes on AArch64`（带 Reported-by）**已在祖先链内**，报告描述的是修前状态；
+3) **装机 loader 反汇编实证**（`installed-loader.disasm`，256 条指令）：`[sp` 操作数 0 条、`bl/blr` 0 条、仅 `0x3ec mov sp,x1` + `0x3f4 br x2` ⇒ 临时 SP 值对 loader 无影响；
+4) guest SP 来自 `start.stack_pointer`（内核原值），与 buffer 无关 ⇒ 传不到 glibc/musl。
+结论：不能当"现网偶发 SIGBUS 解释"（对齐故障是确定性 fault，不是偶发）。残留 = P2 结构脆弱（新增语句类若为 8+8k 奇数 k 会让 SP 掉 8）。
+
+**I-10 = 证据偷换 + 修法不可采纳（两个新认识）**：
+- 「S05a 副用户前置缺失」那次是 `user 999` 未安装 Minis（`installed=false`），proot 根本没启动，**不是 bind 被拒** ⇒ 该"实锤"已剔除；
+- `-b` 失败**并非完全静默**（`binding.c:482` note WARNING + `PersistentShell.kt:407 redirectErrorStream` 合流到终端），缺的是**机器可判定的失败信号**；
+- 「改硬错误」会伤害 app 的可选挂载语义：`bindMounts` 含用户外部挂载（SD 卡拔出即合法消失），一刀切会让整个终端起不来 ⇒ 正解是 essential（/dev /proc /sys）硬错误 + 用户挂载逐条回传 UI。
+
+**唯一相对报告升级的一条**：J-05 —— `translate_and_check_exec` 的 `lstat` 结果 `statl` 从未被读（无 `S_ISREG`）⇒ FIFO 会在 `shebang.c:63` 的 `open(O_RDONLY)` 阻塞 **tracer 主循环**（所有 tracee 冻结），不是报告说的"多走一段加载流程"；修法一行 `!S_ISREG → -EACCES`。
+
+其余降级要点：I-01 x86-only 不编译（N/A）· I-03 与 H-4 同根（不是新战场，且单独补表项不够）· J-01 越界读但 ≥440 的号被 seccomp 放行、几乎到不了 `translate_sysnum`（表长实测 440）· J-02 仅 OOM · J-09 已逐行核完（4B 步长 + 8B 读写，但小端下多回写原值，aarch32 不可达）· J-11 是注释明写的刻意降级（P3）。
+
+backlog 草案 5 条（J12/I10/J05/J03/I11）已写在报告 §7，未写入台账。
+
+<!-- 2026-11-15 18:13:52 -->
+## PRoot l2s施工+REPORT6-9吸收达停止节点（2026-11-15）
+
+用户继续推进且补REPORT6/7/8-9，48个编号分两独立会话回当前pin e2155e6d逐条核；主会话负决策见backlog §PROOT-REPORT69-1115 / work/proot-l2s-1115/REPORT-TRIAGE.md。关键证伪：G11 errno宏早已赋值/清零；H01身份截断早已修验；J12四类脚本16/48/16/64字节均16倍数、28baec5已在树、真实装机loader零[sp]/零call，不能解释SIGBUS。I10把“分身没装app”当bind失败证据错误；拒绝盲加-DNDEBUG/-b全硬退/全库扫尾。
+已授权l2s P0修复独立会话73fa5684交PRoot eea7d4c；主会话补测试链接器LD覆盖及readonly测试必跑提交3bac813582a0b2542d1514dfce02ed322cd029d4，已推fix/link2symlink-integrity-1115。7生产文件+1494/-184；native_offload/fake_netlink/fake_id0与基线逐字不变，上游l2s终态仅删两处未实现openat2引用+保留旧which守卫。
+应用支fix/proot-link2symlink-1115 @8f61c39ec722865f969411a847a049ca0f0565aa，pin3bac813+CI12行，CI3116/run43701569228五job success，head精确匹配。云端真实PRoot18 passed/0 skipped/0 failed（含旧盘格式/#375），handler54、wiring61、变异4+19 controls全中，9268 JVM PASSED/0 FAILED、115门；扫描fixture明确skipped。
+独立Android外层Shizuku真跑同一静态C探针：旧装库20checks/5fail→CI APK新库20/0；dtype10,10,10→8,8,10，procfd内部.l2s名→guest使用的b；readonly unlink/链数/无残留均过。下载artifact14156747540验证ZIP digest，APK2680d0ea…，libproot2dc7c4d4…与CI源码构建/产物一致。未安装分支APK、未合main（用户保留合并起手权）。报告与工作树shared/work/proot-l2s-1115/。用户确认已删除XSpace分身副本，勿重建。
+
+<!-- 2026-11-15 18:31:58 -->
+## l2s最终提交#3117全绿+真机复跑20/0，停在分支待用户放行（2026-11-15 18:35）
+
+PRoot支fix/link2symlink-integrity-1115最终75ac0f8ca9260a544222431b2a367589392979ca（生产eea7d4c + 两测试入口修正3bac813/75ac0f8：make命令行传LD避免GNUmakefile LD=$(CC)覆盖、readonly测试必跑、scratch ashmem头补齐ASHMEM_PIN/UNPIN/GET_PIN_STATUS/PURGE_ALL_CACHES与struct ashmem_pin）。应用支fix/proot-link2symlink-1115最终325cad695f5fe3dc487c1b4452b047e2c869c7a4，pin75ac0f8。
+CI #3117/run43703394167五job success，head逐字符一致：54 checks/0 failures、4+19 controls/0 unexpected、61 checks/0、真实PRoot == 18 passed 0 skipped 0 failed、libproot.so matches source-built、9268 JVM PASSED/0 FAILED、115门；fixture明确skipped。产物APK a401a1c8…、libproot c63162d4…（较上一轮2dc7c4d4不同因构建非确定性+测试脚本变更）。
+Android外层Shizuku真机复跑同一静态C探针仍20/0（dtype 8,8,10；procfd报guest名b）。临时文件已清理：/data/local/tmp/minis-l2s-1115与Documents/RikkaMinis下l2s-ci-*/minis-l2s-probe全删。
+未合并main、未删分支、未装分支APK。报告shared/work/proot-l2s-1115/REPORT.md（含8项核查表+边界），HANDOFF首页已更新为"l2s完成待放行"。
+
+<!-- 2026-11-15 18:44:23 -->
+## l2s 分支审查并合入 main（2026-11-15 18:50，用户放行「没问题就合并」）
+
+
+**合并**：app 分支 `fix/proot-link2symlink-1115` @ `325cad69` `--no-ff` 合 main → **`8e653c474b605969f65216ab6884f07f38925dd3`**（parents = `d5d411c5 325cad69`，父数 2 ✓；树与分支 tip 差异 0 行；gitlink 钉 PRoot `75ac0f8`）。push 已确认远端 main = 8e653c47 逐字符一致。
+
+**审查证据（三项核查全过）**：
+1. diff 全量 2 文件 +13/−1（workflow 新增 l2s 测步骤 + gitlink bump），无调试残留/冲突标记。
+2. CI #3117/run43703394167 @ 325cad69 五 job success，日志逐条在册：`30/54/61 checks 0 failures`、`4+19 controls 0 unexpected`、真实 PRoot `18 passed 0 skipped 0 failed`、`libproot.so matches the source-built`、unit-tests **9268 PASSED / 0 FAILED**（grep 计数实测）、scan-gate `115 passed 0 failed`（夹具 skipped——未改 scripts/scan，不作夹具证据）、publish 步骤 6/7 **skipped**（main 门控完好）。
+3. 三源取二：云端日志 + 真机 20 checks 5fail→0fail（前一会话）+ 沙箱本地复跑。
+
+**main CI**：#3118 / run `43704928609` push 自动触发（head 8e653c47），用户明示不等，本档记录时 in_progress。
+
+**清理**：远端分支 DELETE 204（删前 compare ahead_by=0，status=behind）；本地主克隆在 `shared/work/review-proot-1115/repo`（.git 实体），`proot-l2s-1115/app` 是链接工作树——`git worktree remove --force` 后 `branch -D`；本地只剩 main == origin/main、干净。
+
+**关键认知**：
+- **PRoot 仓库的 pin 分支不可删**：`fix/link2symlink-integrity-1115` @75ac0f8 和 `fix/fake-id0-getresuid-1115` @e2155e6d 是 app gitlink 的可达性锚点，删了 main 的 gitlink 变孤儿提交（会被 GC）。
+- **主克隆方向要判清**：`git worktree list` 不告诉你谁是主树；`ls -ld .git`（目录=主树，文件=链接树）才判得准。`worktree remove` 报 "is a main working tree" = 删错方向。
+- 报告/handoff 已回填：`shared/work/proot-l2s-1115/REPORT.md` §九、`HANDOFF-SANDBOX-1115.md` 首页。
+
+<!-- 2026-11-15 19:54:17 -->
+## 3117 装机验证发现两个新缺陷并在同轮修掉（2026-11-15 晚）
+
+验证 1.0.0+3117（= CI #3117 产物，逐字节一致）：三项 l2s 修复真机生效（原探针 4/4 翻真、find/rg 能列出硬链接、statx 与 stat 一致、procfd/realpath 不再暴露内部名、旧盘链兼容、S38/退出码/回复账本无回归）。同时发现两个用户可见问题：
+1) `rm -rf` 含伪硬链接的目录报 "Directory not empty" 并留 `.l2s.*`（三处文件系统复现；新旧对照：旧库 EPERM+名字保留，新库名字删成功但内部文件残留）；
+2) `git clone --local` / `cp -al` 在 git 树上 fatal `Invalid argument`，源仓库累计 60 个残件。
+**共同根因**：模拟层记账文件（`.l2s.<name><NNNN>` 与 `<...>.<count>`）对 guest 可见。定位手法：`ln .l2s.a0001 e` 直接 EINVAL —— `read_intermediate()` 对普通文件 readlink；git 只对 EPERM/EXDEV 回退复制，EINVAL 致命。
+**修法（一支）**：`handle_getdents_exit()` 压缩重写、把内部条目从 guest 列表剔除（`PROOT_L2S_DIR` 专用目录不隐藏，否则删不掉），纯内部块用链式 getdents 续读；`move_and_symlink_path` 对内部名返回 -EPERM。分支 `fix/l2s-hidden-internals-1115`：PRoot `022fac28`、应用 `57d29b08`；CI #3122/run43710005566 五 job 绿，真实 PRoot `19 passed, 0 skipped, 0 failed`（新用例 `test-l2s-hidden-internals.sh` 含 git clone --local）。真机复验：rm -rf rc=0 residue=0、cp -al 正常、ls -a 无内部名、原探针 20/0。
+**过程教训**：本地 musl 可构建 PRoot（shim：`#define rlimit64 rlimit`、`statfs64 statfs`、MSG_COPY、TEMP_FAILURE_RETRY、scratch linux/ashmem.h，且 shim 不能经 CC=-include 传给汇编）；接线/变异探针是形状断言，改实现必须同步更新锚点，否则 CI 红在探针而不是产品（本轮红两次都是这个原因）。
+**已知边界**：记账文件所在目录仍被别处名字引用时，删该目录报 Directory not empty（固有形态，删引用方即正常）。未合并 main。
+
+<!-- 2026-11-15 20:01:39 -->
+## l2s 隐藏内部文件分支审查+合并（2026-11-15 晚）
+
+
+**合并**：`fix/proot-l2s-hidden-internals-1115` @ `57d29b08` `--no-ff` 合 main → **`095b1b263d3e6a12fb22e3c0bfee9b26ce9f9d4f`**（parents=`8e653c4 57d29b0`，父数 2 ✓；树与分支 tip 逐字节等价）。push 已确认远端 main 一致。main CI #3123/run 43711672440 自动触发。远端分支 DELETE 204（ahead_by=0 已核），本地只剩 main。审查报告 shared/work/review-l2s-hide-1115/REPORT.md。
+
+**审查结论**：0 缺陷。实质改动在 PRoot 侧（pin `75ac0f8`→`022fac28`，5 commit 7 文件 +230/−35）：getdents/getdents64 结果过滤 `.l2s.` 内部文件 + 全内部块链式续读（先例=hidden_files.c:148 同构）+ link 内部名 −EINVAL→−EPERM（工具按 EPERM 回退 copy）+ 专用目录不隐藏。
+
+**两处有意行为变化（有注释，非缺陷）**：① handler readlink 失败 return 0→break（隐藏优先于类型修正）；② git clone --local/cp -al 从 EINVAL（致命）变 EPERM（回退 copy）——这正是修的目标。
+
+**CI 失败演进判读（#3119红→#3120 cancelled→#3121红→#3122绿）**：中间红 = 负控锚文本与实现形态不匹配 fail-closed 红（`the text to mutate is not in the tree any more`），修负控后绿 = **装置在咬，不是测试被削弱**。最终 #3122：63 checks 0 failures + 17 变异负控全红 + 真实 PRoot 18 passed（新测试入 REQUIRED）。
+
+**独立证据（三源取二）**：本地 aarch64 沙箱 wiring 63/0 + mutation 20/0 + baseline e2155e6d 对照臂红；云端真实 PRoot 回归只能在 glibc 宿主跑（musl 缺 rlimit64 + ptrace 不可嵌套，regression 脚本自带说明），本地以静态探针为第二源。
+
+**合并前核查事实**：verify_branch.sh 机械项全过（115 门/four-way 4 层 consistent/CI head_sha 四项全中）；scan_debt、i18n AUTO-SKIP（diff 仅 gitlink）。
+
+<!-- 2026-11-15 20:12:12 -->
+## 真机验证 1.0.0+3122（l2s 隐藏内部文件），核心全绿 + 两条 P1 既有边界（2026-11-15 20:10）
+
+
+**被测**：装机 1.0.0+3122（20:02:54 安装，= 分支 CI #3122 产物 = 已合并 main `095b1b2` 同树）。报告 shared/work/verify-l2s-3122/REPORT.md。
+
+**本轮改动全绿（11 项证据）**：ls/find 内部名 0 可见；rm -rf 平铺/嵌套/2000 链全部 rc=0 零残留；cp -al rc=0；git clone --local（小 repo + 多级近真 repo）rc=0；link/remove 正常；2000 伪硬链接压力零丢失、nlink=2001；上轮 device_probe **20/0**、dtype=8,8,10；混合目录 ls 完整；S38 timeout rc=143 shell 存活；日志无真实 FATAL（7 条命中全是自身命令文本回显）。
+
+**F1（P1，非本轮引入）**：cp -a/cp -al/git clone --local 复制含伪硬链接的树后，**单次 rm -rf 报 ENOTEMPTY rc=1，第二次 rc=0、零残留**（ls -a 空、rmdir 单独成功）。机制：内部记账文件按名字所在目录存放，rm 递归先处理子目录时链计数未归零（父目录名字还在）→ 内部文件属活链必须保留 → rmdir 失败；随后计数归零文件清除但 rm 已放弃 rmdir。对照：手工按序删完所有名字（E1/E2）全成功；只删部分名字（E3）失败属设计正确。性质=上轮 3117 已声明「固有形态」的延伸，本轮把「永久 .l2s.* 残留」改善为「单次报错/二次成功/零残留」。修法需改内部文件归属（结构性），建议登记不修。
+
+**F2（P1，非本轮引入）**：busybox 1.37 `readlink /proc/self/fd/N` 小 buffer 时返回内部名（31B 截断）甚至**宿主真路径** `/data/data/com.rikkaminis.app/fi`（readlink(buf,32)）；同 fd 用 buf 4096/readlinkat/Python os.readlink 返回正确 guest 名。机制：`READLINK_PROC_FD` 改写要求内核返回值完整（is_l2s_file + recall_fd 验证），buffer 偏小→内核返回截断宿主名→改写跳过。性质=3117 改写逻辑边界 + 探针盲区（device_probe 用 PATH_MAX 大 buffer 天然避开，CI 用 coreutils 大 buffer 也测不到）。建议登记 + 顺路修（改写失败时至少不暴露宿主路径）。
+
+**装置改进建议**：回归脚本加「小 buffer readlink」+「cp -a 树后 rm -rf 幂等」两条用例。
+
+<!-- 2026-11-15 20:34:17 -->
+## 修 F1/F2 两轮：新增 l2s 修复分支 fix/l2s-backed-dir-1115（2026-11-15 20:35）
+
+
+**分支**：PRoot `fd290ef`（临时 tip，amend 后）+ app `0b93938`（gitlink bump），两仓同名分支。CI #3124 首轮红（2 个新测试），#3125 第二轮在跑。
+
+**改法**：
+- **F2（readlink 截断）**：exit.c 的 `readlink_proc_fd_state` 加 `truncated`（`old_size >= max_size`）；`readlink_proc_fd` 的 `is_l2s_file` 闸门放宽为 `!is_l2s_file && !truncated`；`recall_fd` 对「rank 0（同 pid+fd）+ truncated + host_path(≥8 字节) 是 final 前缀」放宽。安全依据：缓存每 (pid,fd) 只有一条记录（remember_fd 覆盖）。
+- **F1（rm -rf 顺序）**：app 启用 `PROOT_L2S_DIR`（`filesDir/l2s-backing`，持久），三个 PRoot 启动点（PersistentShell / ShellExecutor / TerminalSession）全部设置；PRoot 侧已有专用目录支持（旧链经 l2s_entry 回退兼容）。
+- 测试：`small_readlink.c`（buffer 可传参）+ `test-l2s-small-buffer-readlink.sh`（buffer = ${#DIR}+6 精确切在 `.l2s.` 内）+ `test-l2s-backed-dir-removal.sh`；wiring 70 checks / mutation 22 负控；`L2sBackingDirWiringTest`（三个启动点 + filesDir 持久性）。
+
+**首轮 CI 两条红 = 装置自错（产品修复本身有效）**：
+1. 小 buffer 测试假设「guest 名 < 31 字节」——实际 CI 的 TMPDIR 路径 58 字节，截断落在目录前缀。**修法：探针支持传 buffer 大小，测试用 `${#DIR}+6` 让截断恰好落在 `.l2s.` 内部**（该长度才能鉴别修复前后：修复前 detranslate 后小答案含 `.l2s.`）。
+2. backed-dir 测试的「BACKING 非空」断言放在 `rm -rf` 之后——链归零已清理。**修法：移到 rm -rf 之前（sh -c 内部）**，并补「删除后 BACKING 无孤儿」断言。
+
+**关键发现（差点漏掉）**：只改 `recall_fd` 不够——`readlink_proc_fd` 开头的 `is_l2s_file(host_path)` 会先拦掉截断名（无计数后缀）。首轮 CI 的 `small` 看起来像 guest 前缀（detranslate 副产品），**误导性地像是修好了**；实际改写根本没发生。判据：本地沙箱跑同一探针（buffer 32/20）得到 `/data/data/com.rikkaminis.app/fi` = 真·修复前行为（本地沙箱是已装 3122 的旧库，天然对照臂）。
+
+**本地对照臂**：沙箱内 `/tmp/sr2 <link> 32` → `small=/data/data/com.rikkaminis.app/fi`，`large=/tmp/sr/d/link`。装新 APK 后重跑同一命令即为验证。
+
+<!-- 2026-11-15 20:46:34 -->
+## 修复 F1/F2 完成：分支 CI #3125 全绿，停在分支等放行（2026-11-15 21:0x）
+
+
+**分支**：PRoot `fix/l2s-backed-dir-1115` @ `fd290ef`；app 同名 @ `0b93938`（gitlink bump）。CI #3125/run 43714473703 五 job success，head_sha 逐字符一致，**未合并 main**。报告 shared/work/fix-l2s-1115b/REPORT.md。
+
+**F1 修法**：app 启用 `PROOT_L2S_DIR`（`filesDir/l2s-backing`，持久、guest 不可见），三个启动点全设（PersistentShell/ShellExecutor/TerminalSession）+ L2sBackingDirWiringTest 守护。根因已实证：cp -a 的 readdir 顺序 [sub,f1,f2] 让链属主落在 sub，内部文件跟着住 sub，删 sub/f3 时链还有活引用 → rmdir ENOTEMPTY。旧链经 l2s_entry 回退兼容，无需迁移。
+
+**F2 修法**：exit.c 加 `truncated`（old_size>=max_size）；`readlink_proc_fd` 的 `is_l2s_file` 闸门放宽为 `!is_l2s_file && !truncated`；`recall_fd` 对 rank0+truncated+前缀(≥8字节) 放行。测试用 `${#DIR}+6` 让截断精确落在 `.l2s.` 内（固定 32 字节在长 TMPDIR 上截在目录前缀，无鉴别力）。
+
+**首轮 CI 2 红 = 装置自错**：① 假设 guest 名<31 字节；② BACKING 非空断言在 rm -rf 之后（已清理）。**最险的坑**：只改 recall_fd 不够——is_l2s_file 闸门先拦掉截断名；首轮 small 看似 guest 前缀（detranslate 副产品）误导成"修好了"，靠本地旧库对照臂（`small=/data/data/com.rikkaminis.app/fi`）才发现真相。
+
+**次轮证据**：handler 30/54 checks 0 failures、wiring 70/0、变异 4+22 controls 0 unexpected、真实 PRoot 21 passed/0 skipped/0 failed（含两新测试，均 REQUIRED）、单测 9270 PASSED/0 FAILED（+2）、publish 发布两步 skipped（门控完好）。
+
+**待真机验证（CI 验不到 app 侧）**：装 #3125 APK 后 cp -a + 单次 rm -rf rc=0；F2 命令 `python3 -c "import os;fd=os.open('/tmp/v/b',0);print(os.readlink('/proc/self/fd/%d'%fd))"` 期望 `/tmp/v/b`。
+
+<!-- 2026-11-15 21:00:54 -->
+## P0 事故：3125 的 PROOT_L2S_DIR 放在 rootfs 外 → 所有伪硬链接不可读（2026-11-15 21:0x）
+
+
+**现象**（真机 1.0.0+3125）：`ln a b` rc=0、`stat` 显示模拟 nlink=2，但 `cat a` / `cat b` 全部 `No such file or directory`。**沙箱 git 全坏**（全新 `git init`+`add`+`commit` 写不进对象，fsck 报 object corrupt or missing）——因为 **git 用 `link(2)` 原子写对象**，每个对象变成坏链。远端仓库完好（API 200 + tree 371 项），只有本地对象创建坏。
+
+**根因**：`PROOT_L2S_DIR` 被设成 `filesDir/l2s-backing`（**rootfs 外**）。伪硬链接是内容为「后备文件 host 路径」的符号链接；**guest 无法到达 rootfs 外的路径** → 内核跟随链接后 PRoot 拒绝翻译 → ENOENT。CI 测试全用 `-r /`（任何 host 路径都在 rootfs 内），所以从未暴露。
+
+**宿主实验取证（Shizuku 跑 app 的 libproot.so）**：A `-r /` + l2s 在 /data/local/tmp（rootfs 内）→ `cat a`=`X` ✓；B `-r rootfsB` + l2s 在 rootfs 外 → `cat a` ENOENT ✗（完整复现）；C `-r rootfsB` + l2s 在 `rootfsB/.l2s-backing` → ✓ 全通。**链路内容都是 host 绝对路径**，唯一差别是是否在 rootfs 内。
+
+**修法**：`getL2sBackingDir` 改为 `File(RootfsManager.getInstance(context).rootfsDir, ".l2s-backing")`；wiring 测试断言从 `filesDir` 改为 `rootfsDir`（并断言 NOT filesDir）。PRoot 侧无需改代码（既有约束），只加 `get_l2s_directory` KDoc 写明「必须在 guest rootfs 内」。
+
+**沙箱 git 坏的绕行**：用 GitHub API 组装 commit（blobs → tree → commit → PATCH ref），脚本 `/tmp/api_commit.py`，成功提交 `1b901c12`，CI #3126 已 dispatch。**装新 APK 后沙箱 git 才恢复**（l2s 修好前别在沙箱做 git/apk 操作）。
+
+**教训**：①「CI 绿」的测试用 `-r /` 天然把任何路径包进 rootfs，**凡涉及 rootfs 内外的配置都必须用真 rootfs 验证**；②`ln rc=0` + `stat` 正常 ≠ 链可用，**必须 `cat` 实际内容**；③git 依赖 `link(2)`，l2s 坏了会表现为「仓库对象莫名消失」，先怀疑 l2s 再怀疑远端。
+
+<!-- 2026-11-15 21:50:56 -->
+## 真机验证 1.0.0+3128：P0 修复确认 + F1/F2 全链路通过（2026-11-15 21:55）
+
+
+**被测**：1.0.0+3128（21:48:39 装机）= CI #3128/run 43719817543 @ `1dba43c5`，五 job 全 success。
+
+**3125/3126 两次 P0 的演进**：3125 把 `PROOT_L2S_DIR` 放 rootfs 外（`filesDir/l2s-backing`）→ 所有伪硬链接 ENOENT + 沙箱 git 全坏（git 用 link 写对象）；3126 放 rootfs 内但用字面路径 → `/data/user/0 → /data/data` 间接使 PRoot canonical 路径与 env 字面值不匹配，仍坏；**3128 = 同位置 + `canonicalFile`** → 全部正常。
+
+**宿主四臂实验（Shizuku + 真实 rootfs，决定性）**：rootfs 外 → ENOENT；rootfs 内但 rootfs 路径经符号链接 → ENOENT；同上 + 仅 l2s 路径 canonical → 正常。**CI 用 `-r /` 天然覆盖不到 rootfs 内外差异**。
+
+**3128 验证（10 项全过）**：`cat p`/`cat q`=ZZ；沙箱 git init/add/commit/fsck 全通；F2 readlink buffer 16/32/64/4096 全返回正确 guest 名；F1 cp -a + 单次 rm -rf rc=0（含真机复现的「属主在子目录」布局）；用户目录 0 内部名；内部文件在 `/.l2s-backing`；20 checks 20/0；2000 链零丢失零残留；重 clone PRoot 仓库 fsck 干净。报告 shared/work/verify-3128/REPORT.md。
+
+**残留**：3125/3126 窗口（20:49–21:48）创建的链无法自动恢复（内核里根本没写出正确符号链接），真身在 `/.l2s-backing/*.0002` 可读但映射丢失。
+
+**CI 两次红的定性（非产品）**：① Maven 429 限流；② 我的测试断言命中了 KDoc 里的 `filesDir` 字面量——**读源码型断言必须先剥注释**。
+
+**方法论**：①「CI 绿」对涉及 rootfs 内外的配置无鉴别力（`-r /` 掩盖一切）；②`ln rc=0`+`stat` 正常 ≠ 链可用，必须 `cat`；③git 突然「对象消失」优先怀疑 l2s（`link(2)` 写对象）；④沙箱 git 坏时用 GitHub API 组装 commit（blobs→tree→commit→PATCH ref，脚本 /tmp/api_commit.py）。
+
+<!-- 2026-11-15 22:12:38 -->
+## 合并 fix/l2s-backed-dir-1115 → main（2026-11-15 22:0x）
+
+
+**merge commit `4d985a8ebb1efc59b21e755d22088d84a07e8702`**（`--no-ff`，parents=`095b1b2 7dce96c`，父数 2 ✓；树与分支 tip 逐字节等价）。远端 main 已确认一致。main CI #3132 自动触发。
+
+**合并前核查三项**：①增量 diff 仅 gitlink bump + KDoc 更正（8 行），无调试残留/冲突标记；②CI #3129 head_sha `7dce96c8` = 本地 HEAD，五 job 全绿；③真机 3128 十项验证（P0 修复 + F1/F2 全链路），本轮仅注释与探针边界。
+
+**#3129 证据**：PRoot handler 30/54 checks 0 failures、wiring 70/0、变异 4+22 controls 0 unexpected、真实 PRoot **21 passed 0 skipped 0 failed**（含 test-l2s-backing-dir / small-buffer-readlink，均 PASS）；单测 9270 PASSED、两 L2sBackingDirWiringTest 用例 PASSED。
+
+**diff 走查中发现并修掉两处**：① `small_readlink.c` 允许 buffer==4096 时 `small[4096]='\0'` 越界（改 `>= sizeof(small)`）→ PRoot `d312e77`；② KDoc 原称「canonical 会治愈 3126 造的旧链」——真机实测证伪（旧链仍 ENOENT），改为如实描述。
+
+**清理**：远端 app 分支 DELETE 204；本地分支已删；PRoot 锚点分支全部保留（新 pin `d312e77` = `fix/l2s-backed-dir-1115`）。远端另有 `chore/proot-upstream-sync-1115`（22aa7ef）非本批产物，未触碰。
+
+<!-- 2026-11-15 22:23:49 -->
+## main CI #3132 全绿 + 正式发版（2026-11-15 22:2x）
+
+
+main CI **#3132 / run 43723022356 @ `4d985a8e`** 五 job 全 success（unit-tests / scan-gate / lint / build-apk / publish）。publish 真执行：`Move the rolling tag android-latest` + `Publish to Releases` 两步 success，release `RikkaMinis-arm64-v8a.apk` 更新于 `2026-11-15T14:22:18Z`（14.7 MB）。
+
+**本轮全面检查（用户要求「全面检查测试，没问题就合并」）结果**：
+- 机械项：scan 115 门 0 failed、four-way 4 层 consistent、i18n AUTO-SKIP（无 strings.xml）、scan_debt 0 条、CI head_sha 逐字符一致。
+- **diff 走查（215 行应用侧 + 457 行 PRoot 侧）抓到 2 处真实问题并修掉**：① `small_readlink.c` 的 buffer 上界 `value > 4096` 允许 4096，`small[4096]='\0'` 越界（改 `>= sizeof(small)`）；② `getL2sBackingDir` 的 KDoc 声称 canonical 会治愈 3125/3126 造的旧链——**真机实测证伪**（旧链仍 ENOENT），改为如实描述。修后 CI #3129 全绿（21 passed PRoot / 9270 单测 / 22 负控）。
+- 调用点核查：`getL2sBackingDir` 3 个启动点、PRoot 侧 `recall_fd`/`truncated` 引用一致、旧 `l2s-backing` 字符串无残留。
+
+**方法论沉淀**：①走查 diff 时对「注释里的断言」和「边界常量」要逐个核（本轮两处都在注释/边界上，CI 全绿也抓不到）；②「声称治愈旧数据」这类断言必须有真机实测支撑，不能靠推理；③合并后清理只删本批分支（远端 `chore/proot-upstream-sync-1115` 属他人/他轮工作，未动）。
+
+<!-- 2026-11-15 22:30:30 -->
+## PRoot fork 同步上游完成 + 真机验证通过（2026-11-15 深夜）
+
+
+**分支**：`***OWNER***/proot` `sync/upstream-1115` @ `0fc7301d`（未合 master）；应用侧 `chore/proot-upstream-sync-1115` @ `3f9e70c8`（基于 main `4d985a8e`，**diff 只有 deps/proot 一行**）。
+
+**构成**：termux/proot `52d65a4`（分叉点以来 140 提交）+ OpenMinis 4 提交（diag×2、AArch64 argv 对齐 FIX-261031-12、PROOT_READONLY_PATHS）+ main 的 2 个 l2s 提交（fd290ef 截断 readlink、d312e77）+ 我们的层（native_offload 538 / fake_netlink 809 / l2s hidden-internals 110-25）。
+
+**合并成本实测**：merge 只冲突 2 文件 12 块（link2symlink.c 11 块 = 我们的 hidden 补丁 vs 上游重写的 handle_getdents_exit；exit.c 1 块 = 纯接受上游）。OpenMinis cherry-pick 冲突 3 处（seccomp.c/h、extension.h），都是「上游新增 vs OpenMinis 基于旧版」的加法冲突，两边都留即可。
+
+**CI**：proot 仓库自己的 `Tests`（上游 make check，amd64 gcc/clang + arm64 clang）3/3 绿 ×2 个 sha；RikkaMinis build-apk run `43723257438` 五 job 全绿 @ `3f9e70c8`。
+
+**真机验证（装机 1.0.0+3133 = 分支 CI 产物，22:27:56）全过**：沙箱启动 / git init+commit+clone --local / 硬链接 nlink 同 inode / `.l2s.*` 在 ls 中不可见 / **cp -a 树后单次 rm -rf rc=0 零残留**（11-15 的 F1 保持）/ 500 硬链接 nlink=501 + 单次 rm -rf 零残留 / offload 100KB+20000 行 / curl 200 + DNS / chmod-chown-rename 记录 / fork 并发 / FATAL 0 条 / proot RSS 4MB。
+
+### 关键发现 1：上游 netlink 模拟**部分**替代我们的 fake_netlink
+- 上游 `host_blocks_af_netlink()` 自动探测，无需开关。实测生效：`python socket.if_nameindex()` 返回真实接口（tun0/rmnet_data3/rmnet_data1/rmnet_data0/dummy0/lo），`ifconfig` 显示真实 IP。**我们的实现返回空列表（iSH 风格），上游更强。**
+- **但上游不覆盖**：① busybox `ip addr` 走 `write()` 发请求 → "Socket not connected"（我们 master 的 `bec3475` 修过，但那个提交不在 pin 分支）；② `SO_MARK` → EPERM（Tailscale 需要，我们有 no-op）。
+- 结论：fake_netlink 可以退役，**前提是先把 bec3475 的 write 修复上游化**（提 PR 给 termux）。上游化成功才是真减负，否则只是把冲突点挪位置。
+
+### 关键发现 2：xnet 不在应用跑的版本里
+pin 分支 `022fac28` 缺 master 的 7 个提交，xnet 的 5 个全在里面 → **应用从来没跑过 xnet**。它是「未部署代码」，跟 fake_netlink 一起单独决策。
+
+### 既有局限（非回归，勿当 bug）
+- `/dev/shm` Permission denied → `python multiprocessing.Pool` 不可用（sem_open 失败）；`multiprocessing.Process`（fork）正常。
+- `/proc/net/dev` Permission denied → busybox `ifconfig` 首行报错但仍显示接口。
+
+**worktree**：`/var/minis/shared/work/proot-sync-1115/{ours2,up,getjoblog.sh,musl_shim.h}`；musl 编译验证方式 `make CC=gcc CPPFLAGS="... -include musl_shim.h"`（71 个 .o，0 非 m32 错误；m32 loader 在 aarch64 上预期失败）。
+
+<!-- 2026-11-15 22:50:34 -->
+## xnet 归档 + proot master 推进（2026-11-15 深夜，用户拍板「沙箱是开发环境不是网络节点」）
+
+
+**决策依据**：`xnet.c`（1815 行）读的是 App 写的 routes 文件，而 app 侧**一行对接代码都没有**（grep tsnet/tailscale/routes 全 0），且 pin 分支从没带过它 → 它是「一半的功能」，不是「待启用的功能」。
+
+**执行**：
+- `git tag archive/xnet-261021` @ `2ca3bae`（远端 ref 已建），随时 `git checkout archive/xnet-261021` 可取回。
+- proot `master`：`2ca3bae` → **`c53f378`**（`--no-ff` merge `sync/upstream-1115`，父数 2 = `2ca3bae 0fc7301`），然后一个 `chore: archive xnet` commit（-2197 行：xnet.c 1815 / xnet.h 87 / tests/xnet 214 / CLI 引用）。
+- `fake_netlink` **保留不动**（809 行零运行时成本，app 从不传 `--fake-netlink`；删它要改 GNUmakefile/extension.h/CLI 而无行为收益）。
+- `bec3475`（busybox `ip addr` 的 write() 修复）**暂不上游化** —— 只有真要 `ip addr` 在沙箱可用时才启动。
+
+**证据**：proot 自身 `Tests` @ `c53f378` 3/3 绿；应用侧 run `43725553594` @ `bd6cf6c5` 五 job 全绿；musl 全树编译 71 个 .o、0 非 m32 错误。
+
+**踩坑（可复用）**：改 gitlink 时用了 `git -C repo rev-parse master` —— 那是**本地 ref**，而本地 master 还停在旧 commit（我的工作在 `probe/master-merge` 分支上，`push HEAD:master` 只更新了远端）→ gitlink 一度指向旧的 `2ca3bae`（含 xnet）。正解：**push 后用 `git ls-remote --heads origin master` 拿远端 sha**，`git branch -f master <远端 sha>` 对齐本地，再写 gitlink。
+
+**另一坑**：删 `--xnet` CLI 条目时用正则 `\{ \.class = "Extension options".*?\n\n` 匹配跨过了整个 `Alias options` 块（因为 xnet 块后面没有空行），把 `-R` 别名等一并删掉，编译报 `expected '}' before ';'`。正解：**按完整固定字符串块精确删除**，删完核 `grep -c 'name = "--'` 与 `Alias options` 计数。
+
+<!-- 2026-11-15 23:39:59 -->
+## PRoot 上游同步合入 main（2026-11-15 深夜，用户两次放行「检查后合并」「确认推送」）
+
+
+**结果**：应用 `main` `4d985a8e` → **`c9903d2c`**（`--no-ff` merge `chore/proot-upstream-sync-1115`，**parents=2** = `4d985a8e bd6cf6c5`；合并树与分支 tip 逐字节一致）。proot 仓库 `master` = **`c53f3789`**（termux `52d65a4` 140 提交 + OpenMinis 4 提交 + 我方扩展层；xnet 归档于 tag `archive/xnet-261021`）。
+
+**合并前八项核查（全过）**：verify_branch.sh 机械项 115 门 0 failed、four-way 逐层 consistent、i18n AUTO-SKIP、scan_debt 跳过、冲突标记 0；分支 CI `#3134` head_sha 精确 `bd6cf6c5` 五 job 绿；独立证据 = proot 自身 `Tests`（`c53f378`）3/3 绿（157 主测试 0 失败）+ 真机 `1.0.0+3133` 已验证（沙箱/git/l2s/offload/网络/权限/删除），**最终版相对 3133 的代码差异只有 `fake_netlink.c`（app 从不传 `--fake-netlink`，该修复由 proot CI 覆盖）**。
+
+**main CI `#3135` / run `43728231397` @ `c9903d2c`**：首跑 `unit-tests` 红，根因不是代码 —— **Maven Central 429**（junit / coroutines-test / mockwebserver / json / jackson 全部 `Could not GET … status code 429`），`build-apk`、`scan-gate`、`lint` 当时已 success，`publish` 因此 skipped。
+**处置**：`POST /actions/runs/<id>/rerun-failed-jobs` → 重跑后五 job 全 success，单测 **9270 PASSED / 0 FAILED**，publish 两步（`Move the rolling tag android-latest` / `Publish to Releases`）真执行，release 资产 `RikkaMinis-arm64-v8a.apk` 更新到 `15:28:14Z`（14.84 MB，sha256 `3d65956b…`）。
+
+**清理**：远端删 `chore/proot-upstream-sync-1115` + proot 的 `sync/upstream-1115` 与 4 个旧 fix 分支（均 204，删前 `compare` 判 `ahead_by=0`；`fix/l2s-backed-dir-1115` 显示 `ahead=2` 但 `git cherry` 两条均为 `-`＝补丁等价，属 cherry-pick 后 commit id 不同）；远端 proot 只剩 `master`，本地两仓库均与远端一致。
+
+**可复用**：① main CI 单测红先看是否依赖下载失败（429/网络），`Received status code 429` 一眼定性，别去翻测试代码；② 失败 run 的 `publish` 是 skipped，**重跑失败 job 后才会真发布**，发布真假仍要核 release 资产 `updated_at` + 两步 `success`；③ 删分支用 `compare` 的 `ahead_by`，遇到 cherry-pick 分支要补 `git cherry`（`-` = 等价）再删。
+
+## 2026-11-16
+
+<!-- 2026-11-16 00:39:55 -->
+## rikkahub 输入栏毛玻璃 → RikkaMinis 移植（2026-11-15 夜，分支 `feat/composer-glass-1115`）
+
+
+**用户诉求演进**：先「研究 rikkahub 输入栏背景效果能不能抄」→ 看了硬编码版后明确要「像他那样**可调**」。
+
+**rikkahub 的真实做法**（源码 `/var/minis/shared/work/rikkahub-research/hub`）：
+- `ui/components/ai/ChatInputHaze.kt`：`hazeBlur`（12dp，Material3）或 `hazeGlass`（16dp + AGSL 光学参数，显式按应用主题写死明暗两套，因为 haze 按系统夜间模式选预设会错）。
+- `ChatInput.kt`：卡片 `color = if (enableBlurEffect) Color.Transparent else containerColor` + `clip(shape)` + 1dp `outlineVariant@0.5` 边框 + `tonalElevation = 0`。
+- **`ChatList.kt:343` 的 `LazyColumn(...).hazeSource(hazeState)`** 才是关键：糊的是滚动中的消息行，不是壁纸。
+- `ChatInput.kt:216` 竖向 scrim（透明→background）避免消息透到导航栏。
+- 开关**默认关**（`Settings.kt:173`），开启后才露出 Blur / Glass 二选一。
+
+**版本坑（可复用）**：haze 2.x（含 GLASS）POM 要求 Compose **1.12** + Kotlin **2.4**；我们 BOM 2025.09（Compose 1.9）+ Kotlin 2.1 ⇒ 只能钉 **1.6.10**（Compose 1.8 / Kotlin 2.1）。所以「Blur / Glass 二选一」抄不了，改成 haze 1.x 真实能生效的三个 knob。
+
+**实现要点**：
+- haze 语义：source 节点 `contentLayer.record { drawContent() }`（**祖先的 clip 不进入录制**）→ 因此只要把列表 tail 拉到输入栏高度，卡片就能糊到被 arc clip 藏掉的那些行。
+- 双路径由一个布尔 `composerGlassOn` 驱动**四个**联动点：tail 深度、arc clip 是否挂、`hazeSource` 是否挂、底部 contentPadding。关 = 上周 composer-arc-1114 原样（不是半吊子）。
+- 卡片阴影必须搬到 `matchParentSize` 兄弟层，否则圆角 clip 会切掉光晕。
+- `ChatColors.*` 是 @Composable getter：`drawBehind{}` 里读会编译报错，必须提前 hoist（CI 抓到）。
+- 可调存 `ChatTuningPrefs`（`chat_composer_glass_enabled/_blur_dp/_tint_pct`，默认 false/16dp/55%），并在 `ConfigBuiltins` 注册 `chat.composerGlass*`；UI 在 Settings → Appearance → Chat Tuning → Composer glass。
+- `ComposerGlassTest`（纯函数 clamp）+ `ComposerGlassWiringTest`（源码形状，含「arc clip 只在 OFF 分支」）共 11 例。
+
+**CI**：run `43735581092` 全绿（5 job，publish 两步 skipped 未污染 release），单测 **9282 PASSED**。第一轮红在中国两个编译错（`tuning` 用在其声明之前、`ChatColors` 在非组合 lambda 里读），第二轮红在既有 `ChatTuningPrefsTest` 的键集守卫（新增 key 必须同步）。**均按「先修再重跑」处理，未绕过。**
+
+<!-- 2026-11-16 01:10:44 -->
+## 玻璃输入栏第二轮：开关搬进外观子页 + 顶栏也玻璃（2026-11-15 深夜，分支 `feat/composer-glass-1115` @ `1657f6c8`）
+
+
+**用户三次澄清的最终形态**：
+1. 开关属「次级选项」→ 不能放外观主页面，要放**外观的子页面**。新建 `Settings → Appearance → Chat appearance`（route `appearance/chat_surface`，`ChatSurfaceSettingsScreen`），主页面只留一条入口行（带 summary）。
+2. 数值（模糊半径/浓度）留**聊天微调**；微调页的保存挪**右上角**（SettingsScaffold `actions` slot，Runtime Limits 同款），底部 Save 删除 —— 只留一个保存口。
+3. 效果要覆盖**顶部标题栏**，不只输入框。
+
+**默认值参照 rikkahub**：开关 off、模糊 **12dp**（他 Blur 档）、浓度 **30%**（他 Glass 档 `containerColor@0.3`）。rikkahub Blur 档是「无底色纯糊」，haze 1.x 抄不了（不铺底会与原内容重影），故保留不透明底 + 30% tint。
+
+**顶栏实现（与输入框对称的手法）**：
+- `ComposerGlass.topBarTail(extra)`：`layout{}` 用 `height+extra` 测量、`place(0, -extra)`、回报原高 —— 让 LazyColumn **视口向上多出顶栏高度**；同时 `contentPadding.top = 4.dp + topBarHeightDp` 抵消，行不移动。
+- 顶栏 `TopAppBar` 包在 `Box(onSizeChanged{ topBarHeightPx })` 里，前面叠一层 `matchParentSize().graphicsLayer{alpha}.hazeEffect(...)`；`containerColor` 在开启时 `Color.Transparent`。
+- 玻璃**只在 `listState.canScrollBackward` 时淡入**（顶部没东西可糊；rikkahub 的 `showCapsuleBackground` 同逻辑）。
+- 顶栏浓度 = 用户值 + 25 点固定余量（`ComposerGlass.topBarTintAlpha`）——三行 11–14sp 小字且**没有 scrim**，与有 scrim 的输入栏不同；固定不加旋钮，理由是「表面的属性」不是口味。
+- 坑：`ChatColors.*` 是 @Composable getter，放进 `remember{}` 计算 lambda 里同样编译报错（第二轮又踩一次，已 hoist 成 `topBarGlassBase`）。
+
+**测试**：`ComposerGlassTest` 5 例（含顶栏余量 30→0.55、100→1.0）、`ComposerGlassWiringTest` 10 例（开关新家、"微调页不许再有开关"、只一个 Save、顶栏 6 条链）。CI run `43738490681` 五 job 全绿、单测 **9286 PASSED**、publish 两个发布步 skipped（未污染 release）。
+
+**教训**：新页面同模块不同包也要 import —— `AppNavigation` 缺 `ChatSurfaceSettingsScreen` 导入，提交前自查补上（未等 CI 报错）。
+
+<!-- 2026-11-16 02:05:04 -->
+## 玻璃输入栏合并 main（2026-11-15 深夜，merge `b709d6a`）
+
+
+**合并前核查三项（全有据）**：
+1. **检查**：`git diff origin/main...HEAD` = 21 文件 +1074/−65，无冲突标记（`^+<<<<<<<` 计数 0），无调试残留（`println/System.out/Log.[dviwe]/TODO` 新增行 0），新增文件仅 `ComposerGlass.kt` + 两个测试。
+2. **验证**：分支 CI `43743290252` 的 `head_sha` = `48312f3f…` 与本机 HEAD 逐字符一致；五 job 全 success；单测 **9286 PASSED / 0 FAILED**；`ComposerGlass*` 15 例逐条 PASSED；publish 的 `Move the rolling tag` / `Publish to Releases` 两步 **skipped**（分支没污染 release）。
+3. **核实**：真机证据 = 用户装最后一个包后确认「这一次改对了」（只有 `48312f3` 才有「独立卡片 + 只有标题」这一版）。
+
+**merge commit `b709d6a`**（`--no-ff`，**parents = `c9903d2 48312f3` 父数 2** ✓），远端 main 已推到同一 sha；main CI 由 push 自动触发（用户说不用等）。
+
+**branch 清理**：按纪律等 main CI 绿再删远端 + 本地分支（当前保留作回滚锚点）。
+
+**这轮 UI 形态的教训（三次反复都在这条上）**：设置页的「次级选项」不是靠猜位置，是靠**和同页其它卡片保持同一节奏**——卡头 + 只有标题的行 + 卡脚小字。第一版放主页面被否（次级占主位），第二版单独子页被否（为一个开关开一页），第三版塞进主题卡被否（开关混在单选行里像第四个主题），第四版独立卡 + 行内只有标题 + 解释进卡脚才过。
+
+<!-- 2026-11-16 06:11:55 -->
+## 2026-11-16 近几日主线深审计与 Rootfs/L2S 修复
+
+对 `43e57e0d..b709d6a`（11-12 至 11-16 主线）按 Provider/Model、Chat/Composer、Sandbox/Terminal、Backup/Settings/Files 四域做只读扫描，并独立审 Rootfs/L2S 生命周期。确认并修复新增 P0 候选：Rootfs reset 原先递归删除 `rootfs/.l2s-backing`，可能让持久 bind 目录中的 link2symlink 伪硬链接悬空。分支 `fix/l2s-persistent-backing-1116-v2`，提交 `cc380884`；`clearRootfsForReinstall` 用 `Files.walkFileTree` + `NOFOLLOW_LINKS` 保留真实 backing，拒绝同名符号链接，重建前停止 shell/PT​​Y、失败不发重建回调。14 条定向 JVM/形状测试绿，相关门 `ran=27 fail=0`，分支 CI #3148 五 job 全绿。未合并 main；真机“持久 bind + 伪硬链接 + Rootfs Reset”仍是独立验证边界，已登记 `shared/backlog.md` §L2S-RESET-PERSIST-1116。
+
+<!-- 2026-11-16 07:55:41 -->
+## 2026-11-16 合并 Rootfs/L2S 修复到 main
+
+用户说「合并」后走完三项核查并合并：merge commit **`755bd77538bce807d35279f6ff73c92abad93827`**（`--no-ff`，parents=`b709d6a6 db19463b`，父数 2；合并树与分支 tip 同一 tree `1a9346cd`）。
+
+- 合并前八项全有证据：verify_branch `115 passed, 0 failed`、冲突标记 0、scan_debt 0 no-trigger、i18n AUTO-SKIP、four-way 一致、CI head `db19463b` 逐字符一致；diff 330 行整份读完；6 符号调用点核查；独立证据 = 本地 JVM 14 例 + 定向门 27/27 + CI 日志逐条 PASSED / 0 FAILED / 本批文件 0 警告。
+- 追加一轮：`cc380884` 的 CI 日志里有一条 `parentFile` 可空警告（测试夹具），修掉成 `db19463b` 再重跑 CI 才合并 —— 「CI 绿」没被当成「无瑕疵」。
+- main CI #3150 / run `43776476736` 五 job 全绿，publish 9 步 0 skipped，release 资产更新 `23:53:39Z`。
+- 清理：远端删两支（`fix/l2s-persistent-backing-1116-v2`、已并入的 `feat/composer-glass-1115`，删前 compare ahead_by=0），本地 `-D`，两个临时 worktree remove+prune，远端只剩 main。
+- 坑：失败排查时我把 `git ls-remote` 写在了进程级代理旁路之外，报「Failed to connect ***PROXY_ADDR***」，一度以为命中 S33；判据是 `fsck` 无 `cannot read existing object info` + `.git/objects` 断链 0 —— **每个 git 命令都要自己带 `GIT_CONFIG_* http.proxy=` 与 `NO_PROXY='*'`，不能只在同一条命令的前半截设**。另：删除 worktree 后旧 cwd 失效，后续命令要先 `cd` 到有效目录。
+- 真机边界仍在：持久 bind + 伪硬链接 + Rootfs Reset 端到端未验（backlog §L2S-RESET-PERSIST-1116）。
+
+<!-- 2026-11-16 08:11:06 -->
+## 背景包整理 + INCR-1116 三包（2026-11-16 上午）
+
+
+**用户口径（新）**：外部审计**按次计费**，不以任务大小计 → 小包必须合并，别为省心多切包。
+
+### 一、背景包（`/var/minis/mounts/背景包/`）整理完成
+
+- `待发-GAP-1113`(A/B/C) + `待发-RESEARCH-1113`(RA/RB/RC) **已发已回已消化** → 移入 `已发/GAP-1113/`、`已发/RESEARCH-1113/`，逐个写 `STATUS.md`（回收报告路径 + 结案 sha：GAP→`4b504af`、RESEARCH/RC→`78b62ca8`）。
+- 六份 r8 报告补录进定档：`RikkaMinis/reports/r8-gap1113/` 与 `r8-research1113/`（原件在 `shared/work/meta-audit/reports/`）。
+- `README.md` 重写（目录表 / 当前状态 / 整理历史加 2026-11-16 行 / 生成器索引）。体积 228 MB 未变。
+
+### 二、待发-INCR-1116（未发送，等用户审）
+
+- 基线 `4b504af`（11-14 11:00，R8+RC 合入后）→ `755bd775`（11-16 07:44）：应用侧 108 提交 / 119 文件 / +8484 −903；PRoot 侧另有 47 文件 / +4922 −226。
+- **3 个包**（原 4 个，C+D 合并成 CD）：
+  - A 备份/镜像/文件/设置 53 文件 / +3699−488 / 1.4 MB
+  - B 聊天/输入栏/渲染 39 / +2695−311 / 1.3 MB
+  - CD 沙箱/终端/PRoot l2s/CI 27+47 / +2090−104 · +4922−226 / 1.1 MB（两棵源码树，PRoot 文件在 zip 里带 `proot/` 前缀）
+- A/B 不互合理由：各自已 40 万 token 量级，硬凑会超上下文 ⇒ 次数浪费是钱、超上下文是废掉整轮。
+- 建议发送顺序 CD → A → B（风险从高到低）。
+
+### 三、打包时抓到并修掉的一处范围错误（可复用）
+
+第一版 D 包把 PRoot 生产代码路径写成 `src/link2symlink.c` / `src/fake_id0`，**真实路径是
+`src/extension/link2symlink/link2symlink.c` 与 `src/extension/fake_id0/`** ⇒ 只捞到 31 文件/+2021 且主战场
+`link2symlink.c`（+1471/−169）**完全没进包**。教训：**别凭记忆写子模块内路径，先 `find <repo> -name '*.c'` 定位**；
+规模对不上的时候要反过来查"是不是少捞了生产文件"，不能拿测试文件的行数当"差不多了"。
+
+### 四、装置
+
+`shared/work/incr1116/`：`01-任务书-{A,B,C,D,CD}.md` · `build.py`（分域/切 diff/生成带真实行号上下文/打 zip/写索引）·
+`merge_cd.py`（C+D 合并）· `stamps.py`（STATUS/批次 README）· `tidy.py`（背景包归档）· `verify.py`/`verify2.py`（自检）。
+自检口径：zip 文件数、docs/fix-reports 零泄漏、上下文行号抽样对拍（A 1407 / B 830 / CD 1739 行，**零偏差**）。
+
+<!-- 2026-11-16 08:33:33 -->
+## INCR-1116 我方走查（4b504af..755bd775）→ 待与外部报告对账
+
+
+**范围**：应用侧 130 文件 +10849/−951 + PRoot 侧 8cf13e99..c53f378（我方 l2s 补丁 + 上游 140 提交）。
+**方法**：独立 full clone（`review-today-1114/repo` @755bd775，工作树干净）+ 差分落盘 15374 行分段读 + 真源码
+kotlinc 编译探针（命令分类器实跑 48 条命令）+ i18n key/占位符机械比对（7 语言各 1681 键，0 差异）+ RuntimeLimits
+恢复默认覆盖度机械比对（41 变量全含）+ `PROOT_L2S_DIR` 注入点全量枚举。
+**报告**：`shared/work/review-incr1116/REPORT.md`；装置同目录 `probe/`。
+
+**发现（9 条，无 P0/P1）**：
+- **F1 P2** `PROOT_L2S_DIR` 注入不全：`RootfsManager.prootLoaderEnv()` 漏设（3 处 apk 启动都用它），而 PersistentShell/TerminalSession/ShellExecutor 都设了 ⇒ apk 装的 busybox 等硬链接仍是旧"名字旁边"布局，`cp -a` 后单次 `rm -rf` 仍会 Directory not empty。
+- **F2 P2** API 29（Android 10）未授 WRITE 时镜像静默降级到 app 私有目录且状态行显健康（`MirrorPlan.targetKind` else 分支把 29 与 26–28 合并，与 `MirrorStore` KDoc「29+ 未授权应报 null」矛盾；`isTargetReachable` 对 APP_EXTERNAL 也返回 true）。v1 在 Q 走 MediaStore 不需该权限 ⇒ 升级后可见性静默丢失。
+- **F3 P2** `pasteStart` 只由主发送路径写；`ChatQueueInterruption`（流中注入）与 `ChatSessionEntryExt.promoteDraftIfNeeded`（草稿提升）两处 user 行写入方都丢边界，后者还不展开 paste buffer（窗口前既有）。
+- **F4 P3** 镜像迁移正确性依赖「manifest 位于被 park 的 mirror/ 之内」隐式不变量，无测试钉住（若移走 manifest ⇒ 陈旧 manifest + 空 current/ + 行健康）。
+- **F5 P2** 长粘贴句中位置被丢弃（`foldLongPasteIfNeeded` 恒传 inlineMarker=false），且两处 KDoc 断言都错：inline marker 本来就原位展开；`pasteStart` 恒为末尾不等于光标。
+- **F6 P3** `PersistentShell.stop()` 新增 /proc 全表扫描跑在调用线程（含 UI cancelStream），量级十毫秒级。
+- **F7 P2** 分类器新回归：`python3<TAB>args` 由 HEAVY 降为 LIGHT（STATEMENT_SEPARATORS 不含 `\t`、verb 只按空格切）；xargs/-exec/sh -c 仍 LIGHT 属残留非回归。
+- **F8 P3** `SandboxDefectRegistry.phraseMatches` 只锚右边界（`verybad pack` 命中 `bad pack`），KDoc 称两头都锚。
+- **F9 P3** 迁移不处理 v1 `auto/*.txt` 旧快照 ⇒ 不参与 v2 轮转、长期残留。
+
+**观察项（非缺陷/窗口外）**：mirrorAutoSnapshot 不看 isEnabled；草稿提升不展开 paste buffer；26–28 旧 app-external 树成孤儿；
+git clone/fetch/push 由 LIGHT 升 HEAVY（有意口径变更）；values-* 两处两元素同行格式残留。
+
+<!-- 2026-11-16 09:48:47 -->
+## INCR-1116 外部审计对账 → 修复 → 合并 main（2026-11-16）
+
+
+**外部三份报告**（A 备份/镜像/文件/设置、B 聊天/输入/渲染、CD 沙箱/终端/PRoot）共 22 条 + 3+3+3 条 CLEAN；
+与我方 9 条合并去重后 **24 条有效发现，P0 = 0，P1 = 3**（三条都需特定形态触发）。
+
+### 结论先行（本轮最重要的方法论收获）
+
+**同一窗口两个独立通道收敛到同一组 P1 ⇒ 覆盖率饱和，不该再审。** 已按用户拍板固化成 **审计轮次门**（GLOBAL.md，第四把尺）：
+一轮审计若 P0=0 且 P1≤3（且各需特定形态），停止对同窗口再审，改为 ①审新提交 ②审上一轮修复 diff ③跑真机清单。
+同时把「修复删掉被门锚定的调用点 ⇒ 门 ROT，不要先怀疑门坏了」写进配套纪律。
+
+### 已修（14 提交 → merge `d30ceb23`，`--no-ff` 父数 2 ✓）
+
+P1：粘贴折叠把块首尾旋转（用 caret 推导 + 重建校验，失败退 inline marker）；`safeResolveWithin` 放行 `.l2s-backing/.l2s.*`（宿主工具能读伪硬链接）；目录删除禁止 PRoot 挂载点及祖先。
+P2：玻璃浓度**文案**反相（HazeTint 是盖在模糊上的遮罩 ⇒ 0%=纯模糊，保映射与默认 30，只改 7 语言文案 + 3 处 KDoc）；技能更新失败不再报 SUCCESS（Failure 终态，删兜底）；排队长消息撤回按钮不可达（guard 增 modifier 通道）；编辑堆积粘贴芯片（`_preEditPastes` 快照）；`min/max/sec` 计入词数但不作长词（金额句转 prose，公式全保）；预览不切代理对（`foldPreview`）；迁移删行失败不标记 v2；重试/ON_RESUME 重读授权；只读目录不致重置永久失败；apk 三个启动点补 `PROOT_L2S_DIR`；制表符归一 + 短语左边界；打印只认主框架；两条假绿测试改锚决策。
+
+### CI 两次红的根因（都是修复自身）
+
+1. **scan-gate**：`skill_frontmatter_roundtrip_check` arm9/arm10 锚在被删的 `skillRepository.update(` 调用点 → ROT。改门三件齐（新决策断言 + 负向断言防回退 + 夹具与 needle），selftest 23 臂 + 真树双绿。
+2. **unit-tests 5 例**：4 个粘贴夹具把光标停在末尾却在中间插入（真实 TextField 不会出现的形状 ⇒ 走 inline 回退）；1 个技能浏览器测试钉着已删的 `if (skill != null)`。另外我自己写的两个新用例块**没过折叠阈值**（英文需 >1000 词）——改用 CJK 块后才真正测到那条臂。教训：**写测试先确认它真的走到了被测分支**。
+
+### 门禁证据
+
+分支 CI #3153（run 43785889762）head `3f944653` 逐字符一致，五 job 全绿、publish 两步 skipped；
+main CI #3154（run 43787279809）五 job 全绿、publish 两步真执行、release 资产 01:47:14Z 更新（14.19 MB）；
+合并树与分支 tip 同 tree `bd222176`；远端只剩 main，本地分支 `-D`，临时 worktree remove+prune。
+未修 13 条（P2/P3，各带触发条件）登记在 `shared/backlog.md §INCR-1116`。
+
+<!-- 2026-11-16 10:27:09 -->
+## 2026-11-16 10:10:16 闪退取证：FGS 5 秒契约被 onTaskRemoved 的 stopSelf 绕过
+
+
+**崩溃**：`crash-2026-11-16_10-10-17.log`，pid 6085，v1.0.0+3153，
+`ForegroundServiceDidNotStartInTimeException`（AgentForegroundService）。
+
+**日志三行定案**（minis-2026-11-16.log [LOGCAT]）：
+- 10:10:16.842 `Service created`（onCreate 完成，尚未 startForeground）
+- 10:10:16.842 `onTaskRemoved with no active sessions, stopping self`（同一毫秒）
+- 10:10:16.881 `Service destroyed` → 16.882 FATAL（40 ms 后）
+
+**机制**：startForegroundService 挂账后必须 5s 内 startForeground，`stopSelf()` 不解除该义务；
+服务在 onCreate→onStartCommand 之间被 onTaskRemoved 打断并裸 stopSelf，销毁时系统**立刻**抛（不必等 5s）。
+触发动作 = task 被移除（从最近任务划掉 app），onTaskRemoved 的唯一来源。
+
+**为什么「几乎没注意到」**：崩溃发生在冷启动 581 ms 内（10:10:16.300 launch → 16.881 崩），界面仍是空白/草稿
+骨架；无 UI 提示（系统主线程 RemoteServiceException）；1.8 s 后系统自动重启并恢复到**同一草稿会话**
+（`__new__dacf7c9a`，loadSession 256 ms，10:10:19.077 ChatScreen MOUNT）。加上用户动作本身是划掉 app，
+app 消失符合预期。
+
+**频率**：近 4 天「划掉 + 无活跃会话 → stopSelf」共 20 次（11-13:7 / 11-14:3 / 11-15:6 / 11-16:4），崩 1 次
+⇒ 只有挂账与 onTaskRemoved 落在同几毫秒才撞上。10:09:37/46/53/10:10:16 连续四次短命启动（9.5s/6.5s/22.7s），第 4 次卡窗口。
+
+**在修方案**（另一会话，`shared/work/fgs-deadline-1116`）：`satisfyForegroundDeadlineThenStop()`，
+未 startForeground 则先 stub startForeground + stopForeground 再 stopSelf；两处裸 stopSelf 已收敛。
+**待核点**：静态 `AgentForegroundService.stopService(context)` → `context.stopService()`（SessionActivityTracker
+scheduleIdleStop→stopServiceNow）走系统销毁，不经过该 helper；若实例恰在未 startForeground 窗口，同款异常仍可能发生。
+
+<!-- 2026-11-16 10:52:00 -->
+## 2026-11-16 上午：FGS 前台服务 P0 + 玻璃输入栏「底跑到屏幕底」
+
+
+### 一、元会话：用户问「我这是什么状态/为什么停不下来」
+
+我的判断（已给用户）：**不是停不下来，是没有停机判据**。几十道门全朝「发现问题」，没有一道说「够了可以停」。判断「能否停」只能靠感觉，而感觉的唯一信号源是自己产出的红绿——滞后且偶发。
+
+递归层：他问这个问题的方式本身在实例化他的模式（找外部框架验证判断）。解法 = 造停机判据（连续 7 天 FATAL=0 / backlog P0=0 / P1 全带触发条件 / 真机主路径全绿）。
+
+**证据当场出现**：回答前 9 分钟（10:10:16）应用真的崩了 —— 他说「不确定能不能停」，直觉是对的。
+
+### 二、FGS P0（分支 `fix/fgs-taskremoved-deadline-1116` @ `ed94ed2`，CI **全绿**）
+
+`AgentForegroundService.onTaskRemoved()` 在无活跃 session 时裸 `stopSelf()`。Android 契约：收到 `startForegroundService()` 后必须 5s 内 `startForeground()`，`stopSelf()` 不免除 → `ForegroundServiceDidNotStartInTimeException` 杀进程。
+
+真机 10:09:37–10:10:18 连续 4 次启动 4 次死；`Service created` 与 `onTaskRemoved ... stopping self` 同一毫秒，40ms 后 FATAL。该路径每天走 3–7 次（11-13:7 / 11-14:3 / 11-15:6 / 11-16:4），第一次撞 5s 窗口。
+
+修：抽 `satisfyForegroundDeadlineThenStop()`（未进前台则 stub 挂载→移除→stop），`onStartCommand` 的 safe-mode 分支改成共用。新 `FgsDeadlineWiringTest` 5 例（3 正 + 2 变异负控）；邻门 `AppInitSkipGuardWiringTest` 因我删掉它锚定的 inline stub 而 ROT（1 例红）→ 重锚到共享出口 + 新增 stub 仍在的一条，7 例全绿。三个变异各自只红一条（精度好）。
+
+### 三、玻璃输入栏「底定到屏幕最下面」（分支 `fix/composer-glass-arc-clip-1116` @ `ebc6941`）
+
+**代码层面完全证实**（对比 `c9903d2` 旧版 vs 现在）：
+- 旧：`.composerArcTail()`（22dp）+ `.clip(composerArcClipShape)`，contentPadding.bottom = 12dp + 22dp
+- 现（玻璃 ON）：`.composerArcTail(composerHeightDp)` + **无 clip**，padding 同增
+
+**根因不是「改了定位」，是移植时的一个错误前提**：报告写「加回 clip 会让玻璃变平」。**证伪**——haze 1.6.10 `HazeSourceNode.draw` 用 `contentLayer.record { drawContentSafely() }` 把自身子树录进 layer，**祖先 clip 在合成时才生效**，采样不受影响。所以 clip 根本不必去掉。
+
+去掉 clip 的真实代价（浓度 10% 时被放大）：内容**清晰**直接画穿卡片 + 卡片左右 16dp 边条（那里根本没有卡片）裸奔 → 观感「列表跑到屏幕最底」。
+
+修：`ComposerArcBand.of` 加 `overlapPx` 参数（默认 radius+topInset 保持旧行为）；`ArcClipShape(overlap)` + `composerGlassArcClipShape(overlap)`；ChatScreen `remember(switch, height)` 一个 outline 无条件 `.clip()`。首帧未测量时不裁剪（否则会切掉没有溢出的视口）。band 修正后 cardTop = height − overlap + topInset（旧公式在玻璃下把 notch 放低约 256px）。
+
+测试：`ComposerArcBandTest` 加玻璃几何（204/244/40）+ 太浅返回 null；`ComposerGlassWiringTest` 的**承重断言**（「clip 只能在 OFF 分支」）重锚到新决策——那条断言保护的是错误前提。
+
+**欠账**：真机未验「卡片后面是否真的渲染出模糊内容」（静态读 haze 说会）。
+
+<!-- 2026-11-16 11:02:14 -->
+## 语音输入（输入法听写）"说着说着突然停了" → composer 文本镜像回写（分支 `fix/voice-ime-mirror-1116` @ `01e5210`，CI 绿，未合并）
+
+
+**用户症状与判别**：RikkaMinis 里用输入法语音输入不如 rikkahub 顺畅，偶发"听写自己结束"（麦克风熄灭、文字停止增长、键盘还在）。
+第 1 个候选（文字回退）用户说没有，第 2 个（听写自己结束）**确定观察到** ⇒ 锁定 `composition = null` 的外来回写。
+
+**根因**：composer 是「双真相源 + 回写」——
+`inputFieldValue`（field）与 `viewModel.inputText`，中间夹 `LaunchedEffect(inputText)` 把 VM 文本写回 field（`ChatInputArea.kt:438`）。
+判据原本是 `inputFieldValue.text != inputText`，即**把"差异"当"写入意图"**。但语音 burst 走
+`IME_BURST_DELTA_THRESHOLD = 8` 的 150ms debounce（`ChatScreenUtils.kt:82`），VM 结构性落后于 field；
+每次 flush 短暂让两者相等的下一帧，effect 就把旧快照写回 field 并 **`composition = null`** → 输入法 composing 被外部清除 → 输入法结束听写。
+打字每键 delta=1 走即时路径 ⇒ 解释了"打字顺、语音有毛刺"的方向性。rikkahub 用 `TextFieldState`（单一真相源、无回写回路）故无此问题。
+
+**修法（最小充分，未迁 TextFieldState）**：
+1. 新文件 `ComposerMirrorPolicy.kt`：`ComposerSelfWrite`（非 State 的文本记号，主线程专用）+ 纯函数
+   `shouldMirrorComposerText(vmText, selfWrittenText, fieldText, imeDictating)` —— 三个判据：自写≠外部意图 / field 已等 / **输入法正在录音则不回写**（lambda 延迟求值，binder 调用只在真外部写入时发生）。
+2. `ChatInputArea.kt`：标记声明前移到 `inputFieldValue` 之后（Kotlin 局部变量必须先声明——`clearComposerInput`/`commitComposerBody` 在它之前），
+   四处 `viewModel.setInputText(` 前都写 `selfWrite.text = …`（clear / commit / burst flush / immediate）。
+3. 第二道硬守卫：`ImeDictation.recordingActive(context)`（既有 `ImeDictation.kt`，API29+、fail-open）为真时不回写。
+4. 一次性观测：守卫生效时打 `ComposerMirror` 日志 "mirror suppressed during IME dictation"，供下次真机确认根因。
+
+**验证**：新增 `ComposerMirrorPolicyTest`（6 例）+ `ComposerMirrorWiringTest`（4 例，源码探针：effect 必须用判据 + 每个写入点必须有标记）；B3 形状探针从字面量 `if (inputFieldValue.text != inputText)` 改锚到决策（否则红）。
+本地变异 M1–M5 全部精确命中后恢复（M4/M5 用 cp 备份恢复，**不能用 git checkout**——工作树有未提交的后续调整）。
+CI run `43794415465` @ `01e5210` 逐字符一致：五 job success、9310 PASSED / 0 FAILED、本批 12 例逐条 PASSED、scan 115 门全过（夹具按预期 skip）、publish 两步 skipped。
+分支 CI 绿 = 停止节点，**未合并 main**。APK 已导出 `/var/minis/attachments/RikkaMinis-voice-ime-01e5210.apk`。
+
+**待真机**：装 01e5210 后长时间语音输入，①看是否还"自己停" ②日志出现 `mirror suppressed during IME dictation` = 守卫真拦到了（根因坐实）。
+**未做（登记）**：SharedPreferences 每 150ms 写草稿（`syncComposerDraft`，最长 5000 字符，主线程序列化）与 `foldLongPasteIfNeeded` 每次全文本双向 diff、mention 无空格 CJK 回溯 O(n) —— 主线程抖动次级项，未在本批改动。
+
+<!-- 2026-11-16 11:48:53 -->
+## backlog 第三次覆盖事故（2026-11-16 11:43，我自己造成）
+
+
+**事故**：给 `shared/backlog.md` 追加一条 P2 登记时调用 `file_write` **漏了 `append=true`**，把 2.09 MB / 484 段的台账整份覆盖成 1256 字节。
+
+**恢复**：用 `shared/work/verify-sandbox-3109/backlog.before.md`（2026-11-15 12:39 快照，2,057,478 B / 10,838 行）恢复基线，再追加「事故说明 + 可重建条目」（§FGS-TASKREMOVED-1116 完整重建、§INCR-1116 的 7 条 bullet 逐字保留、§L2S-RESET-PERSIST-1116 部分重建），现 2,066,778 B / 10,922 行 / 484 段。
+**不可恢复**：2026-11-15 13:13 → 11-16 10:20 的 10 次追加（31,965 B）原文丢失 —— 应用日志只记 `Wrote to … (N bytes)`、会话记录不存工具参数、debug SSE 不含正文。时间/字节/标题清单已写进文件内的事故节。
+
+**这是同类事故第三次**（文件头有 10-17、10-18 两条同款说明，且 10-18 那条本身就写着「任何写入必须 append=true / 覆写前先 cp 快照 / 收尾跑 scan_debt 比段数」——规则存在，我没执行）。
+
+**教训（写进操作习惯）**：只要目标文件是**已存在**的台账/日报/记忆文件，`file_write` 一律显式 `append=true`；要整份重写先 `cp <file> <file>.bak-$(date +%H%M)`；写完立刻 `wc -l` + `grep -c '^## §'` 与写入前对比，段数骤降即覆盖。
+
+<!-- 2026-11-16 11:59:27 -->
+## 更正：backlog 覆盖事故已零丢失恢复（同上一条）
+
+
+上一条写「31,965 字节不可恢复」是错的。**应用的镜像备份救了回来**：
+`/sdcard/Download/RikkaMinis/backup/mirror/previous/<stamp>/shared/backlog.md`（`mirror/current/` 是当前镜像，
+`previous/<stamp>/` 按轮转保留上一版，每约 10 分钟一批）。本次用的是 `20261116-114610`，2,089,443 字节，md5 `***HEX32***` 与设备端逐字节一致，已整份替换回 `shared/backlog.md`（10,933 行全在），只在末尾追加了事故说明 + 一条 P2。
+
+**搬运手法（沙箱无 `/sdcard` 视图）**：`android-shizuku-cli exec "dd if=<外部路径> bs=200000 skip=N count=1 | base64 -w0"` 逐块取回，每块 200 KB 原始 → 267 KB base64 不截断，11 块拼成完整文件，最后与设备端 `md5sum` 对一次。这条路径适用于任何「外部备份 → 沙箱」的整файл恢复。
+
+<!-- 2026-11-16 12:19:35 -->
+## 三分支核查 → 并集合并 main（2026-11-16 中午）
+
+
+**输入**：用户「检查云端上三个分支，有问题就处理，没问题就合并」。三支都是同一天三条会话的产物，基线同为 `d30ceb23`，文件集**互不重叠**（12 文件）。
+
+| 支 | 内容 | 我的核查 |
+|---|---|---|
+| `fix/composer-glass-arc-clip-1116` @`ebc6941` | 玻璃态也裁剪列表，band 深度＝composer 高度（行只在卡片后、不再裸跑到卡片两侧/下方） | 承重前提（祖先 clip 不影响 haze 采样）**用 haze 1.6.10 源码核实**：`HazeSourceNode.draw` 先 `contentLayer.record{drawContentSafely()}` 再 `drawLayer`，effect 直接采样 `area.contentLayer` → 录制不受祖先 clip 影响 ✓。几何手算复核：两种模式 `cardTop = viewport + topInset` 一致；首帧 `RectangleShape` 与 overlap=0 自洽 |
+| `fix/fgs-taskremoved-deadline-1116` @`ed94ed2` | 抽 `satisfyForegroundDeadlineThenStop()`，`onTaskRemoved` 空 session 与 safe-mode 都走它（FGS P0） | 修法正确；**另查 AOSP `ActiveServices` 源码**确认 `stopSelf` 与 `stopService` 都经 `bringDownServiceLocked` 的 `fgRequired` 检查 → 第三条路径（伴生 `stopService`）未收敛，登记 P2 |
+| `fix/voice-ime-mirror-1116` @`01e5210` | 新增 `shouldMirrorComposerText`（自写标记 + 录音守卫），四个 VM 写入点全标记 | 本地编译并跑 `ComposerMirrorPolicyTest` **6/6 OK**；四写入点逐一对齐；`selfWrite` 跨会话残留判为不可达（ChatScreen 走独立 backStackEntry → remember 重建） |
+
+**收口链路**：`integration/3br-1116` `17db3b9b` 并集 CI **#3158** 五 job 全绿（unit 9319 PASSED / 0 FAILED，本批 14 条用例逐条 PASSED，scan 115 门 0 failed，夹具按预期 skip，publish 两步 skipped＝非 main 门控生效）→ main merge **`7e793fb5`（parents=2）**，树与 integration tip 逐字节等价 → main CI **#3159** 五 job 全绿，publish **真执行**（tag 移动 + 发布两步 success，release 资产 `04:14:44Z` / 14.88 MB）→ 四支远端 DELETE 204，`ahead_by=0` 全部为 0，远端只剩 main。
+
+**事故（同一批，必须记）**：登记 P2 时 `file_write` 漏 `append` 覆盖了 `shared/backlog.md`。已用应用镜像备份 `Downloads/RikkaMinis/backup/mirror/previous/20261116-114610/shared/backlog.md`（2,089,443 B）经 shizuku 分块（200 KB ×11）取回，md5 与设备端一致 → **零丢失**；末尾补了事故说明与恢复路径。这是同类第三次，规则早就写着，是我没执行。
+
+<!-- 2026-11-16 12:52:39 -->
+## 自动跟随「退出费劲」根因与修复（2026-11-16，分支 `fix/follow-exit-inset-1116` @ `60a421cd`，CI 绿，未合并）
+
+
+**用户症状**：退出自动跟随要一直上滑到「输入框底部那块」（几乎一屏），理想是到输入框上部（卡片顶边）就退出。
+
+**根因（静态推理 + 真机日志 `sentinelVisible=true` 同时 `canScrollForward=true` 佐证）**：
+`ChatScreen` 底部判定 `isListAtBottom(last.offset+last.size vs info.viewportEndOffset, threshold)` **没有减去 LazyColumn 自己的 bottom contentPadding**（`12/20dp breathing + composerGlassOn ? composerHeightDp : ComposerArcOverlap`）。
+玻璃/arc tail 让列表 viewport 延伸到**物理屏幕底**，而最后一行合法停在 padding 高度之上 ⇒ 在真底部时 `distance = padding ≈ 卡片高` ⇒ 距离臂永远 false；唯一能答 true 的只剩 `sentinel != null` 分支，而 sentinel 会**提前一个 padding 高度进入视口**且该臂完全忽略距离 ⇒ 退出跟随需要拖过整个卡片高度。
+**副证**：玻璃 OFF 时 padding=42dp 也已 > 默认阈值 32dp，距离臂同样失效（只是轻一些）；玻璃 1115 批量改动后症状放大 = 用户「刚刚的修复没成功」。
+
+**修法**（`60a421cd`）：
+1. `isListAtBottom()` 新增必填 `contentBottomInsetPx`，比较 `viewportEnd - inset`（无 padding 调用传 0，旧几何可逐位复现）。
+2. 两个调用点（`isNearBottom` derivedState + `DragInteraction.Stop`）都把 sentinel 当**锚点**而非判据：`anchor = sentinel ?: 最低可见行`，统一走距离测试。
+3. `ChatScreen` 用**一个表达式** `listBottomPaddingDp` 同时喂 `contentPadding.bottom` 和 `listBottomInsetPx`（`SideEffect` 发布 px），几何与判据不可能漂移。
+
+**行为变化**：在底部任何真实上滑（>touch slop）即 detach（distance 变负）；`scrollNearBottomDp`（8–128，默认 32）现在只管「还没到底时是否算在底部」。
+
+**真机待验**：装 `RikkaMinis-follow-exit-60a421c.apk`，上滑到卡片顶边应立即出现回底 FAB / 停止跟随；避免"轻微触摸误退"。
+
+**CI**：run `43805468762` / #3162 @ `60a421cd` 五 job success（publish 的发布两步 skipped = main 门控生效）；单测 9323 PASSED；`ChatBottomFollowTest` 19 例 + `ComposerGlassWiringTest` 全 PASSED；scan-gate 115 门 0 failed（夹具按预期 skip）。
+
+**两条踩坑（可复用）**：
+- **`LocalDensity.current` 不能在 `SideEffect {}` 里读**（@Composable 调用）→ 必须在 composable 作用域先取 `val d = LocalDensity.current`，再在 SideEffect 里用 `with(d)`。CI 编译错 `3801:59 @Composable invocations can only happen from the context of a @Composable function`。
+- 改共享表达式会打掉**别的门**的字符串锚点：`ComposerGlassWiringTest` 断言 `") + if (composerGlassOn) composerHeightDp else ComposerArcOverlap,"` 直接红。修门前先 `grep -rn '<被删的字面量>' src/test scripts/scan`，重锚到新决策（"一个表达式同时喂 padding 和判据"）而不是换个等价字符串。
+
+<!-- 2026-11-16 13:27:22 -->
+## 跟随退出修复：方案二落地 + 合并 main + 文档（2026-11-16 下午）
+
+
+**用户放行两轮**：先「检查没问题就合并」，中途改「在分支上先处理了再一起合并」→ 要求把方案二（判据不依赖推导）一起做掉。
+
+### 方案二的实现（净删代码，非加装置）
+
+上一版 `60a421cd` 是「自算 padding → SideEffect 发布到 state → 判据读 state」。用户真机验过，有效。
+本版 `d8d818aa` 改为 **从列表读回** `LayoutInfo.afterContentPadding`：
+- 依据（Compose 源码 `LazyListMeasure.kt:126`）：`viewportEndOffset = mainAxisAvailableSize + afterContentPadding`
+  ⇒ 原始 viewportEnd 本来就比「内容合法末端」高一个 padding。
+- `LazyListLayoutInfo.afterContentPadding` 是**公开、静态**属性（文档：「applied after the last item」），
+  不是滚动中的动态量（`LazyListMeasure.kt` 里直接写进 LayoutInfo）。
+- 删除 `listBottomInsetPx` state + `SideEffect` + `bottomInsetDensity`，判据两处改为
+  `contentBottomInsetPx = info.afterContentPadding`。
+- 收益：消除首帧 inset=0 窗口；任何人改 padding，判据自动同步（不再有第二真相源）。
+
+### 收口
+
+| 阶段 | sha | 证据 |
+|---|---|---|
+| 分支 CI #3162 | `60a421cd` | 五 job success，9323 PASSED，真机用户确认 |
+| 分支 CI #3163/#? | `d8d818aa` | run `43807411363`：9323 PASSED / 115 门 0 failed / publish 两步 skipped |
+| main merge（代码） | `7fbbff15`（parents=2） | 树与分支 tip 逐字节等价 |
+| main CI #3164 | `7fbbff15` | 五 job success，**publish 真执行** → release `1.0.0+3164`（05:24:01Z，14.19 MB） |
+| docs merge | `e55fec1c`（parents=2） | 树等价 |
+
+清理：远端 `fix/follow-exit-inset-1116` DELETE 204，远端只剩 main；本地两分支删除 + `remote prune`。
+
+### 文档沉淀（用户「更新一下文档这些东西」）
+
+1. `docs/scroll-follow-simplification.md` 追加一节（+105 行）：**三个必须相等的量**（内容末端 / viewport 末端 / 眼睛看到的底部）、
+   11-14 arc 与 11-15 glass 各自破坏了哪一个、Compose 定义、修法、剩余依赖假设与升级触发。
+2. `docs/ARCHITECTURE.md` 的聊天 bullet 原来写「双条件守卫 userScrolledAway + isNearBottom」——描述的是已不存在的代码代；
+   改为 follow 状态机 + 可见底判据，并指向上面那份文档。
+3. `shared/backlog.md` 新增 `§FOLLOW-VERDICT-1116`（append，段数 493→494 校验通过）：
+   修复记录 + 剩余 P2 依赖（`afterContentPadding` 语义）+ 触发条件（Compose 主版本升级 / 列表改为在卡片上方渲染）。
+
+### 可复用
+
+- **判据的输入不该由调用方镜像**：镜像一份 padding 到 state 就是第二真相源，下次 padding 变了它不会跟着变。
+  能从布局结果**读回**的，就不要自己算。
+- **改共享表达式前先 grep 其他门的字面量锚点**（ComposerGlassWiringTest 因 padding 尾逗号断言红过一次）。
+- `git checkout main` 可能被**其他 worktree 占用**：合并要在持有 main 的那个 worktree 里做，或直接用 `commit-tree`。
+
+<!-- 2026-11-16 13:36:01 -->
+## 三件收口（2026-11-16 13:3x）
+
+
+1. **跟随退出真机验收完成**：方案二 `d8d818aa`（读回 `afterContentPadding`）装机 `1.0.0+3164`，用户真机确认通过。推导版 `60a421cd` 与读回版两条臂都过真机 ⇒ `§FOLLOW-VERDICT-1116` 关闭（该段"证据"行已补记）。
+
+2. **INCR-1116 修复 diff 复审（补做）**：此前那一轮**模型复审实际失败** —— `work/audit-1116/model-fix-review.txt` 只有 275 字节，内容是"我没有文件系统访问权限"，`fix-review.md` 从未生成。本次自己重读 `755bd775..3f944653` 生产 diff（20 文件 823+/210−）。
+   - 结论：**无 P0/P1 次生问题**。逐项验过：`isL2sBackingTarget` 判据窄（父目录名精确 `.l2s-backing` + 叶 `.l2s.`）；`normalizeLinuxPath` 解析 `..` ⇒ 挂载点守卫不可绕过、`/` 恒真、`bindMounts` key 无 trailing；`bubbleModifier` 只含 weight，移到 guard/Column 根正确；`deleteRestoringOwnerWrite` 无 FOLLOW_LINKS；`resolveUpdateTargetId` 仍有活调用（删 fallback 未留死码）；打印 `isForMainFrame` 守卫且无 `onReceivedHttpError` 路径。
+   - 发现 **1 条 P2 次生形态**：`MirrorStore.deleteLegacyRows` 改返回 `Int?` 后，null（delete 抛异常）⇒ `syncNow` 每轮 `Failed("legacy mirror migration incomplete")` —— 「永久静默错误」换成「永久阻塞」。已登记 `§MIRROR-MIGRATION-BLOCK-1116`（触发条件：状态行长期 Failed + 日志 `legacy mirror rows could not be dropped`；方案：连续 3 次/跨 24h 降级为写 v2 + warn）。
+
+3. **L2S 两条 P1 负决策固化**：用户拍板「按建议来」⇒ `§L2S-P1-DEFER-1116` 落 backlog，明确 `§L2S-RMRF-ORDER-3122` 与 `§L2S-READLINK-SMALLBUF-3122` 继续登记不排期（无数据损坏、修复半径是结构性 l2s 改动）。
+
+backlog 现状：496 段 / 11130 行；写入前已 `cp backlog.md.bak-1333`。**教训复用**：`file_write` 全部带 `append=true`，写完核段数。
+
+<!-- 2026-11-16 13:38:37 -->
+## 新提交审计 → 空集，改审三分支完整 diff（2026-11-16 13:4x）
+
+
+**事实**：`git fetch` 后 `e55fec1..origin/main` 为空 —— 今天所有代码已经全部合入并审过。所以「审新提交」没有对象。
+
+**改审今天唯一没做完整走查的代码面**：三分支合并 `d30ceb23..7e793fb5` 的 5 个生产文件（970+/63−，含测试 900 行）。
+此前 12:19 只做了「合并前核查」（承重前提 + AOSP 源码核对），没逐行走。
+
+逐行结论：**无 P0/P1 次生问题**。
+- `satisfyForegroundDeadlineThenStop()`：判据 `!foregroundStarted` 正确（`foregroundStarted` 只在正常 `startForeground` 之后置 true，line 308）；safe-mode 与 `onTaskRemoved` 两条去路共用同一出口 ✓。已知第三条（伴生 `stopService`）仍登记 P2。
+- `composerArcClip`：`remember(composerGlassOn, composerHeightPx)` 与内部使用的 `composerHeightDp`（由同一 px 换算）量纲一致；glass ON 首帧 `composerHeightPx<=0` ⇒ `RectangleShape` + overlap=0，列表本就不越界，自洽 ✓。
+- `ArcClipShape(overlap)` 的 band 用 `overlapPx` 参数化，OFF 传 `ComposerArcOverlap`（逐位复现旧几何）✓。
+- `ComposerMirrorPolicy`：三判据顺序（自写≠外部 / field 已等 / 听写中不回写）✓；lambda 延迟求值避免每 burst 调 AudioManager ✓。
+- **修复完备性机械检查**：`ChatInputArea` 内 `setInputText(` 共 4 个调用点（276/341/1900/1925），四个都前置 `selfWrite.text = …` ✓ —— 这是最容易漏的一类（同族第 N 处）。
+
+**新增一条 P3**：`§VOICE-IME-1116-BOUNDARY` —— 听写守卫会把「非 composer 入口的外部写」推迟而非丢弃（当前不可达，需第五个 `setInputText` 调用点才活）。
+
+backlog 497 段 / 11154 行。
 
 ---
 
