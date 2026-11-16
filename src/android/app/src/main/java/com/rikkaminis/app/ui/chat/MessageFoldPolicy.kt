@@ -107,3 +107,21 @@ internal fun splitMessageBody(content: String, pasteStartIndex: Int?): MessageBo
     if (paste.isEmpty()) return MessageBodySplit(content, null)
     return MessageBodySplit(prompt, paste)
 }
+
+/**
+ * [incr1116-B F-12] The folded badge's preview text.
+ *
+ * `content.take(n)` counts UTF-16 code units, so a cut at `n` can land between
+ * the halves of a surrogate pair — an emoji, or a CJK extension-B character —
+ * and the badge rendered the orphan high surrogate as `\uFFFD` right before
+ * the ellipsis. One code unit of slack is all it takes: drop a trailing high
+ * surrogate before appending the ellipsis.
+ *
+ * Pure, so the boundary is pinned by a JVM test instead of by a screenshot.
+ */
+internal fun foldPreview(content: String, previewChars: Int): String {
+    if (content.length <= previewChars) return content
+    var end = previewChars.coerceAtLeast(0)
+    if (end > 0 && content[end - 1].isHighSurrogate()) end -= 1
+    return content.substring(0, end) + "\u2026"
+}

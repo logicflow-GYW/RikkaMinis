@@ -95,6 +95,33 @@ class MessageFoldPolicyTest {
         )
     }
 
+
+    @Test
+    fun `the folded preview never cuts a surrogate pair in half`() {
+        // [incr1116-B F-12] `take(previewChars)` is UTF-16 code units: cutting
+        // between the halves of an emoji leaves an orphan high surrogate, which
+        // the Text layer renders as U+FFFD right before the ellipsis.
+        val emojiAtBoundary = "a".repeat(599) + "\uD83D\uDE00" + "b".repeat(100)
+        val preview = foldPreview(emojiAtBoundary, 600)
+        assertEquals(
+            "the cut must back off one code unit so the pair stays whole",
+            "a".repeat(599) + "\u2026",
+            preview,
+        )
+        val pairKept = foldPreview("a".repeat(598) + "\uD83D\uDE00" + "b".repeat(100), 600)
+        assertEquals("a".repeat(598) + "\uD83D\uDE00" + "\u2026", pairKept)
+    }
+
+    @Test
+    fun `the folded preview is the body itself when nothing is cut`() {
+        assertEquals("short", foldPreview("short", 600))
+        assertEquals(
+            "an ellipsis must not appear on a body that fits",
+            "\uD83D\uDE00\uD83D\uDE00",
+            foldPreview("\uD83D\uDE00\uD83D\uDE00", 600),
+        )
+    }
+
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
