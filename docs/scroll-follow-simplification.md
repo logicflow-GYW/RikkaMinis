@@ -136,3 +136,108 @@ Verification:
   reducer tests + a live scroll regression).
 - `git status` changes are confined to `ChatScreen.kt` (scroll area) +
   `ChatFollowController.kt` (untouched) + `docs/scroll-follow-simplification.md`.
+
+## 2026-11-16 · The bottom verdict anchors to the VISIBLE bottom
+
+**Symptom (device):** leaving auto-follow required dragging until the composer
+card was almost out of the way — roughly one card height of scroll — even though
+a few pixels of upward drag is what the reader intends. Reported the same day the
+composer glass worked landed.
+
+### The three quantities that must stay equal
+
+"At bottom" has been defined, since the first implementation, as **one geometric
+comparison**. That comparison is only meaningful while three different quantities
+denote the same coordinate:
+
+```
+content end        (last row + the list's own bottom content padding)
+viewport end       (LazyColumn's viewportEndOffset)
+what the eye sees  (the composer card's top edge)
+```
+
+In August all three were the same number — the list filled the screen and
+nothing was drawn over it — so the verdict could measure whichever it liked and
+be right. Every later visual feature moved one of them:
+
+| Date | Change | Quantity moved | Who did not follow |
+|---|---|---|---|
+| 09-10 | `reverseLayout = false` (forward list) | insertion direction | index semantics (`total - 2` leftover) |
+| 11-14 | composer arc occlusion (22dp tail) | **viewport height** | the verdict still assumed viewport end = content end |
+| 11-15 | glass composer (tail = the whole card) | same quantity, 6× larger | same |
+
+The 11-14/11-15 changes were **visually correct**: padding grew by exactly the
+same amount the viewport did, so the last row stayed where it was. What did not
+follow is the verdict — because the verdict reads a **third** thing
+(`viewportEndOffset`), and nothing forced it to move with the pair.
+
+### Why the verdict had no choice but "sentinel visible"
+
+Compose defines (LazyListMeasure.kt):
+
+```
+viewportEndOffset = mainAxisAvailableSize + afterContentPadding
+```
+
+So the raw viewport end sits **one padding-height past** the last legal content
+position. At the true bottom, `distance = viewportEnd - rowBottomEdge = padding`
+— i.e. ≈ one card height — which is far outside the 32dp threshold. The distance
+arm therefore answered **false at the true bottom**, and the only arm that could
+ever answer true was `sentinel != null`. That arm ignores distance entirely, and
+the sentinel (a 5dp spacer) enters the viewport a whole padding-height early.
+Net behaviour: follow stayed engaged until the sentinel itself scrolled out,
+i.e. until the reader had dragged past the card.
+
+### Fix (branch `fix/follow-exit-inset-1116`, `d8d818aa`)
+
+1. `isListAtBottom()` takes `contentBottomInsetPx` and measures against
+   `viewportEnd - inset`; callers with no padding pass `0`, reproducing the old
+   geometry exactly (all pre-existing value tests unchanged).
+2. Both call sites — the derived `isNearBottom` and the `DragInteraction.Stop`
+   handler — use the sentinel as an **anchor** for that distance test
+   (`anchor = sentinel ?: lowest visible row`), never as a verdict.
+3. The inset is **read back from the list**
+   (`LayoutInfo.afterContentPadding` — the value Compose measured and applied),
+   not recomputed by the caller. An earlier draft published the caller's padding
+   through a `SideEffect` into a state; that is a second source which goes stale
+   the next time the padding changes for a reason the verdict does not control,
+   so it was deleted rather than kept.
+
+**Source of truth for the padding is now single-ended:** `ChatScreen` writes the
+padding once (`listBottomPaddingDp`), and the verdict asks the list what it
+applied. Changing the padding can no longer leave the verdict measuring a stale
+number.
+
+### Verification
+
+- `ChatBottomFollowTest` 19 cases: three new inset cases (padding is not a gap;
+  a drag into the card area detaches immediately; padding does not stretch the
+  verdict upward) plus both source probes re-anchored to the read-back decision.
+- `ComposerGlassWiringTest::the measured composer height drives the drawing
+  extent and the bottom padding together` re-anchored: it used to assert a
+  literal expression that the refactor deleted.
+- CI run `43807411363` @ `d8d818aa`: 9323 unit tests PASSED, 115 gates 0 failed,
+  publish steps skipped (non-main).
+- Device: the reader who reported it confirmed follow now releases at the card
+  edge (build `60a421cd`, the behaviourally equivalent publisher variant).
+
+### Residual risk (registered, not fixed)
+
+The verdict now depends on **`LayoutInfo.afterContentPadding` meaning what
+Compose documents it to mean**. That is a public, documented property (not an
+implementation detail), but it is still an assumption about a dependency. The
+upgrade trigger is concrete: a Compose major-version bump, or any change that
+makes the list's visible area differ from its measured padding (e.g. rendering
+the list above the card instead of under it). If either happens, re-derive the
+verdict from a measured screen coordinate rather than from layout metadata.
+
+### Scale note
+
+291 non-merge commits in this repository touch follow / scroll / bottom
+(9.5% of 3052). That is not "a feature with many bugs" — it is one decision
+point whose input has been owned by six different call sites (glass switch,
+measured card height, floating tool bar reserve, IME, top-bar glass, font
+scale). Every one of them can move the geometry the verdict reads. The
+structural lesson: **a verdict that derives its input from someone else's layout
+parameter must either read it back from the layout result or be re-proved every
+time that parameter changes.**
