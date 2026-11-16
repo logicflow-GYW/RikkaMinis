@@ -16,11 +16,19 @@ import androidx.compose.ui.unit.dp
 /**
  * [composer-arc-1114] Geometry shared by the message list and the composer.
  *
- * ponytail: [composerArcClipShape] runs only while the [composer-glass-1115]
- * switch is OFF; ON, the clip would erase the rows the glass samples.
- * | 天花板: the band math is only exercised by the OFF path.
- * | 升级触发: glass becomes the only mode → delete [ArcClipShape] /
- * [ComposerArcBand] / [arcNotchPath] together with [ComposerArcBandTest].
+ * ponytail: the clip runs in BOTH modes — OFF with the 22dp band, ON with the
+ * composer's whole height as the band. The two differ only in how deep the
+ * list draws past its viewport ([ComposerArcOverlap] vs `composerHeightDp`).
+ * The original port dropped the clip under glass, assuming it would erase the
+ * rows the card samples; [composer-glass-1116] traced the recording path
+ * instead — `HazeSourceNode.draw` copies its own subtree into a graphics layer
+ * (`contentLayer.record { drawContentSafely() }`) and an ancestor's clip is
+ * applied later, when that layer is composited — so the clip only stops the
+ * un-blurred rows leaking, it does not starve the blur.
+ * | 天花板: the band math is covered by the OFF path plus the ON band shape
+ * test; no device test asserts what the card actually samples.
+ * | 升级触发: haze starts clipping inside `HazeSourceNode` (then this outline
+ * would starve the blur) → re-verify on device before trusting it.
  *
  * Before that file, the list and the composer were plain siblings in a Column:
  * the LazyColumn's viewport ended exactly at the composer's top edge, so the
@@ -84,16 +92,23 @@ internal data class ComposerArcBand(
             radiusPx: Float,
             horizontalInsetPx: Float,
             topInsetPx: Float,
+            // [composer-glass-1116] How far the list actually draws past its own
+            // viewport — i.e. exactly what the caller handed [composerArcTail].
+            // Defaults to the arc band itself (the pre-glass geometry), but glass
+            // ON extends the list by the whole composer height, and then the
+            // card's top edge sits that far above the clip's bottom instead of
+            // one radius.
+            overlapPx: Float = radiusPx + topInsetPx,
         ): ComposerArcBand? {
-            // The caller overlaps the list by `radius + topInset`, so this
-            // element's bottom is the deepest point of the arcs; the card's top
-            // edge sits one radius above that, i.e. exactly `topInset` below
-            // the composer column's own top edge.
-            val band = radiusPx + topInsetPx
-            // Anything no taller than the band has no list content inside it at
-            // all (the extension alone is `band` tall), so there is nothing for
-            // the arc to occlude — a notch there would cut into a card that has
-            // no content behind it, and its top edge would land above y=0.
+            // The caller overlaps the list by `overlapPx`, so this element's
+            // bottom is the deepest point of whatever is underneath; the card's
+            // top edge sits one `topInset` below the composer column's own top,
+            // which is `overlapPx` above our bottom.
+            val band = overlapPx
+            // Anything no taller than the extension has no list content inside
+            // it at all, so there is nothing for the arc to occlude — a notch
+            // there would cut into a card that has no content behind it, and its
+            // top edge would land above y=0.
             if (heightPx <= band) return null
             val notchTop = heightPx - band + topInsetPx
             if (widthPx < 2f * (horizontalInsetPx + radiusPx)) return null
@@ -149,7 +164,7 @@ internal fun Modifier.composerArcTail(overlap: Dp = ComposerArcOverlap): Modifie
  * corner notches. Applied to the element that carries [composerArcTail], so the
  * outline's own height already includes the overlap band.
  */
-private class ArcClipShape : Shape {
+private class ArcClipShape(private val overlap: Dp) : Shape {
     override fun createOutline(
         size: Size,
         layoutDirection: LayoutDirection,
@@ -161,6 +176,7 @@ private class ArcClipShape : Shape {
             radiusPx = with(density) { ComposerCardCornerRadius.toPx() },
             horizontalInsetPx = with(density) { ComposerCardHorizontalInset.toPx() },
             topInsetPx = with(density) { ComposerCardTopInset.toPx() },
+            overlapPx = with(density) { overlap.toPx() },
         ) ?: return Outline.Rectangle(Rect(0f, 0f, size.width, size.height))
         val path = Path().apply {
             addRect(Rect(0f, 0f, size.width, band.cardTop))
@@ -175,7 +191,29 @@ private class ArcClipShape : Shape {
  * Stateless, so every composition shares one instance — a fresh shape on each
  * recomposition would make `Modifier.clip` invalidate its layer every frame.
  */
-internal val composerArcClipShape: Shape = ArcClipShape()
+internal val composerArcClipShape: Shape = ArcClipShape(ComposerArcOverlap)
+
+/**
+ * [composer-glass-1116] The glass build of the same clip.
+ *
+ * With the effect ON the list draws the WHOLE composer height past its own
+ * bounds (see `composerArcTail(overlap = composerHeightDp)`), because the card
+ * can only blur rows that sit behind it. That extension is not supposed to be
+ * *seen*: the card is the only surface allowed to show those rows, blurred.
+ * Without this clip the rows are painted straight through — sharp text under a
+ * 10 % tint reads as "the message list runs to the bottom of the screen", and
+ * the 16dp gutters either side of the card have no card at all covering them.
+ *
+ * The blurred copy is unaffected: `Modifier.hazeSource` records the source
+ * node's own content into a graphics layer (`HazeSourceNode.draw` →
+ * `contentLayer.record { drawContentSafely() }`), and an ancestor's clip is
+ * applied when that layer is composited into the parent — so the card still
+ * samples the rows this outline hides.
+ *
+ * Callers MUST `remember` the instance keyed on [overlap] — a fresh Shape each
+ * recomposition invalidates the clip layer every frame.
+ */
+internal fun composerGlassArcClipShape(overlap: Dp): Shape = ArcClipShape(overlap)
 
 /**
  * The part of [notch] that lies outside its quarter disc: bounded by the two
