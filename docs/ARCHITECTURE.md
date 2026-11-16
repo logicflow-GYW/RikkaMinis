@@ -196,8 +196,11 @@
 ## 8. UI（Compose）
 
 - 聊天主屏：消息流 + 回合聚合（工具回合折叠）+ 思考折叠框 + 流式 Markdown
-  （KaTeX 数学）+ auto-follow（**双条件守卫**：userScrolledAway +
-  isNearBottom，防内容插入顶走视口）。
+  （KaTeX 数学）+ auto-follow（**显式状态机**：`followReducer` 的
+  FOLLOWING/DETACHED，只有 Send/Resume/Retry/FAB/首开这些**显式意图**能重新接上；
+  底部判定是「锚点行底边距**可见底**的距离 ≤ `scrollNearBottomDp`」，
+  可见底 = `viewportEndOffset - LayoutInfo.afterContentPadding` ——
+  详见 `docs/scroll-follow-simplification.md` 最后一节）。
 - 左滑会话抽屉（历史切换/新建/长按删除）、极简顶栏、输入栏内模型选择器。
 - 设置 15+ 屏；**7+1 语言**（en/zh/zh-rTW/de/ja/ko/ru + 默认）。
 - **单行输入框契约**：`SectionTextField` / `DialogTextField` 的单行模式在
