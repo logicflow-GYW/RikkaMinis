@@ -83,10 +83,21 @@ class MessageFoldPolicyTest {
         val src = readRepoFile(
             "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatUserMessageUI.kt",
         )
-        assertTrue(
-            "ChatUserMessageUI no longer passes collapseThresholdChars — user bubbles " +
-                "fall back to the 32K assistant floor and the paste renders in full",
-            src.contains("collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS"),
+        // [incr1116-B F-11] Count the call sites: the bubble has TWO guards (no
+        // paste boundary, and the folded paste segment). A single `contains`
+        // passed while either one lost the argument, i.e. while half the long
+        // messages still fell back to the 32K floor.
+        assertEquals(
+            "both user-bubble guards must pass the short threshold (found " +
+                Regex("collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS").findAll(src).count() +
+                ")",
+            2,
+            Regex("collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS").findAll(src).count(),
+        )
+        assertEquals(
+            "both user-bubble guards must pass the short preview length",
+            2,
+            Regex("previewChars = USER_MESSAGE_PREVIEW_CHARS").findAll(src).count(),
         )
         assertTrue(
             "ChatUserMessageUI no longer passes previewChars — the folded user badge " +
