@@ -516,6 +516,10 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
 
     val result = try {
         try {
+            // Same audited headless-session chain ScheduledTaskRunner and
+            // `minis-sessions-cli send` already use in release (both product
+            // features); sinking it out of the debug package is backlog HEADLESS-SINK.
+            // debug-ok: sub-agent dispatch reuses the existing headless-session sink
             com.rikkaminis.app.debug.ChatMutationMethods.prompt(context, params)
         } catch (ce: CancellationException) {
             // A user stop must not be reported as a sub-agent failure.
