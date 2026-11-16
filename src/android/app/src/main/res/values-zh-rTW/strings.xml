@@ -1518,6 +1518,7 @@
     <string name="chat_tuning_entry">聊天微調</string>
     <string name="chat_tuning_entry_subtitle">閱讀、捲動與輸入手感</string>
     <string name="chat_tuning_title">聊天微調</string>
+    <string name="settings_live_apply_hint">本頁每一項調整都在改動時立即生效並儲存，無需再按儲存。</string>
     <string name="chat_tuning_section_reading">閱讀與捲動</string>
     <string name="chat_tuning_scroll_threshold">觸底判定閾值</string>
     <string name="chat_tuning_scroll_threshold_desc">距離底部多近（dp）仍算「在底部」——決定自動跟隨的黏性與回到底部按鈕的出現時機。預設 32。</string>
@@ -1596,9 +1597,9 @@
     <string name="runtime_limits_heavy_gate">沙箱：重負載閘門等待</string>
     <string name="runtime_limits_heavy_gate_desc">重負載指令等待全域重負載閘門的最長時間，逾時則回報另一重負載仍在執行。</string>
     <string name="runtime_limits_sandbox_footer">這些視窗用於防止記憶體壓力，預設值與先前的固定值一致。</string>
-    <string name="runtime_limits_restore_confirm_body">本頁所有參數在編輯器裡回到出廠值。在你按儲存之前不會寫入任何內容。</string>
+    <string name="runtime_limits_restore_confirm_body">本頁所有參數將立即恢復為出廠預設值，此操作無法復原。</string>
     <string name="runtime_limits_restore_confirm_title">恢復預設？</string>
-    <string name="runtime_limits_restore_defaults_footer">恢復只改動本頁尚未儲存的數值，需要再按儲存才會生效。滑桿步長未變：部分預設值（如暫存目錄收割年齡）一旦拖過就再也拖不回來，這一列就是為此存在的。</string>
+    <string name="runtime_limits_restore_defaults_footer">恢復會立即把本頁所有參數改回內建預設值，無需再儲存。滑桿步長未變：部分預設值（如暫存目錄收割年齡）一旦拖過就再也拖不回來，這一列就是為此存在的。</string>
     <string name="runtime_limits_restore_defaults_desc">把本頁所有參數改回出廠值</string>
     <string name="runtime_limits_restore_defaults">恢復預設</string>
     <string name="runtime_limits_section_reset">重設</string>

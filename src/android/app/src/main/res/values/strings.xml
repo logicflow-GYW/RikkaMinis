@@ -1627,6 +1627,7 @@
     <string name="chat_tuning_entry">Chat Tuning</string>
     <string name="chat_tuning_entry_subtitle">Reading, scrolling and composer feel</string>
     <string name="chat_tuning_title">Chat Tuning</string>
+    <string name="settings_live_apply_hint">Every change on this page is applied and saved as soon as you make it — there is no Save button.</string>
     <string name="chat_tuning_section_reading">READING &amp; SCROLLING</string>
     <string name="chat_tuning_scroll_threshold">Bottom-stick threshold</string>
     <string name="chat_tuning_scroll_threshold_desc">How close to the bottom (dp) still counts as “at the bottom” — governs auto-follow stickiness and the jump-to-bottom button. Default 32.</string>
@@ -1705,9 +1706,9 @@
     <string name="runtime_limits_heavy_gate">Sandbox: heavy gate wait</string>
     <string name="runtime_limits_heavy_gate_desc">How long a heavy command waits for the global heavy-command gate before reporting that another heavy command is still running.</string>
     <string name="runtime_limits_sandbox_footer">These windows protect the app from memory pressure. Defaults match the previously fixed values.</string>
-    <string name="runtime_limits_restore_confirm_body">Every knob on this page goes back to its shipped value in the editor. Nothing is written until you press Save.</string>
+    <string name="runtime_limits_restore_confirm_body">Every knob on this page goes back to its shipped value immediately. This cannot be undone.</string>
     <string name="runtime_limits_restore_confirm_title">Restore defaults?</string>
-    <string name="runtime_limits_restore_defaults_footer">Restoring only changes this page\'s unsaved values — press Save to apply them. Slider steps are unchanged: some defaults (such as the tmp sweep age) are not reachable by dragging once you have moved past them, which is why this row exists.</string>
+    <string name="runtime_limits_restore_defaults_footer">Restoring rewrites every knob on this page to its built-in default immediately — there is nothing left to save. Slider steps are unchanged: some defaults (such as the tmp sweep age) are not reachable by dragging once you have moved past them, which is why this row exists.</string>
     <string name="runtime_limits_restore_defaults_desc">Put every knob on this page back to its shipped value</string>
     <string name="runtime_limits_restore_defaults">Restore defaults</string>
     <string name="runtime_limits_section_reset">Reset</string>
