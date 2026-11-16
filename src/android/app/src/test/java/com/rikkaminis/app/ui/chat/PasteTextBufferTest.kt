@@ -455,10 +455,12 @@ class PasteTextBufferTest {
         // in the user's own message.
         val (mint, stored) = sequentialStash()
         val block = "😀".repeat(601) // 1202 units → folds
-        // "a|b" so the common prefix is "a" and the common suffix is "b"; the
-        // caret after "a" is what tells the fold the run is exactly `block`.
+        // "a|b": the paste REPLACES the "|" (that is what selecting it and
+        // pasting does), so the selection the edit started from is [1, 2). With
+        // a collapsed caret the reconstruction check would see one unit too few
+        // and take the inline fallback instead of the detached arm.
         val folded = foldAt(
-            "a|b", TextRange(1), "a" + block + "b", TextRange(1 + block.length), mint,
+            "a|b", TextRange(1, 2), "a" + block + "b", TextRange(1 + block.length), mint,
         )
         assertEquals("the field keeps only what the user typed", "a|b", folded.text)
         assertEquals("the inserted run is the block and nothing else", block, stored.single())
