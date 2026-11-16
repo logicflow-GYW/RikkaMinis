@@ -211,6 +211,20 @@ internal fun ChatInputArea(
     var inputFieldValue by remember {
         mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(""))
     }
+    // [voice-ime-1116] The last text this composer wrote INTO the ViewModel.
+    // Plain holder, not Compose state: only the main thread touches it and it
+    // must not recompose anything. Declared here (before every writer) because
+    // Kotlin locals must exist before their first use — `clearComposerInput`
+    // and `commitComposerBody` below are lambdas declared above the burst
+    // state. See [shouldMirrorComposerText]: without this marker the mirror
+    // reads its own debounced lag as an external intent and rolls the field
+    // back under a dictating IME.
+    val selfWrite = remember { ComposerSelfWrite() }
+    // [voice-ime-1116] One-shot observability latch: proof that the dictation
+    // guard fired on a real device (the report that started this fix had no
+    // runtime trace, only "it stops mid-sentence"). Logged once per composer
+    // instance — a per-burst log would be the same noise it is meant to catch.
+    var dictationSkipLogged by remember { mutableStateOf(false) }
     // [Txxx-android-composer-caret] Authoritative caret written on EVERY
     // onValueChange from the IME's own TextFieldValue.selection. The old
     // fallback read inputFieldValue.selection.end — but under the long-paste
@@ -271,11 +285,11 @@ internal fun ChatInputArea(
     // consumers on purpose: a local `val` lambda cannot be referenced before
     // its declaration (the 1039-B1 lesson — the compiler rejected the
     // subscription written after its consumer).
+    // [voice-ime-1116] Clearing is a composer write too: it is recorded inside
+    // the funnel below so the mirror effect never reads the emptied ViewModel
+    // as an external intent (see [shouldMirrorComposerText]).
     val clearComposerInput: () -> Unit = {
         cancelPendingImeBurst()
-        // [voice-ime-1116] Record the write BEFORE it lands: the mirror effect
-        // runs after this frame and must see "we wrote this", not "the VM
-        // drifted".
         selfWrite.text = ""
         viewModel.setInputText("")
         inputFieldValue = androidx.compose.ui.text.input.TextFieldValue("")
@@ -420,12 +434,6 @@ internal fun ChatInputArea(
     // the flush sees the caret that belonged to that exact burst, not a
     // later-arrived one.
     var imeBurstCaret by remember { mutableStateOf(0) }
-    // [voice-ime-1116] The last text this composer wrote INTO the ViewModel.
-    // Plain holder, not Compose state: only the main thread touches it and it
-    // must not recompose anything. See [shouldMirrorComposerText] — without it
-    // the mirror reads its own debounced lag as an external intent and rolls
-    // the field back under a dictating IME.
-    val selfWrite = remember { ComposerSelfWrite() }
     // Commit the composer input-mode pref on send. Voice input was removed, so
     // every composition is now "text"; the old voiceUsedSinceClear tracker and
     // the VoiceCorrection vocabulary miner went with it.
@@ -467,6 +475,15 @@ internal fun ChatInputArea(
                 // the field after send (mirrors iOS unmarkText in AIChatView.swift
                 // updateUIView L5638).
                 composition = null,
+            )
+        } else if (!dictationSkipLogged && inputFieldValue.text != inputText &&
+            ImeDictation.recordingActive(context)
+        ) {
+            dictationSkipLogged = true
+            AppLogger.info(
+                "ComposerMirror",
+                "[voice-ime-1116] mirror suppressed during IME dictation " +
+                    "(vm=${inputText.length}ch field=${inputFieldValue.text.length}ch)",
             )
         }
     }
