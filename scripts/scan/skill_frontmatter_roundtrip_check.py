@@ -25,10 +25,14 @@ Fix contract asserted here (code anchors, comments stripped before matching):
         different, correct `0 until`)
   arm8  the SKILL.md viewer renders through the repository's single merge exit
         instead of hand-splicing a 3-key block
-  arm9  the skills-BROWSER refresh (re-download of a catalogue SKILL.md) hands
-        the parsed block to update() as well — same contract as arm4/arm8's
-        file path; without it the on-disk block shadowed the incoming one
-        (deep-audit-1030 ISSUE-02)
+  arm9  the skills-BROWSER refresh (re-download of a catalogue SKILL.md) goes
+        through the full-fat importer and NOTHING else: since 2026-11-16 the
+        frontmatter travels inside importFromGitHub (it re-parses the fetched
+        document), and the screen's own SKILL.md-only update() fallback was
+        deleted because it reported SUCCESS for a refresh whose sibling files
+        had failed to download (deep-audit-1030 ISSUE-02, incr1116-A F-06).
+        The negative half is what keeps that lie from coming back, and a failed
+        re-download must return, not fall through into the success path.
   arm10 [dv22-B6 §1042-B-07] the skills-BROWSER import path judges duplication
         BEFORE the full-fat import: it resolves the update target
         (resolveUpdateTargetId) first, hands that id to importFromGitHub as
@@ -93,9 +97,12 @@ MERGE_WALK_DOUBLED = "for (i in 0 until frontmatterEnd)"
 VIEWER_EXIT = "SkillRepository.mergeFrontmatter("
 VIEWER_SPLICE = 'appendLine("name: '
 DETAIL_PASSES = "frontmatter = parsed.frontmatter.ifBlank { null }"
-# [da1030-A ISSUE-02] the browser refresh call site
+# [da1030-A ISSUE-02 / incr1116-A F-06] the browser refresh call site. The
+# direct update() is now a NEGATIVE anchor: the refresh must not patch
+# SKILL.md alone, because that path claims success for a refresh that never
+# fetched scripts/references.
 SB_UPDATE_CALL = "skillRepository.update("
-SB_UPDATE_DISCRIMINATOR = "id = targetId"
+SB_FAILURE_BRANCH = "is SkillRepository.UpdateResult.Failure ->"
 # [dv22-B6 §1042-B-07] the browser pre-import dedup chain. Decision points,
 # not whole-line spellings: the resolution must happen before the full-fat
 # import, the import call must carry the resolved id, and the success HUD must
@@ -773,27 +780,28 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
         sb_nc = mask_comments(sb_text if sb_text is not None else "")
     except KotlinLexError as exc:
         return ["ROT: MinisSkillsBrowserScreen.kt does not lex (%s) — fail-closed" % exc]
-    call_at = sb_nc.find(SB_UPDATE_CALL)
-    call_block = call_arg_block(sb_nc, call_at) if call_at >= 0 else None
-    if call_block is None:
-        check("arm9 browser refresh call site found", False,
-              "'%s' not found in MinisSkillsBrowserScreen.kt (ROT — update this gate)"
-              % SB_UPDATE_CALL)
-    else:
-        check("arm9 browser refresh call site is the resolved-id one",
-              SB_UPDATE_DISCRIMINATOR in call_block,
-              "expected '%s' in the update() arguments (ROT — update this gate)"
-              % SB_UPDATE_DISCRIMINATOR)
-        check("arm9 browser refresh passes parsed.frontmatter",
-              DETAIL_PASSES in call_block,
-              "update() re-seeds from the on-disk SKILL.md when no block is "
-              "passed, so the incoming subagent / max_turns / allowed_tools are "
-              "shadowed by the disk copy")
-
-    # arm9 (dataflow) — the resolved-id call must carry a non-null block, not the
-    # anchor plus `.let { null }`.
-    failures.extend(provably_null_arg_problems(
-        sb_nc, call_at, "frontmatter", "arm9 browser refresh"))
+    # arm9 [incr1116-A F-06] — three criteria, all about the same decision:
+    #  · the refresh goes through importFromGitHub (the only path that also
+    #    fetches the sibling files, and the only one whose frontmatter travels
+    #    with the download);
+    #  · the screen does not patch SKILL.md directly any more — that fallback
+    #    ended in HudState.SUCCESS for a refresh whose download had failed;
+    #  · a failed download is terminal.
+    check("arm9 browser refresh goes through the full-fat importer",
+          SB_IMPORT_CALL in sb_nc,
+          "'%s' not found in MinisSkillsBrowserScreen.kt — the refresh must use "
+          "the importer that fetches the sibling files (ROT — update this gate)"
+          % SB_IMPORT_CALL)
+    check("arm9 browser refresh has no SKILL.md-only update() fallback",
+          SB_UPDATE_CALL not in sb_nc,
+          "the screen writes '%s' again: that path patches SKILL.md alone and "
+          "reports success for a refresh whose scripts/references were never "
+          "fetched (ROT — update this gate)" % SB_UPDATE_CALL)
+    check("arm9 browser refresh treats a failed download as terminal",
+          SB_FAILURE_BRANCH in sb_nc,
+          "expected '%s' in MinisSkillsBrowserScreen.kt — a Failure that falls "
+          "through re-enters the success path (ROT — update this gate)"
+          % SB_FAILURE_BRANCH)
 
     # arm10 [dv22-B6 §1042-B-07]: the browser import judges duplication BEFORE
     # the full-fat import. The dedup variable name is derived from the
@@ -835,12 +843,15 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
             seg_end = min(dedup2 if dedup2 >= 0 else len(sb_nc), import_at + 3000)
             msg_seg = sb_nc[import_at:seg_end]
             guard_at = msg_seg.find(SB_NULL_GUARD)
+            # [incr1116-A F-06] The old shape wrapped this in
+            # `if (skill != null)`; the typed outcome makes `skill` non-null by
+            # construction (a Failure returns above), so the wrapper is gone and
+            # only the DECISION is pinned: both strings, chosen by `!= null`.
             check("arm10 HUD message branches on the dedup result",
-                  SB_NULL_GUARD in msg_seg and
                   SB_MSG_UPDATED in msg_seg and SB_MSG_IMPORTED in msg_seg and
                   ("%s != null" % dedup_var) in msg_seg,
                   "expected the success HUD to pick %s / %s on '%s != null' "
-                  "inside the if (skill != null) branch (ROT — update this gate)"
+                  "(ROT — update this gate)"
                   % (SB_MSG_UPDATED, SB_MSG_IMPORTED, dedup_var))
 
     # arm10 (dataflow): the resolution must be fed the LIVE candidate set — a
@@ -1050,15 +1061,28 @@ GOOD_SB = '''package com.rikkaminis.app.ui.settings
 internal suspend fun refreshFromCatalogue(skillRepository: SkillRepository) {
     val parsed = skillRepository.parseSkillMdPublic(content)
     val matchedId = resolveUpdateTargetId(rows, slug = slugify(parsed.name), incomingName = parsed.name)
-    val skill = skillRepository.importFromGitHub(url, preferredId = matchedId)
-    if (skill != null) {
-        val messageRes =
-            if (matchedId != null) R.string.skills_browser_success_updated
-            else R.string.skills_browser_success_imported
-        onStateChange(HudState.SUCCESS, context.getString(messageRes, skill.name))
-        return
+    val result = skillRepository.importFromGitHub(url, preferredId = matchedId)
+    val skill = when (result) {
+        is SkillRepository.UpdateResult.Success -> result.skill
+        is SkillRepository.UpdateResult.PartialSuccess -> result.skill
+        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
     }
-    val targetId = resolveUpdateTargetId(rows, slugify(parsed.name), parsed.name) ?: slugify(parsed.name)
+    val messageRes =
+        if (matchedId != null) R.string.skills_browser_success_updated
+        else R.string.skills_browser_success_imported
+    onStateChange(HudState.SUCCESS, context.getString(messageRes, skill.name))
+}
+'''
+
+# The shape arm9's negative half exists for: the screen patches SKILL.md
+# itself (here as the old "last-resort refresh") and reports success for a
+# download that never fetched the sibling files.
+DIRTY_SB_FALLBACK = GOOD_SB.replace(
+    """    val messageRes =""",
+    """    val targetId = resolveUpdateTargetId(rows, slugify(parsed.name), parsed.name) ?: slugify(parsed.name)
     val updated = withContext(Dispatchers.IO) {
         skillRepository.update(
             id = targetId,
@@ -1069,22 +1093,16 @@ internal suspend fun refreshFromCatalogue(skillRepository: SkillRepository) {
             frontmatter = parsed.frontmatter.ifBlank { null },
         )
     }
-}
-'''
+    val messageRes =""")
 
-# The pre-fix shape: the refresh kept its own block and let update() re-seed
-# from the on-disk SKILL.md.
-DIRTY_SB_DROP = GOOD_SB.replace(
-    "            frontmatter = parsed.frontmatter.ifBlank { null },\n", "")
-
-# Precision control: the block is present in the file, but on a DIFFERENT
-# update() call — the criterion is scoped to the refresh site, so this is still
-# a violation (a file-wide `"frontmatter = parsed.frontmatter" in sb_nc` check
-# would have been satisfied here and gone green on the real defect).
-DIRTY_SB_BLOCK_ELSEWHERE = DIRTY_SB_DROP.replace(
-    "    val updated = withContext(Dispatchers.IO) {\n",
-    "    skillRepository.update(id = otherId, frontmatter = parsed.frontmatter.ifBlank { null })\n"
-    "    val updated = withContext(Dispatchers.IO) {\n")
+# The pre-fix lie: the failed download falls through into the success path.
+DIRTY_SB_NO_FAILURE_ARM = GOOD_SB.replace(
+    """        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+""",
+    "")
 
 # [dv22-B6 §1042-B-07] dirty variants — each flips exactly the arm10 decision
 # it names, keeping arm9 green (the update() call site is untouched).
@@ -1092,9 +1110,9 @@ DIRTY_SB_BLOCK_ELSEWHERE = DIRTY_SB_DROP.replace(
 # The pre-fix shape: import before resolve (no dedup at all).
 DIRTY_SB_NO_DEDUP = GOOD_SB.replace(
     """    val matchedId = resolveUpdateTargetId(rows, slug = slugify(parsed.name), incomingName = parsed.name)
-    val skill = skillRepository.importFromGitHub(url, preferredId = matchedId)
+    val result = skillRepository.importFromGitHub(url, preferredId = matchedId)
 """,
-    """    val skill = skillRepository.importFromGitHub(url)
+    """    val result = skillRepository.importFromGitHub(url)
 """)
 
 # Resolve happens but the id never reaches the import call — the landing id
@@ -1106,11 +1124,11 @@ DIRTY_SB_NO_PASSTHROUGH = GOOD_SB.replace(
 # The id is carried but the HUD always claims "imported" — the message lies
 # about the in-place refresh (the original symptom).
 DIRTY_SB_ALWAYS_IMPORTED = GOOD_SB.replace(
-    """        val messageRes =
-            if (matchedId != null) R.string.skills_browser_success_updated
-            else R.string.skills_browser_success_imported
+    """    val messageRes =
+        if (matchedId != null) R.string.skills_browser_success_updated
+        else R.string.skills_browser_success_imported
 """,
-    """        val messageRes = R.string.skills_browser_success_imported
+    """    val messageRes = R.string.skills_browser_success_imported
 """)
 
 # ── wide-1024 witnesses (each mechanically reproduced on the real tree:
@@ -1191,9 +1209,12 @@ def selftest():
         ("update() loses frontmatter param", DIRTY_SR_UPDATE, GOOD_SM, GOOD_SB),
         ("parseSkillMd stops returning the block", DIRTY_SR_PARSE, GOOD_SM, GOOD_SB),
         ("viewer hand-splice returns", GOOD_SR, DIRTY_SM_SPLICE, GOOD_SB),
-        ("browser refresh drops the block", GOOD_SR, GOOD_SM, DIRTY_SB_DROP),
-        ("browser block on the wrong call", GOOD_SR, GOOD_SM, DIRTY_SB_BLOCK_ELSEWHERE),
-        ("browser import without dedup", GOOD_SR, GOOD_SM, DIRTY_SB_NO_DEDUP),
+        ("browser refresh patches SKILL.md directly", GOOD_SR, GOOD_SM,
+         DIRTY_SB_FALLBACK, "no SKILL.md-only update() fallback"),
+        ("browser download failure falls through", GOOD_SR, GOOD_SM,
+         DIRTY_SB_NO_FAILURE_ARM, "failed download as terminal"),
+        ("browser import without dedup", GOOD_SR, GOOD_SM, DIRTY_SB_NO_DEDUP,
+         "resolves the update target before importing"),
         ("browser dedup id not carried", GOOD_SR, GOOD_SM, DIRTY_SB_NO_PASSTHROUGH),
         ("browser HUD always says imported", GOOD_SR, GOOD_SM, DIRTY_SB_ALWAYS_IMPORTED),
         # wide-1024 witnesses — the needle pins WHICH criterion fired, so a

@@ -163,7 +163,15 @@ class SkillBrowserUpdateTargetTest {
         val seg = code.substring(importAt, minOf(segEnd, importAt + 3000))
         val m = Regex("val\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*resolveUpdateTargetId\\(").find(code)
         val dedupVar = m!!.groupValues[1]
-        assertTrue("if (skill != null) success branch not found after the import", "if (skill != null)" in seg)
+        // [incr1116-A F-06] The `if (skill != null)` wrapper is gone: the typed
+        // outcome makes `skill` non-null by construction (a Failure returns
+        // above). What this test pins is the DECISION, not the wrapper — the
+        // failure arm being terminal is the other half, asserted here so a
+        // fall-through cannot reintroduce the "updated" lie.
+        assertTrue(
+            "a failed re-download must be terminal, not fall into the success path",
+            "is SkillRepository.UpdateResult.Failure ->" in seg,
+        )
         assertTrue(
             "the success HUD must branch: '$dedupVar != null' picks updated vs imported",
             "$dedupVar != null" in seg,
