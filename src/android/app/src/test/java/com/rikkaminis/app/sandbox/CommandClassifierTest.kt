@@ -151,6 +151,20 @@ class CommandClassifierTest {
     }
 
     @Test
+    fun `a tab separates the verb from its arguments like a space`() {
+        // [incr1116-C F-05] Regression from the prefix check this file replaced:
+        // it saw `python3` no matter what followed, while the tokenizer only
+        // splits on a space -- so `python3<TAB>x.py` came out LIGHT and rode the
+        // shared shell past the heavy gate.
+        assertEquals(CommandClass.HEAVY, classifyCommand("python3\tx.py"))
+        assertEquals(CommandClass.HEAVY, classifyCommand("python3\t-x\t/tmp/script.py"))
+        assertEquals(CommandClass.HEAVY, classifyCommand("git\tfetch"))
+        assertEquals(CommandClass.HEAVY, classifyCommand("tar\t-czf\ta.tgz\tdir"))
+        assertEquals(CommandClass.LIGHT, classifyCommand("ls\t-la"))
+        assertEquals(CommandClass.LIGHT, classifyCommand("cd\t/tmp"))
+    }
+
+    @Test
     fun `a command that is only assignments or separators is light`() {
         assertEquals(CommandClass.LIGHT, classifyCommand("A=1"))
         assertEquals(CommandClass.LIGHT, classifyCommand("&&"))

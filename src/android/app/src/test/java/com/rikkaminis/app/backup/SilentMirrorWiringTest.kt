@@ -375,7 +375,7 @@ class SilentMirrorWiringTest {
         )
         assertTrue(
             "a blocked migration must surface as a failure, not a silent no-op",
-            sync.contains("Outcome.Failed(\"legacy mirror tree could not be moved aside\")"),
+            sync.contains("Outcome.Failed(\"legacy mirror migration incomplete\")"),
         )
     }
 

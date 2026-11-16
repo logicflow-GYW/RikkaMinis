@@ -242,7 +242,17 @@ class ComposerGlassWiringTest {
         )
         assertTrue(
             "at scroll 0 there is nothing to blur, so the glass fades in only once the list can scroll up",
-            screenFlat.contains("listState.canScrollBackward"),
+            // [incr1116-B F-11] Match the GATE, not the string: `canScrollBackward`
+            // already appears five times elsewhere in ChatScreen (other scroll
+            // logic), so `contains(...)` stayed true even with this gate deleted
+            // or hard-wired to `true`. The whole declaration is the anchor.
+            screenFlat.contains(
+                "val topBarScrolled by remember { derivedStateOf { listState.canScrollBackward } }",
+            ),
+        )
+        assertTrue(
+            "the fading layer must read that gate, not a constant",
+            screenFlat.contains("targetValue = if (composerGlassOn && topBarScrolled) 1f else 0f,"),
         )
         assertTrue(
             "the bar's own density margin comes from the shared helper, not from a second knob",

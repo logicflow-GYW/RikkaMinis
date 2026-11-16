@@ -83,15 +83,53 @@ class MessageFoldPolicyTest {
         val src = readRepoFile(
             "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatUserMessageUI.kt",
         )
-        assertTrue(
-            "ChatUserMessageUI no longer passes collapseThresholdChars — user bubbles " +
-                "fall back to the 32K assistant floor and the paste renders in full",
-            src.contains("collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS"),
+        // [incr1116-B F-11] Count the call sites: the bubble has TWO guards (no
+        // paste boundary, and the folded paste segment). A single `contains`
+        // passed while either one lost the argument, i.e. while half the long
+        // messages still fell back to the 32K floor.
+        assertEquals(
+            "both user-bubble guards must pass the short threshold (found " +
+                Regex("collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS").findAll(src).count() +
+                ")",
+            2,
+            Regex("collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS").findAll(src).count(),
+        )
+        assertEquals(
+            "both user-bubble guards must pass the short preview length",
+            2,
+            Regex("previewChars = USER_MESSAGE_PREVIEW_CHARS").findAll(src).count(),
         )
         assertTrue(
             "ChatUserMessageUI no longer passes previewChars — the folded user badge " +
                 "would preview 8K chars, i.e. it barely folds anything",
             src.contains("previewChars = USER_MESSAGE_PREVIEW_CHARS"),
+        )
+    }
+
+
+    @Test
+    fun `the folded preview never cuts a surrogate pair in half`() {
+        // [incr1116-B F-12] `take(previewChars)` is UTF-16 code units: cutting
+        // between the halves of an emoji leaves an orphan high surrogate, which
+        // the Text layer renders as U+FFFD right before the ellipsis.
+        val emojiAtBoundary = "a".repeat(599) + "\uD83D\uDE00" + "b".repeat(100)
+        val preview = foldPreview(emojiAtBoundary, 600)
+        assertEquals(
+            "the cut must back off one code unit so the pair stays whole",
+            "a".repeat(599) + "\u2026",
+            preview,
+        )
+        val pairKept = foldPreview("a".repeat(598) + "\uD83D\uDE00" + "b".repeat(100), 600)
+        assertEquals("a".repeat(598) + "\uD83D\uDE00" + "\u2026", pairKept)
+    }
+
+    @Test
+    fun `the folded preview is the body itself when nothing is cut`() {
+        assertEquals("short", foldPreview("short", 600))
+        assertEquals(
+            "an ellipsis must not appear on a body that fits",
+            "\uD83D\uDE00\uD83D\uDE00",
+            foldPreview("\uD83D\uDE00\uD83D\uDE00", 600),
         )
     }
 

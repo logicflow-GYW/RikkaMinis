@@ -1456,6 +1456,13 @@ private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?
              */
             override fun onRendererGone(view: WebView?) {
                 AppLogger.warning("FilePreview", "print renderer gone for ${item.name}")
+                // [incr1116-A F-08] Only the CURRENT print may talk to the user:
+                // a superseded view's failure arrives after the slot belongs to
+                // a newer request, and its toast would read as that request's.
+                if (view != null && printWebView !== view) {
+                    destroyPrintWebView(view)
+                    return
+                }
                 // [RC-U07] Say it out loud. This branch released the WebView and
                 // logged, so the toolbar's print icon looked dead: no print
                 // panel, no message, and the user retried a button that had
@@ -1510,6 +1517,19 @@ private fun printFile(context: Context, item: FileItem, preRenderedHtml: String?
                 request: android.webkit.WebResourceRequest,
                 error: android.webkit.WebResourceError,
             ) {
+                // [incr1116-A F-08] `onReceivedError` fires for EVERY resource
+                // the page asks for, so a document with one missing relative
+                // image used to toast "print failed" and destroy the renderer
+                // before the main frame finished — the print panel never opened.
+                // Printability is a property of the document, not of its
+                // sub-resources; the main frame still reports its own failure.
+                if (!request.isForMainFrame) return
+                // A superseded view's failure must not speak for the newer
+                // request either.
+                if (printWebView !== view) {
+                    destroyPrintWebView(view)
+                    return
+                }
                 // Without this the failure path never ran onPageFinished, so the
                 // view was never released at all.
                 AppLogger.warning(

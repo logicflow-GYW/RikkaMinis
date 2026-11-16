@@ -26,7 +26,16 @@ internal object ComposerGlass {
 
     /**
      * Density percent → the alpha of the tint drawn OVER the blurred sample.
-     * 0 = the surface keeps its full colour (blur invisible), 100 = pure blur.
+     * 0 = no tint at all (pure blur), 100 = the card colour covers the blur
+     * completely (a solid card).
+     *
+     * [incr1116-B F-06] `HazeTint` is a scrim drawn ON TOP of the blurred
+     * backdrop (`HazeStyle.tints` — "the HazeTints to apply to the blurred
+     * content"; `backgroundColor` is the separate fill drawn BEHIND it), so
+     * this alpha is opacity over the blur. The first cut of this file's KDoc
+     * (and the settings copy in seven languages) described the two ends the
+     * other way round, which is what the strings now match instead: the
+     * percentage names how much card colour remains, not how much blur.
      */
     fun tintAlpha(percent: Int): Float = (percent / 100f).coerceIn(0f, 1f)
 

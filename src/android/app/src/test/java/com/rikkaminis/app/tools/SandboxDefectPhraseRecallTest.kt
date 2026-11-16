@@ -159,6 +159,16 @@ class SandboxDefectPhraseRecallTest {
     // ── the guardrails: what must NOT be relaxed ─────────────────────────────
 
     @Test
+    fun `a phrase must start on a word boundary too`() {
+        // [incr1116-C F-05] The trailing guard alone let the phrase match a
+        // longer word that merely ENDS with it: `git log` hit `digit log`,
+        // `bad pack` hit `verybad pack`. Both ends are bounded now.
+        assertFalse(matchOne("`git log`", "error: digit log returned 128"))
+        assertFalse(matchOne("`bad pack`", "(verybad pack) rejected"))
+        assertTrue("the exact phrase still hits", matchOne("`git log`", "error: git log returned 128"))
+    }
+
+    @Test
     fun `a single generic short word is still not a seed`() {
         // `data`, `wait`, `file`, `000` stay dead on purpose: with no adjacency
         // there is nothing to borrow specificity from, and these words appear in

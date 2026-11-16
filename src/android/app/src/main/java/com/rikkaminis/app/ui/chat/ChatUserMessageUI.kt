@@ -225,6 +225,17 @@ internal fun UserMessageBubble(
                             // no `pasteStart`) keeps the old single-body behaviour,
                             // folding the whole thing once it passes 4K.
                             val split = splitMessageBody(message.content, message.pasteStartIndex)
+                            // [incr1116-B F-04] `bubbleModifier` (the queued
+                            // row's `weight`) belongs on whatever is the ROW's
+                            // direct child — the guard's root or this column —
+                            // not on a Text inside it: a folded bubble is a
+                            // badge whose root is `fillMaxWidth()`, so a weight
+                            // applied two levels down measured the badge at the
+                            // full row width and left the 44dp withdraw button
+                            // with zero. That button is the only way to pull a
+                            // queued message back, so losing it on exactly the
+                            // long messages (4K+ now folds) is a functional
+                            // loss, not cosmetics.
                             if (split.paste == null) {
                                 LargeContentGuard(
                                     content = message.content,
@@ -232,12 +243,13 @@ internal fun UserMessageBubble(
                                     stableKey = "user:${message.id}",
                                     collapseThresholdChars = USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS,
                                     previewChars = USER_MESSAGE_PREVIEW_CHARS,
+                                    modifier = bubbleModifier,
                                 ) {
                                     Text(
                                         text = message.content,
                                         color = textColor,
                                         style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.5.sp * LocalMarkdownFontScale.current),
-                                        modifier = bubbleModifier
+                                        modifier = Modifier
                                             .background(bubbleBg, shape)
                                             .clip(shape)
                                             .then(dashedStroke)
@@ -246,6 +258,7 @@ internal fun UserMessageBubble(
                                 }
                             } else {
                                 Column(
+                                    modifier = bubbleModifier,
                                     horizontalAlignment = Alignment.End,
                                     verticalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
@@ -254,7 +267,7 @@ internal fun UserMessageBubble(
                                             text = split.prompt,
                                             color = textColor,
                                             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.5.sp * LocalMarkdownFontScale.current),
-                                            modifier = bubbleModifier
+                                            modifier = Modifier
                                                 .background(bubbleBg, shape)
                                                 .clip(shape)
                                                 .then(dashedStroke)
