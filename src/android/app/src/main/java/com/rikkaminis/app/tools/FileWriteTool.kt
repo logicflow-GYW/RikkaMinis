@@ -6,6 +6,10 @@ import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.AgentToolParam
 import com.rikkaminis.app.sandbox.PRootKernel
 import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 object FileWriteTool {
     const val NAME = "file_write"
@@ -19,9 +23,20 @@ object FileWriteTool {
             "content" to AgentToolParam("string", "The text content to write to the file"),
             "append" to AgentToolParam("boolean", "If true, append to existing file instead of overwriting (default: false)"),
             "create_dirs" to AgentToolParam("boolean", "If true, create parent directories if they don't exist (default: false)"),
+            "overwrite" to AgentToolParam(
+                "boolean",
+                "Required to replace an append-only file (/var/minis/shared/backlog.md, anything under " +
+                    "/var/minis/memory/). Those are ledgers and memory files: append=true is almost always " +
+                    "what you want. Set this only when you really mean to replace the whole file (default: false).",
+            ),
+            "overwrite_reason" to AgentToolParam(
+                "string",
+                "One sentence saying why an append-only file is being replaced. Required together with " +
+                    "overwrite=true; a snapshot of the current bytes is taken either way.",
+            ),
         ),
         required = listOf("tool_title", "path", "content"),
-        propertyOrdering = listOf("tool_title", "path", "content", "append", "create_dirs"),
+        propertyOrdering = listOf("tool_title", "path", "content", "append", "create_dirs", "overwrite", "overwrite_reason"),
     )
 
     fun execute(argsJson: String, sessionId: String, context: Context): ToolExecutionResult {
@@ -34,6 +49,12 @@ object FileWriteTool {
             val content = args.optString("content", "")
             val append = args.optBoolean("append", false)
             val createDirs = args.optBoolean("create_dirs", false)
+            // [fix/append-only-write-guard-1116] The escape hatch for
+            // replacing a ledger / memory file. Both are parsed here so the
+            // refusal below can tell "forgot append" from "meant to replace
+            // but did not say why".
+            val overwrite = args.optBoolean("overwrite", false)
+            val overwriteReason = args.optString("overwrite_reason", "")
 
             if (path.isBlank()) {
                 return ToolExecutionResult("Error: 'path' is required", false, toolTitle = toolTitle)
@@ -117,6 +138,44 @@ object FileWriteTool {
                 parent.mkdirs()
             }
 
+            // [fix/append-only-write-guard-1116] Two-sided guard — see
+            // AppendOnlyWriteGuard's KDoc for the six incidents behind it.
+            // 1) An append-only target (the shared backlog ledger, anything
+            //    under /var/minis/memory/) cannot be replaced by default. The
+            //    refusal text carries the rule, delivered at the only moment a
+            //    writer is actually reading.
+            // 2) Every whole-file replace that hits such a target — or shrinks
+            //    a >=8 KiB file by more than half — leaves a sibling snapshot
+            //    first, so a mistake that still gets through costs a copy.
+            val existed = file.exists()
+            val currentBytes = if (existed) file.length() else 0L
+            val incomingBytes = effectiveContent.toByteArray(Charsets.UTF_8).size.toLong()
+            val appendOnly = AppendOnlyWriteGuard.isAppendOnly(path)
+            when (
+                val decision = AppendOnlyWriteGuard.decide(
+                    path = path,
+                    append = append,
+                    overwrite = overwrite,
+                    overwriteReason = overwriteReason,
+                    exists = existed,
+                    currentBytes = currentBytes,
+                    incomingBytes = incomingBytes,
+                )
+            ) {
+                is AppendOnlyWriteGuard.Decision.Refuse -> return ToolExecutionResult(
+                    AppendOnlyWriteGuard.refusalMessage(path, decision),
+                    false,
+                    toolTitle = toolTitle,
+                )
+                AppendOnlyWriteGuard.Decision.Allow -> Unit
+            }
+            val snapshotNote =
+                if (WriteSnapshotPlan.shouldSnapshot(append, appendOnly, existed, currentBytes, incomingBytes)) {
+                    takeSnapshot(file, path, currentBytes) ?: ""
+                } else {
+                    ""
+                }
+
             if (append) {
                 file.appendText(effectiveContent)
             } else {
@@ -160,7 +219,7 @@ object FileWriteTool {
                     "content. The bytes written were recovered from $it. If that is not what you " +
                     "intended, re-issue the call with the real content."
             } ?: ""
-            ToolExecutionResult("Wrote to $path ($bytes bytes)$healedNote", true, toolTitle = toolTitle)
+            ToolExecutionResult("Wrote to $path ($bytes bytes)$healedNote$snapshotNote", true, toolTitle = toolTitle)
         } catch (e: Exception) {
             // [fix/audit-0917-b9] toolTitle — every other return path (L37,
             // L59, L75, L85, L102, L158) passes it, so an exception after
@@ -169,4 +228,32 @@ object FileWriteTool {
             ToolExecutionResult("Error writing file: ${e.message}", false, toolTitle = toolTitle)
         }
     }
+
+    /**
+     * [fix/append-only-write-guard-1116] Sibling `.bak-<stamp>` copy written
+     * before a whole-file replace. Returns the note appended to the tool
+     * output, or null when the copy failed.
+     *
+     * Snapshot failure never blocks the write. The refusal guard above already
+     * made the destructive path explicit; turning "disk full" into "your write
+     * failed" would add a new failure mode to the common case in exchange for
+     * protecting a case that is already rare.
+     */
+    private fun takeSnapshot(file: File, displayPath: String, bytes: Long): String? =
+        try {
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(Date())
+            val dest = File(file.parentFile, file.name + ".bak-" + stamp)
+            file.copyTo(dest, overwrite = false)
+            com.rikkaminis.app.logging.AppLogger.warning(
+                "FileWrite",
+                "whole-file replace of $displayPath ($bytes bytes) — snapshot at ${dest.path}",
+            )
+            "\nSnapshot of the previous $bytes bytes: ${dest.path}"
+        } catch (t: Throwable) {
+            com.rikkaminis.app.logging.AppLogger.warning(
+                "FileWrite",
+                "could not snapshot $displayPath before replace: ${t.message}",
+            )
+            null
+        }
 }
