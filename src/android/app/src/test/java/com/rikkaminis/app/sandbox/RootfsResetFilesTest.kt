@@ -101,4 +101,25 @@ class RootfsResetFilesTest {
             isL2sBackingTarget("/rootfs${sep}.l2s-backing${sep}.l2s.a0001.0002"),
         )
     }
+
+    @Test
+    fun `a read-only directory does not abort the reset`() {
+        // [incr1116-CD F-04] Trees that came out of an archive with `0555` were
+        // a permanent reset failure: `Files.delete` throws where
+        // `deleteRecursively()` returned false, the walk stopped half-way and the
+        // install failed -- and nothing ever makes that directory writable again.
+        // The walk now restores the owner-write bit and keeps going.
+        val rootfs = temp.newFolder("rootfs-ro")
+        val locked = File(rootfs, "rodir").apply { mkdirs() }
+        File(locked, "payload.txt").writeText("x")
+        locked.setWritable(false, false)
+        try {
+            clearRootfsForReinstall(rootfs)
+            assertFalse("the read-only tree must still be gone", File(rootfs, "rodir").exists())
+            assertTrue("the walk must finish and leave the root itself", rootfs.isDirectory)
+        } finally {
+            locked.setWritable(true, true)
+            File(locked, "payload.txt").setWritable(true, true)
+        }
+    }
 }
