@@ -123,6 +123,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -880,6 +881,27 @@ fun ChatScreen(
     // state (≈300 lines up) put it before `tuning` exists — a compile error the
     // first CI run caught (`Unresolved reference 'tuning'`).
     val composerGlassOn = tuning.composerGlassEnabled
+
+    // [composer-glass-1116] One clip outline, shared by both modes and
+    // remembered so `Modifier.clip` keeps its layer across recompositions.
+    // Its depth IS the tail depth: [ComposerArcOverlap] with the glass off, the
+    // measured composer height with it on. That pairing is the whole point —
+    // the outline is the inverse of exactly what the list drew past its
+    // viewport, so a mismatch cannot silently produce either a dead effect
+    // (clip deeper than the tail) or content bleeding around the card.
+    val composerArcClip = remember(composerGlassOn, composerHeightPx) {
+        when {
+            // OFF — the pre-glass arc band (22dp).
+            !composerGlassOn -> composerArcClipShape
+            // Glass ON, first frame: `onSizeChanged` has not reported yet, so
+            // the list was handed ZERO overlap and does not actually draw past
+            // its viewport. Clipping to any band here would cut 22dp off a
+            // viewport that does not overflow — clip nothing for that one frame
+            // and let the measured pass install the real outline.
+            composerHeightPx <= 0 -> RectangleShape
+            else -> composerGlassArcClipShape(composerHeightDp)
+        }
+    }
 
     // [composer-glass-1115] Top-bar glass: same switch, same HazeState, same
     // source as the composer card — the message list. Two things differ, both
@@ -3694,16 +3716,20 @@ fun ChatScreen(
                 // would drop them ComposerArcOverlap down under the card.
                 AlwaysStretchOverscrollBox(
                     modifier = Modifier
-                        // [composer-glass-1115] The extent and the clip depend on
-                        // the Chat Tuning switch:
+                        // [composer-glass-1115 / composer-glass-1116] The
+                        // extent still depends on the Chat Tuning switch, the
+                        // clip does not:
                         //  • glass ON  — the list runs the WHOLE composer height
-                        //    underneath the card and is NOT clipped there, so the
-                        //    rows the card covers become the blur source.
+                        //    underneath the card, because those rows are what the
+                        //    card blurs. The clip stays on with that depth as its
+                        //    band, so the rows are only ever seen *through* the
+                        //    card, never painted sharp beside or below it.
                         //  • glass OFF — the original composer-arc-1114 shape:
                         //    22dp of extra drawing room plus a clip that reveals
                         //    only the two corner notches.
-                        // Clipping under glass ON would remove exactly the pixels
-                        // the card samples, i.e. a flat tint instead of a blur.
+                        // The blur is unaffected by the clip: haze records the
+                        // list's own subtree into a layer and the outline is
+                        // applied at composite time (see ComposerArcOcclusion).
                         // [composer-glass-1115] Upward first (outermost): the
                         // list has to reach the screen top before it can run
                         // under the top bar. Its own content padding grows by
@@ -3712,10 +3738,20 @@ fun ChatScreen(
                         .composerArcTail(
                             overlap = if (composerGlassOn) composerHeightDp else ComposerArcOverlap,
                         )
-                        .then(
-                            if (composerGlassOn) Modifier
-                            else Modifier.clip(composerArcClipShape),
-                        ),
+                        // [composer-glass-1116] The clip stays on in BOTH modes;
+                        // only its depth follows the tail (see composerArcClip).
+                        //
+                        // The original port dropped it under glass so the card
+                        // would have rows to blur. It does have them either way:
+                        // `Modifier.hazeSource` copies the list's own subtree
+                        // into a graphics layer and an ancestor clip is applied
+                        // later, when that layer is composited — so the card
+                        // still samples the rows this outline hides. What the
+                        // outline buys is the reverse: without it those rows are
+                        // painted straight through the card, and a 10 % tint
+                        // leaves sharp text visible under the glass while the
+                        // 16dp gutters either side of the card show it raw.
+                        .clip(composerArcClip),
                 ) { sharedEffect ->
                 // [render-churn-1] Tool-pill progress flow (LocalToolProgressById)
                 // provided ONCE with a stable reference — the flow instance

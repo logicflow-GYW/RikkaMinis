@@ -83,4 +83,45 @@ class ComposerArcBandTest {
         assertEquals(22f, ComposerArcOverlap.value, 0f)
         assertEquals(ComposerCardCornerRadius + ComposerCardTopInset, ComposerArcOverlap)
     }
+
+    // ── [composer-glass-1116] the clip is shared by both modes ──────────────
+
+    /** Glass ON: the list draws the whole composer height, not 22dp. */
+    private fun glassBand(
+        heightPx: Float = 500f,
+        overlapPx: Float = 300f,
+    ): ComposerArcBand? = ComposerArcBand.of(
+        widthPx = 1000f,
+        heightPx = heightPx,
+        radiusPx = 40f,
+        horizontalInsetPx = 32f,
+        topInsetPx = 4f,
+        overlapPx = overlapPx,
+    )
+
+    @Test
+    fun theGlassOverlapLiftsTheCardTopByExactlyTheExtraDepth() {
+        // The clip is 300px taller than the text viewport on purpose, so the
+        // card's top edge is 300px above the clip's bottom (plus the 4px the
+        // composer column pads above the card): 500 - 300 + 4 = 204.
+        // With the old fixed `radius + topInset` band this would have been 460,
+        // i.e. a notch 256px below the real card edge — content leaking for the
+        // whole height of the card.
+        assertEquals(204f, glassBand()!!.cardTop, 0f)
+    }
+
+    @Test
+    fun theGlassNotchKeepsTheSameCornerSquareSize() {
+        val notch = glassBand()!!.leftNotch
+        assertEquals(204f, notch.top, 0f)
+        assertEquals(244f, notch.bottom, 0f)
+        assertEquals(40f, notch.height, 0f)
+    }
+
+    @Test
+    fun anOverlapTallerThanTheClipHasNoBandAtAll() {
+        // Same guard as the default band: nothing to occlude means no outline.
+        assertNull(glassBand(heightPx = 300f, overlapPx = 300f))
+        assertNull(glassBand(heightPx = 100f, overlapPx = 300f))
+    }
 }

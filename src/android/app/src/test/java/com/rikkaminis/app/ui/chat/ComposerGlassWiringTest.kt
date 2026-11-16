@@ -17,9 +17,9 @@ import java.io.File
  *   3. `hazeEffect(state = …, style = …)` on the card, INSIDE its rounded clip.
  *   4. the list's drawing extent (`composerArcTail`) and its bottom padding must
  *      move together, or the last row slides behind the card.
- *   5. the Chat Tuning switch must gate ALL FOUR of the above: a switch that
- *      only greys out the card while the list still records is a per-frame cost
- *      for nothing; a switch that leaves the arc clip on is a flat tint.
+ *   5. the Chat Tuning switch must gate the recording and the drawing extent: a
+ *      switch that only greys out the card while the list still records is a
+ *      per-frame cost for nothing.
  *
  * Break any link and the app still compiles, still runs and still renders a
  * card — it just isn't glass. That is exactly the class of defect this codebase
@@ -27,9 +27,11 @@ import java.io.File
  * `ShareDirPruneWiringTest`): the real behaviour needs a device + a GPU, the
  * WIRING does not.
  *
- * The load-bearing assertion is #5's clip arm — re-adding the arc clip
- * unconditionally would clip away precisely the rows the glass samples while
- * every other assertion here still passes.
+ * [composer-glass-1116] This file used to carry "re-adding the arc clip is a
+ * flat tint" as its load-bearing assertion. That premise was wrong — haze
+ * records the source node's own subtree and clips at composite time — and the
+ * clip is now what keeps the rows from being painted sharp beside and below the
+ * card. See `the arc clip runs in both modes with the depth of the list tail`.
  */
 class ComposerGlassWiringTest {
 
@@ -101,16 +103,53 @@ class ComposerGlassWiringTest {
         )
     }
 
+    /**
+     * [composer-glass-1116] The arc clip is now in BOTH modes; only its depth
+     * follows the tail.
+     *
+     * The pre-1116 shape asserted the opposite ("an unconditional clip would
+     * make the effect look dead"). That was a guess about haze's recording
+     * order, and it was wrong: `HazeSourceNode.draw` copies its own subtree
+     * into a graphics layer (`contentLayer.record { drawContentSafely() }`) and
+     * an ancestor's clip is applied later, at composite time — so the card
+     * still samples the rows the outline hides. Re-adding the clip is what
+     * stops those rows being painted sharp beside and below the card.
+     *
+     * What this test now guards: the outline must be the inverse of the tail
+     * (same depth) and must be remembered, otherwise either the effect dies
+     * (clip deeper than the tail) or the rows leak (no clip at all).
+     */
     @Test
-    fun `the arc clip is the OFF branch, never an unconditional step`() {
-        val onBranch = screenFlat.indexOf("if (composerGlassOn) Modifier else Modifier.clip(composerArcClipShape)")
+    fun `the arc clip runs in both modes with the depth of the list tail`() {
         assertTrue(
-            "composerArcClipShape clips exactly the rows the glass samples — it may only run with the effect OFF",
-            onBranch >= 0,
+            "the list must be clipped unconditionally — glass ON still draws the whole composer " +
+                "height past its viewport, and those rows may only be seen through the card",
+            screenFlat.contains(".composerArcTail( overlap = if (composerGlassOn) composerHeightDp else ComposerArcOverlap, )")
+                && screenFlat.contains(".clip(composerArcClip)"),
+        )
+        assertTrue(
+            "the glass branch must build its outline with the SAME depth the tail just used",
+            screenFlat.contains("else -> composerGlassArcClipShape(composerHeightDp)"),
+        )
+        assertTrue(
+            "glass OFF must fall back to the shared 22dp instance",
+            screenFlat.contains("!composerGlassOn -> composerArcClipShape"),
+        )
+        assertTrue(
+            "the un-measured frame must clip NOTHING — the list was handed zero overlap, so any " +
+                "band there would cut a viewport that does not overflow",
+            screenFlat.contains("composerHeightPx <= 0 -> RectangleShape"),
+        )
+        assertTrue(
+            "the outline must be remembered on the measured height — a fresh Shape per " +
+                "recomposition invalidates the clip layer every frame, and a stale one keeps " +
+                "the old depth after the composer grows",
+            screenFlat.contains("val composerArcClip = remember(composerGlassOn, composerHeightPx)"),
         )
         assertFalse(
-            "an unconditional .clip(composerArcClipShape) in the chain would make the effect look dead",
-            screenFlat.contains(".composerArcTail( overlap = if (composerGlassOn) composerHeightDp else ComposerArcOverlap, ) .clip("),
+            "the conditional-clip branch must not come back: skipping the clip under glass is " +
+                "what painted message rows straight through the card",
+            screenFlat.contains("if (composerGlassOn) Modifier else Modifier.clip("),
         )
     }
 
