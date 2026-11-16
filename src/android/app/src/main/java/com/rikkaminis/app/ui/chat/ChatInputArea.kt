@@ -273,6 +273,10 @@ internal fun ChatInputArea(
     // subscription written after its consumer).
     val clearComposerInput: () -> Unit = {
         cancelPendingImeBurst()
+        // [voice-ime-1116] Record the write BEFORE it lands: the mirror effect
+        // runs after this frame and must see "we wrote this", not "the VM
+        // drifted".
+        selfWrite.text = ""
         viewModel.setInputText("")
         inputFieldValue = androidx.compose.ui.text.input.TextFieldValue("")
         lastTrueCaretEnd = 0
@@ -338,6 +342,7 @@ internal fun ChatInputArea(
             lastTrueCaretEnd = lastTrueCaretEnd,
             length = text.length,
         )
+        selfWrite.text = text
         viewModel.setInputText(text)
         inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(
             text = text,
@@ -415,6 +420,12 @@ internal fun ChatInputArea(
     // the flush sees the caret that belonged to that exact burst, not a
     // later-arrived one.
     var imeBurstCaret by remember { mutableStateOf(0) }
+    // [voice-ime-1116] The last text this composer wrote INTO the ViewModel.
+    // Plain holder, not Compose state: only the main thread touches it and it
+    // must not recompose anything. See [shouldMirrorComposerText] — without it
+    // the mirror reads its own debounced lag as an external intent and rolls
+    // the field back under a dictating IME.
+    val selfWrite = remember { ComposerSelfWrite() }
     // Commit the composer input-mode pref on send. Voice input was removed, so
     // every composition is now "text"; the old voiceUsedSinceClear tracker and
     // the VoiceCorrection vocabulary miner went with it.
@@ -422,7 +433,13 @@ internal fun ChatInputArea(
         ComposerInputModePrefs.save(context, voice = false)
     }
     androidx.compose.runtime.LaunchedEffect(inputText) {
-        if (inputFieldValue.text != inputText) {
+        if (shouldMirrorComposerText(
+                vmText = inputText,
+                selfWrittenText = selfWrite.text,
+                fieldText = inputFieldValue.text,
+                imeDictating = { ImeDictation.recordingActive(context) },
+            )
+        ) {
             // [Txxx-android-composer-caret-jump] Honor a one-shot caret
             // override from the slash flow (prepend "/ " → caret 1; insert
             // "/<skill> " → caret after the prefix). Read-and-clear so it
@@ -1897,6 +1914,7 @@ internal fun ChatInputArea(
                                             if (flushed != null &&
                                                 shouldCommitImeBurst(flushed, inputText, inputFieldValue.text)
                                             ) {
+                                                selfWrite.text = flushed
                                                 viewModel.setInputText(flushed)
                                                 viewModel.updateSlashMenuState(flushed)
                                                 // [fix/voice-ime-mention-scan] Sweep the
@@ -1922,6 +1940,7 @@ internal fun ChatInputArea(
                                         // be rejected later or (worse) publish a
                                         // zombie pending copy that `New Chat` reads.
                                         cancelPendingImeBurst()
+                                        selfWrite.text = tfv.text
                                         viewModel.setInputText(tfv.text)
                                         // [dv25-B08] No burst pending any more — the
                                         // committed string IS the newest copy.
