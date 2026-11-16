@@ -99,13 +99,14 @@ internal fun LargeContentBadge(
     stableKey: String,
     onExpand: () -> Unit,
     previewChars: Int = LARGE_MESSAGE_PREVIEW_CHARS,
+    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val sizeLabel = remember(content.length) { formatByteSize(content.length) }
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
             .background(
@@ -123,9 +124,9 @@ internal fun LargeContentBadge(
         // Preview lines — plain Text, not markdown. Capped at [previewChars]
         // (the assistant default is 8K; USER bubbles pass a much shorter one —
         // see MessageFoldPolicy.kt).
-        val preview = remember(content, previewChars) {
-            content.take(previewChars) + if (content.length > previewChars) "…" else ""
-        }
+        // [incr1116-B F-12] `take(previewChars)` alone can bisect a surrogate
+        // pair; foldPreview keeps the cut on a code-point boundary.
+        val preview = remember(content, previewChars) { foldPreview(content, previewChars) }
         Text(
             text = preview,
             style = MaterialTheme.typography.bodyMedium,
@@ -219,6 +220,14 @@ internal fun LargeContentBadge(
  *                    [USER_MESSAGE_COLLAPSE_THRESHOLD_CHARS] so an ordinary
  *                    long paste is readable as "folded", not as a wall of text.
  * @param previewChars  How many leading chars the folded badge shows.
+ * @param modifier    Applied to BOTH roots (the badge and the expanded body).
+ *                    A queued bubble needs it: the guard sits in a Row next to
+ *                    the 44dp withdraw button and carries `RowScope.weight`
+ *                    there ([incr1116-B F-04]). Without it the badge's
+ *                    `fillMaxWidth()` measured at the full row width and the
+ *                    button was laid out with zero — present in the tree,
+ *                    unreachable on screen, for exactly the long messages the
+ *                    button exists to withdraw.
  * @param renderer    The actual body composable; called when content is small
  *                    or after user explicitly expands.
  */
@@ -229,6 +238,7 @@ internal fun LargeContentGuard(
     stableKey: String,
     collapseThresholdChars: Int = LARGE_MESSAGE_THRESHOLD_CHARS,
     previewChars: Int = LARGE_MESSAGE_PREVIEW_CHARS,
+    modifier: Modifier = Modifier,
     renderer: @Composable () -> Unit,
 ) {
     // [T-android-streaming-regex-hang] Proactive streaming degrade. While a
@@ -363,7 +373,7 @@ internal fun LargeContentGuard(
         // `rememberSaveable`, so it survived scrolling away and back too). The
         // collapse control lives here rather than on the renderer because only
         // the guard knows the body is foldable at all.
-        Column(Modifier.fillMaxWidth()) {
+        Column(modifier.fillMaxWidth()) {
             renderer()
             CollapseBackRow(
                 stableKey = stableKey,
@@ -377,6 +387,10 @@ internal fun LargeContentGuard(
             stableKey = stableKey,
             onExpand = { expanded = true },
             previewChars = previewChars,
+            // The guard's `modifier` is the row-level sizing (a `weight` for
+            // queued bubbles); it has to land on the badge's root, not on the
+            // text inside it, or the row measures the badge at full width.
+            modifier = modifier,
         )
     }
 }
