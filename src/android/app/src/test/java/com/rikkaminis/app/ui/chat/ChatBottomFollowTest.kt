@@ -39,30 +39,30 @@ class ChatBottomFollowTest {
     @Test
     fun `a row whose bottom edge is flush with the viewport end is at bottom`() {
         // Row spans 900..1000, viewport ends at 1000 → distance 0.
-        assertTrue(isListAtBottom(lastVisibleOffsetPx = 900, lastVisibleSizePx = 100, viewportEndOffsetPx = viewportEnd, thresholdPx = 48))
+        assertTrue(isListAtBottom(lastVisibleOffsetPx = 900, lastVisibleSizePx = 100, viewportEndOffsetPx = viewportEnd, contentBottomInsetPx = 0, thresholdPx = 48))
     }
 
     @Test
     fun `a row whose bottom edge is within the threshold is at bottom`() {
         // Bottom edge 20px short of the viewport end, threshold 48.
-        assertTrue(isListAtBottom(880, 100, viewportEnd, 48))
+        assertTrue(isListAtBottom(880, 100, viewportEnd, 0, 48))
     }
 
     @Test
     fun `the threshold is inclusive`() {
         // Bottom edge 48px short of the viewport end, threshold 48.
-        assertTrue(isListAtBottom(852, 100, viewportEnd, 48))
+        assertTrue(isListAtBottom(852, 100, viewportEnd, 0, 48))
     }
 
     @Test
     fun `one pixel past the threshold is not at bottom`() {
         // Bottom edge 49px short of the viewport end → the gap is real.
-        assertFalse(isListAtBottom(851, 100, viewportEnd, 48))
+        assertFalse(isListAtBottom(851, 100, viewportEnd, 0, 48))
     }
 
     @Test
     fun `content still below the viewport end is not at bottom`() {
-        assertFalse(isListAtBottom(500, 100, viewportEnd, 48))
+        assertFalse(isListAtBottom(500, 100, viewportEnd, 0, 48))
     }
 
     @Test
@@ -70,19 +70,19 @@ class ChatBottomFollowTest {
         // The old formula's false positive: the row is 5000px tall, its top is
         // at the viewport top, so the reader is at the START of it — nowhere
         // near the list's end.
-        assertFalse(isListAtBottom(0, 5000, viewportEnd, 48))
+        assertFalse(isListAtBottom(0, 5000, viewportEnd, 0, 48))
     }
 
     @Test
     fun `a row bottom already scrolled past the viewport end is never at bottom`() {
         // Bottom edge 1050 > viewport end 1000 → overscrolled past the end;
         // even a huge threshold must not claim "at bottom".
-        assertFalse(isListAtBottom(950, 100, viewportEnd, 10_000))
+        assertFalse(isListAtBottom(950, 100, viewportEnd, 0, 10_000))
     }
 
     @Test
     fun `a short list fully on screen is at bottom`() {
-        assertTrue(isListAtBottom(0, 1000, viewportEnd, 48))
+        assertTrue(isListAtBottom(0, 1000, viewportEnd, 0, 48))
     }
 
     @Test
@@ -90,8 +90,34 @@ class ChatBottomFollowTest {
         // Same geometry (bottom edge 980, viewport end 1000): threshold 0 must
         // say "not at bottom", threshold 48 must say "at bottom". This is the
         // pair the pre-fix code failed — the knob was captured but never read.
-        assertFalse(isListAtBottom(880, 100, viewportEnd, 0))
-        assertTrue(isListAtBottom(880, 100, viewportEnd, 48))
+        assertFalse(isListAtBottom(880, 100, viewportEnd, 0, 0))
+        assertTrue(isListAtBottom(880, 100, viewportEnd, 0, 48))
+    }
+
+    @Test
+    fun `the list's own bottom padding is not read as a gap to the bottom`() {
+        // [fix/follow-exit-inset-1116] Real geometry with the composer effect on:
+        // viewport ends at 2400, the list's bottom content padding is 420 (20dp
+        // breathing + the measured card height), so a row at rest has its bottom
+        // edge at 1980. Pre-1116 this compared against the raw viewport end and
+        // read FALSE at the true bottom — the sentinel arm was then the only way
+        // to answer "yes", and that arm ignores distance.
+        assertFalse("pre-1116 geometry: a true bottom read as away", isListAtBottom(1780, 200, 2400, 0, 32))
+        assertTrue("with the inset the same geometry reads as bottom", isListAtBottom(1780, 200, 2400, 420, 32))
+    }
+
+    @Test
+    fun `a drag into the card area detaches immediately`() {
+        // Same geometry, the row pushed 20px below the visible bottom → the
+        // reader has started scrolling away; follow must release right there
+        // instead of after a full card height.
+        assertFalse(isListAtBottom(1800, 200, 2400, 420, 32))
+    }
+
+    @Test
+    fun `padding does not stretch the verdict upward`() {
+        // Content ends 200px above the visible bottom — still scrolling distance.
+        assertFalse(isListAtBottom(1580, 200, 2400, 420, 32))
     }
 
     // ── legacy control: the reversed formula, replicated locally ────────────
@@ -111,7 +137,7 @@ class ChatBottomFollowTest {
         // bottom edge flush with the viewport end → distance 0).
         assertFalse(legacyReversedVerdict(15, 20, 0, 48))
         // …while the shared verdict reads the same geometry correctly.
-        assertTrue(isListAtBottom(950, 50, viewportEnd, 48))
+        assertTrue(isListAtBottom(950, 50, viewportEnd, 0, 48))
     }
 
     @Test
@@ -119,7 +145,7 @@ class ChatBottomFollowTest {
         // Row 19 (the last of 20) is tall and its top is at the viewport top.
         assertTrue(legacyReversedVerdict(19, 20, 0, 48))
         // The shared verdict correctly says the reader is mid-item.
-        assertFalse(isListAtBottom(0, 5000, viewportEnd, 48))
+        assertFalse(isListAtBottom(0, 5000, viewportEnd, 0, 48))
     }
 
     // ── source contract ────────────────────────────────────────────────────
@@ -137,13 +163,33 @@ class ChatBottomFollowTest {
     @Test
     fun `both consumers call the shared verdict`() {
         val src = readRepoFile(sourcePath)
-        assertTrue(
-            "the isNearBottom fallback arm must use the shared verdict",
-            src.contains("isListAtBottom(last.offset, last.size, viewportEnd, nearBottomThresholdPx.toInt())"),
+        assertEquals(
+            "both verdict sites must read the inset back from the list",
+            2,
+            Regex("""contentBottomInsetPx = info\.afterContentPadding,""").findAll(src).count(),
         )
         assertTrue(
-            "the drag-stop verdict must use the shared verdict",
-            src.contains("last.offset, last.size, info.viewportEndOffset, nearBottomThresholdPx.toInt(),"),
+            "the content padding must be written in exactly one place",
+            src.contains("bottom = listBottomPaddingDp,"),
+        )
+        assertFalse(
+            "and the verdict must NOT mirror it through a second state — a published " +
+                "copy is the drift this round removed",
+            src.contains("listBottomInsetPx"),
+        )
+    }
+
+    @Test
+    fun `a visible sentinel is not an unconditional at-bottom`() {
+        // [fix/follow-exit-inset-1116] The pre-fix body was
+        // `val result = if (sentinel != null) { true } else { … }`: with a bottom
+        // content padding the sentinel enters the viewport one padding-height
+        // early, so that arm reported "at bottom" the whole way down and held
+        // follow engaged until the reader had dragged past the whole card.
+        val src = readRepoFile(sourcePath)
+        assertFalse(
+            "the sentinel must be an ANCHOR for the distance test, not a verdict",
+            src.contains("val result = if (sentinel != null) {"),
         )
     }
 

@@ -951,31 +951,52 @@ fun ChatScreen(
     // emission expands into N tool / text flat items, firstVisible
     // drifts by N in one frame (logcat showed jumps of 5+ on a
     // multi-tool turn). Anchor on the rendered set instead.
+    // [fix/follow-exit-inset-1116] The bottom verdict anchors to the VISIBLE
+    // bottom — the composer card's top edge — not to the layout viewport end.
+    // Under the arc/glass tail the viewport extends to the physical screen bottom
+    // while the last row legitimately rests `padding.bottom` above it, so a
+    // comparison against the raw viewport end said "not at bottom" AT the true
+    // bottom. That left the sentinel-visible arm as the only one that could ever
+    // answer yes; that arm ignores distance, and the sentinel enters the viewport
+    // a whole padding-height early, so leaving follow needed a full card height
+    // of scroll (field report 2026-11-16).
+    //
+    // The inset is READ FROM THE LIST, not recomputed here:
+    // `LazyListLayoutInfo.afterContentPadding` is the value Compose measured and
+    // applied, and `viewportEndOffset` is defined as
+    // `mainAxisAvailableSize + afterContentPadding` (LazyListMeasure.kt), i.e.
+    // the viewport end already includes it. Subtracting it yields the coordinate
+    // where content is actually allowed to end. Deriving the number from the
+    // layout call site instead would be a second source that silently drifts the
+    // next time the padding changes for a reason this file does not control.
     val isNearBottom = remember(listState, nearBottomThresholdPx) {
         derivedStateOf {
-            // [forward-stable] Forward list: "at bottom" ⇔ the bottom
-            // sentinel row is visible, or the last visible row's bottom edge
-            // reaches the viewport end. The sentinel is a 5dp spacer one past
-            // the last message row, so it is only measurable when the user
-            // really is at the bottom — and it cannot be fooled by a tall
-            // last item (the T173 failure mode of the old gap test).
+            // [forward-stable] Forward list: "at bottom" ⇔ the sentinel row (or,
+            // when it is off screen, the lowest visible row) sits within the
+            // threshold ABOVE the visual bottom. The sentinel is a 5dp spacer one
+            // past the last message row, so it cannot be fooled by a tall last
+            // item (the T173 failure mode of the old gap test).
+            //
+            // [fix/follow-exit-inset-1116] Two corrections to the pre-1116 arm:
+            //  1. the anchor is measured against the visible end, not the raw
+            //     viewport end;
+            //  2. "sentinel visible" is no longer an unconditional TRUE. With a
+            //     bottom content padding the sentinel enters the viewport one
+            //     padding-height before the true bottom, so visibility alone kept
+            //     follow engaged the whole way down.
             val info = listState.layoutInfo
             val total = info.totalItemsCount
             if (total == 0) return@derivedStateOf false
             val sentinelIdx = total - 1
             val sentinel = info.visibleItemsInfo.firstOrNull { it.index == sentinelIdx }
-            val result = if (sentinel != null) {
-                true
-            } else {
-                val viewportEnd = info.viewportEndOffset
-                val last = info.visibleItemsInfo.maxByOrNull { it.index }
-                // [B-03 deep-audit-1037] The threshold is now actually
-                // consumed: the old arm had no threshold term at all (the
-                // remember key was captured but never read inside this body),
-                // so the scrollNearBottomDp knob did nothing on this arm.
-                last != null &&
-                    isListAtBottom(last.offset, last.size, viewportEnd, nearBottomThresholdPx.toInt())
-            }
+            val anchor = sentinel ?: info.visibleItemsInfo.maxByOrNull { it.index }
+            val result = anchor != null && isListAtBottom(
+                lastVisibleOffsetPx = anchor.offset,
+                lastVisibleSizePx = anchor.size,
+                viewportEndOffsetPx = info.viewportEndOffset,
+                contentBottomInsetPx = info.afterContentPadding,
+                thresholdPx = nearBottomThresholdPx.toInt(),
+            )
             // T-android-jank-profile: was logging on every scroll frame (this
             // is a derivedStateOf body — it re-runs when any of
             // listState.layoutInfo / firstVisibleItemIndex /
@@ -1340,19 +1361,30 @@ fun ChatScreen(
                     // yanked back mid-read). The verdict now reads the same
                     // raw layoutInfo snapshot as isNearBottom — authoritative
                     // at drag-stop, unlike the cached derived state — through
-                    // the ONE shared bottom test (sentinel arm + threshold).
+                    // the ONE shared bottom test (visible-end distance with
+                    // the sentinel as anchor, [fix/follow-exit-inset-1116]).
                     val info = listState.layoutInfo
                     val stoppedTotal = info.totalItemsCount
                     val sentinel = if (stoppedTotal > 0) {
                         info.visibleItemsInfo.firstOrNull { it.index == stoppedTotal - 1 }
                     } else null
                     val last = info.visibleItemsInfo.maxByOrNull { it.index }
-                    val stoppedAtBottom = stoppedTotal > 0 && (
-                        sentinel != null ||
-                            (last != null && isListAtBottom(
-                                last.offset, last.size, info.viewportEndOffset, nearBottomThresholdPx.toInt(),
-                            ))
-                        )
+                    // [fix/follow-exit-inset-1116] Same rule as isNearBottom: the
+                    // verdict is a distance against the VISIBLE end (viewport end
+                    // minus the list's bottom content padding), and a visible
+                    // sentinel is only one of the two possible anchors — not an
+                    // automatic "at bottom". Without the inset the drag-stop could
+                    // never report "away" until the last row had been dragged a
+                    // whole card height past the viewport end, which is exactly
+                    // the "hard to stop following" complaint.
+                    val anchor = sentinel ?: last
+                    val stoppedAtBottom = stoppedTotal > 0 && anchor != null && isListAtBottom(
+                        lastVisibleOffsetPx = anchor.offset,
+                        lastVisibleSizePx = anchor.size,
+                        viewportEndOffsetPx = info.viewportEndOffset,
+                        contentBottomInsetPx = info.afterContentPadding,
+                        thresholdPx = nearBottomThresholdPx.toInt(),
+                    )
                     // [forward-stable] Drag end flips the mode: sentinel in
                     // view → follow; scrolled away → detach (nothing may yank).
                     // Maintains the mode for the explicit-intent consumer above.
@@ -3764,6 +3796,14 @@ fun ChatScreen(
                 // grows at the BOTTOM, so the viewport anchor naturally stays
                 // put during streaming — no reverseLayout index-0 insertion
                 // churn, no need for an anchor-guard compensation loop.
+                // [fix/follow-exit-inset-1116] The bottom clearance, in dp. This is
+                // the only place it is written; the verdict does not mirror it — it
+                // reads the same number back from the list
+                // (`LayoutInfo.afterContentPadding`), so changing the padding here
+                // can never leave the verdict measuring a stale geometry.
+                val listBottomPaddingDp =
+                    (if (bottomReserve == 0.dp) 12.dp else bottomReserve) +
+                        if (composerGlassOn) composerHeightDp else ComposerArcOverlap
                 LazyColumn(
                     state = listState,
                     reverseLayout = false,
@@ -3788,8 +3828,9 @@ fun ChatScreen(
                         // occupies (it slides under the card), so the clearance
                         // grows by the same amount and the last row stays put.
                         // With it off, the pre-existing arc band is the extent.
-                        bottom = (if (bottomReserve == 0.dp) 12.dp else bottomReserve) +
-                            if (composerGlassOn) composerHeightDp else ComposerArcOverlap,
+                        // [fix/follow-exit-inset-1116] Same value the verdict
+                        // reads (computed once, above).
+                        bottom = listBottomPaddingDp,
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -5471,12 +5512,27 @@ private fun followEventLabel(event: FollowEvent): String = when (event) {
 /**
  * [B-03 deep-audit-1037] The ONE bottom verdict, shared by the derived
  * `isNearBottom` state and the `DragInteraction.Stop` handler. "At bottom" =
- * the last visible row's bottom edge sits within [thresholdPx] of the
- * viewport end. Callers add the sentinel arm on top (sentinel row visible ⇒
- * at bottom regardless of measurement) — the sentinel is a 5dp spacer one
- * past the last message row and is only measurable when the user really is
- * at the bottom, so it cannot be fooled by a tall last item (the T173
- * failure mode of the old gap test).
+ * the anchor row's bottom edge sits within [thresholdPx] of the VISIBLE end of
+ * the content area — `viewportEndOffsetPx - contentBottomInsetPx` — never past it.
+ *
+ * [fix/follow-exit-inset-1116] [contentBottomInsetPx] is `LayoutInfo.afterContentPadding`
+ * — the bottom content padding the list MEASURED and applied, read back from the
+ * list itself rather than recomputed by the caller. It has to be subtracted:
+ * `viewportEndOffset` is defined by Compose as `mainAxisAvailableSize +
+ * afterContentPadding` (LazyListMeasure.kt), so the raw viewport end sits one
+ * padding-height past the last legal content position — and under the composer
+ * arc/glass tail the viewport itself reaches the physical screen bottom while
+ * the last row legitimately rests that padding above it. Comparing against it
+ * read FALSE at the true bottom, which forced both callers onto the sentinel arm;
+ * the sentinel enters the viewport one padding-height early and that arm ignores
+ * distance, so leaving follow required a full card height of scroll.
+ * Callers with no padding pass 0.
+ *
+ * The sentinel is an ANCHOR for this distance test (preferred when it is on
+ * screen, because it is the true content end), not a verdict on its own: it is
+ * a 5dp spacer one past the last message row, so it cannot be fooled by a tall
+ * last item (the T173 failure mode of the old gap test), but its VISIBILITY says
+ * nothing about how far the reader has scrolled.
  *
  * Before this function the two callers each carried their own copy, and the
  * DragStop copy compared the viewport-TOP index (`firstVisibleItemIndex`)
@@ -5484,7 +5540,7 @@ private fun followEventLabel(event: FollowEvent): String = when (event) {
  * era that read FALSE at the true bottom (streaming stopped following) and
  * TRUE when a tall last item's top reached the viewport top (a reader got
  * yanked back). [LazyListItemInfo.size] is the FULL item height, so
- * "bottom edge within threshold of the viewport end" is scroll-depth aware.
+ * "bottom edge within threshold of the visible end" is scroll-depth aware.
  *
  * Pure: no Compose / Android dependencies, JVM-testable.
  */
@@ -5492,10 +5548,18 @@ internal fun isListAtBottom(
     lastVisibleOffsetPx: Int,
     lastVisibleSizePx: Int,
     viewportEndOffsetPx: Int,
+    contentBottomInsetPx: Int,
     thresholdPx: Int,
 ): Boolean {
+    // [fix/follow-exit-inset-1116] The visible end of the content area is the
+    // viewport end MINUS the list's bottom content padding. Under the composer
+    // arc/glass tail the list's viewport reaches the physical screen bottom while
+    // the last row legitimately rests `padding.bottom` above it, so the raw
+    // viewport end is NOT where content is allowed to end. Callers that own no
+    // padding pass 0, which reproduces the pre-1116 geometry exactly.
+    val visualEnd = viewportEndOffsetPx - contentBottomInsetPx.coerceAtLeast(0)
     val bottomEdge = lastVisibleOffsetPx + lastVisibleSizePx
-    val distance = viewportEndOffsetPx - bottomEdge
+    val distance = visualEnd - bottomEdge
     return distance >= 0 && distance <= thresholdPx
 }
 

@@ -165,8 +165,17 @@ class ComposerGlassWiringTest {
         )
         assertTrue(
             "the viewport grew by composerHeightDp, so the clearance must grow by the same value — " +
-                "otherwise the last row slides down behind the card",
-            screenFlat.contains(") + if (composerGlassOn) composerHeightDp else ComposerArcOverlap,"),
+                "otherwise the last row slides down behind the card. " +
+                "[fix/follow-exit-inset-1116] the clearance is now ONE expression that feeds both " +
+                "the content padding and the bottom verdict, so the two cannot drift apart",
+            screenFlat.contains("val listBottomPaddingDp =") &&
+                screenFlat.contains("(if (bottomReserve == 0.dp) 12.dp else bottomReserve) +") &&
+                screenFlat.contains("bottom = listBottomPaddingDp,"),
+        )
+        assertTrue(
+            "the same clearance must reach the bottom verdict, read back from the list " +
+                "rather than mirrored into a second state",
+            screenFlat.contains("contentBottomInsetPx = info.afterContentPadding,"),
         )
     }
 
