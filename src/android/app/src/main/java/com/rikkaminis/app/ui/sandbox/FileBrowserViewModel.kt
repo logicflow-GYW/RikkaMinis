@@ -634,6 +634,20 @@ class FileBrowserViewModel(
                     )
                     return@launch
                 }
+                // [incr1116-A F-01] The delete button reached directories in
+                // this window, and the guest dirs under /var/minis are PRoot
+                // bind-mount TARGETS. Removing one deletes the placeholder the
+                // bind needs, and PRoot silently skips a bind whose target is
+                // missing — so the whole sandbox loses that view with one tap
+                // (the session's files are untouched, which makes it worse: the
+                // size still shows, the path is gone). Ancestors too: /var and
+                // /var/minis are a back-press away in the rootfs browser.
+                if (com.rikkaminis.app.sandbox.PRootKernel.isLinuxPathMountPointOrAncestor(lp)) {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Mount point: ${item.name} cannot be deleted",
+                    )
+                    return@launch
+                }
             }
             try {
                 // T10-L5: File.delete()/deleteRecursively() return false instead
