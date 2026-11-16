@@ -202,8 +202,15 @@ private val HEAVY_GIT_SUBCOMMANDS = setOf(
  */
 internal fun classifyCommand(command: String): CommandClass {
     if (command.isBlank()) return CommandClass.LIGHT
+    // [incr1116-C F-05] A tab is whitespace to the shell, and the tokenizer
+    // below only knows the space: `python3<TAB>x.py`, `git<TAB>fetch` and
+    // `tar<TAB>-czf` arrived as one verb, matched nothing, and were classified
+    // LIGHT — a regression from the prefix check this file replaced, which saw
+    // `python3` regardless of what followed it. One normalisation keeps the
+    // rest of the parser byte-for-byte the same.
+    val normalized = command.replace('\t', ' ')
     var best = CommandClass.LIGHT
-    for (rawStatement in command.split(STATEMENT_SEPARATORS)) {
+    for (rawStatement in normalized.split(STATEMENT_SEPARATORS)) {
         val c = classifyStatement(rawStatement)
         if (CLASS_ORDER.getValue(c) > CLASS_ORDER.getValue(best)) best = c
     }

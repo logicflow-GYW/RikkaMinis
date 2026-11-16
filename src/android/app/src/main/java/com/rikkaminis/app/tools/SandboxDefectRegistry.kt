@@ -236,7 +236,12 @@ object SandboxDefectRegistry {
         // character, so `git_log` would still pass, while the registry's own
         // S29 wording (`http=000 size=0`) relies on punctuation being a valid
         // separator. "Not alphanumeric" is the actual rule.
-        val pattern = tokens.joinToString("[^a-z0-9]+") { Regex.escape(it) } + "(?![a-z0-9])"
+        // [incr1116-C F-05] Both ends, as the note above says: without the
+        // leading guard `bad pack` matched `verybad pack`, `git log` matched
+        // `digit log`. `(?<![a-z0-9])` is the mirror of the trailing one.
+        val pattern = "(?<![a-z0-9])" +
+            tokens.joinToString("[^a-z0-9]+") { Regex.escape(it) } +
+            "(?![a-z0-9])"
         return Regex(pattern).containsMatchIn(hay)
     }
 
