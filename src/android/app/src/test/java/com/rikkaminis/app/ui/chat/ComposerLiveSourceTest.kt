@@ -373,23 +373,26 @@ class ComposerLiveSourceTest {
         return out
     }
 
-    /** The innermost `{ … }` slice containing [idx]. */
+    /**
+     * Innermost `{…}` block enclosing [idx].
+     *
+     * [fix/move-to-capsule-empty-1116] This used to record the LAST brace opened
+     * before [idx] and never restore the previously-open one when that block
+     * closed. Any SIBLING block ahead of the site (a guard
+     * `if (…) { … }`, a `when` arm, a nested lambda) therefore became the
+     * "enclosing" block, and the probe reported "must drop the pending burst
+     * flush" at a site whose own block did call it. Track the open braces on a
+     * stack so the answer is the block the site actually sits in.
+     */
     private fun enclosingBlock(skel: String, idx: Int): String {
-        var depth = 0
-        var start = -1
+        val open = java.util.ArrayDeque<Int>()
         for (i in 0 until idx) {
             when (skel[i]) {
-                '{' -> {
-                    depth++
-                    start = i
-                }
-                '}' -> {
-                    depth--
-                    if (depth <= 0) start = -1
-                }
+                '{' -> open.addLast(i)
+                '}' -> if (open.isNotEmpty()) open.removeLast()
             }
         }
-        return if (start == -1) "" else braceSlice(skel, start)
+        return if (open.isEmpty()) "" else braceSlice(skel, open.peekLast())
     }
 
     private fun braceSlice(skel: String, start: Int): String {

@@ -1239,7 +1239,17 @@ internal fun ChatInputArea(
             // free overlay primitive that doesn't need a Box wrapper,
             // and an in-flow Row at the top with Arrangement.End is the
             // cleanest equivalent.
-            val showMoveCapsule by viewModel.hasInjectedShareContent.collectAsState()
+            // [fix/move-to-capsule-empty-1116] Armed by a system share, but
+            // only shown while the draft still holds something to move. The
+            // raw flag kept the pill floating after the shared attachments
+            // were deleted or the text was cleared — an entry with no content
+            // behind it and no dismiss affordance. See [MoveToCapsuleGate].
+            val shareInjected by viewModel.hasInjectedShareContent.collectAsState()
+            val showMoveCapsule = MoveToCapsuleGate.shouldShow(
+                shareInjected = shareInjected,
+                draftText = inputFieldValue.text,
+                attachmentCount = attachments.size,
+            )
             // Mirrors iOS swipe-up-to-send: drag the input bar upward —
             // if it holds text, a floating send-arrow + "Release to send"
             // capsule track the finger; releasing past `swipeArmFraction`
@@ -1470,7 +1480,13 @@ internal fun ChatInputArea(
                                 }
                                 Spacer(Modifier.width(6.dp))
                                 Text(
-                                    "Move to…",
+                                    // [fix/move-to-capsule-empty-1116] Was a
+                                    // hard-coded English literal, so the pill
+                                    // showed the English label in a Chinese UI
+                                    // while every locale already shipped
+                                    // `move_to_sheet_title` for the sheet it
+                                    // opens.
+                                    stringResource(com.rikkaminis.app.R.string.move_to_sheet_title),
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = ChatColors.secondaryText,
@@ -2411,7 +2427,18 @@ internal fun ChatInputArea(
                 currentSessionId = sessionId,
                 chatRepository = chatRepository,
                 onDismiss = { showMoveSheet = false },
-                onSelect = { targetId ->
+                onSelect = moveTo@{ targetId ->
+                    // [fix/move-to-capsule-empty-1116] Nothing to move ⇒ no
+                    // move. This used to execute unconditionally, so an empty
+                    // draft still navigated the user to the target session and
+                    // the transfer drain there re-armed the capsule — the pill
+                    // followed the user instead of dismissing (real-device
+                    // log: `[MoveTo] draining transfer … text=0ch
+                    // attachments=0`).
+                    if (!MoveToCapsuleGate.canMove(inputFieldValue.text, viewModel.attachments.value.size)) {
+                        showMoveSheet = false
+                        return@moveTo
+                    }
                     // [fix/dv19-b1] Stash the field's LIVE text (the VM string can
                     // still be a 150 ms burst behind, i.e. exactly empty right
                     // after dictation) and drop the pending flush: the job is
