@@ -317,13 +317,22 @@ class B3RenderInputShapeTest {
     fun theMirrorGuardIsWhyTheFieldWriteCannotBeSkipped() {
         val src = codeOnly(read(chatInputRel))
         assertTrue(
-            "the composer mirrors the ViewModel string behind an inequality guard -- " +
+            "the composer mirrors the ViewModel string behind a guard -- " +
                 "if that guard is gone this probe's premise (and the fix) changed",
             src.contains("LaunchedEffect(inputText)")
         )
+        // [voice-ime-1116] The guard's SHAPE changed: the old `field != vm`
+        // inequality also fires on the composer's own debounced dictation lag,
+        // which rolled the field back mid-recording. The guard is now a
+        // decision function, and this probe pins the decision, not a spelling.
         assertTrue(
-            "the mirror guard `if (inputFieldValue.text != inputText)` is gone",
-            src.contains("if (inputFieldValue.text != inputText)")
+            "the mirror must ask shouldMirrorComposerText whether the difference is an intent",
+            src.contains("shouldMirrorComposerText(")
+        )
+        assertTrue(
+            "the mirror must pass this composer's last write, or our own 150 ms burst lag " +
+                "reads as an external intent",
+            src.contains("selfWrittenText = selfWrite.text")
         )
     }
 
