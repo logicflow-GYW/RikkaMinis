@@ -908,6 +908,14 @@ class RootfsManager private constructor(private val context: Context) {
             "PATH" to ALPINE_PATH,
             "PROOT_TMP_DIR" to PRootKernel.getProotTmpDir(context).absolutePath,
             "LD_LIBRARY_PATH" to nativeLibDir.absolutePath,
+            // [incr1116-CD F-02] The three launches below all pass
+            // --link2symlink (apk fix / offline APKs / apk-world restore), and
+            // `apk add` links the files that alias each other (busybox applets,
+            // hardlinked paths in a package). Without this every one of those
+            // chains keeps its backing file next to the guest name, i.e. the
+            // layout that makes a copied tree fail its first `rm -rf`, and the
+            // same sandbox ends up with two backing layouts.
+            "PROOT_L2S_DIR" to PRootKernel.getL2sBackingDir(context).absolutePath,
         )
         File(nativeLibDir, "libproot-loader.so").takeIf { it.exists() }?.let {
             env["PROOT_LOADER"] = it.absolutePath

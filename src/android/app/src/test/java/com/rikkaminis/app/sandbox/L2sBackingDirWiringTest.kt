@@ -38,8 +38,19 @@ class L2sBackingDirWiringTest {
     private fun sandboxSource(name: String): String =
         readRepoFile("src/android/app/src/main/java/com/rikkaminis/app/sandbox/$name")
 
-    /** Every launch site that starts a PRoot process and builds the environment. */
-    private val launchSites = listOf("PersistentShell.kt", "ShellExecutor.kt", "TerminalSession.kt")
+    /**
+     * Every launch site that starts a PRoot process and builds the environment.
+     *
+     * [incr1116-CD F-02] `RootfsManager.kt` is the fourth one and it was missed:
+     * its three `--link2symlink` launches (`apk fix`, the offline APKs and the
+     * apk-world restore) go through one `prootLoaderEnv()` that only knew
+     * PATH/PROOT_TMP_DIR/LD_LIBRARY_PATH, so every package installed by any of
+     * them wrote its backing files next to the names inside the rootfs — the
+     * exact layout this whole wiring exists to avoid.
+     */
+    private val launchSites = listOf(
+        "PersistentShell.kt", "ShellExecutor.kt", "TerminalSession.kt", "RootfsManager.kt",
+    )
 
     @Test
     fun everyPRootLaunchSitePassesTheBackingDirectory() {
