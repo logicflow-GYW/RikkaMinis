@@ -373,7 +373,6 @@ class ComposerLiveSourceTest {
         return out
     }
 
-    /** The innermost `{ … }` slice containing [idx]. */
     /**
      * Innermost `{…}` block enclosing [idx].
      *
