@@ -439,7 +439,15 @@ fun ChatScreen(
             viewModel.requestComposerCommand(ComposerCommand.AppendText(transfer.inputText, separator = "\n", trimExistingEnd = false, trailingSpace = false))
         }
         for (a in transfer.attachments) viewModel.addAttachment(a)
-        viewModel.markShareInjected()
+        // [fix/move-to-capsule-empty-1116] Only a transfer that actually
+        // carried something re-arms the capsule. Unconditional marking meant an
+        // empty "move" (nothing stashed) landed here and lit the pill in the
+        // target session, so it followed the user around instead of expiring
+        // with the content. The source-side guard in ChatInputArea refuses the
+        // empty move; this is the same decision read from the other end.
+        if (MoveToCapsuleGate.canMove(transfer.inputText, transfer.attachments.size)) {
+            viewModel.markShareInjected()
+        }
     }
 
     val inputFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
