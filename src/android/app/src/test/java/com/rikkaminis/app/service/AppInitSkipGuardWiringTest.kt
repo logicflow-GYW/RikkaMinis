@@ -37,6 +37,8 @@ class AppInitSkipGuardWiringTest {
     private val revokedFlagWrite = "_revoked.value ="
     private val stubNotification = ".setContentTitle(\"RikkaMinis\")"
     private val stubUnwind = "return START_NOT_STICKY"
+    /** FGS-DEADLINE-1116: the one exit both "we have nothing to do" paths use. */
+    private val sharedStubExit = "satisfyForegroundDeadlineThenStop()"
 
     private val safeModeGuard = "if (isSafeMode() || isInitSkipped() || isDbGuidanceMode())"
     private val guidanceConstant = "SHOW_NEWER_DB_GUIDANCE"
@@ -237,9 +239,16 @@ class AppInitSkipGuardWiringTest {
             occurrences(branch, safeModeGuard),
         )
         assertEquals(
-            "the branch must build the stub notification and then unwind",
+            "the branch must unwind through the shared stub-and-stop exit — the stub moved " +
+                "there so safe mode and the swipe-from-recents path cannot drift apart " +
+                "(FGS-DEADLINE-1116 re-anchored this assertion)",
             1,
-            occurrences(branch, stubNotification),
+            occurrences(branch, sharedStubExit),
+        )
+        assertFalse(
+            "the stub notification must not be built inline a second time — that duplication is " +
+                "exactly what let the other caller keep a bare stopSelf()\n<branch>",
+            branch.contains(stubNotification),
         )
         assertEquals(
             "the branch must return START_NOT_STICKY",
@@ -253,6 +262,22 @@ class AppInitSkipGuardWiringTest {
         assertTrue(
             "the normal path must keep building the real notification",
             body.indexOf("buildNotification") > body.indexOf(safeModeGuard),
+        )
+    }
+
+    /**
+     * FGS-DEADLINE-1116 moved the stub out of `onStartCommand`; this keeps the
+     * original intent ("the degraded modes still attach a notification") pinned
+     * at the new home, so moving it again cannot silently drop the deadline.
+     */
+    @Test
+    fun `the shared stub-and-stop exit still builds the stub notification`() {
+        val shared = functionBody(fgsSource(), "private fun satisfyForegroundDeadlineThenStop()")
+        assertEquals(
+            "the shared exit is the only place the stub is built now — if it stops building one, " +
+                "both callers lose the 5-second deadline and the process is killed at expiry\n$shared",
+            1,
+            occurrences(shared, stubNotification),
         )
     }
 
