@@ -79,11 +79,6 @@ C3_OPENAI_GUARD = ("if (!finishedSent && (contentLen > 0 || reasoningLen > 0 "
                    "|| toolCallEventCount > 0)) {")
 C3_ANTHROPIC_GUARD = "if (!sawClearFinish && (contentChars > 0 || toolChars > 0)) {"
 
-C4_SUBAGENT_DECL = "internal suspend fun runSubagentLoop("
-C4_POLICY_CALL = "TruncatedToolCallPolicy.rejectionReason("
-C4_REFUSAL_GATE = "if (truncatedRefusal != null) {"
-C4_PAIRING = "content = truncatedRefusal, isError = true"
-C4_NO_SECOND_WORDING = '"[TRUNCATED]'
 
 C5_SHARED_GUARD = "EofStubReminderStackGuard.isStaleEofStubReminder("
 C5_GUARD_CALLS = 2
@@ -141,10 +136,7 @@ RESPONSES_STATUS_CALL = """mapHttpError(
 # [wide4] Mutation anchors for the wide4 arms. Only the arms use them: every
 # criterion above derives its shape from structure, so renaming product code
 # keeps the gate working while these arms are updated deliberately.
-SUBAGENT_CALL = ("                val truncatedRefusal = "
-                 "TruncatedToolCallPolicy.rejectionReason(")
 ENGINE_CONSUMER = "                if (truncatedRefusal != null) {"
-
 ESCAPE = "truncated-guard-ok:"
 SELFTEST_MARK = "TRUNCATED_CALL_GUARD_SELFTEST=PASS"
 
@@ -885,55 +877,6 @@ def check(policy, engine, openai, anthropic, tool_executors, gemini, signals,
                          line_of(anthropic, "[RC2-truncated-detection]"),
                          "Anthropic EOF guard shape must keep counting toolChars"))
 
-    # C4 — the sub-agent loop refuses through the shared policy, pairing intact.
-    loop_start = tool_executors.find(C4_SUBAGENT_DECL)
-    if loop_start < 0:
-        problems.append(("subagent-loop-missing", TOOL_EXECUTORS, 0,
-                         "runSubagentLoop not found"))
-    else:
-        # slice to the next top-level doc comment after the loop
-        nxt = tool_executors.find("\n/**", loop_start)
-        loop = tool_executors[loop_start:nxt if nxt > 0 else len(tool_executors)]
-        # [wide3-04] Same axis as C2: the call must be the refusal value itself,
-        # and it must carry the stream flag. `if (false) rejectionReason(…) else
-        # null` keeps the call, the gate and the pairing, and disarms the loop.
-        ok, why, rline, rargs = operative_call(
-            mask_code(loop), "truncatedRefusal",
-            "TruncatedToolCallPolicy.rejectionReason")
-        if not ok:
-            problems.append(("subagent-refusal-wired", TOOL_EXECUTORS,
-                             line_of(tool_executors, C4_SUBAGENT_DECL),
-                             "runSubagentLoop: " + why))
-        elif len(rargs) < 3 or rargs[2] != "turnTruncated":
-            problems.append(("subagent-refusal-wired", TOOL_EXECUTORS,
-                             line_of(tool_executors, C4_SUBAGENT_DECL),
-                             "runSubagentLoop must pass the stream-level flag as the third "
-                             "argument (turnTruncated), found (%s)" % ", ".join(rargs)))
-        elif (shadowed := flag_shadowed(mask_code(loop), ("turnTruncated",
-                                                         "turnFinishReason"),
-                                        mask_code(loop).find("val truncatedRefusal ="))):
-            # [wide4] The name in the argument list is not the value: a same-name
-            # `val turnTruncated = false` one line above makes the policy read a
-            # constant while `rargs[2]` still says `turnTruncated`.
-            problems.append((
-                "subagent-refusal-wired", TOOL_EXECUTORS,
-                line_of(tool_executors, C4_SUBAGENT_DECL),
-                "turnTruncated is shadowed or overwritten with a constant — "
-                "runSubagentLoop declares `%s` again before the refusal call, so the "
-                "policy reads the shadowing value" % shadowed[0][0]))
-        elif C4_REFUSAL_GATE not in loop:
-            problems.append(("subagent-refusal-gate", TOOL_EXECUTORS,
-                             line_of(tool_executors, C4_SUBAGENT_DECL),
-                             "the refusal branch (if (truncatedRefusal != null)) is gone"))
-        elif C4_PAIRING not in loop:
-            problems.append(("subagent-refusal-pairing", TOOL_EXECUTORS,
-                             line_of(tool_executors, C4_SUBAGENT_DECL),
-                             "a refused call must still produce a tool_result (isError = true)"))
-        elif C4_NO_SECOND_WORDING in loop:
-            problems.append(("subagent-single-source", TOOL_EXECUTORS,
-                             line_of(tool_executors, C4_SUBAGENT_DECL),
-                             "runSubagentLoop must not hand-write a second [TRUNCATED] wording"))
-
     # C5 — both stub-reminder injection sites share one stacking guard.
     guard_calls = engine.count(C5_SHARED_GUARD)
     if guard_calls != C5_GUARD_CALLS:
@@ -1300,12 +1243,6 @@ def selftest(root):
             return s + "\n// sentinel-missing\n"
         return s[:i] + s[i + len(C5_SHARED_GUARD):]
 
-    def drop_subagent_refusal(s):
-        i = s.find(C4_REFUSAL_GATE)
-        if i < 0:
-            return s + "\n// sentinel-missing\n"
-        return s.replace(C4_REFUSAL_GATE, "if (false) {", 1)
-
     arms = [
         ("policy loses the flag parameter", "policy-flag-signature",
          on(0, lambda s: s.replace(C1_SIGNATURE,
@@ -1321,21 +1258,6 @@ def selftest(root):
         ("anthropic sibling guard regresses", "anthropic-sibling-pin",
          on(3, lambda s: s.replace(C3_ANTHROPIC_GUARD,
                                           "if (!sawClearFinish && (contentChars > 0)) {", 1))),
-        ("subagent loop drops the refusal gate", "subagent-refusal-gate",
-         on(4, drop_subagent_refusal)),
-        ("subagent loop skips the policy", "subagent-refusal-wired",
-         on(4, lambda s: s.replace(C4_POLICY_CALL, "TruncatedToolCallPolicy.isTruncatedFinish(", 1))),
-        # [wide4] The arm must stay VALID Kotlin: the shared lexer now refuses to
-        # judge a file it cannot tokenise, so an arm that splices an unterminated
-        # string would exercise the fail-closed path instead of this criterion.
-        ("subagent loop hand-writes the wording", "subagent-single-source",
-         on(4, lambda s: s.replace(
-             "log(\"[Subagent] turn=$turns truncated tool call REFUSED",
-             "log(\"[TRUNCATED] \" + \"[Subagent] turn=$turns truncated tool call REFUSED",
-             1))),
-        ("subagent refusal breaks the pairing", "subagent-refusal-pairing",
-         on(4, lambda s: s.replace(C4_PAIRING,
-                                               "content = truncatedRefusal, isError = false", 1))),
         ("error-shaped branch loses the stacking guard", "stack-guard-shared",
          on(1, strip_guard_from_error_branch)),
         ("gemini EOF reverts to the fabricated end_turn",
@@ -1393,19 +1315,6 @@ def selftest(root):
          on(0, lambda s: s.replace(
              C1_CONDITION,
              C1_CONDITION + "\n        if (!ceilingDeclared) return null", 1))),
-        ("sub-agent refusal variable is wrapped in if (false) … else null",
-         "subagent-refusal-wired",
-         on(4, lambda s: s.replace(
-             "val truncatedRefusal = TruncatedToolCallPolicy.rejectionReason(\n"
-             "                    call.name,\n"
-             "                    turnFinishReason,\n"
-             "                    turnTruncated,\n"
-             "                )",
-             "val truncatedRefusal = if (false) TruncatedToolCallPolicy.rejectionReason(\n"
-             "                    call.name,\n"
-             "                    turnFinishReason,\n"
-             "                    turnTruncated,\n"
-             "                ) else null", 1))),
         ("engine refusal variable is wrapped in if (false) … else null",
          "engine-feeds-flag",
          on(1, lambda s: s.replace(
@@ -1439,11 +1348,6 @@ def selftest(root):
          on(1, lambda s: s.replace(
              ENGINE_CONSUMER,
              "                if (false && truncatedRefusal != null) {", 1))),
-        ("w4-subagent shadows the stream flag before the refusal call",
-         "subagent-refusal-wired",
-         on(4, lambda s: s.replace(
-             SUBAGENT_CALL,
-             "                val turnTruncated = false\n" + SUBAGENT_CALL, 1))),
         ("w4-openai feeds the EOF counter through a dead branch",
          "openai-count-derived",
          on(2, lambda s: s.replace(

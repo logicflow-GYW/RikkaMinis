@@ -1,7 +1,6 @@
 package com.rikkaminis.app.data.repository
 
 import android.content.Context
-import com.rikkaminis.app.tools.SkillInfo
 import com.rikkaminis.app.tools.SubagentSkill
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
@@ -465,27 +464,26 @@ class SkillRepository(private val context: Context) {
 
     data class Skill(
         val id: String = UUID.randomUUID().toString(),
-        override val name: String,
-        override val description: String = "",
+        val name: String,
+        val description: String = "",
         val version: String = "1.0.0",
         val importSource: ImportSource = ImportSource.FILE,
         val isEnabled: Boolean = true,
         val installedAt: Long = System.currentTimeMillis(),
         val updatedAt: Long = System.currentTimeMillis(),
-        override val body: String = "",
+        val body: String = "",
         /**
-         * [fix/subagent-frontmatter] Frontmatter block of the on-disk SKILL.md
-         * (`---` … `---` included). [body] is frontmatter-stripped by
-         * [parseSkillMd], so frontmatter-only fields — `subagent: true`,
-         * `max_turns`, `allowed_tools` — must ride on this field or
-         * SubagentSkill can never see them. Populated by [loadAll] from disk.
+         * Frontmatter block of the on-disk SKILL.md (`---` … `---` included).
+         * [body] is frontmatter-stripped by [parseSkillMd], so frontmatter-only
+         * keys (`subagent`, `max_turns`, `allowed_tools`, …) ride on this field
+         * through an edit/save round-trip. Populated by [loadAll] from disk.
          */
-        override val frontmatter: String = "",
+        val frontmatter: String = "",
         /** Original GitHub URL when importSource is URL (null otherwise). */
         val sourceURL: String? = null,
         /** Cumulative read count of this skill's SKILL.md; normalized to 0–100 after exceeding 1000. */
         val useCount: Double = 0.0,
-    ) : SkillInfo
+    )
 
     enum class UsageFrequency { NEVER, LOW, REGULAR, HIGH }
 
@@ -2243,10 +2241,9 @@ class SkillRepository(private val context: Context) {
             // parse feeds the metadata re-sync further down.
             val diskSkill = parseSkillMdOnDisk(id)
             val body = diskSkill?.body ?: ""
-            // [fix/subagent-frontmatter] Frontmatter-only fields (subagent:
-            // true, max_turns, allowed_tools) never reach `body` — parseSkillMd
-            // strips the block — so read it separately for consumers that
-            // re-inspect frontmatter (SubagentSkill.parseSubagentConfig).
+            // Frontmatter-only keys (subagent / max_turns / allowed_tools, …)
+            // never reach `body` — parseSkillMd strips the block — so read the
+            // block separately and carry it through an edit/save round-trip.
             val frontmatter = readSkillMdFrontmatter(id)
             val sourceUrlIdx = cursor.getColumnIndex("source_url")
             val useCountIdx = cursor.getColumnIndex("use_count")
@@ -2357,17 +2354,13 @@ class SkillRepository(private val context: Context) {
                         description = parsed.description,
                         importSource = ImportSource.SESSION,
                         body = parsed.body,
-                        // [fix/subagent-frontmatter-autodiscover] The Skill
-                        // created here used to default frontmatter to "" —
-                        // parseSkillMd strips the block from body — so a skill
-                        // first discovered mid-session (e.g. written by an
-                        // agent file_write with `subagent: true`) parsed as
-                        // isSubagent=false and EVERY spawn_agent on it failed
-                        // with "not a sub-agent skill" until the next full
-                        // loadAll (10-08 23:44 sweep: 7/7 spawn failures on a
-                        // skill whose file had the flag). Extract the block
-                        // from the same raw text the parse consumed — mirrors
-                        // the DB-row path above (readSkillMdFrontmatter).
+                        // The Skill created here used to default frontmatter
+                        // to "" — parseSkillMd strips the block from body — so a
+                        // skill first discovered mid-session lost every
+                        // frontmatter-only key until the next full loadAll.
+                        // Extract the block from the same raw text the parse
+                        // consumed — mirrors the DB-row path above
+                        // (readSkillMdFrontmatter).
                         frontmatter = SubagentSkill.extractFrontmatterBlock(raw),
                     )
                     insertDb(skill)
@@ -2401,18 +2394,15 @@ class SkillRepository(private val context: Context) {
         // 3-key block. `parseSkillMd` only extracts name/description/version, so
         // the old rebuild silently dropped every frontmatter-only key —
         // `subagent: true`, `max_turns`, `allowed_tools` — on ANY landing
-        // (add / update / import-overwrite / bundled upgrade). Since
-        // SubagentSkill.parseSubagentConfig reads those keys off disk, one
-        // rename via the skills UI made the skill vanish from the spawn_agent
-        // list. Preserving the original block keeps unknown keys intact.
+        // (add / update / import-overwrite / bundled upgrade). Preserving the
+        // original block keeps unknown keys intact.
         val existing = runCatching { file.readText() }.getOrNull()
         // [fix/subagent-frontmatter-newskill] A brand-new skill (no on-disk
         // file yet) used to emit the canonical 3-key block, silently dropping
         // every frontmatter-only key (`subagent: true`, `max_turns`,
-        // `allowed_tools`) the caller carried — an import of a `subagent:
-        // true` SKILL.md via the skills editor landed WITHOUT the flag, so
-        // parseSubagentConfig read isSubagent=false until the source was
-        // re-imported. Seed the merge with the caller's frontmatter block:
+        // `allowed_tools`) the caller carried — an import of a SKILL.md with
+        // such keys via the skills editor landed WITHOUT them until the source
+        // was re-imported. Seed the merge with the caller's frontmatter block:
         // mergeFrontmatter swaps the three managed keys in place and carries
         // every other key verbatim.
         //

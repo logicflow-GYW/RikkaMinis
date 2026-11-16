@@ -1,447 +1,158 @@
 package com.rikkaminis.app.tools
 
-import com.rikkaminis.app.data.model.AgentToolDefinition
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * Sub-agent dispatch is an app-level capability (rework 2026-11-17):
+ * the tool takes a complete task, dispatch runs in a real session, and the
+ * skill system is not consulted at all. These tests pin the pure surface —
+ * tool shape, prompt shape, and the four outcomes the caller can receive.
+ *
+ * The Android-bound half (creating the session, blocking for the answer)
+ * lives in `executeSpawnAgentTool` and is covered by CI / device tests.
+ */
 class SubagentSkillTest {
 
-    /**
-     * Minimal skill representation for test purposes.
-     * Implements [SkillInfo] so it can be passed to SubagentSkill methods.
-     *
-     * [body] + [frontmatter] mirror the production shape: SkillRepository
-     * stores the markdown body with frontmatter STRIPPED and keeps the block
-     * separately, which is exactly the split that used to break sub-agent
-     * detection. Callers that only have raw markdown keep passing it as [body]
-     * (see `makeSkill`), which is why the fallback matters.
-     */
-    private data class TestSkill(
-        override val name: String = "test-skill",
-        override val description: String = "A test skill",
-        override val body: String = "",
-        override val frontmatter: String = "",
-    ) : SkillInfo
-
-    private fun makeSkill(body: String) = TestSkill(body = body)
-
-    /** Raw-markdown skill: frontmatter rides inside [body], as in the old shape. */
-    private fun makeRawSkill(markdown: String) = TestSkill(body = markdown)
-
-    /** Production shape: frontmatter stripped out of [body] into its own field. */
-    private fun makeProductionSkill(body: String, frontmatter: String) =
-        TestSkill(body = body, frontmatter = frontmatter)
-
-    private fun makeTool(name: String) = AgentToolDefinition(
-        name = name,
-        description = "tool $name",
-        parameters = emptyMap(),
-    )
-
-    // ── parseSubagentConfig ──────────────────────────────────────────────
+    // ── Tool definition ─────────────────────────────────────────────────
 
     @Test
-    fun `regular skill without frontmatter is not a subagent`() {
-        val skill = makeSkill("Just some instructions.\n\nDo things.")
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertFalse(config.isSubagent)
-        assertEquals(12, config.maxTurns)
-        assertEquals(4096, config.maxOutputTokens)
-        assertNull(config.allowedTools)
-    }
-
-    @Test
-    fun `skill with subagent true is a subagent`() {
-        val skill = makeSkill(
-            """
-            ---
-            name: Researcher
-            description: Deep research
-            subagent: true
-            ---
-            You are a researcher. Do research.
-            """.trimIndent(),
+    fun `definition requires a complete task and no skill`() {
+        val d = SubagentSkill.definition()
+        assertEquals("spawn_agent", d.name)
+        assertEquals(listOf("tool_title", "task"), d.required)
+        assertTrue("task must be a parameter", d.parameters.containsKey("task"))
+        assertFalse(
+            "dispatch is app-level: no skill parameter may come back",
+            d.parameters.containsKey("skill_name"),
         )
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertTrue(config.isSubagent)
-        assertEquals(12, config.maxTurns)
-        assertNull(config.allowedTools)
-    }
-
-    @Test
-    fun `subagent with custom budget overrides defaults`() {
-        val skill = makeSkill(
-            """
-            ---
-            subagent: true
-            max_turns: 6
-            max_output_tokens: 2048
-            ---
-            You are a focused agent.
-            """.trimIndent(),
+        assertFalse(
+            "dispatch is app-level: no query parameter may come back",
+            d.parameters.containsKey("query"),
         )
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertTrue(config.isSubagent)
-        assertEquals(6, config.maxTurns)
-        assertEquals(2048, config.maxOutputTokens)
     }
 
     @Test
-    fun `subagent with inline allowlist parses tool names`() {
-        val skill = makeSkill(
-            """
-            ---
-            subagent: true
-            allowed_tools: [file_read, file_write, memory_get]
-            ---
-            You are a researcher.
-            """.trimIndent(),
+    fun `definition tells the model the child cannot see this conversation`() {
+        val desc = SubagentSkill.definition().description
+        assertTrue(desc.contains("self-contained"))
+        assertTrue(desc.contains("cannot see this conversation"))
+        assertTrue("recursion must stay forbidden in the description", desc.contains("Do NOT dispatch"))
+    }
+
+    // ── Dispatch prompt ─────────────────────────────────────────────────
+
+    @Test
+    fun `wait timeout is inside the prompt api's accepted range`() {
+        // ChatMutationMethods clamps waitTimeout to 1..1800. A zero/negative
+        // value would be clamped to 1s (every dispatch times out) and a huge
+        // one would be silently cut — both read as "the sub-agent failed".
+        assertTrue(
+            "WAIT_TIMEOUT_SECONDS must be a real, bounded wait",
+            SubagentSkill.WAIT_TIMEOUT_SECONDS in 1..1800,
         )
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertTrue(config.isSubagent)
-        assertEquals(setOf("file_read", "file_write", "memory_get"), config.allowedTools)
     }
 
     @Test
-    fun `subagent with dash allowlist parses tool names`() {
-        val skill = makeSkill(
-            """
-            ---
-            subagent: true
-            allowed_tools:
-              - file_read
-              - memory_get
-            ---
-            You are a researcher.
-            """.trimIndent(),
+    fun `buildTaskPrompt carries the task verbatim`() {
+        val task = "Audit /var/minis/shared/work/x for the F-12 defect.\nReport to /tmp/r.md."
+        val p = SubagentSkill.buildTaskPrompt(task)
+        assertTrue("the task text must arrive unchanged", p.contains(task))
+    }
+
+    @Test
+    fun `buildTaskPrompt states the answer-only contract`() {
+        val p = SubagentSkill.buildTaskPrompt("do x")
+        assertTrue(p.contains("returned verbatim"))
+        assertTrue("the child must know the parent sees only its reply", p.contains("cannot see your intermediate"))
+    }
+
+    @Test
+    fun `buildTaskPrompt forbids recursion`() {
+        val p = SubagentSkill.buildTaskPrompt("do x")
+        assertTrue(p.contains("Do not dispatch another sub-agent"))
+        assertTrue(p.contains("do not create new sessions"))
+    }
+
+    @Test
+    fun `buildTaskPrompt trims surrounding whitespace and has no trailing blank lines`() {
+        val p = SubagentSkill.buildTaskPrompt("\n\n  do x  \n\n")
+        assertTrue(p.contains("## Task\ndo x"))
+        assertFalse(p.endsWith("\n"))
+        assertFalse(p.endsWith(" "))
+    }
+
+    // ── Result mapping: four distinguishable outcomes ───────────────────
+
+    @Test
+    fun `completed dispatch returns the assistant text as success`() {
+        val r = SubagentSkill.resultOf(
+            status = "Completed", text = "all done", sessionId = "s1", timedOut = false,
         )
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertEquals(setOf("file_read", "memory_get"), config.allowedTools)
+        assertTrue(r.success)
+        assertTrue(r.output.contains("all done"))
+        assertTrue("the caller must be able to follow up", r.output.contains("session: s1"))
     }
 
     @Test
-    fun `subagent with empty allowlist means no tools allowed`() {
-        val skill = makeSkill(
-            """
-            ---
-            subagent: true
-            allowed_tools: []
-            ---
-            You are a purist.
-            """.trimIndent(),
+    fun `completed dispatch with empty text says so instead of returning blank`() {
+        val r = SubagentSkill.resultOf(
+            status = "Completed", text = "   ", sessionId = "", timedOut = false,
         )
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertEquals(emptySet<Any>(), config.allowedTools)
+        assertTrue(r.success)
+        assertTrue(r.output.contains("without producing text"))
+        assertFalse("no session id means no session footer", r.output.contains("session:"))
     }
 
     @Test
-    fun `subagent with unknown fields ignores them gracefully`() {
-        val skill = makeSkill(
-            """
-            ---
-            subagent: true
-            max_turns: not-a-number
-            max_output_tokens: 999999
-            color: blue
-            ---
-            You are a tolerant agent.
-            """.trimIndent(),
+    fun `timeout is a failure that tells the caller how to recover`() {
+        val r = SubagentSkill.resultOf(
+            status = "Timeout", text = "", sessionId = "s2", timedOut = true,
+            timeoutSeconds = 42,
         )
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertTrue(config.isSubagent)
-        // Invalid number falls back to default; out-of-range clamps
-        assertEquals(12, config.maxTurns)
-        assertEquals(128_000, config.maxOutputTokens)
+        assertFalse("a timeout must never read as an answer", r.success)
+        assertTrue(r.output.contains("42s"))
+        assertTrue(r.output.contains("minis-sessions-cli messages --id s2"))
+        assertTrue(r.output.contains("--session s2"))
     }
 
-    // ── buildFilteredTools ───────────────────────────────────────────────
-
     @Test
-    fun `forbidden tools are always excluded`() {
-        val all = listOf(
-            makeTool("file_read"),
-            makeTool("shell_execute"),
-            makeTool("spawn_agent"),
-            makeTool("browser_use"),
-            makeTool("memory_get"),
+    fun `a refused dispatch is a failure carrying the status and reason`() {
+        val r = SubagentSkill.resultOf(
+            status = "Error", text = "provider disabled", sessionId = "s3", timedOut = false,
         )
-        val filtered = SubagentSkill.buildFilteredTools(all, null)
-        val names = filtered.map { it.name }.toSet()
-        assertEquals(setOf("file_read", "memory_get"), names)
+        assertFalse(r.success)
+        assertTrue(r.output.contains("status=Error"))
+        assertTrue(r.output.contains("provider disabled"))
     }
 
     @Test
-    fun `allowlist restricts to listed tools`() {
-        val all = listOf(
-            makeTool("file_read"),
-            makeTool("file_write"),
-            makeTool("file_edit"),
-            makeTool("memory_get"),
-            makeTool("memory_write"),
+    fun `a refusal with no reason still names the status`() {
+        val r = SubagentSkill.resultOf(
+            status = "Cancelled", text = "", sessionId = "", timedOut = false,
         )
-        val filtered = SubagentSkill.buildFilteredTools(all, setOf("file_read", "memory_get"))
-        val names = filtered.map { it.name }.toSet()
-        assertEquals(setOf("file_read", "memory_get"), names)
+        assertFalse(r.success)
+        assertTrue(r.output.contains("status=Cancelled"))
+        assertTrue(r.output.contains("no reason given"))
     }
 
-    @Test
-    fun `allowlist cannot re-enable forbidden tools`() {
-        val all = listOf(
-            makeTool("file_read"),
-            makeTool("shell_execute"),
-            makeTool("spawn_agent"),
-        )
-        // Even if the skill author lists them, FORBIDDEN wins.
-        val filtered = SubagentSkill.buildFilteredTools(
-            all, setOf("file_read", "shell_execute", "spawn_agent"),
-        )
-        assertEquals(listOf("file_read"), filtered.map { it.name })
-    }
-
-    @Test
-    fun `empty allowlist yields no tools`() {
-        val all = listOf(makeTool("file_read"), makeTool("memory_get"))
-        val filtered = SubagentSkill.buildFilteredTools(all, emptySet())
-        assertTrue(filtered.isEmpty())
-    }
-
-    // ── buildSystemPrompt ────────────────────────────────────────────────
-
-    @Test
-    fun `system prompt strips frontmatter`() {
-        val skill = makeSkill(
-            """
-            ---
-            name: Researcher
-            description: Deep research
-            subagent: true
-            ---
-            You are a researcher. Always cite sources.
-            """.trimIndent(),
-        )
-        val prompt = SubagentSkill.buildSystemPrompt(skill)
-        assertTrue(prompt.contains("You are a researcher"))
-        assertFalse(prompt.contains("subagent:"))
-        assertFalse(prompt.contains("---"))
-    }
-
-    @Test
-    fun `system prompt falls back to description for frontmatter-only skill`() {
-        val skill = TestSkill(
-            name = "Empty",
-            description = "Fallback description",
-            body = """
-                ---
-                name: Empty
-                description: Fallback description
-                subagent: true
-                ---
-                """.trimIndent(),
-        )
-        assertEquals("Fallback description", SubagentSkill.buildSystemPrompt(skill))
-    }
-
-    @Test
-    fun `system prompt returns raw body when no frontmatter`() {
-        val skill = makeSkill("Plain instructions without frontmatter.")
-        assertEquals("Plain instructions without frontmatter.", SubagentSkill.buildSystemPrompt(skill))
-    }
-
-    // ── frontmatter hand-off (production shape) ──────────────────────────
-
-    /**
-     * Regression for the dead-feature bug: a production Skill's `body` has the
-     * frontmatter stripped by SkillRepository.parseSkillMd, and the block lives
-     * on `frontmatter`. Parsing `body` alone made isSubagent permanently false,
-     * so every `spawn_agent` call was answered with "add `subagent: true`" —
-     * an instruction no installed skill could satisfy.
-     */
-    @Test
-    fun `frontmatter field alone marks a skill as subagent`() {
-        val skill = makeProductionSkill(
-            body = "You are a probe. Report what you see.",
-            frontmatter = """
-                ---
-                name: probe
-                description: probe
-                subagent: true
-                max_turns: 5
-                allowed_tools: [file_write]
-                ---
-                """.trimIndent(),
-        )
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertTrue(config.isSubagent)
-        assertEquals(5, config.maxTurns)
-        assertEquals(setOf("file_write"), config.allowedTools)
-    }
-
-    @Test
-    fun `stripped body with no frontmatter is not a subagent`() {
-        val skill = makeProductionSkill(body = "Plain instructions.", frontmatter = "")
-        assertFalse(SubagentSkill.parseSubagentConfig(skill).isSubagent)
-    }
-
-    @Test
-    fun `frontmatter field wins when body also carries a block`() {
-        // `frontmatter` is the authoritative on-disk block; a leftover block in
-        // `body` must not override it.
-        val skill = TestSkill(
-            body = "---\nsubagent: true\n---\nBody text",
-            frontmatter = "---\nsubagent: false\n---",
-        )
-        assertFalse(SubagentSkill.parseSubagentConfig(skill).isSubagent)
-    }
+    // ── Skill plumbing kept for SkillRepository ─────────────────────────
 
     @Test
     fun `extractFrontmatterBlock keeps delimiters and stops at the close marker`() {
-        val raw = "---\nname: a\nsubagent: true\n---\nBody\n---\nnot frontmatter"
-        assertEquals(
-            "---\nname: a\nsubagent: true\n---",
-            SubagentSkill.extractFrontmatterBlock(raw),
-        )
+        val raw = "---\nname: x\ndescription: y\n---\nbody"
+        assertEquals("---\nname: x\ndescription: y\n---", SubagentSkill.extractFrontmatterBlock(raw))
     }
 
     @Test
     fun `extractFrontmatterBlock is empty for body-only content`() {
-        assertEquals("", SubagentSkill.extractFrontmatterBlock("plain body\nsecond line"))
+        assertEquals("", SubagentSkill.extractFrontmatterBlock("just a body"))
     }
 
     @Test
     fun `extractFrontmatterBlock is empty when the block never closes`() {
-        assertEquals("", SubagentSkill.extractFrontmatterBlock("---\nname: a\nsubagent: true"))
-    }
-
-    @Test
-    fun `auto-discover path parses a mid-session-written skill as subagent`() {
-        // [fix/subagent-frontmatter-autodiscover] Simulates the auto-discover
-        // path's contract: a mid-session-written SKILL.md is parsed with
-        // parseSkillMd (body = stripped) and the block extracted from the SAME
-        // raw text feeds the Skill's frontmatter field. Pre-fix the auto-
-        // discover Skill got frontmatter="" and parseSubagentConfig fell back
-        // to the stripped body → isSubagent=false → every spawn_agent on the
-        // skill failed until the next full app restart.
-        val raw = """
-            ---
-            name: fresh-skill
-            description: written mid-session
-            version: 1.0.0
-            subagent: true
-            ---
-            You are a fresh skill.
-        """.trimIndent()
-        val fm = SubagentSkill.extractFrontmatterBlock(raw)
-        val body = raw.lines()
-            .dropWhile { it.trim() != "---" }
-            .drop(1)
-            .dropWhile { it.trim() != "---" }
-            .drop(1)
-            .joinToString("\n")
-            .trim()
-        val skill = makeProductionSkill(body = body, frontmatter = fm)
-        val config = SubagentSkill.parseSubagentConfig(skill)
-        assertTrue("auto-discovered skill must parse as subagent", config.isSubagent)
-    }
-
-    // ── context fragments ────────────────────────────────────────────────
-
-    @Test
-    fun `system prompt appends context fragments after the instructions in caller order`() {
-        val skill = makeSkill("You are a probe.")
-        val prompt = SubagentSkill.buildSystemPrompt(
-            skill,
-            listOf(
-                "Skills:\n  <skill>alpha</skill>",
-                "Global memory (GLOBAL.md — read-only):\nUser prefers Chinese.",
-            ),
-        )
-        assertEquals(
-            "You are a probe.\n\n" +
-                "Skills:\n  <skill>alpha</skill>\n\n" +
-                "Global memory (GLOBAL.md — read-only):\nUser prefers Chinese.",
-            prompt,
-        )
-    }
-
-    @Test
-    fun `system prompt skips blank and whitespace-only fragments`() {
-        val skill = makeSkill("You are a probe.")
-        val prompt = SubagentSkill.buildSystemPrompt(skill, listOf("", "   ", "kept", "\n"))
-        assertEquals("You are a probe.\n\nkept", prompt)
-    }
-
-    @Test
-    fun `system prompt without fragments is byte-identical to the skill body`() {
-        val skill = makeSkill("You are a probe.")
-        assertEquals("You are a probe.", SubagentSkill.buildSystemPrompt(skill))
-        assertEquals("You are a probe.", SubagentSkill.buildSystemPrompt(skill, emptyList()))
-    }
-
-    // ── [r3-B11-F13] double frontmatter strip ate horizontal-rule bodies ────
-    //
-    // `SkillInfo.body` is frontmatter-STRIPPED in production (the block lives on
-    // `frontmatter`), so the extra strip inside skillInstructions only ever
-    // applied to raw-markdown callers. Its trigger, though, was
-    // `lines[0].startsWith("---")` plus any later line starting with `---` —
-    // so an instruction body that OPENS with a horizontal rule lost its first
-    // section silently. The strip is now limited to a real YAML block.
-
-    @Test
-    fun `raw body opening with a horizontal rule is not treated as frontmatter`() {
-        val body = "---\n\nFirst section that must survive.\n\n---\n\nSecond section."
-        assertEquals(body, SubagentSkill.buildSystemPrompt(makeSkill(body)))
-    }
-
-    @Test
-    fun `production body opening with a horizontal rule is kept verbatim`() {
-        val body = "---\n\nFirst section that must survive.\n\n---\n\nSecond section."
-        val skill = makeProductionSkill(body = body, frontmatter = "---\nname: probe\nsubagent: true\n---")
-        val prompt = SubagentSkill.buildSystemPrompt(skill)
-        assertTrue("first section must survive: $prompt", prompt.contains("First section that must survive."))
-        assertTrue("second section must survive", prompt.contains("Second section."))
-    }
-
-    @Test
-    fun `a real raw frontmatter block is still stripped`() {
-        val skill = makeSkill("---\nname: probe\nsubagent: true\n---\nYou are a probe.")
-        assertEquals("You are a probe.", SubagentSkill.buildSystemPrompt(skill))
-    }
-
-    @Test
-    fun `four-dash rule is not a frontmatter delimiter`() {
-        val body = "----\nname: not frontmatter\n----\nReal instructions."
-        assertEquals(body, SubagentSkill.buildSystemPrompt(makeSkill(body)))
-    }
-
-    @Test
-    fun `stripRealFrontmatter rejects a markdown table row`() {
-        val body = "---\n|---|---|\n| a | b |\n---\ntext"
-        assertNull("table rows are not a YAML mapping", SubagentSkill.stripRealFrontmatter(body))
-    }
-
-    @Test
-    fun `stripRealFrontmatter returns the content after a real block`() {
-        assertEquals(
-            "Body line 1\nBody line 2",
-            SubagentSkill.stripRealFrontmatter("---\nname: a\nsubagent: true\n---\nBody line 1\nBody line 2"),
-        )
-    }
-
-    @Test
-    fun `stripRealFrontmatter accepts list continuation lines`() {
-        assertEquals(
-            "Instructions.",
-            SubagentSkill.stripRealFrontmatter(
-                "---\nname: a\nallowed_tools:\n  - file_read\n  - file_write\n---\nInstructions.",
-            ),
-        )
-    }
-
-    @Test
-    fun `stripRealFrontmatter ignores a body with no leading block`() {
-        assertNull(SubagentSkill.stripRealFrontmatter("Plain instructions.\n\n---\n\nMore."))
+        assertEquals("", SubagentSkill.extractFrontmatterBlock("---\nname: x\nbody without close"))
     }
 }

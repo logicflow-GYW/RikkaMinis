@@ -2700,7 +2700,7 @@ DA1017_GATES = [
     # (script without .py, selftest marker that proves negative arms ran, real-tree argv)
     ("tool_result_image_branch_check", "missing provider package is a hard failure", (REPO_ROOT,)),
     ("turn_tail_finalize_order", "SELFTEST PASS", (REPO_ROOT,)),
-    ("subagent_handback_check", "SELFTEST OK", (REPO_ROOT,)),
+    ("subagent_dispatch_check", "SELFTEST OK", (REPO_ROOT,)),
     ("calendar_events_nullable_predicate_check", "ALL ARMS MATCH", ("--root", REPO_ROOT)),
     ("shizuku_args_check", "gate flips red on every criterion", (REPO_ROOT,)),
     ("marker_boundary_check", "SELFTEST=PASS", (REPO_ROOT,)),
@@ -2729,7 +2729,6 @@ def test_da1017_external_fixtures():
     import importlib.util
     for script, clean_const, dirty_const, dirty_name in (
         ("marker_boundary_check", "OK_FIXTURE", "PRE_FIX_FIXTURE", "pre-fix boundary hit"),
-        ("subagent_handback_check", "GOOD", "NO_ECHO", "missing assistant echo"),
     ):
         spec = importlib.util.spec_from_file_location(
             script, os.path.join(SCRIPT_DIR, script + ".py"))

@@ -433,288 +433,121 @@ private fun ChatViewModel.defectRegistryHintFor(failureOutput: String): String? 
     }.getOrNull()
 
 /**
- * [T7-subagent] Execute [SubagentSkill.NAME] — spawn an independent
- * sub-agent using the named skill. The sub-agent gets its own system
- * prompt (from the skill body), a filtered tool set, and runs its own
- * independent loop with its own budget. Context is fully isolated from
- * the main agent's [agentHistory].
+ * [rework/spawn-agent-as-real-session 2026-11-17] Execute [SubagentSkill.NAME]
+ * — dispatch a sub-agent as a REAL chat session and block for its final answer.
+ *
+ * APP-LEVEL, not skill-level: the caller passes the complete task, and nothing
+ * here consults the skill repository, a `subagent: true` declaration, or a
+ * per-session skill enable flag. A skill can still be used as a task template
+ * (read its SKILL.md and put the instructions in `task`), but dispatch never
+ * depends on one being installed.
+ *
+ * This replaces the in-process `runSubagentLoop`: a second agent implementation
+ * with no shell/browser arm, no visible progress, and every main-loop fix
+ * duplicated into it. A dispatched sub-agent is an ordinary session — same
+ * ChatViewModel, same system prompt, same full tool set — created/prompted
+ * through [ChatMutationMethods.prompt], the exact path
+ * `minis-sessions-cli send` already uses.
+ *
+ * Semantics:
+ *  - The call blocks up to [SubagentSkill.WAIT_TIMEOUT_SECONDS] and returns the
+ *    assistant's final text, so delegation stays synchronous for the caller.
+ *    Longer work should go through `minis-sessions-cli send --async` instead.
+ *  - The session is visible in the chat list (watch / interrupt / follow up).
+ *  - The child takes one PROVIDER_ATTEMPTS unit from THIS run's budget: the
+ *    dispatch performs a real provider call on the run's behalf, and a runaway
+ *    dispatcher must not spend uncounted attempts. A denial is a visible failed
+ *    tool result, never a run-ending stop.
+ *  - Thinking level is inherited from the dispatching turn; the model binding is
+ *    the new-session default (the child is a normal session the user can re-bind).
  */
 internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): ToolExecutionResult {
     val args = try { JSONObject(argsJson) } catch (_: Exception) { JSONObject() }
-    val skillName = args.optString("skill_name", "").trim()
-    val query = args.optString("query", "").trim()
+    // `query` is accepted as an alias: sessions recorded before this rename
+    // carry it, and replaying one must not dead-end on a missing `task`.
+    val task = args.optString("task", "").trim().ifBlank { args.optString("query", "").trim() }
     val title = args.optString("tool_title", "Sub-agent").ifBlank { "Sub-agent" }
 
-    if (skillName.isBlank()) {
-        return ToolExecutionResult("Error: spawn_agent requires 'skill_name'", false, toolTitle = title)
-    }
-    if (query.isBlank()) {
-        return ToolExecutionResult("Error: spawn_agent requires 'query'", false, toolTitle = title)
-    }
-
-    val repo = skillRepository ?: return ToolExecutionResult(
-        "Error: Skill system unavailable", false, toolTitle = title,
-    )
-
-    // 1. Look up the skill
-    val skill = repo.skills.value.find {
-        it.name == skillName || it.id == skillName || it.name.equals(skillName, ignoreCase = true)
-    } ?: return ToolExecutionResult(
-        "Error: Skill '$skillName' not found. Make sure it is installed and the name is correct.",
-        false, toolTitle = title,
-    )
-
-    if (!repo.isEnabledForSession(skill.id, activeSessionId)) {
+    if (task.isBlank()) {
         return ToolExecutionResult(
-            "Error: Skill '$skillName' is disabled for this session",
+            "Error: spawn_agent requires 'task' — a complete, self-contained task " +
+                "description (goal, inputs/paths, constraints, expected output).",
             false, toolTitle = title,
         )
     }
 
-    // 2. Parse subagent config
-    val config = SubagentSkill.parseSubagentConfig(skill)
-    if (!config.isSubagent) {
-        // Answer with the skills that ARE sub-agents instead of a bare
-        // rejection — same "give the model a way back" rule as
-        // UnknownToolMessage. An empty list is itself the useful signal.
-        val candidates = repo.skills.value
-            .filter { SubagentSkill.parseSubagentConfig(it).isSubagent }
-            .map { it.name }
-        val hint = if (candidates.isEmpty()) {
-            "No installed skill declares `subagent: true` yet."
-        } else {
-            "Sub-agent-capable skills: ${candidates.joinToString(", ")}."
+    // Dispatch budget. One dispatch = one provider attempt on this run's
+    // ledger; an exhausted budget is a visible refusal, not a run stop.
+    if (traceObserver.activeRunBudget?.isExpired() == true) {
+        return ToolExecutionResult(
+            "Error: run deadline reached — sub-agent dispatch refused",
+            false, toolTitle = title,
+        )
+    }
+    if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS) { it.consumeProviderAttempt() }) {
+        return ToolExecutionResult(
+            "Error: provider-attempt budget exhausted — sub-agent dispatch refused",
+            false, toolTitle = title,
+        )
+    }
+
+    val params = JSONObject()
+        .put("prompt", SubagentSkill.buildTaskPrompt(task))
+        .put("wait", true)
+        .put("waitTimeout", SubagentSkill.WAIT_TIMEOUT_SECONDS)
+        .put("thinkingLevel", effectiveThinkingLevel.name.lowercase())
+
+    // [rework/spawn-agent-as-real-session] Auto-pin the dispatcher. A session
+    // waiting on a sub-agent stops updating its own row while every child does,
+    // so `ORDER BY updated_at DESC` pushed the parent below the children it
+    // spawned — three dispatches and the session the user is working in is off
+    // the drawer. Pin it for the duration and restore the previous state when
+    // the LAST dispatch finishes (reference counted: one parent may run several
+    // children concurrently). A pin the user takes during the window is left
+    // alone — we only undo the exact value we wrote.
+    val depth = com.rikkaminis.app.data.SubagentDispatchPin.begin(activeSessionId)
+    var ourPin: Long? = null
+    if (depth == 1) {
+        val alreadyPinned = runCatching { chatRepository.getSession(activeSessionId)?.pinnedAt }.getOrNull()
+        if (alreadyPinned == null) {
+            ourPin = runCatching { chatRepository.pinSession(activeSessionId, true) }.getOrNull()
         }
-        return ToolExecutionResult(
-            "Error: Skill '$skillName' is not a sub-agent skill. " +
-                "Add `subagent: true` to its SKILL.md frontmatter to enable sub-agent mode. $hint",
-            false, toolTitle = title,
-        )
     }
 
-    // 3. Build filtered tool set
-    // [R5-C C-C-07①] recordSkillUse sits AFTER the isSubagent gate (moved from
-    // step 2): the [FIX-R4-Q F-14] rationale is unchanged — dispatching a
-    // sub-agent IS a skill use and the "最近使用" ordering never saw sub-agent
-    // usage — but a dispatch that was then REJECTED (a non-subagent skill, the
-    // answer above IS the way back) was counted as a use all the same. Usage is
-    // something the model DID, not something it tried and was refused.
-    runCatching { skillRepository?.recordSkillUse(skill.id) }
-
-    val subagentTools = SubagentSkill.buildFilteredTools(agentTools, config.allowedTools)
-    if (subagentTools.isEmpty()) {
-        return ToolExecutionResult(
-            "Error: Skill '$skillName' has no usable tools (all filtered out by forbidden/allowlist)",
-            false, toolTitle = title,
-        )
-    }
-
-    // 4. Build system prompt + history
-    // [fix/subagent-context] A sub-agent used to get the bare skill body — no
-    // skills disclosure, no memory — while the cross-session `send` path
-    // (which reuses the main prompt) had both, so delegated work answered as
-    // if the user had no conventions and no history. Give the sub-agent the
-    // same standing context the main loop injects, minus what only describes
-    // the MAIN agent's surface: the identity/persona block, the tool-
-    // convention text (the sub-agent's tool set is filtered — no shell, no
-    // browser, no spawn), and the integration / MCP disclosures (reached
-    // through shell only). Memory fragments stay behind the session's memory
-    // toggle, mirroring the tool gate: memory off ⇒ neither tools nor
-    // fragments, so the sub-agent can't be handed context it can't act on.
-    val memoryOn = _memoryEnabled.value
-    // [fix/memcache-prefix-split] Stable→volatile ordering: global + rollup
-    // (slow-changing) first, daily log (changes on EVERY memory_write) LAST
-    // so the sub-agent's prefix cache survives memory writes too. Order
-    // defined once in MemoryPromptOrder. Use orderForSubagentContext, NOT
-    // orderInStandingRegion: the sub-agent has no Runtime-context anchor, so
-    // the daily fragment must ride LAST — the standing-region filter would
-    // silently drop it (probe-reproduced regression of this very branch).
-    val subagentContext = buildList {
-        skillRepository?.skillPromptFragment(activeSessionId)?.let {
-            add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.SKILL, it))
-        }
-        if (memoryOn) {
-            memoryRepository?.loadGlobalMemoryFragment()?.let {
-                add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.GLOBAL_MEMORY, it))
-            }
-            memoryRepository?.loadRollupFragment()?.let {
-                add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.ROLLUP, it))
-            }
-            memoryRepository?.loadRecentDailyMemoryFragment()?.let {
-                add(MemoryPromptOrder.Fragment(MemoryPromptOrder.Key.DAILY_MEMORY, it))
-            }
-        }
-    }.let(MemoryPromptOrder::orderForSubagentContext).map { it.text }
-    val systemPrompt = SubagentSkill.buildSystemPrompt(skill, subagentContext)
-    val provider = currentProvider ?: return ToolExecutionResult(
-        "Error: No active provider available", false, toolTitle = title,
-    )
-
-    // 5. Run the sub-agent loop (extracted engine). Guard first: the
-    // original returned this exact error when the provider had no
-    // instance context (setup failure, not a mid-run error).
-    if (provider.instanceContext == null) {
-        return ToolExecutionResult(
-            "Error: No provider instance context for sub-agent remote execution",
-            false, toolTitle = title,
-        )
-    }
-
-    return com.rikkaminis.app.ui.chat.runSubagentLoop(
-        skillName = skillName,
-        query = query,
-        title = "Sub-agent: ${skill.name}",
-        config = config,
-        systemPrompt = systemPrompt,
-        streamProvider = { messages ->
-            // [FIX-R4-Q F-14] The sub-agent must not escape the run's
-            // observation budget: the main loop checks the deadline and
-            // consumes one PROVIDER_ATTEMPTS unit before every provider
-            // request (AgentLoopEngine:1201/:1226). Without these two gates a
-            // runaway sub-agent burned provider attempts the host budget never
-            // counted, so the budget line undercounted the run and the
-            // deadline guard could be exceeded. A denial aborts the sub-agent
-            // run with a visible reason (runSubagentLoop turns the throw into
-            // a failed ToolExecutionResult, so the dispatching agent learns
-            // the run was refused rather than timed out).
-            if (traceObserver.activeRunBudget?.isExpired() == true) {
-                throw SubagentBudgetExhaustedException(
-                    "run deadline reached — sub-agent request refused"
-                )
-            }
-            // Same single-line gate shape as the main loop (AgentLoopEngine
-            // :1226): the lambda and the `if` body open on the line that names
-            // the dimension, so source-shape probes see the refusal (the
-            // throw) inside this gate's body — a multi-line lambda makes the
-            // brace matcher close the body at `}) {` and read the gate as
-            // non-terminal.
-            if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_PROVIDER_ATTEMPTS) { it.consumeProviderAttempt() }) {
-                throw SubagentBudgetExhaustedException(
-                    "provider-attempt budget exhausted — sub-agent request refused"
-                )
-            }
-            val instance = provider.instanceContext!!
-            com.rikkaminis.app.sandbox.offload.ProviderExecutionGateway.stream(
-                context = context,
-                instance = instance,
-                model = provider.model,
-                messages = messages,
-                systemPrompt = systemPrompt,
-                maxTokens = config.maxOutputTokens,
-                temperature = null,
-                tools = subagentTools,
-                // [fix/subagent-thinking] Was hardcoded OFF — a session
-                // configured for thinking (group default, e.g. "max") spawned
-                // sub-agents that reasoned at none. Inherit the dispatching
-                // session's level, same "no silent downgrade on a dispatch
-                // path" rule as the `send` fix in HeadlessChatRunner.
-                // [T-thinking-effective-level] Read the EFFECTIVE level: a
-                // sub-agent must inherit what this turn actually sends, not a
-                // stored choice the current model can't honour (e.g. after a
-                // group rotation onto a non-reasoning member).
-                thinkingLevel = effectiveThinkingLevel,
+    val result = try {
+        try {
+            com.rikkaminis.app.debug.ChatMutationMethods.prompt(context, params)
+        } catch (ce: CancellationException) {
+            // A user stop must not be reported as a sub-agent failure.
+            throw ce
+        } catch (t: Throwable) {
+            return ToolExecutionResult(
+                "Error: sub-agent dispatch failed (${t.javaClass.simpleName}): ${t.message ?: "no message"}",
+                false, toolTitle = title,
             )
-        },
-        // [audit-0916] The sub-agent's own filtered list is passed in so a
-        // rejected name is answered with the names this level may use.
-        executeSubTool = { name, subArgs ->
-            // [R5-C C-C-07①] A tool executed INSIDE the sub-agent was invisible
-            // to the parent run's tool budget: the main dispatch consumes one
-            // TOOL_CALLS unit per call (executeTool), and the sub-agent's own
-            // REQUESTS consume PROVIDER_ATTEMPTS (streamProvider below —
-            // [FIX-R4-Q F-14]), but every in-tool execution here was free — a
-            // runaway sub-agent (a skill looping over files) could make
-            // thousands of tool calls the budget never counted and the deadline
-            // never capped. The SPAWN call itself is already charged by the main
-            // dispatch (that is what executeTool's gate pays for), so the unit
-            // belongs here, on each inner execution.
-            //
-            // Refusal shape = the file's own convention for a sub-agent gate:
-            // throw SubagentBudgetExhaustedException, which runSubagentLoop's
-            // catch turns into a VISIBLE failed result for the dispatching agent
-            // ("encountered an error after N turn(s) … Error: <reason>") instead
-            // of a refuse-and-retry loop on a run that is out of budget. The
-            // same marker keeps ShellBudgetStopSymmetryTest's contract intact:
-            // a dispatch-level gate is excluded from the RUN-level terminal
-            // gates (its KDoc), so the run-terminating gates stay exactly
-            // tool_calls + shell_commands.
-            if (traceObserver.activeRunBudget?.isExpired() == true) {
-                throw SubagentBudgetExhaustedException(
-                    "run deadline reached — sub-agent tool call refused",
-                )
-            }
-            if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS) { it.consumeToolCall() }) {
-                throw SubagentBudgetExhaustedException(
-                    "tool-call budget exhausted — sub-agent tool call refused",
-                )
-            }
-            executeSubagentTool(name, subArgs, subagentTools.map { it.name })
-        },
-        // [fix/same-class-cleanup] The residue policy resolves a drifted
-        // tool call against the sub-agent's OWN allowed tools — the same
-        // filtered list the loop executes against.
-        knownToolNames = subagentTools.map { it.name },
-        log = { AppLogger.warning(ChatViewModel.TAG, it) },
-    )
-}
-
-/**
- * [T7-subagent] Execute a tool inside a sub-agent's loop. Mirrors the
- * main [executeTool] dispatch but without UI updates (toolBlocks,
- * assistantId, etc.) — the sub-agent produces file/memory results only.
- * Tools that are FORBIDDEN for sub-agents never reach this method
- * because [SubagentSkill.buildFilteredTools] excludes them.
- *
- * [R5-C C-C-07①] The parent run's deadline + TOOL_CALLS budget are gated by
- * this method's ONLY caller (the spawn dispatch's `executeSubTool` lambda).
- * A second call site must gate too, or inner executions escape the parent
- * budget again.
- */
-internal suspend fun ChatViewModel.executeSubagentTool(
-    name: String,
-    argsJson: String,
-    // [audit-0916] Names this sub-agent may call - used to answer an unknown
-    // (or forbidden) tool with the real options instead of a bare rejection.
-    allowedToolNames: List<String>,
-): ToolExecutionResult = when (name) {
-    FileReadTool.NAME -> FileReadTool.execute(argsJson, activeSessionId, context).also { result ->
-        // [FIX-R4-Q F-14] Same arm as the main dispatch (executeTool's
-        // FileReadTool branch): a sub-agent reading SKILL.md is a skill use.
-        if (result.success) {
+        }
+    } finally {
+        if (com.rikkaminis.app.data.SubagentDispatchPin.end(activeSessionId) == 0 && ourPin != null) {
             runCatching {
-                val readPath = JSONObject(argsJson).optString("path", "")
-                if (readPath.isNotEmpty()) {
-                    skillRepository?.skillIdFromPath(readPath)?.let { sid ->
-                        skillRepository.recordSkillUse(sid)
-                    }
+                // Undo only OUR pin: a manual pin taken meanwhile has a newer
+                // value (or a null after an unpin) and must survive.
+                if (chatRepository.getSession(activeSessionId)?.pinnedAt == ourPin) {
+                    chatRepository.pinSession(activeSessionId, false)
                 }
             }
         }
     }
-    FileWriteTool.NAME -> FileWriteTool.execute(argsJson, activeSessionId, context).also {
-        if (it.success) maybeReloadSkillsForPath(argsJson)
-    }
-    FileEditTool.NAME -> FileEditTool.execute(argsJson, activeSessionId, context).also {
-        if (it.success) maybeReloadSkillsForPath(argsJson)
-    }
-    ReadImageTool.NAME -> ReadImageTool.execute(argsJson, activeSessionId, context)
-    "memory_write" -> executeMemoryWriteTool(argsJson)
-    "memory_get" -> executeMemoryGetTool(argsJson)
-    "memory_rollup" -> executeMemoryRollupTool()
-    // [knowledge-pack] Same arm as the main dispatch: a skill that leaves
-    // allowedTools null gets app_guide in its schema, so a missing arm here
-    // would answer "Unknown or forbidden tool" for a tool it advertised.
-    AppGuideTool.NAME -> AppGuideTool.execute(argsJson, context)
-    // Subagents run inside the same session, so the same transcript is fair
-    // game (read-only, redacted). Kept in sync with the main dispatch switch —
-    // a missing arm here is silent: the tool would work in the main loop and
-    // answer "Unknown or forbidden tool" only inside a subagent.
-    com.rikkaminis.app.tools.ConversationHistoryContract.NAME -> executeConversationHistoryTool(argsJson)
-    // [audit-0916] List the names this sub-agent may actually use; a bare
-    // rejection gives the model no way back (see UnknownToolMessage).
-    else -> ToolExecutionResult(
-        UnknownToolMessage.message(name, allowedToolNames, forbidden = true),
-        false,
+
+    // [deep-audit-1044 A-04] A delivered prompt that finished answers
+    // "Completed"; a refusal or a timeout must reach the caller as a failure,
+    // never as the answer. Mapping lives in SubagentSkill.resultOf so the four
+    // outcomes are unit-tested without an Android context.
+    return SubagentSkill.resultOf(
+        status = result.optString("status", ""),
+        text = result.optString("responseText", ""),
+        sessionId = result.optString("sessionId", ""),
+        timedOut = result.optBoolean("timedOut", false),
+        title = title,
     )
 }
 
@@ -1532,27 +1365,29 @@ Environment variables:
     // invalidated.
     skillRepository?.reloadFromDisk()
     val skillFragment = skillRepository?.skillPromptFragment(activeSessionId)
-    // [T-subagent-routing-default] The 「子代理 → spawn_agent」 default lives
-    // HERE, in app code, not in skill descriptions or per-session memory:
-    // before this fragment the routing depended on whichever skill happened
-    // to carry the word in its description, and a spawn_agent failure (e.g.
-    // the auto-discovered-frontmatter gap) silently rerouted delegation work
-    // to cross-session `minis-sessions-cli send` — new chat sessions the user
-    // never asked for. Gated on the same SubagentPrefs switch as the tool
-    // itself (dual gate, mirroring the memory fragment/tool pattern): both
-    // present or both explaining-disabled, never a mismatch.
+    // [rework/spawn-agent-as-real-session 2026-11-17] There is exactly ONE
+    // sub-agent shape now: a real chat session. `spawn_agent` is the
+    // synchronous front door to it (block until the answer, return the text);
+    // `minis-sessions-cli send` is the same path for fire-and-forget/parallel
+    // work and for continuing a dispatched session. The routing text must say
+    // that plainly — the old text described an in-process agent with its own
+    // filtered tool set and loop, which no longer exists.
+    //
+    // Gated on the same SubagentPrefs switch as the tool itself (dual gate,
+    // mirroring the memory fragment/tool pattern): both present or both
+    // explaining-disabled, never a mismatch.
     val subagentOn = com.rikkaminis.app.data.SubagentPrefs.isEnabled(context)
     val subagentRoutingFragment = if (subagentOn) {
         """
 
-Sub-agent routing (会话子代理):
-- When the user says 子代理 / sub-agent, the DEFAULT target is the spawn_agent tool — the in-session sub-agent (its own system prompt, filtered tool set, independent loop and budget, result returned into this conversation). Delegate to it first.
-- Use minis-sessions-cli send ONLY when the user explicitly wants SEPARATE chat sessions / 多会话并行派发 (cross-session dispatch). It is NOT a fallback for spawn_agent errors — if a spawn_agent call fails, read the error (it lists sub-agent-capable skills) and retry with a valid skill name, or report the blocker to the user.
-- spawn_agent requires a skill whose SKILL.md frontmatter declares `subagent: true`. Find candidates with grep over /var/minis/skills/*/SKILL.md; the error reply also lists them."""
+Sub-agent routing (子代理):
+- A sub-agent is a REAL chat session. When the user asks for 子代理 / sub-agent, call spawn_agent with a COMPLETE, self-contained task (goal, inputs/paths, constraints, expected output): it opens a session that runs with the full tool set (visible in the chat list) and blocks until it answers, returning the final text here.
+- Use minis-sessions-cli send for fire-and-forget or parallel dispatch (--async), or to continue a dispatched session (--session <id>). Both paths run the SAME agent loop as this conversation — there is no in-process sub-agent, and no skill is required to dispatch.
+- If a skill is the right task template, read its SKILL.md first and put those instructions inside the task text. Do not spawn a sub-agent from inside a sub-agent."""
     } else {
         """
 
-Sub-agent routing: the in-session sub-agent feature (spawn_agent) and cross-session dispatch (minis-sessions-cli send) are currently DISABLED (runtime.subagentEnabled). If the user asks for 子代理 / sub-agents, tell them the feature is off and that they can enable it in Settings → Agent Runtime; do not simulate delegation yourself."""
+Sub-agent routing: sub-agent dispatch is currently DISABLED (runtime.subagentEnabled) — both spawn_agent and minis-sessions-cli send are off. If the user asks for 子代理 / sub-agents, tell them the feature is off and that they can enable it in Settings → Agent Runtime; do not simulate delegation yourself."""
     }
     // [T-mcp-integration-android] Re-read servers.json (the CLI / file
     // browser may have changed it out-of-band) then build the Top-20
@@ -2366,13 +2201,3 @@ internal fun ChatViewModel.resolveTitleProvider(): LLMProvider? {
     // capability questions as the primary — pass the enriched model.
     return ProviderFactory.create(instance, apiKey, providerModelFor(entry), context)
 }
-
-/**
- * [FIX-R4-Q F-14] Raised from `executeSpawnAgentTool`'s streamProvider when the
- * host run's observation budget refuses another provider request (deadline
- * reached / attempts exhausted). A dedicated type so the sub-agent's failure
- * text says WHY it stopped instead of looking like a provider error, and so a
- * future change to the budget gate cannot be silently swallowed by a generic
- * catch that assumes "provider went wrong".
- */
-internal class SubagentBudgetExhaustedException(message: String) : RuntimeException(message)

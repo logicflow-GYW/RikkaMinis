@@ -2,299 +2,134 @@ package com.rikkaminis.app.tools
 
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.AgentToolParam
-import org.json.JSONObject
 
 /**
- * Minimal skill info required by sub-agent config parsing and prompt building.
- * Implemented by `SkillRepository.Skill` in production; stubbed in tests to
- * avoid pulling the Android-dependent SkillRepository into JVM unit tests.
- */
-interface SkillInfo {
-    val name: String
-    val description: String
-    val body: String
-
-    /**
-     * The skill's SKILL.md frontmatter block (`---` delimiters included), or
-     * "" when the source had none.
-     *
-     * [body] is frontmatter-STRIPPED — `SkillRepository.parseSkillMd()` drops
-     * the block before anything is stored — so every frontmatter field other
-     * than the three managed ones (name / description / version) is reachable
-     * only through this property. Defaulting to "" keeps test stubs and
-     * raw-markdown callers working: [parseSubagentConfig] falls back to [body].
-     */
-    val frontmatter: String get() = ""
-}
-
-/**
- * Sub-agent skill system — skill = independent agent instance.
+ * Sub-agent dispatch — an APP-LEVEL capability, not a skill feature.
  *
- * A skill marked `subagent: true` in its SKILL.md frontmatter gets its own
- * system prompt, filtered tool set, independent loop, and budget. The
- * [spawn_agent] tool dispatches to it; the sub-agent's context is fully
- * isolated from the main agent's history.
+ * [rework/spawn-agent-as-real-session 2026-11-17] Two rewrites in one:
  *
- * FORBIDDEN tools (never passed to a sub-agent):
- *   - spawn_agent    (anti-recursion)
- *   - shell_execute  (terminal/android privilege escalation)
- *   - browser_use    (browser is a shared resource; a sub-agent shouldn't
- *                     race the main agent's browser tabs)
+ *  1. A sub-agent is a REAL chat session, not a second agent loop. The old
+ *     `runSubagentLoop` had its own filtered tool set (no shell, no browser),
+ *     no visible progress, and every main-loop fix had to be duplicated into
+ *     it — nine "main loop fixed it, sub-agent still broken" patches piled up.
+ *     Dispatch now uses the same path as `minis-sessions-cli send`: a real
+ *     session on the real ChatViewModel.
+ *  2. It no longer rides on the skill system. The caller passes the complete
+ *     task; nothing here requires a skill to be installed, a `subagent: true`
+ *     frontmatter declaration, or a per-session skill enable flag. A skill can
+ *     still be used as a task template — the caller reads its SKILL.md and puts
+ *     the instructions in the task text — but dispatch does not depend on one.
+ *
+ * [extractFrontmatterBlock] stays because `SkillRepository` uses it to carry
+ * frontmatter-only keys through an edit/save round-trip. That is skill
+ * plumbing, unrelated to dispatch.
  */
 object SubagentSkill {
 
     const val NAME = "spawn_agent"
 
     /**
-     * [r3-B11-F13] One YAML frontmatter mapping line (`key:` / `key: value`).
-     * Used to tell a real frontmatter block apart from a Markdown body that
-     * merely opens with a horizontal rule.
+     * How long a synchronous dispatch blocks for the child's final answer
+     * before returning a visible timeout (upper bound of
+     * `ChatMutationMethods.prompt`'s `waitTimeout`, which clamps at 1800).
      */
-    private val KEY_LINE_RE = Regex("""^[A-Za-z][A-Za-z0-9_.\-]*:\s*.*$""")
-
-    /** Tools that sub-agents are NEVER allowed to use. */
-    val FORBIDDEN_TOOLS: Set<String> = setOf(
-        NAME,              // anti-recursion
-        "shell_execute",   // privilege escalation (terminal, android-* CLIs)
-        "browser_use",     // shared browser resource — no racing
-    )
-
-    /** Default budget for sub-agents when the skill doesn't specify. */
-    private const val DEFAULT_MAX_TURNS = 12
-    private const val DEFAULT_MAX_OUTPUT_TOKENS = 4096
-
-    /**
-     * Parsed from a skill's SKILL.md frontmatter. Returned by
-     * [parseSubagentConfig] for every skill; [isSubagent] is false
-     * for regular skills.
-     */
-    data class SubagentConfig(
-        val isSubagent: Boolean = false,
-        val maxTurns: Int = DEFAULT_MAX_TURNS,
-        val maxOutputTokens: Int = DEFAULT_MAX_OUTPUT_TOKENS,
-        /** Null = allow all non-FORBIDDEN tools. Non-null = explicit allowlist. */
-        val allowedTools: Set<String>? = null,
-    )
+    const val WAIT_TIMEOUT_SECONDS = 900
 
     // ── Tool definition ──────────────────────────────────────────────────
 
     fun definition(): AgentToolDefinition = AgentToolDefinition(
         name = NAME,
-        description = "Spawn a sub-agent with its own system prompt, tool set, " +
-            "and budget. The sub-agent runs independently and returns its final " +
-            "result. Use this to delegate complex sub-tasks to a focused agent. " +
-            "When the user says 子代理 / sub-agent, this tool is the DEFAULT " +
-            "in-session delegation path; cross-session dispatch via " +
-            "minis-sessions-cli send is only for the user explicitly wanting " +
-            "separate chat sessions. " +
-            "The skill must be defined with `subagent: true` in its SKILL.md " +
-            "frontmatter and must already be installed and enabled; an error " +
-            "reply lists the skills that are. Find candidates by searching " +
-            "/var/minis/skills/*/SKILL.md for `subagent: true`. " +
-            "Recursive spawn_agent is forbidden.",
+        description = "Dispatch a sub-agent as a REAL chat session and block until " +
+            "it answers. The sub-agent gets the app's normal agent prompt and the " +
+            "full tool set (shell_execute, browser_use, file/memory tools), and its " +
+            "session appears in the chat list so the user can watch or interrupt it. " +
+            "Use it for delegated work that needs tools: hand it a complete, " +
+            "self-contained task (goal, inputs/paths, constraints, expected output) — " +
+            "it cannot see this conversation. Returns the sub-agent's final text. " +
+            "Do NOT dispatch from inside a sub-agent. For fire-and-forget or " +
+            "parallel work, use minis-sessions-cli send --async instead.",
         parameters = mapOf(
             "tool_title" to AgentToolParam(
                 "string",
                 "A concise 5-10 word summary of what this sub-agent should do",
             ),
-            "skill_name" to AgentToolParam(
+            "task" to AgentToolParam(
                 "string",
-                "The name (or id) of the sub-agent skill to invoke",
-            ),
-            "query" to AgentToolParam(
-                "string",
-                "The task, question, or instruction to give to the sub-agent",
+                "The complete task: goal, inputs/paths, constraints, and the exact " +
+                    "output you expect. The sub-agent sees only this text.",
             ),
         ),
-        required = listOf("tool_title", "skill_name", "query"),
-        propertyOrdering = listOf("tool_title", "skill_name", "query"),
+        required = listOf("tool_title", "task"),
+        propertyOrdering = listOf("tool_title", "task"),
     )
 
-    // ── Config parsing ───────────────────────────────────────────────────
+    // ── Prompt building ──────────────────────────────────────────────────
 
     /**
-     * Parse sub-agent configuration from a skill's frontmatter (see
-     * [SkillInfo.frontmatter]; falls back to [SkillInfo.body] for callers that
-     * only hold raw markdown). Recognises YAML frontmatter fields:
-     *   subagent: true
-     *   max_turns: 12
-     *   max_output_tokens: 4096
-     *   allowed_tools: [file_read, file_write, memory_get]
+     * Wrap the caller's task with the dispatch preamble.
      *
-     * Returns [SubagentConfig] with isSubagent=false for skills without
-     * `subagent: true` in the frontmatter — existing skills are unaffected.
+     * Pure so the shape is unit-tested. The sub-agent must know two things it
+     * cannot infer: (a) its final reply is the ONLY thing the parent sees, and
+     * (b) it must not recurse into another dispatch.
      */
-    fun parseSubagentConfig(skill: SkillInfo): SubagentConfig {
-        // [fix/subagent-frontmatter] Parse the FRONTMATTER block, not `body`.
-        // SkillRepository stores `body` with the frontmatter already stripped
-        // (parseSkillMd), so a production Skill's `body` never contains
-        // `subagent:` — reading it made isSubagent permanently false and the
-        // whole spawn_agent path unreachable ("add `subagent: true`" was an
-        // instruction no skill could satisfy). Falling back to `body` keeps
-        // the pure-function contract for callers that only hold raw markdown
-        // (unit tests, future import paths).
-        val source = skill.frontmatter.ifBlank { skill.body }
-        if (source.isBlank()) return SubagentConfig()
-
-        // Extract the frontmatter block, then drop both `---` delimiters.
-        val block = extractFrontmatterBlock(source)
-        if (block.isBlank()) return SubagentConfig()
-        val blockLines = block.lines()
-        if (blockLines.size < 3) return SubagentConfig()
-        val frontmatter = blockLines.subList(1, blockLines.size - 1)
-        var isSubagent = false
-        var maxTurns = DEFAULT_MAX_TURNS
-        var maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS
-        var allowedTools: Set<String>? = null
-
-        var i = 0
-        while (i < frontmatter.size) {
-            val trimmed = frontmatter[i].trim()
-            when {
-                trimmed.startsWith("subagent:") -> {
-                    val value = trimmed.substringAfter(":").trim()
-                    isSubagent = value == "true" || value == "yes"
-                }
-                trimmed.startsWith("max_turns:") -> {
-                    maxTurns = trimmed.substringAfter(":").trim().toIntOrNull() ?: DEFAULT_MAX_TURNS
-                }
-                trimmed.startsWith("max_output_tokens:") -> {
-                    maxOutputTokens = trimmed.substringAfter(":").trim().toIntOrNull() ?: DEFAULT_MAX_OUTPUT_TOKENS
-                }
-                trimmed.startsWith("allowed_tools:") -> {
-                    val listStr = trimmed.substringAfter(":").trim()
-                    val tools = mutableSetOf<String>()
-                    if (listStr.isNotEmpty()) {
-                        parseListValue(listStr)?.let { tools.addAll(it) }
-                    }
-                    // Multi-line form: subsequent lines starting with "- "
-                    var j = i + 1
-                    while (j < frontmatter.size) {
-                        val item = frontmatter[j].trim()
-                        if (item.startsWith("- ")) {
-                            tools.add(item.removePrefix("- ").trim().trim('"', '\''))
-                            j++
-                        } else {
-                            break
-                        }
-                    }
-                    allowedTools = tools.ifEmpty { emptySet() }
-                }
-            }
-            i++
-        }
-
-        return SubagentConfig(
-            isSubagent = isSubagent,
-            maxTurns = maxTurns.coerceIn(1, 100),
-            maxOutputTokens = maxOutputTokens.coerceIn(256, 128_000),
-            allowedTools = allowedTools,
+    fun buildTaskPrompt(task: String): String = buildString {
+        appendLine("You are a sub-agent dispatched for one task in this session.")
+        appendLine(
+            "Put your final answer in your reply — it is returned verbatim to the " +
+                "agent that dispatched you, which cannot see your intermediate " +
+                "steps. Make it self-contained."
         )
-    }
+        appendLine()
+        appendLine("## Task")
+        appendLine(task.trim())
+        appendLine()
+        appendLine("## Working agreement")
+        appendLine("- Prefer finishing over exploring; state what you verified and what you did not.")
+        appendLine("- Do not dispatch another sub-agent and do not create new sessions.")
+    }.trimEnd()
+
+    // ── Result mapping ───────────────────────────────────────────────────
 
     /**
-     * Build the filtered tool list for a sub-agent.
-     * Excludes [FORBIDDEN_TOOLS] and, when [allowedTools] is non-null,
-     * only includes tools whose name is in that set.
+     * Map a `ChatMutationMethods.prompt` reply onto the caller's tool result.
+     *
+     * Pure on purpose (no Context / no ViewModel): the four outcomes are the
+     * contract the dispatching model reads — a finished answer, an empty
+     * answer, a timeout, and a refusal — and each must be distinguishable, or
+     * a refusal gets read as an answer (the [deep-audit-1044 A-04] defect the
+     * `send` CLI path hit).
      */
-    fun buildFilteredTools(
-        allTools: List<AgentToolDefinition>,
-        allowedTools: Set<String>?,
-    ): List<AgentToolDefinition> {
-        return allTools.filter { tool ->
-            tool.name !in FORBIDDEN_TOOLS &&
-                (allowedTools == null || tool.name in allowedTools)
+    fun resultOf(
+        status: String,
+        text: String,
+        sessionId: String,
+        timedOut: Boolean,
+        title: String = "Sub-agent",
+        timeoutSeconds: Int = WAIT_TIMEOUT_SECONDS,
+    ): ToolExecutionResult {
+        val where = if (sessionId.isBlank()) "" else "\n\n(session: $sessionId)"
+        return when {
+            status == "Completed" -> ToolExecutionResult(
+                text.ifBlank { "(sub-agent finished without producing text)" } + where,
+                true,
+                toolTitle = title,
+            )
+            timedOut -> ToolExecutionResult(
+                "Error: sub-agent did not finish within ${timeoutSeconds}s. " +
+                    "It may still be running — read it with " +
+                    "`minis-sessions-cli messages --id $sessionId`, or continue it with " +
+                    "`minis-sessions-cli send --session $sessionId --prompt ...`.$where",
+                false, toolTitle = title,
+            )
+            else -> ToolExecutionResult(
+                "Error: sub-agent dispatch was not delivered (status=$status): " +
+                    (text.ifBlank { "no reason given" }) + where,
+                false, toolTitle = title,
+            )
         }
     }
 
-    /**
-     * Build the system prompt for a sub-agent: the skill's own instructions
-     * plus any standing context fragments the caller injects.
-     *
-     * [contextFragments] is the sub-agent's share of the context the main
-     * loop puts in ITS system prompt — the skills disclosure and, when memory
-     * is on for the session, the global / daily / rollup memory fragments.
-     * Empty or blank fragments are skipped, and an empty list produces exactly
-     * the pre-change output (skill body only), so existing callers and tests
-     * are unaffected.
-     *
-     * Fragments are appended in the caller's order after a single blank line.
-     * The prompt is rebuilt on every spawn, so a stable shape keeps provider
-     * prefix caching useful across a sub-agent's turns.
-     */
-    fun buildSystemPrompt(skill: SkillInfo, contextFragments: List<String> = emptyList()): String {
-        val instructions = skillInstructions(skill)
-        val extras = contextFragments.map { it.trim() }.filter { it.isNotEmpty() }
-        if (extras.isEmpty()) return instructions
-        return buildString {
-            append(instructions)
-            for (extra in extras) {
-                append("\n\n")
-                append(extra)
-            }
-        }
-    }
-
-    /**
-     * Strip frontmatter from the skill body and return the instruction text.
-     * Falls back to the skill description when the body is only frontmatter.
-     *
-     * [r3-B11-F13] Production bodies are ALREADY stripped —
-     * `SkillRepository.parseSkillMd()` drops the block before anything is
-     * stored, and [SkillInfo.frontmatter] carries it — so this second strip
-     * only exists for raw-markdown callers (unit tests, import paths) whose
-     * [SkillInfo.frontmatter] is blank. It also now requires a real
-     * frontmatter shape: a Markdown body that opens with a horizontal rule
-     * (`---`) is PROSE, and the old `startsWith("---")` + any-line-`---` scan
-     * deleted the first section of such a skill's instructions.
-     */
-    private fun skillInstructions(skill: SkillInfo): String {
-        val body = skill.body
-        if (body.isBlank()) return skill.description
-        // Only raw-markdown callers can still carry frontmatter in [body].
-        val bodyText = if (skill.frontmatter.isBlank()) {
-            stripRealFrontmatter(body) ?: body
-        } else {
-            body
-        }
-        val content = bodyText.trim()
-        return if (content.isNotEmpty()) content else skill.description
-    }
-
-    /**
-     * [r3-B11-F13] Strip a leading YAML frontmatter block from [raw], or null
-     * when the leading `---` is not frontmatter. "Real" means: both delimiters
-     * are exactly `---` (a Markdown table row `---|---` and a `----` rule do
-     * not count), there is at least one middle line, and every non-blank,
-     * non-list-continuation middle line looks like a `key:` mapping — prose
-     * between two horizontal rules fails that test and is returned untouched.
-     *
-     * Pure string work; covered by [SubagentSkillTest].
-     */
-    internal fun stripRealFrontmatter(raw: String): String? {
-        val lines = raw.lines()
-        if (lines.size < 3) return null
-        if (lines[0].trim() != "---") return null
-        val endIdx = lines.subList(1, lines.size)
-            .indexOfFirst { it.trim() == "---" }
-            .takeIf { it >= 0 }
-            ?.plus(1)
-            ?: return null
-        // Middle lines: index 1 .. endIdx-1 (the closing `---` sits at endIdx).
-        val middle = lines.subList(1, endIdx)
-        if (middle.none { it.isNotBlank() }) return null
-        for (line in middle) {
-            val trimmed = line.trim()
-            if (trimmed.isEmpty() || trimmed.startsWith("- ")) continue
-            // A YAML key: optional leading chars, then `:` followed by end or
-            // whitespace (so a URL "http://x" — `http:` — still passes, while
-            // "see chapter 3:4" does not pretend to be a mapping).
-            val isMapping = KEY_LINE_RE.matches(trimmed)
-            if (!isMapping) return null
-        }
-        val contentLines = lines.subList(endIdx + 1, lines.size)
-        return contentLines.joinToString("\n").trim()
-    }
+    // ── Skill plumbing (not dispatch) ────────────────────────────────────
 
     /**
      * The frontmatter block of a SKILL.md document (`---` … `---` inclusive),
@@ -314,41 +149,4 @@ object SubagentSkill {
         }
         return ""
     }
-
-    // ── Helpers ──────────────────────────────────────────────────────────
-
-    /**
-     * Parse a YAML list value like `[file_read, file_write]` or
-     * `- file_read\n- file_write`.
-     */
-    private fun parseListValue(value: String): Set<String>? {
-        val trimmed = value.trim()
-        if (trimmed.isEmpty() || trimmed == "[]") return emptySet()
-
-        // Inline list: [item1, item2, ...]
-        if (trimmed.startsWith("[")) {
-            return trimmed
-                .removeSurrounding("[", "]")
-                .split(",")
-                .map { it.trim().trim('"', '\'') }
-                .filter { it.isNotBlank() }
-                .toSet()
-                .ifEmpty { null }
-        }
-
-        // Multi-line list: each line starts with "- "
-        val items = trimmed.lines()
-            .map { it.trim() }
-            .filter { it.startsWith("- ") }
-            .map { it.removePrefix("- ").trim().trim('"', '\'') }
-            .filter { it.isNotBlank() }
-        return items.toSet().ifEmpty { null }
-    }
 }
-
-/** A tool call emitted by a sub-agent during its loop. */
-data class SubagentToolCall(
-    val id: String,
-    val name: String,
-    val args: JSONObject,
-)

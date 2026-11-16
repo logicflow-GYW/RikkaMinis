@@ -10,9 +10,9 @@ import org.junit.Test
  *
  * Before the fix `writeSkillMd` regenerated a 3-key frontmatter block on every
  * write, so any frontmatter-only key (`subagent: true`, `max_turns`,
- * `allowed_tools`) was destroyed by an ordinary rename — and since
- * `SubagentSkill.parseSubagentConfig` reads those keys off disk, the skill then
- * disappeared from the `spawn_agent` list.
+ * `allowed_tools`) was destroyed by an ordinary rename — `subagent: true` in
+ * particular is a user-authored key that must round-trip even though dispatch
+ * itself no longer reads it.
  *
  * `SkillRepository` itself needs Android's Context/SQLite, so the pure merge
  * helper lives in its companion object and is exercised directly here (the same

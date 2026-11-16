@@ -252,39 +252,6 @@ class SystemPromptSegmentOrderTest {
     }
 
     // ------------------------------------------------------------------
-    // 4. The sub-agent path must keep its daily fragment (the P0 this
-    //    branch's ancestor fixed by adding orderForSubagentContext)
-    // ------------------------------------------------------------------
-
-    @Test
-    fun theSubagentContextStillCarriesTheDailyFragment() {
-        // [incr1113 F-07] Scoped to the function, and the ARGUMENT is checked.
-        //
-        // The previous version asserted `whole.contains("orderForSubagentContext")`
-        // over the entire file — a bare substring, satisfiable by a comment, by an
-        // import, or by the function being called somewhere else while the
-        // sub-agent path silently stopped calling it. The regression this guards
-        // (orderInStandingRegion filtering DAILY_MEMORY out of the sub-agent
-        // context) happens entirely inside `executeSpawnAgentTool`, so that is
-        // the only region whose text means anything here.
-        val src = stripComments(readRepoFile(promptRel))
-        val body = functionBodyOf(src, "internal suspend fun ChatViewModel.executeSpawnAgentTool(")
-        assertTrue(
-            "executeSpawnAgentTool no longer calls orderForSubagentContext — " +
-                "orderInStandingRegion FILTERS by membership and silently drops " +
-                "DAILY_MEMORY, which is the P0 this path already hit once",
-            body.contains("orderForSubagentContext"),
-        )
-        // …and the daily fragment must actually be handed IN. A call whose list
-        // omits DAILY_MEMORY re-introduces the same hole with the right helper.
-        assertTrue(
-            "the sub-agent fragment list no longer adds DAILY_MEMORY — the ordering " +
-                "helper can only keep what it is given",
-            body.contains("MemoryPromptOrder.Key.DAILY_MEMORY"),
-        )
-    }
-
-    // ------------------------------------------------------------------
 
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))

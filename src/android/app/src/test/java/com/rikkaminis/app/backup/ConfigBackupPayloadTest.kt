@@ -1,6 +1,5 @@
 package com.rikkaminis.app.backup
 
-import com.rikkaminis.app.tools.SkillInfo
 import com.rikkaminis.app.tools.SubagentSkill
 import org.json.JSONArray
 import org.json.JSONObject
@@ -541,34 +540,21 @@ class ConfigBackupPayloadTest {
 
     // ── Skill frontmatter fallback (sweep1013-D1/F-8) ────────────────────
 
-    private fun skillInfoFor(frontmatter: String, body: String): SkillInfo = object : SkillInfo {
-        override val name = "demo"
-        override val description = "d"
-        override val body = body
-        override val frontmatter = frontmatter
-    }
-
     @Test
-    fun `frontmatter rejoined to body keeps subagent-only keys parseable`() {
+    fun `frontmatter rejoined to body keeps its keys verbatim`() {
         // The export fallback carries the raw frontmatter block alongside the
         // frontmatter-STRIPPED body; the restore branch re-joins them exactly
-        // as `frontmatter + "\n" + body` before importFromContent re-parses.
-        // A skill whose `subagent: true` / `max_turns` exist ONLY in the
-        // frontmatter must survive that re-join.
+        // as `frontmatter + "\n" + body`. Frontmatter-only keys must survive
+        // that re-join verbatim — dispatch itself no longer parses them, but a
+        // round-trip that ate them would still mangle the user's SKILL.md.
         val frontmatter = "---\nname: demo\ndescription: d\nsubagent: true\nmax_turns: 7\n---"
         val body = "You are a fix executor."
         val joined = frontmatter + "\n" + body // mirror of the restore branch
 
-        val parsed = SubagentSkill.parseSubagentConfig(skillInfoFor(joined, joined))
-        assertTrue("subagent flag must survive the re-join", parsed.isSubagent)
-        assertEquals(7, parsed.maxTurns)
-    }
-
-    @Test
-    fun `body-only legacy fallback still parses without frontmatter`() {
-        // Older backups carry body only (no "frontmatter" key) — the restore
-        // branch treats frontmatter as absent and hands the body through.
-        val parsed = SubagentSkill.parseSubagentConfig(skillInfoFor("", "plain skill body"))
-        assertFalse("no frontmatter means not a subagent", parsed.isSubagent)
+        val block = SubagentSkill.extractFrontmatterBlock(joined)
+        assertTrue("the block must still be extractable", block.startsWith("---"))
+        assertTrue("subagent key must survive the re-join", block.contains("subagent: true"))
+        assertTrue("max_turns must survive the re-join", block.contains("max_turns: 7"))
+        assertTrue("the body must stay behind the block", joined.endsWith(body))
     }
 }

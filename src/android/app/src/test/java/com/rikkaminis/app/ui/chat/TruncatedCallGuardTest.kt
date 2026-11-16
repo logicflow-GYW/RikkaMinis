@@ -132,30 +132,6 @@ class TruncatedCallGuardTest {
         assertTrue(anthropic.contains("if (!sawClearFinish && (contentChars > 0 || toolChars > 0)) {"))
     }
 
-    @Test
-    fun `sub-agent loop consults the same policy instead of executing blind`() {
-        val src = readRepoFile(TOOL_EXECUTORS)
-        val body = src.substring(src.indexOf("internal suspend fun runSubagentLoop("))
-        assertTrue(
-            "runSubagentLoop must refuse truncated tool calls",
-            body.contains("TruncatedToolCallPolicy.rejectionReason("),
-        )
-        // Single source of truth: the loop must not re-implement the wording.
-        assertFalse(
-            "runSubagentLoop must not hand-write a second [TRUNCATED] message",
-            body.contains("\"[TRUNCATED]"),
-        )
-        // The refusal still produces a tool_result (pairing contract).
-        val refusalIdx = body.indexOf("if (truncatedRefusal != null) {")
-        assertTrue(refusalIdx >= 0)
-        val refusalBlock = body.substring(refusalIdx, refusalIdx + 2000)
-        assertTrue(refusalBlock.contains("AgentContentPart.ToolResult("))
-        assertTrue(refusalBlock.contains("isError = true"))
-        // …and the executable branch is its else-arm, so a refusal never runs.
-        assertTrue(refusalBlock.contains("} else {"))
-        assertTrue(refusalBlock.indexOf("executeSubTool(") > refusalBlock.indexOf("} else {"))
-    }
-
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
