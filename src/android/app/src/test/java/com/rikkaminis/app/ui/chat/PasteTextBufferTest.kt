@@ -256,19 +256,22 @@ class PasteTextBufferTest {
         // scrambled material (the old inline arm hid this, because the marker
         // went back into the same region it was cut from).
         val (mint, stored) = sequentialStash()
-        val block = "Hello " + "x".repeat(1500)
+        // The block has to cross the fold threshold to reach the arm under test
+        // (english >1000 words / CJK >1200 units), and it has to SHARE the
+        // field's opening and closing words for the diff to mis-attribute them.
+        val block = "中文" + cjkChars(1300)
         val out = foldAt(
-            old = "Hello world",
+            old = "中文结尾",
             oldSelection = TextRange(0),
-            new = block + "Hello world",
+            new = block + "中文结尾",
             newSelection = TextRange(block.length),
             stash = mint,
         )
 
-        assertEquals("the field must not be edited by a detached paste", "Hello world", out.text)
+        assertEquals("the field must not be edited by a detached paste", "中文结尾", out.text)
         assertEquals(
-            "the stashed block must be the bytes the user pasted — a rotated run ships " +
-                "garbage to the model",
+            "the stashed block must be the bytes the user pasted — the diff's run is " +
+                "rotated (its head moves to its tail) whenever the boundary is guessed",
             block,
             stored.single(),
         )
@@ -286,11 +289,14 @@ class PasteTextBufferTest {
         // Here the text grew at the head while the caret sat in the middle: the
         // reconstruction check fails, so nothing is detached.
         val (mint, stored) = sequentialStash()
-        val block = "Hello " + "x".repeat(1500)
+        val block = "中文" + cjkChars(1300)
         val out = foldAt(
-            old = "Hello world",
-            oldSelection = TextRange(5),
-            new = block + "Hello world",
+            old = "中文结尾",
+            // Caret at the END of the field while the text grew at the head: no
+            // selection explains this edit, which is the shape IME composition
+            // and autocorrect can hand us.
+            oldSelection = TextRange("中文结尾".length),
+            new = block + "中文结尾",
             newSelection = TextRange(block.length),
             stash = mint,
         )
@@ -302,7 +308,7 @@ class PasteTextBufferTest {
         )
         assertEquals(
             "expansion must reproduce the edit exactly",
-            block + "Hello world",
+            block + "中文结尾",
             out.text.replace(PastedText.placeholderFor(1), stored.single()),
         )
     }
@@ -414,7 +420,15 @@ class PasteTextBufferTest {
         val prefix = "😀😀"
         val suffix = "🎉🎉"
         val block = cjkChars(1300)
-        val out = fold(prefix + suffix, prefix + block + suffix, mint)
+        // [incr1116-B F-01] The caret sits where the block went in — that is
+        // the evidence the detached arm derives (and verifies) the run from.
+        // A fixture with the caret parked at the end of the field describes an
+        // edit no text field produces and would take the inline fallback.
+        val out = foldAt(
+            prefix + suffix, TextRange(prefix.length),
+            prefix + block + suffix, TextRange(prefix.length + block.length),
+            mint,
+        )
 
         assertEquals("the typed text survives, minus the inserted block", prefix + suffix, out.text)
         assertEquals(block, stored.single())
@@ -441,9 +455,11 @@ class PasteTextBufferTest {
         // in the user's own message.
         val (mint, stored) = sequentialStash()
         val block = "😀".repeat(601) // 1202 units → folds
-        // "a|b" so the diff's common prefix is "a" and its common suffix is "b":
-        // the inserted run is exactly `block`, not `block` glued to the tail.
-        val folded = fold("a|b", "a" + block + "b", mint)
+        // "a|b" so the common prefix is "a" and the common suffix is "b"; the
+        // caret after "a" is what tells the fold the run is exactly `block`.
+        val folded = foldAt(
+            "a|b", TextRange(1), "a" + block + "b", TextRange(1 + block.length), mint,
+        )
         assertEquals("the field keeps only what the user typed", "a|b", folded.text)
         assertEquals("the inserted run is the block and nothing else", block, stored.single())
 
