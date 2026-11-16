@@ -1264,6 +1264,20 @@ class ChatViewModel(
     // the edited turn (the send path clears _attachments itself).
     internal val _preEditAttachments = MutableStateFlow<List<InputAttachment>?>(null)
 
+    /**
+     * [incr1116-B F-05] The paste chips the composer held when edit mode
+     * started, for the same snapshot-once / restore-on-cancel contract as
+     * [_preEditAttachments].
+     *
+     * Re-folding an edited message's paste appends a chip
+     * ([stashPastedText]), and nothing ever took it back: edit A → cancel →
+     * edit B left chip #1 behind, and the next send appended BOTH blocks —
+     * the same 15K pasted twice. The snapshot is what makes cancel and
+     * re-entry idempotent; a successful send clears it with the attachment
+     * snapshot.
+     */
+    internal val _preEditPastes = MutableStateFlow<List<PastedText>?>(null)
+
     internal val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
@@ -3186,6 +3200,7 @@ class ChatViewModel(
         // alive, so tapping "Exit Edit Mode" after the wipe restored the
         // stale pre-edit composer staging into the fresh chat.
         _preEditAttachments.value = null
+        _preEditPastes.value = null
         _editingMessageId.value = null
         _promptQueue.value = emptyList()
         _hasInjectedShareContent.value = false
@@ -3818,6 +3833,16 @@ class ChatViewModel(
         if (_preEditAttachments.value == null) {
             _preEditAttachments.value = _attachments.value
         }
+        // [incr1116-B F-05] Same snapshot-once rule for the paste chips, plus
+        // the re-entry case: editing another message while already in edit mode
+        // must start from the snapshot, not from the chip the previous edit
+        // appended.
+        val preEditPastes = _preEditPastes.value
+        if (preEditPastes == null) {
+            _preEditPastes.value = _pastedTexts.value
+        } else if (_pastedTexts.value != preEditPastes) {
+            _pastedTexts.value = preEditPastes
+        }
         _attachments.value = restaged.map { r ->
             val mime = android.webkit.MimeTypeMap.getSingleton()
                 .getMimeTypeFromExtension(
@@ -3879,6 +3904,10 @@ class ChatViewModel(
         // restage in editMessage()).
         _preEditAttachments.value?.let { _attachments.value = it }
         _preEditAttachments.value = null
+        // [incr1116-B F-05] Drop the chips this edit re-folded; leaving them
+        // would append the same block to the next message the user sends.
+        _preEditPastes.value?.let { _pastedTexts.value = it }
+        _preEditPastes.value = null
         _editingMessageId.value = null
     }
 
@@ -4123,6 +4152,7 @@ class ChatViewModel(
             if (_editingMessageId.value != null) {
                 _editingMessageId.value = null
                 _preEditAttachments.value = null
+                _preEditPastes.value = null
             }
             pendingExhaustedText = trimmed
             pendingExhaustedHasAttachments = _attachments.value.isNotEmpty()
@@ -4228,6 +4258,9 @@ class ChatViewModel(
             // `currentAttachments` snapshot + clearAttachments() below is what
             // the send path will persist.
             _preEditAttachments.value = null
+            // [incr1116-B F-05] The send consumed the chips (expanded into the
+            // message), so the snapshot must go with the attachment one.
+            _preEditPastes.value = null
         }
 
         // [fix/compact-cancel-on-stop-1002] Store the shell job so
