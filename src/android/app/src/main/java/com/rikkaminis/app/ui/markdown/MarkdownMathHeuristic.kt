@@ -70,8 +70,10 @@ internal object MarkdownMathHeuristic {
      * both `$` vanished from it. Same for `sin x cos x`, `max a b`,
      * `lim n to inf`, `O(n log n)`. Five regressions, one cause.
      *
-     * So these tokens are excluded from BOTH tests (word count and long-word):
-     * a formula may use any number of them and still be a formula.
+     * So these tokens are excluded from the LONG-word test: a formula may use
+     * any number of them and still be a formula. They are deliberately NOT
+     * excluded from the word count — see [looksLikeNaturalLanguage] for the
+     * money sentence that needs `min` to count.
      *
      * Exact-token match, case-insensitive — `maximum` is not `max`, `sine` is
      * not `sin`, `logo` is not `log`. The list is deliberately closed: adding
@@ -166,12 +168,19 @@ internal object MarkdownMathHeuristic {
      *  - at least one word must be [NATURAL_LANGUAGE_MIN_WORD_LENGTH] letters or
      *    longer — a real formula's "words" are single variables (`x`, `pi`),
      *    while prose always carries an ordinary word (`for`, `pass`, `day`);
-     *  - [review-1114 B] a token in [MATH_FUNCTION_TOKENS] is not a prose word
-     *    at all: it neither counts toward the word total nor satisfies the
-     *    long-word test. Function names are the one class of 3+ letter ASCII
-     *    word that appears INSIDE formulas, so counting them as prose evidence
-     *    inverted the signal — it made `log x + log y` and `sin x cos x` read
-     *    as sentences while the `-` in `3-day` still reads as prose evidence.
+     *  - [review-1114 B] a token in [MATH_FUNCTION_TOKENS] never satisfies the
+     *    LONG-word test (it still counts toward the total). Function names are
+     *    the one class of 3+ letter ASCII word that appears INSIDE formulas, so
+     *    letting them be the long word inverted the signal — it made
+     *    `log x + log y` and `sin x cos x` read as sentences while the `-` in
+     *    `3-day` still reads as prose evidence.
+     *
+     *    [incr1116-B F-10] They DO count toward the total, though, and that is
+     *    what keeps unit abbreviations out of the formula branch:
+     *    `50 for 30-min or ` has three words only if `min` is one of them, and
+     *    its long word is `for` — so it stays prose. Excluding them from the
+     *    count entirely (the first cut) made the span look like a two-word
+     *    formula, and the `-` of `30-min` then rendered both dollars as KaTeX.
      *
      * The two together keep `$x - y$`, `$x+y$`, `$1+1=2$`, `$x^2$` and
      * `$\frac{1}{2}$` classified as math (they fail the word-count or the
@@ -193,9 +202,15 @@ internal object MarkdownMathHeuristic {
             var j = i
             while (j < content.length && content[j].isAsciiLetter()) j++
             val token = content.substring(i, j)
-            if (token.lowercase() !in MATH_FUNCTION_TOKENS) {
-                words++
-                if (j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH) hasLongWord = true
+            // [incr1116-B F-10] Every token is a word; a function name just
+            // cannot be the LONG one. See the KDoc: the count has to include
+            // `min`/`max`/`sec` so `50 for 30-min or ` reaches three words,
+            // while `max a b` still fails the long-word test and stays math.
+            words++
+            if (token.lowercase() !in MATH_FUNCTION_TOKENS &&
+                j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH
+            ) {
+                hasLongWord = true
             }
             i = j
         }

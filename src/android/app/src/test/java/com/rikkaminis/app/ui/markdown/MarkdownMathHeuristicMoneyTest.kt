@@ -123,4 +123,20 @@ class MarkdownMathHeuristicMoneyTest {
         // exclusion table can never be widened into "prose is math".
         assertEquals(false, MarkdownMathHeuristic.looksLikeMath("50 for a 3-day pass or "))
     }
+
+    @Test
+    fun `a unit abbreviation is a word, not a function call`() {
+        // [incr1116-B F-10] `min` / `max` / `sec` are function names AND the
+        // units a money sentence is written with. Counting the token as math
+        // evidence only for the long-word test (never dropping it from the word
+        // count) is what separates `$50 for 30-min or $100` — prose, three
+        // words, long word `for` — from `$\max a b$`, which has no long word at
+        // all and stays a formula.
+        assertEquals(false, MarkdownMathHeuristic.looksLikeMath("50 for 30-min or "))
+        assertEquals(false, MarkdownMathHeuristic.looksLikeMath("50 for 15-sec or "))
+        // The formula arm is unchanged: three tokens whose only 3+ letter word
+        // is the function name itself.
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("max a b"))
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("log x + log y"))
+    }
 }
