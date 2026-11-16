@@ -227,8 +227,8 @@ class AgentForegroundService : Service() {
         // from ToolOverlayController.<init> here would throw
         // UninitializedPropertyAccessException — writing a second crash log
         // from the very detection logic that meant to stop the crashing.
-        // Skip the overlay observer and let onStartCommand satisfy the
-        // FG-deadline + stopSelf.
+        // Skip the overlay observer and let onStartCommand discharge the
+        // FG deadline via satisfyForegroundDeadlineThenStop().
         if (isSafeMode() || isInitSkipped() || isDbGuidanceMode()) {
             Log.w(
                 TAG,
@@ -249,19 +249,28 @@ class AgentForegroundService : Service() {
         Log.d(TAG, "Service created")
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Safe-mode: system restarted us under START_STICKY (intent==null)
-        // after a crash. Satisfy the 5-second startForeground deadline
-        // with a stub notification, then unwind. The crash share dialog
-        // owns the UX from here; running a background service in this
-        // state would re-trip the lateinit access that brought us down.
-        //
-        // The database-guidance skip is the same degraded-mode shape: the
-        // on-disk schema is newer than this build, MinisApp.onCreate bailed
-        // before building the repositories, so an OEM restart of this service
-        // would hit the same UninitializedPropertyAccessException. A sticky
-        // service can be recreated in either state, hence the shared stub.
-        if (isSafeMode() || isInitSkipped() || isDbGuidanceMode()) {
+    /**
+     * [FGS-DEADLINE-1116] Android's foreground-service contract: once a process
+     * has been handed a `startForegroundService()` intent it MUST call
+     * `startForeground()` within 5 seconds, and `stopSelf()` does **not**
+     * discharge that obligation. A service that decides it has nothing to do
+     * and returns from `onTaskRemoved` with a bare `stopSelf()` leaves the
+     * deadline unmet, so the system kills the entire process at expiry with
+     * `ForegroundServiceDidNotStartInTimeException`.
+     *
+     * Observed on-device 2026-11-16 10:10:16 — `Service created` and
+     * `onTaskRemoved with no active sessions, stopping self` landed in the same
+     * millisecond, then FATAL 40 ms later after four short-lived starts. The
+     * swipe-from-recents path runs several times a day; before that it merely
+     * never hit the 5 s window.
+     *
+     * Every "we no longer need the service" exit goes through here: instances
+     * that never reached [foregroundStarted] satisfy the deadline with a
+     * throwaway stub row and drop it again; instances that did reach it have
+     * already discharged the obligation and just stop.
+     */
+    private fun satisfyForegroundDeadlineThenStop() {
+        if (!foregroundStarted) {
             try {
                 val stub = androidx.core.app.NotificationCompat.Builder(this, CHANNEL_ID)
                     .setContentTitle("RikkaMinis")
@@ -284,9 +293,28 @@ class AgentForegroundService : Service() {
                     stopForeground(true)
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "safe-mode stub startForeground failed: ${t.message}")
+                Log.w(TAG, "stub startForeground before stop failed: ${t.message}")
             }
-            stopSelf()
+        }
+        stopSelf()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Safe-mode: system restarted us under START_STICKY (intent==null)
+        // after a crash. Satisfy the 5-second startForeground deadline
+        // with a stub notification, then unwind. The crash share dialog
+        // owns the UX from here; running a background service in this
+        // state would re-trip the lateinit access that brought us down.
+        //
+        // The database-guidance skip is the same degraded-mode shape: the
+        // on-disk schema is newer than this build, MinisApp.onCreate bailed
+        // before building the repositories, so an OEM restart of this service
+        // would hit the same UninitializedPropertyAccessException. A sticky
+        // service can be recreated in either state, hence the shared stub.
+        if (isSafeMode() || isInitSkipped() || isDbGuidanceMode()) {
+            // Same exit as the swipe-from-recents path: the stub + stop pair
+            // lives in one place so neither caller can drop the deadline again.
+            satisfyForegroundDeadlineThenStop()
             return START_NOT_STICKY
         }
         val sessionCount = intent?.getIntExtra(EXTRA_SESSION_COUNT, 0) ?: 0
@@ -321,7 +349,10 @@ class AgentForegroundService : Service() {
      * Re-anchor the service to its own intent and call startForeground
      * again. AOSP keeps it alive across task removal as long as at least
      * one active session is registered; if zero sessions remain (the
-     * task removal raced a natural completion), [stopSelf] cleans up.
+     * task removal raced a natural completion) the service unwinds through
+     * [satisfyForegroundDeadlineThenStop] — NOT a bare `stopSelf()`, which
+     * would leave a `startForegroundService()` deadline unmet and get the
+     * process killed (FGS-DEADLINE-1116).
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
@@ -333,7 +364,7 @@ class AgentForegroundService : Service() {
         SessionActivityTracker.clearPresence()
         if (SessionActivityTracker.activeSessions.value.isEmpty()) {
             Log.d(TAG, "onTaskRemoved with no active sessions, stopping self")
-            stopSelf()
+            satisfyForegroundDeadlineThenStop()
             return
         }
         Log.d(TAG, "onTaskRemoved with ${SessionActivityTracker.activeSessions.value.size} active session(s) — keeping service alive")
