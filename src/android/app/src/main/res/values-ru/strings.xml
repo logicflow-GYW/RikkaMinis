@@ -1466,6 +1466,7 @@
     <string name="chat_tuning_entry">Тонкая настройка чата</string>
     <string name="chat_tuning_entry_subtitle">Чтение, прокрутка и ввод</string>
     <string name="chat_tuning_title">Тонкая настройка чата</string>
+    <string name="settings_live_apply_hint">Любое изменение на этой странице применяется и сохраняется сразу — кнопки сохранения нет.</string>
     <string name="chat_tuning_section_reading">ЧТЕНИЕ И ПРОКРУТКА</string>
     <string name="chat_tuning_scroll_threshold">Порог прилипания к низу</string>
     <string name="chat_tuning_scroll_threshold_desc">Насколько близко к низу (dp) ещё считается «внизу» — управляет прилипанием автопрокрутки и появлением кнопки «вниз». По умолчанию 32.</string>
@@ -1544,9 +1545,9 @@
     <string name="runtime_limits_heavy_gate">Песочница: ожидание шлюза</string>
     <string name="runtime_limits_heavy_gate_desc">Сколько тяжёлая команда ждёт глобальный шлюз тяжёлых команд, прежде чем сообщить, что другая тяжёлая команда ещё выполняется.</string>
     <string name="runtime_limits_sandbox_footer">Эти окна защищают приложение от нехватки памяти. Значения по умолчанию совпадают с прежними фиксированными.</string>
-    <string name="runtime_limits_restore_confirm_body">Все параметры этой страницы в редакторе вернутся к заводским значениям. Запись произойдёт только после нажатия «Сохранить».</string>
+    <string name="runtime_limits_restore_confirm_body">Все параметры этой страницы сразу вернутся к заводским значениям. Отменить это нельзя.</string>
     <string name="runtime_limits_restore_confirm_title">Восстановить значения по умолчанию?</string>
-    <string name="runtime_limits_restore_defaults_footer">Сброс меняет только несохранённые значения этой страницы — чтобы применить, нажмите «Сохранить». Шаг ползунков не изменён: некоторые значения по умолчанию (например, возраст очистки tmp) после сдвига недостижимы — для этого и нужна эта строка.</string>
+    <string name="runtime_limits_restore_defaults_footer">Сброс сразу возвращает все значения этой страницы к встроенным по умолчанию — сохранять ничего не нужно. Шаг ползунков не изменён: некоторые значения по умолчанию (например, возраст очистки tmp) после сдвига недостижимы — для этого и нужна эта строка.</string>
     <string name="runtime_limits_restore_defaults_desc">Возвращает все параметры этой страницы к заводским значениям</string>
     <string name="runtime_limits_restore_defaults">Восстановить значения по умолчанию</string>
     <string name="runtime_limits_section_reset">Сброс</string>

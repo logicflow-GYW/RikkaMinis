@@ -192,47 +192,20 @@ object ChatTuningPrefs {
         composerGlassTintPct = composerGlassTintPct(context),
     )
 
-    /** One-shot persist used by the panel's Save action (clamps like the readers). */
-    fun save(context: Context, values: ChatTuningValues) {
-        prefs(context).edit()
-            .putInt(
-                KEY_SCROLL_NEAR_BOTTOM_DP,
-                values.scrollNearBottomDp.coerceIn(SCROLL_NEAR_BOTTOM_MIN, SCROLL_NEAR_BOTTOM_MAX),
-            )
-            .putInt(
-                KEY_PREWARM_ROW_LIMIT,
-                values.prewarmRowLimit.coerceIn(PREWARM_ROW_LIMIT_MIN, PREWARM_ROW_LIMIT_MAX),
-            )
-            .putInt(
-                KEY_CODE_PREVIEW_LINES,
-                values.codePreviewLines.coerceIn(CODE_PREVIEW_LINES_MIN, CODE_PREVIEW_LINES_MAX),
-            )
-            .putInt(
-                KEY_TABLE_PREVIEW_ROWS,
-                values.tablePreviewRows.coerceIn(TABLE_PREVIEW_ROWS_MIN, TABLE_PREVIEW_ROWS_MAX),
-            )
-            .putInt(
-                KEY_MARKDOWN_LINE_HEIGHT_SP,
-                values.markdownLineHeightSp.coerceIn(MARKDOWN_LINE_HEIGHT_MIN, MARKDOWN_LINE_HEIGHT_MAX),
-            )
-            .putInt(
-                KEY_INPUT_MAX_LINES,
-                values.inputMaxLines.coerceIn(INPUT_MAX_LINES_MIN, INPUT_MAX_LINES_MAX),
-            )
-            .putInt(
-                KEY_SEND_SWIPE_THRESHOLD_DP,
-                values.sendSwipeThresholdDp.coerceIn(SEND_SWIPE_THRESHOLD_MIN, SEND_SWIPE_THRESHOLD_MAX),
-            )
-            .putBoolean(KEY_COMPOSER_GLASS_ENABLED, values.composerGlassEnabled)
-            .putInt(
-                KEY_COMPOSER_GLASS_BLUR_DP,
-                values.composerGlassBlurDp.coerceIn(COMPOSER_GLASS_BLUR_MIN, COMPOSER_GLASS_BLUR_MAX),
-            )
-            .putInt(
-                KEY_COMPOSER_GLASS_TINT_PCT,
-                values.composerGlassTintPct.coerceIn(COMPOSER_GLASS_TINT_MIN, COMPOSER_GLASS_TINT_MAX),
-            )
-            .apply()
+    /**
+     * [live-apply-1116] Single-key write for the live-apply panel: one slider
+     * commit persists exactly its own knob and nothing else. That is strictly
+     * safer than the batched all-ten-keys write this object used to expose —
+     * a stale edit buffer can no longer clobber a concurrent write to a
+     * DIFFERENT key (the batched path had to re-read every field at save time
+     * to stay honest).
+     *
+     * Range checking stays in the readers (each clamps on the way out), so a
+     * value outside its bounds — only reachable by a caller that bypassed the
+     * slider's own min/max — still cannot escape into layout math.
+     */
+    fun setInt(context: Context, key: String, value: Int) {
+        prefs(context).edit().putInt(key, value).apply()
     }
 
     private fun readClamped(context: Context, key: String, default: Int, min: Int, max: Int): Int =

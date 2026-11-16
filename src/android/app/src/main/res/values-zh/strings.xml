@@ -1540,6 +1540,7 @@
     <string name="chat_tuning_entry">聊天微调</string>
     <string name="chat_tuning_entry_subtitle">阅读、滚动与输入手感</string>
     <string name="chat_tuning_title">聊天微调</string>
+    <string name="settings_live_apply_hint">本页每一项调整都在改动时立即生效并保存，无需再点保存。</string>
     <string name="chat_tuning_section_reading">阅读与滚动</string>
     <string name="chat_tuning_scroll_threshold">触底判定阈值</string>
     <string name="chat_tuning_scroll_threshold_desc">距离底部多近（dp）仍算“在底部”——决定自动跟随的粘性与回到底部按钮的出现时机。默认 32。</string>
@@ -1618,9 +1619,9 @@
     <string name="runtime_limits_heavy_gate">沙箱：重活闸门等待</string>
     <string name="runtime_limits_heavy_gate_desc">重活命令等待全局重活闸门的最长时间，超时则报告另一重活仍在运行。</string>
     <string name="runtime_limits_sandbox_footer">这些窗口用于防止内存压力，默认值与之前的固定值一致。</string>
-    <string name="runtime_limits_restore_confirm_body">本页所有参数在编辑器里回到出厂值。在你点保存之前不会写入任何内容。</string>
+    <string name="runtime_limits_restore_confirm_body">本页所有参数将立即恢复为出厂默认值，此操作无法撤销。</string>
     <string name="runtime_limits_restore_confirm_title">恢复默认？</string>
-    <string name="runtime_limits_restore_defaults_footer">恢复只改动本页尚未保存的数值，需要再点保存才会生效。滑块步长未变：部分默认值（如临时目录收割年龄）一旦拖过就再也拖不回来，这一行就是为此存在的。</string>
+    <string name="runtime_limits_restore_defaults_footer">恢复会立即把本页所有参数改回内置默认值，无需再保存。滑块步长未变：部分默认值（如临时目录收割年龄）一旦拖过就再也拖不回来，这一行就是为此存在的。</string>
     <string name="runtime_limits_restore_defaults_desc">把本页所有参数改回出厂值</string>
     <string name="runtime_limits_restore_defaults">恢复默认</string>
     <string name="runtime_limits_section_reset">重置</string>

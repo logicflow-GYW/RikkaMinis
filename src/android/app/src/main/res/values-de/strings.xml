@@ -1513,6 +1513,7 @@
     <string name="chat_tuning_entry">Chat-Feintuning</string>
     <string name="chat_tuning_entry_subtitle">Lesen, Scrollen und Eingabegefühl</string>
     <string name="chat_tuning_title">Chat-Feintuning</string>
+    <string name="settings_live_apply_hint">Jede Änderung auf dieser Seite wird sofort übernommen und gespeichert – es gibt keinen Speichern-Knopf.</string>
     <string name="chat_tuning_section_reading">LESEN &amp; SCROLLEN</string>
     <string name="chat_tuning_scroll_threshold">Unten-Haften-Schwelle</string>
     <string name="chat_tuning_scroll_threshold_desc">Wie nah am Ende (dp) noch als „ganz unten“ gilt — steuert das automatische Mitführen und wann der Nach-unten-Knopf erscheint. Standard 32.</string>
@@ -1591,9 +1592,9 @@
     <string name="runtime_limits_heavy_gate">Sandbox: Heavy-Gate-Wartezeit</string>
     <string name="runtime_limits_heavy_gate_desc">Wie lange ein Heavy-Befehl auf das globale Heavy-Gate wartet, bevor gemeldet wird, dass ein anderer Heavy-Befehl noch läuft.</string>
     <string name="runtime_limits_sandbox_footer">Diese Fenster schützen die App vor Speicherdruck. Die Standardwerte entsprechen den früheren festen Werten.</string>
-    <string name="runtime_limits_restore_confirm_body">Jeder Wert dieser Seite kehrt im Editor auf den Auslieferungswert zurück. Erst beim Speichern wird geschrieben.</string>
+    <string name="runtime_limits_restore_confirm_body">Jeder Wert dieser Seite springt sofort auf den Auslieferungswert zurück. Das lässt sich nicht rückgängig machen.</string>
     <string name="runtime_limits_restore_confirm_title">Standard wiederherstellen?</string>
-    <string name="runtime_limits_restore_defaults_footer">Wiederherstellen ändert nur die ungespeicherten Werte dieser Seite — zum Anwenden speichern. Die Schieberegler-Schritte bleiben unverändert: manche Standardwerte (etwa das Alter für die tmp-Bereinigung) sind nach dem Verstellen nicht mehr erreichbar, dafür gibt es diese Zeile.</string>
+    <string name="runtime_limits_restore_defaults_footer">Wiederherstellen schreibt sofort jeden Wert dieser Seite auf den eingebauten Standard zurück — Speichern entfällt. Die Schieberegler-Schritte bleiben unverändert: manche Standardwerte (etwa das Alter für die tmp-Bereinigung) sind nach dem Verstellen nicht mehr erreichbar, dafür gibt es diese Zeile.</string>
     <string name="runtime_limits_restore_defaults_desc">Setzt jeden Wert dieser Seite auf den Auslieferungswert zurück</string>
     <string name="runtime_limits_restore_defaults">Standard wiederherstellen</string>
     <string name="runtime_limits_section_reset">Zurücksetzen</string>

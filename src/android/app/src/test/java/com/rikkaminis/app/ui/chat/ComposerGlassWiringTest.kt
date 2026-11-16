@@ -238,8 +238,8 @@ class ComposerGlassWiringTest {
             tuningFlat.contains("R.string.chat_tuning_glass_footer"),
         )
         assertTrue(
-            "…and the tuning page must read the switch FRESH when saving: a remembered copy would clobber an external write",
-            tuningFlat.contains("composerGlassEnabled = ChatTuningPrefs.composerGlassEnabled(context),"),
+            "…and the tuning page must NEVER write the switch key: live-apply writes exactly the knob being edited, and Appearance owns its only writer",
+            !tuningSrc.contains("KEY_COMPOSER_GLASS_ENABLED"),
         )
         // Its own card, not a row inside the theme card: a Switch among three
         // radio rows reads as a fourth theme option.
@@ -261,16 +261,30 @@ class ComposerGlassWiringTest {
     }
 
     @Test
-    fun `the tuning page saves from the top bar, once`() {
-        assertTrue(
-            "Save belongs in the actions slot (Runtime Limits pattern): a tall page must not force a scroll to commit",
-            tuningFlat.contains("onBack = onBack, actions = { MinisTextButton(onClick = {"), 
+    fun `the tuning page has no Save and every slider writes its own key on release`() {
+        // [live-apply-1116] The screen used to edit a nine-field draft and
+        // persist it from a top-bar Save. The decision now is "one commit =
+        // one key", so this test anchors exactly that: no Save affordance at
+        // all, and one single-key write per slider row.
+        assertFalse(
+            "the Save action is gone — a residual common_save would be a dead button",
+            tuningSrc.contains("common_save"),
         )
-        // Exactly one Save affordance: the bottom Row with the button is gone.
         assertEquals(
-            "two Save buttons (top bar + page bottom) is the ambiguity this move removed",
-            1,
+            "no Save affordance may remain on the page",
+            0,
             Regex("MinisTextButton\\(").findAll(tuningSrc).count(),
+        )
+        assertEquals(
+            "every slider must persist on release, through the single-key writer",
+            9,
+            Regex(
+                "onCommitFinished = \\{ ChatTuningPrefs\\.setInt\\(context, ChatTuningPrefs\\.KEY_",
+            ).findAll(tuningSrc).count(),
+        )
+        assertTrue(
+            "the page must state the rule where the user lands",
+            tuningFlat.contains("LimitsSectionFooter(stringResource(R.string.settings_live_apply_hint))"),
         )
     }
 

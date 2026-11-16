@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -119,31 +121,40 @@ class PrefsListenerPrimeOrderTest {
         )
     }
 
+    /**
+     * [live-apply-1116] The page used to batch every knob into one Save, and
+     * the [dv22-B1] contract was "capture all 40 states into `pending...`
+     * locals before the first write". That decision is GONE: each control now
+     * writes only its own key the moment it is committed, so there is nothing
+     * to snapshot. The reset row is the one remaining multi-key write, and it
+     * passes the named `*_DEFAULT` constants rather than state vars — the
+     * property that made the old snapshot necessary (listener-resettable
+     * arguments) cannot apply to a constant.
+     */
     @Test
-    fun `the runtime-limits Save captures every pending value before the first write (dv22-B1)`() {
-        val onClick = balancedBlock(readRepoFile(limitsScreen), "onClick = {")
-        val firstWrite = onClick.indexOf("SubagentPrefs.setEnabled(")
-        assertTrue("the Save onClick must still start with the subagent write", firstWrite >= 0)
-        for (capture in listOf(
-            "val pendingSubagentEnabled = subagentEnabled",
-            "val pendingMaxSessions = maxSessions",
-            "val pendingMaxTurns = maxTurns",
-            "val pendingGuestTmpMaxAgeMin = guestTmpMaxAgeMin",
-            "val pendingHeavyGateTimeoutSec = heavyGateTimeoutSec",
-        )) {
-            val at = onClick.indexOf(capture)
-            assertTrue(
-                "$capture must be captured BEFORE the first write (dv22-B1)",
-                at in 0 until firstWrite,
-            )
-        }
-        assertTrue(
-            "the batched save must take the snapshot, not the state vars",
-            "maxTurns = pendingMaxTurns," in onClick,
+    fun `the runtime-limits reset writes defaults as constants, not state (dv22-B1 + live-apply)`() {
+        val src = readRepoFile(limitsScreen)
+        assertFalse(
+            "the batched Save snapshot is gone — a `pending...` capture means a second write path came back",
+            src.contains("val pendingMaxTurns = maxTurns"),
         )
+        val resetAt = src.indexOf("SubagentPrefs.setEnabled(context, false)")
+        assertTrue("the reset row must still write the switch", resetAt >= 0)
+        val saveAt = src.indexOf("AgentRuntimeLimitsPrefs.save(", resetAt)
+        assertTrue("the reset must still write the named defaults", saveAt >= 0)
+        val args = parenBlock(src.substring(saveAt), "AgentRuntimeLimitsPrefs.save")
         assertTrue(
-            "reading the state vars at write time is the mid-Save rollback",
-            "maxTurns = maxTurns," !in onClick,
+            "the reset writes the shipped constants by name",
+            "maxTurns = AgentRuntimeLimitsPrefs.TURNS_DEFAULT," in args,
+        )
+        assertFalse(
+            "a state var here would be re-read (reset) by the listener before this write evaluates",
+            Regex("""=\s*(maxTurns|guestTmpMaxAgeMin|maxSessions|verifyNudges)\s*,""").containsMatchIn(args),
+        )
+        assertEquals(
+            "every slider row must persist its own key on release",
+            Regex("""onCommit = \{""").findAll(src).count(),
+            Regex("""onCommitFinished = \{""").findAll(src).count(),
         )
     }
 
@@ -191,6 +202,31 @@ class PrefsListenerPrimeOrderTest {
             }
         }
         require(close >= 0) { "the block for $marker is unbalanced" }
+        return src.substring(open0, close + 1)
+    }
+
+    /**
+     * The balanced `( ... )` block of the call whose name starts at/after
+     * [marker] — the argument list a source-shape test needs to read.
+     */
+    private fun parenBlock(src: String, marker: String): String {
+        val at = src.indexOf(marker)
+        require(at >= 0) { "no call found for $marker" }
+        val open0 = src.indexOf('(', at + marker.length)
+        require(open0 >= 0) { "the call for $marker has no argument list" }
+        var depth = 0
+        var close = -1
+        for (j in open0 until src.length) {
+            if (src[j] == '(') depth++
+            if (src[j] == ')') {
+                depth--
+                if (depth == 0) {
+                    close = j
+                    break
+                }
+            }
+        }
+        require(close >= 0) { "the call for $marker is unbalanced" }
         return src.substring(open0, close + 1)
     }
 
