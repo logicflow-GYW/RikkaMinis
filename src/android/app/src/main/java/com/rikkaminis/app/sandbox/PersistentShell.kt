@@ -50,6 +50,19 @@ class PersistentShell(
         // this granularity and lets ExecutionCoordinator recycle pre-crash.
         private const val PROOT_MEM_POLL_MS = 1_000L
 
+        /**
+         * [WAVE-1118 R3-F01] How long the daemon reaper waits for the killed
+         * process tree to actually disappear before calling it a survivor.
+         *
+         * 2 s, unchanged from the value the old (unobserved) wait used: SIGKILL
+         * on a live tracer completes in milliseconds, so any process still
+         * present after 2 s is D-state, ptrace-stopped, or reparented away from
+         * us — waiting longer does not make it exit, it only delays the report.
+         * It must NOT be shortened to "check faster": a single wait is cheaper
+         * than polling, and the reaper is a daemon thread either way.
+         */
+        internal const val REAP_WAIT_MS = 2_000L
+
         // Hard cap on command output before truncation to guard against
         // runaway commands flooding the agent context window and app memory.
         // Mirrors RikkaHub's WorkspaceShellRunner.MAX_OUTPUT_CHARS, but
@@ -988,7 +1001,23 @@ class PersistentShell(
             // the daemon reaper below owns the bounded wait.
             runCatching { proc.destroyForcibly() }
             val reaper = Thread({
-                try { proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {}
+                // [WAVE-1118 R3-F01] This wait used to be a bare statement whose
+                // boolean was thrown away: the reaper could time out with the
+                // tracer (or a D-state child) still resident and NOTHING said so,
+                // while `isAlive` had already been forced false by
+                // `process = null` above. That is an open EFFECT edge — the loop
+                // acted, never read the result back. Now the outcome is measured
+                // and, when the tree outlived SIGKILL + the wait, it is logged
+                // with the pid so a leaked tracer is attributable.
+                val gone = internalAwaitProcessGone(proc, REAP_WAIT_MS)
+                if (!gone) {
+                    Log.e(
+                        TAG,
+                        "Shell pid=$rootPid survived SIGKILL + ${REAP_WAIT_MS}ms " +
+                            "(D-state child, ptrace-stopped tracer or reparented tree) — " +
+                            "shell reported stopped while the process is still resident",
+                    )
+                }
             }, "PersistentShell-reaper")
             reaper.isDaemon = true
             reaper.start()
@@ -1002,6 +1031,29 @@ class PersistentShell(
         commandCount = 0
         Log.i(TAG, "Persistent shell stopped")
     }
+}
+
+/**
+ * [WAVE-1118 R3-F01] True when [proc] is CONFIRMED gone within [timeoutMs].
+ *
+ * `Process.waitFor(timeout, unit)` answers "did it terminate inside the window";
+ * `isAlive` then confirms the process object is not still considered live (a
+ * process that exited between the two reads is still gone). Either signal alone
+ * is weaker than the pair: `waitFor` returning true is the only way to learn
+ * "it exited", and a reactor that is zombie-but-present inside Android's
+ * process table still reports `isAlive == true`.
+ *
+ * Extracted so the reaper's EFFECT edge is testable with a fake [Process]
+ * (`stop()` itself needs a Context and a live PRoot tree): the defect was a bare
+ * `waitFor(...)` whose boolean nobody read, and a test can only pin "the answer
+ * is consumed" if the answer is a value here.
+ */
+internal fun internalAwaitProcessGone(proc: java.lang.Process, timeoutMs: Long): Boolean {
+    val exited = runCatching {
+        proc.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }.getOrDefault(false)
+    if (!exited) return false
+    return !runCatching { proc.isAlive }.getOrDefault(false)
 }
 
 /**

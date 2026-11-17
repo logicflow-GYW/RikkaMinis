@@ -397,23 +397,37 @@ object ChatStreamOffloadHandler {
             // (the exact P0 race). Timeout → leave the dir as an orphan and
             // let the orphan reaper reclaim later.
             try {
-                // Signal a cancel ONLY if we have not yet seen a terminal state
-                // (normal DONE / error must NOT get a cancel shoved at it).
-                if (!terminalSeen) {
-                    if (deathCleanup) {
-                        // [LOOP-1030 R2 M2] This cancel was written by the death
-                        // cleanup, not by the user. `cancel.death` marks it so
-                        // recovery treats stream.jsonl as RECOVERABLE (the
-                        // half answer must survive a restart) and the orphan
-                        // reaper must not reclaim it as "discarded by design".
-                        // The plain `cancel` still goes out first: a frozen
-                        // worker that thaws must abort exactly as before.
-                        ModelExecutionMailbox.writeCancelDeath(cancelFile.parentFile!!)
-                    } else {
-                        ModelExecutionMailbox.writeCancel(cancelFile.parentFile!!)
-                    }
-                }
-                awaitTerminalAndWorkerExitThenDelete(dir, runId)
+                // [WAVE-1118 D3-F02] This finally MUST survive cancellation.
+                // The user's "stop" cancels this flow, and the wait below is a
+                // `delay`-driven poll: called bare, it threw
+                // CancellationException on the first delay and the swallowed
+                // exception skipped BOTH the `client.ack` and the dir delete, so
+                // the worker waited out its ack timeout + drain (~45 s) holding
+                // its native heap for a stream nobody was reading. See
+                // [internalRunCancelCleanup].
+                internalRunCancelCleanup(
+                    writeCancel = {
+                        // Signal a cancel ONLY if we have not yet seen a terminal
+                        // state (normal DONE / error must NOT get a cancel shoved
+                        // at it).
+                        if (!terminalSeen) {
+                            if (deathCleanup) {
+                                // [LOOP-1030 R2 M2] This cancel was written by the
+                                // death cleanup, not by the user. `cancel.death`
+                                // marks it so recovery treats stream.jsonl as
+                                // RECOVERABLE (the half answer must survive a
+                                // restart) and the orphan reaper must not reclaim
+                                // it as "discarded by design". The plain `cancel`
+                                // still goes out first: a frozen worker that thaws
+                                // must abort exactly as before.
+                                ModelExecutionMailbox.writeCancelDeath(cancelFile.parentFile!!)
+                            } else {
+                                ModelExecutionMailbox.writeCancel(cancelFile.parentFile!!)
+                            }
+                        }
+                    },
+                    cleanup = { awaitTerminalAndWorkerExitThenDelete(dir, runId) },
+                )
             } catch (_: Exception) {}
         }
         } finally {
