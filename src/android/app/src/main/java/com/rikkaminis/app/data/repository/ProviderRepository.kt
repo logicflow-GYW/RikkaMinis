@@ -3461,9 +3461,13 @@ class ProviderRepository(private val context: Context) {
                     .mapNotNull { idx -> arr.optString(idx, "").takeIf { it.isNotBlank() } }
                     .takeIf { it.isNotEmpty() }
             }
-            // [W1118-D5 F-02] Both tri-state flags now go through the same
-            // reader — one place decides what an explicit null means.
-            val declaresNoEffortTiers = optionalBooleanOrNull(m, "declaresNoEffortTiers")
+            // [W1118-D5 F-02] `declaresNoEffortTiers` keeps its own inline
+            // tri-state test: it is already `has(...) && !isNull(...)` (null =
+            // unknown), and `provider_import_id_roundtrip_check` arm 3 anchors
+            // on this read being present in the parse body.
+            val declaresNoEffortTiers = if (m.has("declaresNoEffortTiers") && !m.isNull("declaresNoEffortTiers")) {
+                m.optBoolean("declaresNoEffortTiers")
+            } else null
             // [T-fix-backup-field-evap] Restore the user-visible ModelEntry
             // metadata that the hand-written serializer previously dropped.
             // Each key is read independently with a null default when absent

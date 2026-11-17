@@ -153,6 +153,7 @@ class ChatRepositoryCreateSessionTest {
         override suspend fun listSessions(): List<ChatSessionEntity> = emptyList()
         override suspend fun getSession(id: String): ChatSessionEntity? = null
         override suspend fun getMessage(id: String): MessageEntity? = null
+        override suspend fun sessionIdOf(id: String): String? = null
         override suspend fun sessionsUpdatedSince(cutoff: Long): List<ChatSessionEntity> = emptyList()
         override suspend fun updateSessionTitle(id: String, title: String, updatedAt: Long) {}
         override suspend fun updateSessionTitleAndCategory(

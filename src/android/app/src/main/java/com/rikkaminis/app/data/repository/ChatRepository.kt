@@ -647,9 +647,8 @@ class ChatRepository(
         // row in place with the parts of an existing (possibly oversized) row,
         // and an uncapped write here reinstates exactly the payload the append
         // path truncated — the 2 MB CursorWindow crash walks straight back in.
-        val capped = capPartsJsonForRow(partsJson)
-        dao.updateMessageParts(id, capped)
-        refreshTailPreviewAfterPartsRewrite(id, capped)
+        dao.updateMessageParts(id, capPartsJsonForRow(partsJson))
+        refreshTailPreviewAfterPartsRewrite(id, partsJson)
     }
 
     /**
@@ -663,19 +662,22 @@ class ChatRepository(
      *    next append.
      *  - `ChatViewModel.updatePersistedAssistantTurn` (early turn persist)
      *    rewrites the just-appended assistant row with its final payload.
-     * Both write with the same [capPartsJsonForRow] ceiling, so the value we
-     * compare against the stored tail is the value the DAO just wrote.
      *
-     * Non-tail rows are left alone: their preview is not what the drawer shows,
-     * and the tail row is the authority for that column. `extractTextPreview`
-     * returning null keeps the previous preview, exactly like
-     * [updateSessionPreview] (never blank a good line with nothing).
+     * The tail test reads the session id through a column projection
+     * ([ChatDao.sessionIdOf]) — never the whole row, which is what
+     * `dao_loadmessages_check` (and every big-session crash before it) is
+     * about — and then compares the stored tail payload against the payload we
+     * just wrote. A non-tail row leaves the preview alone: the drawer shows the
+     * tail, and the tail is the authority for that column.
+     *
+     * `extractTextPreview` returning null keeps the previous preview, exactly
+     * like [updateSessionPreview] (never blank a good line with nothing).
      */
-    private suspend fun refreshTailPreviewAfterPartsRewrite(id: String, cappedPartsJson: String) {
-        val row = dao.getMessage(id) ?: return
-        if (dao.lastMessageParts(row.sessionId) != cappedPartsJson) return
-        val preview = extractTextPreview(cappedPartsJson) ?: return
-        dao.updateLastMessage(row.sessionId, preview, System.currentTimeMillis())
+    private suspend fun refreshTailPreviewAfterPartsRewrite(id: String, partsJson: String) {
+        val sessionId = dao.sessionIdOf(id) ?: return
+        if (dao.lastMessageParts(sessionId) != capPartsJsonForRow(partsJson)) return
+        val preview = extractTextPreview(partsJson) ?: return
+        dao.updateLastMessage(sessionId, preview, System.currentTimeMillis())
     }
 
     /** [T-error-persist-android] Set/clear the error sticker on a row by id. */

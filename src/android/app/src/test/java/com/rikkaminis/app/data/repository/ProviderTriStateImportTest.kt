@@ -81,10 +81,14 @@ class ProviderTriStateImportTest {
             "overrides layer no longer reads supportsReasoning via optionalBooleanOrNull",
             src.contains("""optionalBooleanOrNull(overridesObj, "supportsReasoning")"""),
         )
-        // the second tri-state flag of the same function, kept on the same reader
+        // The second tri-state flag of the same function keeps its inline test:
+        // `provider_import_id_roundtrip_check` arm 3 anchors on that read being
+        // present in the parse body, and the shape was already correct. Pinned
+        // here so a future "unify the readers" pass does not silently drop the
+        // null guard.
         assertTrue(
-            "declaresNoEffortTiers drifted back onto a hand-rolled has()/isNull() pair",
-            src.contains("""optionalBooleanOrNull(m, "declaresNoEffortTiers")"""),
+            "declaresNoEffortTiers lost its !isNull guard (an explicit null would import as false)",
+            src.contains("""has("declaresNoEffortTiers") && !m.isNull("declaresNoEffortTiers")"""),
         )
         // and the defect shape itself is gone
         assertFalse(

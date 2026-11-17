@@ -69,6 +69,20 @@ interface ChatDao {
     @Query("SELECT * FROM messages WHERE id = :id")
     suspend fun getMessage(id: String): MessageEntity?
 
+    /**
+     * [W1118-D5 F-03] The owning session of a message row — a COLUMN projection,
+     * on purpose.
+     *
+     * `ChatRepository.updateMessageParts` needs the session id to refresh
+     * `sessions.last_message` after an in-place parts rewrite. Selecting the
+     * whole row for that would drag `parts_json` through a CursorWindow, which
+     * is the exact read `dao_loadmessages_check` forbids inside the repository
+     * (a 2 MB+ row throws `SQLiteBlobTooBigException` and the call dies). One
+     * short TEXT column, no blob.
+     */
+    @Query("SELECT session_id FROM messages WHERE id = :id")
+    suspend fun sessionIdOf(id: String): String?
+
     @Query("SELECT * FROM sessions WHERE updated_at >= :cutoff ORDER BY updated_at DESC")
     suspend fun sessionsUpdatedSince(cutoff: Long): List<ChatSessionEntity>
 

@@ -44,7 +44,7 @@ class ChatTailPartsPreviewRefreshTest {
             )
         }
 
-        override suspend fun getMessage(id: String): MessageEntity? = rows[id]
+        override suspend fun sessionIdOf(id: String): String? = rows[id]?.sessionId
 
         override suspend fun updateMessageParts(id: String, partsJson: String, updatedAt: Long) {
             partsWrites.add(id to partsJson)
