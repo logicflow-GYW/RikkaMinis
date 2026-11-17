@@ -5565,7 +5565,23 @@ internal fun isListAtBottom(
     // the last row legitimately rests `padding.bottom` above it, so the raw
     // viewport end is NOT where content is allowed to end. Callers that own no
     // padding pass 0, which reproduces the pre-1116 geometry exactly.
-    val visualEnd = viewportEndOffsetPx - contentBottomInsetPx.coerceAtLeast(0)
+    // [incr1117-B F-01] The visible end must never be NEGATIVE. When the viewport
+    // is shorter than the list's own bottom content padding (landscape / split
+    // screen + IME + a multi-line draft: the composer arc grows that padding
+    // past the list's height) the pre-fix expression computed `visualEnd < 0`,
+    // and every visible row has `bottomEdge >= 0`, so `distance` was negative
+    // for EVERY row: the verdict read false at the true bottom and stayed false,
+    // i.e. follow never re-engaged after a send.
+    //
+    // Clamping the ENDPOINT is deliberately not a geometry fix. The padding /
+    // tail mismatch itself is a registered P2 (backlog §INCR-1116
+    // "B F-09 极矮视口下 padding 与 tail 不一致" — the candidate fix is
+    // `BoxWithConstraints` sizing the tail from the real viewport). Here the
+    // rule stays "the tail row's bottom edge is within `thresholdPx` of the
+    // visible end": for a viewport that fits its padding the value is unchanged,
+    // and for an over-long padding it measures the overshoot instead of the
+    // void.
+    val visualEnd = (viewportEndOffsetPx - contentBottomInsetPx.coerceAtLeast(0)).coerceAtLeast(0)
     val bottomEdge = lastVisibleOffsetPx + lastVisibleSizePx
     val distance = visualEnd - bottomEdge
     return distance >= 0 && distance <= thresholdPx

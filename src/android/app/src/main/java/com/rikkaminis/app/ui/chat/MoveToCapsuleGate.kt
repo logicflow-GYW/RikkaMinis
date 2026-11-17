@@ -45,4 +45,47 @@ internal object MoveToCapsuleGate {
         draftText: String,
         attachmentCount: Int,
     ): Boolean = shareInjected && canMove(draftText, attachmentCount)
+
+    /**
+     * [incr1117-B F-05] One composer frame's verdict on the share arm.
+     *
+     * @property sawContent the latch to carry into the next frame: the share's
+     *   content has been observed in the composer at least once since arming.
+     * @property disarm true when the arm is SPENT — the draft this share seeded
+     *   has been emptied by the user, so the flag must be cleared.
+     */
+    internal data class ShareArmFrame(val sawContent: Boolean, val disarm: Boolean)
+
+    /**
+     * Decide what the composer does with the share arm on this frame.
+     *
+     * **The bug this closes.** `_hasInjectedShareContent` was cleared in exactly
+     * two places — a send, and a completed "Move to…". Deleting the shared
+     * content only HID the capsule (`shouldShow` reads the draft), so the flag
+     * stayed armed: the user then typed anything at all and the pill came back,
+     * offering to move a draft that had nothing to do with the share.
+     *
+     * **Why the verdict is not simply `shareInjected && !canMove(...)`.** The
+     * share drain appends its text through the composer command queue
+     * ([ChatScreen] → `ComposerCommand.AppendText`), so there are frames — and,
+     * for an attachment-less share, whole composition passes — where the flag is
+     * armed and the draft is still empty. Disarming on those frames would drop
+     * the capsule for every text-only share before its text ever landed. Hence
+     * the [sawContent] latch: an arm can only be spent after the content it
+     * seeded was actually seen. Attachments need no latch (they are added
+     * synchronously before `markShareInjected()`), the text arm needs it.
+     *
+     * `shareInjected = false` resets the latch — the next share starts a fresh
+     * arm, never one already marked as spent.
+     */
+    fun observeFrame(
+        shareInjected: Boolean,
+        draftText: String,
+        attachmentCount: Int,
+        sawContent: Boolean,
+    ): ShareArmFrame {
+        if (!shareInjected) return ShareArmFrame(sawContent = false, disarm = false)
+        if (canMove(draftText, attachmentCount)) return ShareArmFrame(sawContent = true, disarm = false)
+        return ShareArmFrame(sawContent = sawContent, disarm = sawContent)
+    }
 }

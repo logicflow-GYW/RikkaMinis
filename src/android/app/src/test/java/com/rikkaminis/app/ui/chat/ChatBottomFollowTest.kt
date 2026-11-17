@@ -120,6 +120,50 @@ class ChatBottomFollowTest {
         assertFalse(isListAtBottom(1580, 200, 2400, 420, 32))
     }
 
+    // ── [incr1117-B F-01] a viewport shorter than its own bottom padding ────
+
+    @Test
+    fun `an inset exactly equal to the viewport end keeps the tail row at bottom`() {
+        // viewportEnd 1000, afterContentPadding 1000 → the visible end is 0 and
+        // the last row's bottom edge rests on it. Pre-fix computed the same 0, so
+        // this is an INVARIANCE pin: the clamp must not move the boundary case.
+        assertTrue(isListAtBottom(lastVisibleOffsetPx = -20, lastVisibleSizePx = 20, viewportEndOffsetPx = 1000, contentBottomInsetPx = 1000, thresholdPx = 48))
+    }
+
+    @Test
+    fun `a viewport shorter than its bottom padding still reports the tail as bottom`() {
+        // Landscape / split screen + IME + a multi-line draft: the composer arc
+        // grows afterContentPadding past the list's height. Raw expression:
+        // visualEnd = 1000 - 1200 = -200, distance = -200 - (-30) = -170 → false
+        // for EVERY row, forever ("在底" could never be true, so follow never
+        // re-engaged after a send). Clamped: visualEnd = 0, distance = 30 ≤ 48.
+        assertTrue(isListAtBottom(-130, 100, 1000, 1200, 48))
+    }
+
+    @Test
+    fun `the clamp does not turn any over-long padding into at-bottom`() {
+        // Same over-long inset, but the tail row's bottom edge is 100px BELOW the
+        // clamped end (distance -100): the reader is still scrolling.
+        assertFalse(isListAtBottom(0, 100, 1000, 1200, 48))
+    }
+
+    @Test
+    fun `the visible end is clamped at zero`() {
+        val src = readRepoFile(sourcePath)
+        assertTrue(
+            "the visible end must be clamped at 0: an inset taller than the viewport " +
+                "produced a negative endpoint, and `bottomEdge >= 0` made the verdict " +
+                "false for every row",
+            src.contains("(viewportEndOffsetPx - contentBottomInsetPx.coerceAtLeast(0)).coerceAtLeast(0)"),
+        )
+        // Negative control: reverting to the pre-fix (unclamped) expression must
+        // make this test fail.
+        assertFalse(
+            "the unclamped endpoint is back",
+            src.contains("val visualEnd = viewportEndOffsetPx - contentBottomInsetPx.coerceAtLeast(0)"),
+        )
+    }
+
     // ── legacy control: the reversed formula, replicated locally ────────────
 
     /** The pre-fix verdict, verbatim: viewport-TOP index vs `total - 2`. */
