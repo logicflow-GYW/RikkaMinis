@@ -252,19 +252,23 @@ open class VoiceProvider(
         val call = httpClient.newCall(effectiveRequest)
         // [FIX-1 / F-209] Cancellable execute — see provider/CallCancellation.kt:
         // executeOrCancel rethrows a real CancellationException (never a
-        // fallback) and cancels the Call when the coroutine completes.
+        // fallback) and cancels the Call while the read is still blocked.
         //
         // [da1020 ISSUE-05] Prompt-interruption watcher. readTimeout here is
         // 120s (TTS can be slow), and coroutine cancellation does not interrupt
-        // a blocking body read. executeOrCancel's own hook is registered on the
-        // withContext job itself, which cannot reach its final state while this
-        // body is blocked — sandbox-verified (probe/jvm/CancelProbe2.kt,
-        // kotlinx-coroutines 1.9.0): its Call.cancel() only fired AFTER the
-        // blocking read was released (promptCancelCount=0). A child job that
-        // does nothing but await cancellation CAN complete promptly (it has no
-        // blocking body), so its completion hook cancels the Call while the
-        // read is still in flight — which makes execute() throw immediately
+        // a blocking body read. The probe that motivated this local watcher
+        // (sandbox, kotlinx-coroutines 1.9.0, probe/jvm/CancelProbe2.kt) measured
+        // that a hook registered on the withContext job itself can never reach
+        // its final state while this body is blocked (promptCancelCount=0),
+        // whereas a child job that only awaits cancellation CAN complete
+        // promptly — its completion hook then cancels the Call mid-read
         // (probe: job.join returned in ~190ms with the Call cancelled).
+        // [W1118 D6-F05 / R5-F04] That idiom now lives in
+        // `Call.executeOrCancel` itself (any caller gets it), so this local
+        // pair is belt-and-braces rather than the only guard. Kept because its
+        // trampoline is unconditional (it cancels on ANY completion, including
+        // a failure of the enclosing scope) and removing it would need its own
+        // timing proof — see the T3 report's P2 registration.
         val watchJob = launch { awaitCancellation() }
         val watchDisposable = watchJob.invokeOnCompletion { _ -> call.cancel() }
         try {
