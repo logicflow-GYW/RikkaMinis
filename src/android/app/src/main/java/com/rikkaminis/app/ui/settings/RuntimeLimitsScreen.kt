@@ -765,7 +765,11 @@ fun RuntimeLimitsScreen(onBack: () -> Unit) {
                     // survive the mid-callback listener re-read from [dv22-b1], and
                     // no second copy of the numbers lives in the UI: a default that
                     // moves in the data layer moves here too.
-                    SubagentPrefs.setEnabled(context, false)
+                    // [C-INCR1117-F02] The switch resets to SubagentPrefs.DEFAULT,
+                    // not to a literal: this line still said `false` after the
+                    // default flipped to ON, so "Restore defaults" disabled a
+                    // feature that ships enabled.
+                    SubagentPrefs.setEnabled(context, SubagentPrefs.DEFAULT)
                     ConcurrencyPrefs.setMaxConcurrentSessions(context, ConcurrencyPrefs.DEFAULT)
                     AgentRuntimeLimitsPrefs.save(
                         context = context,

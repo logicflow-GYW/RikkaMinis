@@ -138,8 +138,33 @@ class PrefsListenerPrimeOrderTest {
             "the batched Save snapshot is gone — a `pending...` capture means a second write path came back",
             src.contains("val pendingMaxTurns = maxTurns"),
         )
-        val resetAt = src.indexOf("SubagentPrefs.setEnabled(context, false)")
+        // [C-INCR1117-F02] The reset must write the SHIPPED default. Anchor on
+        // the argument the call actually passes — a literal anchor
+        // (`setEnabled(context, false)`) is what hid the defect: it vanished
+        // from the source while the test kept passing on the new code. The
+        // region starts at the confirm dialog, because the per-slider
+        // `save(...)` commits that precede it are not this write.
+        val dialogAt = src.indexOf("runtime_limits_restore_confirm_title")
+        assertTrue("the restore-defaults dialog must still exist", dialogAt >= 0)
+        val resetAt = src.indexOf("SubagentPrefs.setEnabled(", dialogAt)
         assertTrue("the reset row must still write the switch", resetAt >= 0)
+        val resetArg = secondArgument(src.substring(resetAt), "SubagentPrefs.setEnabled")
+        assertEquals(
+            "the reset must pass SubagentPrefs.DEFAULT: a literal ships the feature OFF while a fresh install has it ON (C-F02)",
+            "SubagentPrefs.DEFAULT",
+            resetArg,
+        )
+        // Negative control: the pre-fix literal must NOT satisfy the predicate
+        // above, otherwise the assertion is vacuous.
+        val preFixArg = secondArgument(
+            "SubagentPrefs.setEnabled(context, false)",
+            "SubagentPrefs.setEnabled",
+        )
+        assertEquals("the extraction must actually yield an argument", "false", preFixArg)
+        assertFalse(
+            "the pre-fix literal must be rejected by the same predicate",
+            preFixArg == "SubagentPrefs.DEFAULT",
+        )
         val saveAt = src.indexOf("AgentRuntimeLimitsPrefs.save(", resetAt)
         assertTrue("the reset must still write the named defaults", saveAt >= 0)
         val args = parenBlock(src.substring(saveAt), "AgentRuntimeLimitsPrefs.save")
@@ -229,6 +254,17 @@ class PrefsListenerPrimeOrderTest {
         require(close >= 0) { "the call for $marker is unbalanced" }
         return src.substring(open0, close + 1)
     }
+
+    /**
+     * The Nth (0-based second) argument of the first call to [marker], trimmed.
+     * `parenBlock` returns `"(a, b)"`; this yields `"b"`.
+     */
+    private fun secondArgument(src: String, marker: String): String =
+        parenBlock(src, marker)
+            .removePrefix("(")
+            .removeSuffix(")")
+            .substringAfter(",")
+            .trim()
 
     /**
      * Walk up from the test working directory to the repo root containing
