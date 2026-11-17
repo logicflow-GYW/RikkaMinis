@@ -210,6 +210,32 @@ class AgentExecutionBudgetTest {
     }
 
     @Test
+    fun `parent consumption cannot spend tokens already reserved for a child`() {
+        val b = budget(maxEstimatedTokens = 1000L)
+        assertEquals(BudgetDecision.Allowed, b.tryReserveChildBudget(600L))
+
+        // 父级可用额度 = 1000 - 0 - 600 = 400：800 必须被拒绝，否则 600 的预留
+        // 会变成"预留成功、兑现失败"（child 拿着已获准的额度反而被拒）。
+        val denied = b.consumeEstimatedTokens(800L)
+        assertTrue("expected Denied, got $denied", denied is BudgetDecision.Denied)
+        assertEquals(BudgetExhaustedReason.TOKEN_BUDGET_EXCEEDED, (denied as BudgetDecision.Denied).reason)
+        // 拒绝不改变任何状态
+        assertEquals(0L, b.snapshot().estimatedTokensUsed)
+        assertEquals(600L, b.snapshot().reservedChildTokens)
+
+        // 正好用掉预留之外的 400 是允许的；不变量 used + reserved == cap 恒成立
+        assertEquals(BudgetDecision.Allowed, b.consumeEstimatedTokens(400L))
+        assertEquals(400L, b.snapshot().estimatedTokensUsed)
+        assertEquals(1000L, b.snapshot().estimatedTokensUsed!! + b.snapshot().reservedChildTokens)
+
+        // 预留兑现仍然成功（旧实现下这一步会被"父级已花光 cap"顶掉）
+        assertEquals(BudgetDecision.Allowed, b.consumeChildTokens(600L))
+        assertEquals(1000L, b.snapshot().estimatedTokensUsed)
+        assertEquals(0L, b.snapshot().reservedChildTokens)
+        assertEquals(0L, b.remaining().estimatedTokensRemaining)
+    }
+
+    @Test
     fun `child consumed tokens enter parent ledger and cannot exceed reservation`() {
         val b = budget(maxEstimatedTokens = 100L)
         assertEquals(BudgetDecision.Allowed, b.tryReserveChildBudget(40L))
