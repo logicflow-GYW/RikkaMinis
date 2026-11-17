@@ -64,21 +64,37 @@ class SubagentBudgetGateTest {
     }
 
     @Test
-    fun `the dispatcher is pinned for the dispatch and released in a finally block`() {
+    fun `the dispatch window is opened and closed through the locked window ops`() {
+        // [INCR-1117B A4] What used to be three separate `indexOf` assertions
+        // (begin before prompt, end after finally, NonCancellable around it) is
+        // now ONE shape assertion: the call site may only ever delegate to
+        // SubagentDispatchPin.beginWindow / finishWindow. The behaviour those
+        // blocks must have — a restore that is not cut short by a cancellation,
+        // and a restore that cannot interleave with a new window — is covered
+        // by real coroutine tests in SubagentDispatchPinTest. Those tests
+        // survive refactors; a token order does not (moving the Room calls out
+        // of the NonCancellable block used to stay green).
         val body = spawn()
         val beginAt = body.indexOf("SubagentDispatchPin.begin(")
-        assertTrue("dispatch must pin the parent", beginAt > 0)
+        assertTrue("dispatch must open the window", beginAt > 0)
         val promptAt = body.indexOf("ChatMutationMethods.prompt(")
-        assertTrue("the pin must be taken before the child runs", beginAt < promptAt)
+        assertTrue("the window must be open before the child runs", beginAt < promptAt)
 
         val finallyAt = body.indexOf("} finally {")
-        assertTrue("the release must be in a finally block (a throw must not leak a pin)", finallyAt > beginAt)
+        assertTrue("the close must live in a finally (a throw must not leak a pin)", finallyAt > beginAt)
         val endAt = body.indexOf("SubagentDispatchPin.end(")
-        assertTrue("dispatch must release the pin", endAt > finallyAt)
+        assertTrue("dispatch must close the window", endAt > finallyAt)
 
+        assertFalse(
+            "the raw count/pin bookkeeping is private on purpose: touching it from " +
+                "the call site skips the per-session lock and the NonCancellable " +
+                "block that make the window atomic",
+            body.contains("SubagentDispatchPin.noteWrittenPin(") ||
+                body.contains("SubagentDispatchPin.takeWrittenPin("),
+        )
         assertTrue(
-            "restore must only undo OUR pin, not a manual one taken meanwhile",
-            body.contains("pinnedAt == ourPin"),
+            "a failed restore must be reported, not swallowed silently",
+            body.contains("if (!restored)"),
         )
     }
 
@@ -113,14 +129,17 @@ class SubagentBudgetGateTest {
         // viewModelScope, so releasing the wait is not enough: stop on the
         // dispatching turn must also stop the child, which keeps running tools
         // and spending tokens otherwise.
-        val src = readRepoFile(HEADLESS_RUNNER)
-        val waitAt = src.indexOf("val finished = try {")
+        // [INCR-1117B A4] Scoped to prompt(): the same tokens appear in retry()
+        // and elsewhere in this class, so matching them file-wide could be
+        // satisfied by a function that never entered the picture.
+        val body = balancedRegion(readRepoFile(HEADLESS_RUNNER), "suspend fun prompt(")
+        val waitAt = body.indexOf("val finished = try {")
         assertTrue("the wait must be written so its cancellation is handled", waitAt > 0)
-        val nonCancelAt = src.indexOf("withContext(NonCancellable)", waitAt)
+        val nonCancelAt = body.indexOf("withContext(NonCancellable)", waitAt)
         assertTrue("cancelling the child must not itself be cancelled", nonCancelAt > waitAt)
-        val cancelAt = src.indexOf("vm.cancelStream()", nonCancelAt)
+        val cancelAt = body.indexOf("vm.cancelStream()", nonCancelAt)
         assertTrue("a cancelled caller must stop the turn it started", cancelAt > nonCancelAt)
-        val rethrowAt = src.indexOf("throw ce", cancelAt)
+        val rethrowAt = body.indexOf("throw ce", cancelAt)
         assertTrue("the stop must still reach the caller as a stop", rethrowAt > cancelAt)
     }
 
@@ -157,35 +176,6 @@ class SubagentBudgetGateTest {
     }
 
     @Test
-    fun `the pin value is restored from the shared window record, not a local`() {
-        // [INCR-1117 A-F02] Which dispatch pins and which one finishes last are
-        // different coroutines when two dispatches overlap on one parent.
-        val body = spawn()
-        assertTrue(
-            "the written value must be recorded with the count",
-            body.contains("SubagentDispatchPin.noteWrittenPin("),
-        )
-        val finallyAt = body.indexOf("} finally {")
-        assertTrue("the release must live in a finally", finallyAt > 0)
-        val takeAt = body.indexOf("SubagentDispatchPin.takeWrittenPin(")
-        assertTrue("the last dispatch must read the recorded value", takeAt > finallyAt)
-    }
-
-    @Test
-    fun `the pin restore survives a cancelled coroutine`() {
-        // [INCR-1117 A-F03] `getSession` / `pinSession` are suspend (Room). On a
-        // user stop the coroutine is already cancelled, so the restore threw at
-        // its first suspension point and `runCatching` swallowed it.
-        val body = spawn()
-        val finallyAt = body.indexOf("} finally {")
-        assertTrue("the release must live in a finally", finallyAt > 0)
-        val nonCancelAt = body.indexOf("withContext(NonCancellable)", finallyAt)
-        assertTrue("a cancelled stop must still restore the pin", nonCancelAt > finallyAt)
-        val endAt = body.indexOf("SubagentDispatchPin.end(")
-        assertTrue("the restore must stay inside the non-cancellable block", endAt > nonCancelAt)
-    }
-
-    @Test
     fun `a json null reply is resolved before it becomes the answer text`() {
         // [INCR-1117 A-F01] Android's `optString(name, fallback)` returns the
         // literal "null" for `JSONObject.NULL` — reading the field that way is
@@ -196,6 +186,34 @@ class SubagentBudgetGateTest {
             "reading responseText with optString is the defect",
             body.contains("optString(\"responseText\""),
         )
+    }
+
+    /** Source of [signature]'s own body: brace matched from its opening `{`, so
+     *  a member function is cut at its own closing brace instead of bleeding
+     *  into the next one (the file-order `indexOf` scans it replaces could be
+     *  satisfied by any other member of the class). */
+    private fun balancedRegion(src: String, signature: String): String {
+        val at = src.indexOf(signature)
+        assertTrue("signature not found: $signature", at >= 0)
+        val open = src.indexOf('{', at + signature.length)
+        assertTrue("no body after $signature", open > at)
+        var depth = 0
+        var i = open
+        while (i < src.length) {
+            when (src[i]) {
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) {
+                        val region = src.substring(at, i + 1)
+                        assertTrue("the region must close before EOF", region.length < src.length)
+                        return region
+                    }
+                }
+            }
+            i += 1
+        }
+        throw AssertionError("unbalanced braces after $signature")
     }
 
     /** Source of the function starting at [signature], cut at the next top-level

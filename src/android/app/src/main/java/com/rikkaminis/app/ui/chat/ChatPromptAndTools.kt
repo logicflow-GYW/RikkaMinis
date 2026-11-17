@@ -37,7 +37,6 @@ import com.rikkaminis.app.util.Utf16Sanitizer
 import com.rikkaminis.app.util.saveOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -539,19 +538,18 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     // the LAST dispatch finishes (reference counted: one parent may run several
     // children concurrently). A pin the user takes during the window is left
     // alone — we only undo the exact value we wrote.
-    val depth = com.rikkaminis.app.data.SubagentDispatchPin.begin(activeSessionId)
-    if (depth == 1) {
-        val alreadyPinned = runCatching { chatRepository.getSession(activeSessionId)?.pinnedAt }.getOrNull()
-        if (alreadyPinned == null) {
-            // [INCR-1117 A-F02] The value we wrote is recorded WITH the count.
-            // Which dispatch pins and which one finishes last are different
-            // coroutines under concurrency, so a `var ourPin` local here left
-            // the last `end` with nothing to restore — and the parent pinned
-            // for good.
-            runCatching { chatRepository.pinSession(activeSessionId, true) }.getOrNull()
-                ?.let { com.rikkaminis.app.data.SubagentDispatchPin.noteWrittenPin(activeSessionId, it) }
-        }
-    }
+    //
+    // [INCR-1117B A3-a / A3-b] Opening the window is ONE operation that also
+    // does the "already pinned?" read and the pin write, under a per-session
+    // lock and NonCancellable — see SubagentDispatchPin.begin. Doing it
+    // inline here (count, then two suspend Room calls in runCatching) let a
+    // cancellation land between the pin WRITE and its bookkeeping, and let a
+    // new window read a pin that the previous window was about to undo.
+    com.rikkaminis.app.data.SubagentDispatchPin.begin(
+        sessionId = activeSessionId,
+        readPinnedAt = { chatRepository.getSession(it)?.pinnedAt },
+        pin = { chatRepository.pinSession(it, true) },
+    )
 
     val result = try {
         try {
@@ -571,24 +569,24 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         }
     } finally {
         // [INCR-1117 A-F03] The restore is a suspend (Room) round trip, and on a
-        // user stop this coroutine is ALREADY cancelled: the first suspension
-        // point throws CancellationException, `runCatching` swallowed it, and
-        // the parent stayed pinned for good. NonCancellable lets a bounded
-        // best-effort undo (two statements) finish on the way out — it is not a
-        // reason to keep the job alive, and no new scope/Job is involved.
-        withContext(NonCancellable) {
-            if (com.rikkaminis.app.data.SubagentDispatchPin.end(activeSessionId) == 0) {
-                val ourPin = com.rikkaminis.app.data.SubagentDispatchPin.takeWrittenPin(activeSessionId)
-                if (ourPin != null) {
-                    runCatching {
-                        // Undo only OUR pin: a manual pin taken meanwhile has a
-                        // newer value (or a null after an unpin) and must survive.
-                        if (chatRepository.getSession(activeSessionId)?.pinnedAt == ourPin) {
-                            chatRepository.pinSession(activeSessionId, false)
-                        }
-                    }
-                }
-            }
+        // user stop this coroutine is ALREADY cancelled.
+        // [INCR-1117B A3-a/A3-b] Closing the window is ONE operation: count
+        // down, and (on the last window) read + undo + forget, all under the
+        // per-session lock and NonCancellable — see
+        // SubagentDispatchPin.end. Splitting it here (end() first,
+        // then the Room calls) is what let a new window slip in between and be
+        // unpinned by this one.
+        val restored = com.rikkaminis.app.data.SubagentDispatchPin.end(
+            sessionId = activeSessionId,
+            readPinnedAt = { chatRepository.getSession(it)?.pinnedAt },
+            unpin = { chatRepository.pinSession(it, false) },
+        )
+        if (!restored) {
+            AppLogger.warning(
+                ChatViewModel.TAG,
+                "SubagentDispatchPin: could not restore the parent's pin for " +
+                    "session=$activeSessionId; the record is kept for a later window",
+            )
         }
     }
 

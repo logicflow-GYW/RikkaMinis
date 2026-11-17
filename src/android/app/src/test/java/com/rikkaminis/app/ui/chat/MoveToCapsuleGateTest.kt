@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.chat
 
+import com.rikkaminis.app.share.PendingShare
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -115,6 +117,46 @@ class MoveToCapsuleGateTest {
         assertFalse(MoveToCapsuleGate.observeFrame(false, "hello", 2, sawContent = true).disarm)
     }
 
+    // ─── Layer 1c: the arm follows content, not intent [incr1117-B F-03] ───
+
+    @Test
+    fun `a share that landed nothing must not arm the capsule`() {
+        val items = listOf(
+            PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, "gone.png"),
+            PendingShare.Item(PendingShare.Item.Kind.INLINE_TEXT, "   \n"),
+        )
+        // The staged file was missing / the copy threw, so nothing was added.
+        assertFalse(
+            "nothing reached the composer, so nothing may be armed",
+            shareDrainLanded(items) { false },
+        )
+        // The deadlock this closes: an arm that never sees content can never spend
+        // itself, so the pill came back over the next unrelated draft.
+        val armed = shareDrainLanded(items) { false }
+        assertFalse(MoveToCapsuleGate.shouldShow(armed, "", 0))
+        assertFalse("the pill must not reappear over an unrelated draft", MoveToCapsuleGate.shouldShow(armed, "hello", 0))
+    }
+
+    @Test
+    fun `a text-only share still arms`() {
+        // Over-correction control: disarming every share whose text lands
+        // asynchronously would drop the capsule for all of them.
+        val armed = shareDrainLanded(listOf(PendingShare.Item(PendingShare.Item.Kind.INLINE_TEXT, "https://x"))) { false }
+        assertTrue(armed)
+        assertTrue(MoveToCapsuleGate.shouldShow(armed, "https://x", 0))
+    }
+
+    @Test
+    fun `one landed item is enough and blanks are not items`() {
+        val attach = PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, "ok.png")
+        val blank = PendingShare.Item(PendingShare.Item.Kind.INLINE_TEXT, " \n\t ")
+        assertTrue("a landed attachment arms", shareDrainLanded(listOf(attach)) { true })
+        assertFalse("a failed copy does not", shareDrainLanded(listOf(attach)) { false })
+        assertTrue("one of two landing is enough", shareDrainLanded(listOf(attach, blank)) { true })
+        assertFalse("whitespace-only text appends nothing", shareDrainLanded(listOf(blank)) { false })
+        assertFalse("an empty share arms nothing", shareDrainLanded(emptyList()) { true })
+    }
+
     // ─── Layer 2: the call sites ─────────────────────────────────────────
 
     @Test
@@ -132,6 +174,31 @@ class MoveToCapsuleGateTest {
         )
         // Negative control: a token that does not exist cannot be "found".
         assertFalse(code.contains("definitelyNotInThisFile_1116"))
+    }
+
+    @Test
+    fun `the share drain arms only what really landed`() {
+        val screen = source("src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatScreen.kt")
+        val drain = blockAfter(screen, "LaunchedEffect(shareBufferVersion)")
+        // Negative control: the probe reads the drain, not some other effect.
+        assertTrue(drain.contains("[Share] injecting"))
+        assertEquals(
+            "the share drain must arm exactly once, and only through the landed guard",
+            1,
+            Regex("markShareInjected\\(\\)").findAll(drain).count(),
+        )
+        assertTrue(
+            "the attachment arm must keep the attachment only when the copy really added one",
+            drain.contains(
+                "if (viewModel.addAttachmentFromStagedShare(java.io.File(sharedDir, item.value)) != null)",
+            ),
+        )
+        val guard = blockAfter(drain, "if (shareDrainLanded(pending.items, landed::contains))")
+        assertTrue(
+            "the arm must sit inside the landed guard — arming on a failed copy is what " +
+                "locked `sawContent` false forever",
+            guard.contains("viewModel.markShareInjected()"),
+        )
     }
 
     @Test
