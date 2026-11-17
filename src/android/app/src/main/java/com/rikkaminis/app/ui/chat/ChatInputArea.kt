@@ -1250,6 +1250,25 @@ internal fun ChatInputArea(
                 draftText = inputFieldValue.text,
                 attachmentCount = attachments.size,
             )
+            // [incr1117-B F-05] The arm must be SPENT, not merely hidden. Hiding
+            // is `shouldShow`'s job and it reads the draft, so emptying the
+            // share left the flag armed and any later typing brought the "Move
+            // to…" pill back over an unrelated draft (the pill then moved
+            // something the share had nothing to do with). `observeFrame` owns
+            // the timing half — it will not spend an arm before the injected
+            // text has actually landed, because the share drain appends through
+            // the composer command queue (see its KDoc).
+            var shareContentSeen by remember { mutableStateOf(false) }
+            LaunchedEffect(shareInjected, inputFieldValue.text, attachments.size) {
+                val frame = MoveToCapsuleGate.observeFrame(
+                    shareInjected = shareInjected,
+                    draftText = inputFieldValue.text,
+                    attachmentCount = attachments.size,
+                    sawContent = shareContentSeen,
+                )
+                shareContentSeen = frame.sawContent
+                if (frame.disarm) viewModel.clearShareInjectedFlag()
+            }
             // Mirrors iOS swipe-up-to-send: drag the input bar upward —
             // if it holds text, a floating send-arrow + "Release to send"
             // capsule track the finger; releasing past `swipeArmFraction`

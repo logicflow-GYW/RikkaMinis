@@ -304,6 +304,51 @@ class PasteFoldWiringTest {
         )
     }
 
+    // ── 6: edit mode owns the composer [incr1117-B F-03] ─────────────────────
+
+    @Test
+    fun `entering edit mode replaces the draft's chips instead of stacking on them`() {
+        val body = blockAfter(viewModel, "fun editMessage(messageId: String)")
+        val snapshotAt = body.indexOf("val preEditPastes = _preEditPastes.value")
+        assertTrue("the snapshot-once block must still exist", snapshotAt >= 0)
+        val refoldAt = body.indexOf("stashPastedText(paste, inlineMarker = false)", snapshotAt)
+        assertTrue("the edit still refolds the turn's own paste", refoldAt >= 0)
+        val window = body.substring(snapshotAt, refoldAt)
+
+        fun clearsFirstEntryChips(src: String) = src.contains("_pastedTexts.value = emptyList()")
+
+        assertTrue(
+            "the first entry must SNAPSHOT and then CLEAR the live chips — the attachment " +
+                "branch replaces `_attachments` the same way. Snapshot-only left the draft's " +
+                "blocks in the buffer, so the refold appended the edited turn's paste AFTER " +
+                "them: two chips on screen, and `expandPastedTextWithSplit` consumes EVERY " +
+                "detached block, so the unsent draft paste was pushed into the edited " +
+                "history message",
+            clearsFirstEntryChips(window),
+        )
+        val clearAt = body.indexOf("_pastedTexts.value = emptyList()", snapshotAt)
+        assertTrue(
+            "the clear must run BEFORE the refold, or the turn's own chip is wiped too",
+            clearAt in snapshotAt until refoldAt,
+        )
+        // Negative control: the pre-fix shape (snapshot only, no clear) must fail
+        // the very probe above — otherwise the probe pins nothing.
+        assertFalse(
+            "negative control: snapshot-without-clear must not pass",
+            clearsFirstEntryChips(window.replace("_pastedTexts.value = emptyList()", "")),
+        )
+    }
+
+    @Test
+    fun `leaving edit mode puts the draft's chips back`() {
+        val body = blockAfter(viewModel, "fun cancelEdit()")
+        assertTrue(
+            "cancelEdit must restore the snapshot in place of the turn's refolded chip — " +
+                "the cleared first entry is only safe because this path returns it",
+            body.contains("_preEditPastes.value?.let { _pastedTexts.value = it }"),
+        )
+    }
+
     // ── chip row / preview ───────────────────────────────────────────────────
 
     @Test
