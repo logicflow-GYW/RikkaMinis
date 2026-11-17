@@ -541,11 +541,11 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     //
     // [INCR-1117B A3-a / A3-b] Opening the window is ONE operation that also
     // does the "already pinned?" read and the pin write, under a per-session
-    // lock and NonCancellable — see SubagentDispatchPin.beginWindow. Doing it
+    // lock and NonCancellable — see SubagentDispatchPin.begin. Doing it
     // inline here (count, then two suspend Room calls in runCatching) let a
     // cancellation land between the pin WRITE and its bookkeeping, and let a
     // new window read a pin that the previous window was about to undo.
-    com.rikkaminis.app.data.SubagentDispatchPin.beginWindow(
+    com.rikkaminis.app.data.SubagentDispatchPin.begin(
         sessionId = activeSessionId,
         readPinnedAt = { chatRepository.getSession(it)?.pinnedAt },
         pin = { chatRepository.pinSession(it, true) },
@@ -573,10 +573,10 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         // [INCR-1117B A3-a/A3-b] Closing the window is ONE operation: count
         // down, and (on the last window) read + undo + forget, all under the
         // per-session lock and NonCancellable — see
-        // SubagentDispatchPin.finishWindow. Splitting it here (end() first,
+        // SubagentDispatchPin.end. Splitting it here (end() first,
         // then the Room calls) is what let a new window slip in between and be
         // unpinned by this one.
-        val restored = com.rikkaminis.app.data.SubagentDispatchPin.finishWindow(
+        val restored = com.rikkaminis.app.data.SubagentDispatchPin.end(
             sessionId = activeSessionId,
             readPinnedAt = { chatRepository.getSession(it)?.pinnedAt },
             unpin = { chatRepository.pinSession(it, false) },

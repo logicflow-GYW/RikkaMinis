@@ -18,7 +18,7 @@ import org.junit.Test
  * update their own rows.
  *
  * [INCR-1117B A4] These are BEHAVIOUR tests: every one of them drives real
- * coroutines through [SubagentDispatchPin.beginWindow] / [finishWindow] and
+ * coroutines through [SubagentDispatchPin.begin] / [SubagentDispatchPin.end] and
  * asserts on what the fake `pinned_at` row ends up as. The pre-fix tests
  * asserted on the ORDER OF TOKENS in the call-site source, which stayed green
  * when the Room calls were moved out of the window (the very regression the
@@ -212,14 +212,14 @@ class SubagentDispatchPinTest {
     // ---- helpers -----------------------------------------------------------
 
     private suspend fun open(sid: String, repo: FakeRepo): Int =
-        SubagentDispatchPin.beginWindow(
+        SubagentDispatchPin.begin(
             sessionId = sid,
             readPinnedAt = { repo.read(it) },
             pin = { repo.pin(it, true) },
         )
 
     private suspend fun close(sid: String, repo: FakeRepo): Boolean =
-        SubagentDispatchPin.finishWindow(
+        SubagentDispatchPin.end(
             sessionId = sid,
             readPinnedAt = { repo.read(it) },
             unpin = { repo.pin(it, false) },

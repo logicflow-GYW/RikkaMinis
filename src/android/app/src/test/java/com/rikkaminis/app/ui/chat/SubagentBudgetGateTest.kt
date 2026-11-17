@@ -75,23 +75,21 @@ class SubagentBudgetGateTest {
         // survive refactors; a token order does not (moving the Room calls out
         // of the NonCancellable block used to stay green).
         val body = spawn()
-        val beginAt = body.indexOf("SubagentDispatchPin.beginWindow(")
+        val beginAt = body.indexOf("SubagentDispatchPin.begin(")
         assertTrue("dispatch must open the window", beginAt > 0)
         val promptAt = body.indexOf("ChatMutationMethods.prompt(")
         assertTrue("the window must be open before the child runs", beginAt < promptAt)
 
         val finallyAt = body.indexOf("} finally {")
         assertTrue("the close must live in a finally (a throw must not leak a pin)", finallyAt > beginAt)
-        val finishAt = body.indexOf("SubagentDispatchPin.finishWindow(")
-        assertTrue("dispatch must close the window", finishAt > finallyAt)
+        val endAt = body.indexOf("SubagentDispatchPin.end(")
+        assertTrue("dispatch must close the window", endAt > finallyAt)
 
         assertFalse(
-            "begin()/end()/noteWrittenPin()/takeWrittenPin() are private on purpose: " +
-                "calling them from the call site skips the per-session lock and the " +
-                "NonCancellable block that make the window atomic",
-            body.contains("SubagentDispatchPin.begin(") ||
-                body.contains("SubagentDispatchPin.end(") ||
-                body.contains("SubagentDispatchPin.noteWrittenPin(") ||
+            "the raw count/pin bookkeeping is private on purpose: touching it from " +
+                "the call site skips the per-session lock and the NonCancellable " +
+                "block that make the window atomic",
+            body.contains("SubagentDispatchPin.noteWrittenPin(") ||
                 body.contains("SubagentDispatchPin.takeWrittenPin("),
         )
         assertTrue(

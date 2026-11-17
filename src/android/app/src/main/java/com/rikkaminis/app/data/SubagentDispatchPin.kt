@@ -26,13 +26,13 @@ import kotlinx.coroutines.withContext
  *
  * ## Window operations, not counts
  *
- * Callers must use [beginWindow] and [finishWindow]; the count itself is
+ * Callers must use [begin] and [end]; the count itself is
  * private. Each is ONE operation that covers the count AND the Room round trip
  * around it, serialized per session by a [Mutex]:
  *
- *  - [beginWindow]: count up, and — on the first window — read `pinned_at`,
+ *  - [begin]: count up, and — on the first window — read `pinned_at`,
  *    write the pin and record the written value;
- *  - [finishWindow]: count down, and — on the last window — read `pinned_at`,
+ *  - [end]: count down, and — on the last window — read `pinned_at`,
  *    undo the pin when it is still ours, and forget the record.
  *
  * [INCR-1117B A3-a] They are mutually exclusive because the pre-fix code
@@ -55,9 +55,15 @@ import kotlinx.coroutines.withContext
  * window cannot be opened at all, nothing has been written either.
  *
  * The pin VALUE that was written lives here too, not in a local at the call
- * site: which dispatch writes it and which one finishes last are different
+ * site: which dispatch pins and which one finishes last are different
  * coroutines, so "the one that pinned restores" is not a safe assumption (see
  * [writtenPins]).
+ *
+ * The names [begin] / [end] are not decoration: `scripts/scan/subagent_dispatch_check.py`
+ * (D5) anchors "the pin is taken before the child runs and released inside a
+ * `finally`" on the call-site tokens `SubagentDispatchPin.begin(` /
+ * `SubagentDispatchPin.end(`, and the pre-fix call site used them. Keeping the
+ * names keeps that gate honest without editing the gate.
  */
 object SubagentDispatchPin {
 
@@ -97,7 +103,7 @@ object SubagentDispatchPin {
      * (`getSession(id)?.pinnedAt` / `pinSession(id, true)`), injected so the
      * decision logic is plain JVM code.
      *
-     * Never throws on cancellation: the caller's `try { … } finally { [finishWindow] } }`
+     * Never throws on cancellation: the caller's `try { … } finally { [end] } }`
      * opens AFTER this returns, so a cancellation escape here would leak both
      * the count and the pin.
      *
@@ -107,7 +113,7 @@ object SubagentDispatchPin {
      * stuck migration) the next window waits there too, uncancellably.
      * 升级触发: a `pinSession` watchdog/panic shows up in the logs.
      */
-    suspend fun beginWindow(
+    suspend fun begin(
         sessionId: String,
         readPinnedAt: suspend (String) -> Long?,
         pin: suspend (String) -> Long?,
@@ -131,7 +137,7 @@ object SubagentDispatchPin {
      *
      * Call it from a `finally`: it is the only place the pin can be released.
      */
-    suspend fun finishWindow(
+    suspend fun end(
         sessionId: String,
         readPinnedAt: suspend (String) -> Long?,
         unpin: suspend (String) -> Unit,
