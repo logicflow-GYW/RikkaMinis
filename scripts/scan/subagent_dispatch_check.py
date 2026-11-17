@@ -493,7 +493,7 @@ def main() -> int:
     else:
         problems.append(("pin-window-missing", 0, "%s not found" % PIN_OBJECT))
     if not problems:
-        print("OK: sub-agent dispatch wiring holds (5 call-site contracts + 7 pin-window decisions)")
+        print("OK: sub-agent dispatch wiring holds (5 call-site contracts + 8 pin-window decisions)")
         return 0
     for code, line, message in problems:
         print("FAIL [%s]: %s" % (code, message))
