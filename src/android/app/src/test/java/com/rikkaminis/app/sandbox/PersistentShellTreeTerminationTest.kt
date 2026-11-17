@@ -163,8 +163,26 @@ class PersistentShellTreeTerminationTest {
         assertTrue("root identity must use the captured Process handle", body.contains("rootIsAlive = { proc.isAlive }"))
         assertTrue("current PID identity must be parsed afresh", body.contains("internalParseProcStat(File(\"/proc/\$pid/stat\").readText())"))
         val reaper = body.substringAfter("val reaper = Thread({")
-        assertTrue("waitFor stays on the asynchronous reaper", reaper.contains("proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)"))
+        // [WAVE-1118 R3-F01] The anchor moved from the literal
+        // `proc.waitFor(2, TimeUnit.SECONDS)` to the DECISION it encoded: the
+        // bounded wait for the killed tree still lives on the asynchronous
+        // reaper (never on the caller), and its budget is the named
+        // [PersistentShell.REAP_WAIT_MS] rather than an inline literal — the
+        // reaper now also CONSUMES the answer instead of discarding it (see
+        // PersistentShellReapTest for that half).
+        assertTrue(
+            "the bounded wait for exit stays on the asynchronous reaper",
+            reaper.contains("internalAwaitProcessGone(proc, REAP_WAIT_MS)"),
+        )
+        assertTrue(
+            "the reap budget must stay a named constant, not an inline literal",
+            source.contains("internal const val REAP_WAIT_MS = 2_000L"),
+        )
         assertFalse("stop cannot block the caller waiting for exit", body.substringBefore("val reaper = Thread({").contains("waitFor("))
+        assertFalse(
+            "the bare discarded wait must not come back",
+            reaper.contains("try { proc.waitFor("),
+        )
     }
 
     private fun sourceFile(name: String): File {
