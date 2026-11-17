@@ -2,13 +2,14 @@
 
 - **分支**：`fix/w1118-chat`（worktree `/var/minis/shared/work/incr1118/wt1`）
 - **基线**：`c85131ad`（= 当前 main，已含 FIX-1117B 五支）
-- **代码 tip**：`5b471b4e`（`fix(chat): keep the clear funnel last on the exit-edit path (CI gate round)`）
-  —— 代码分两次提交：`1274de37`（六条修复）+ `5b471b4e`（分支 CI #3217 的门禁反馈，见 §2.7；意图不变，形态改为门与
-  「字段唯一写者」都要求的那个）
+- **代码 tip**：`8704c599`（`fix(chat): route the moved paste blocks through the composer's intent channel`）
+  —— 代码分三次提交：`1274de37`（六条修复）+ `5b471b4e`（CI #3217 门禁反馈，§2.7）+
+  `8704c599`（CI #3225 三条既有形状断言的反馈，§2.8）。后两次都**不改意图，只改形态**到了门/既有断言要求的样子
 - **来源**：`shared/work/meta-audit/reports/wave1118/` 的 `Wave_1118_D1_Report.md`（F-01…F-08）、
   `Wave_1118_D2_Report.md`（F-01…F-06）、`Wave_1118_D10_Report.md` **仅 F-05**；
   纪律见 `shared/work/incr1118/fix/POLICY.md`
-- **改动面**：6 个生产文件（+237/−16，两次提交合计）+ 4 个新测试类（+644，28 用例）——
+- **改动面**：6 个生产文件（+271/−16，三次提交合计）+ 4 个新测试类（29 用例）+ 1 处既有测试的
+  拼写 pin 改为决策 pin ——
   `ChatViewModel.kt` / `ChatScreen.kt` / `ChatInputArea.kt` / `ChatQueueInterruption.kt` /
   `ChatViewModelStore.kt` / `MoveToCapsuleGate.kt`（仅 KDoc）
 - **未跑**（按任务书硬约束）：全量 `scan.sh` / `test_scan.py` / gradle。编译证据交分支 CI。
@@ -72,7 +73,7 @@
 | `RetryFollowReengageTest` | **3/7 红**（四入口无 dispatch、未用安全索引、仍有手写 `coerceAtLeast(0)`）；4 条 rule 层用例按设计本来就绿（纯 reducer，与树无关） |
 | `ComposerPasteCarryTest` | 基线无法编译（两个纯函数在当时还不存在）——如实记为「纯规则是本轮新增」，其 shape 层证据由 pre 臂的三个类覆盖 |
 
-**修复后（post 臂）**：`OK (12)` / `OK (4)` / `OK (7)` / `OK (5)`，共 **28 用例全绿**。
+**修复后（post 臂）**：`OK (13)` / `OK (4)` / `OK (7)` / `OK (5)`，共 **29 用例全绿**。
 
 **变异（12 臂，每条只翻对应断言）**
 
@@ -89,6 +90,7 @@ M9  ChatScreen.kt           RED -> resolves index through the shared helper | no
 M10 ChatInputArea.kt        RED -> move-to stash fills pastedTexts from the live buffer
 M11 ChatScreen.kt           RED -> move-to drain restores the blocks as detached chips
 M12 ChatViewModel.kt        RED -> exit edit demotes an inline chip whose literal the clear removed
+M13 ChatInputArea.kt        RED -> the composer restores the carried blocks as detached chips
 ```
 
 M5 的第一次结果暴露了测试自身的漏洞（`no early refusal` 因「跳过含 `trimmed.isBlank()` 的窗口」
@@ -225,8 +227,12 @@ inline 条目（`expandPastePlaceholders` 返回 consumed，`expandPastedTextWit
 - 源侧（`ChatInputArea` 的 Move-to 回调）传入 `pastesCarriedByMove(viewModel.pastedTexts.value, inputFieldValue.text)`。
   判断基准是**字段的实时文本**（不是展开后的串，也不是 `viewModel.inputText` 的 150 ms 防抖快照）：
   字面量还在屏幕上 ⇒ 它会被上面的展开带进正文，不该再搬一份。
-- 目标侧（`ChatScreen` 的 transfer drain）逐条 `stashPastedText(p.text, inlineMarker = false)`——
-  由目标自己重新分配 id（`nextFreePasteId` 还会把屏上已有字面量计入 used），源侧 id 不会串。
+- 目标侧走**意图通道**：`ChatScreen` 的 drain 只发 `ComposerCommand.RestoreDraftPastes(transfer.carriedPastes)`，
+  composer 收到后调 `restoreDraftPastesAfterClear`（重新分配 id：`nextFreePasteId` 还会把屏上已有字面量计入
+  used，源侧 id 不会串；形态固定为 detached）。
+  这一条是被既有断言逼出来的正确形态：`PasteFoldWiringTest` 钉住「粘贴缓冲属于 composer，`ChatScreen` 不得出现
+  `PastedText` / `pastedTexts` / `stashPastedText`」（该文件属另一个并行分支的归并安全属性），
+  所以字段名也改成 `carriedPastes`，让规则仍可机械检查。
 - `MoveToCapsuleGate` 只改 KDoc（说明「芯片会随合格草稿一起走」）；**判据本体不动**：
   「只有 detached 芯片」的草稿仍然不点亮胶囊（这是「胶囊是搬运动作」的取舍，改它会改变胶囊的供给面，
   登记为后续可选项而不是本支顺手改）。
@@ -268,6 +274,28 @@ the clear funnel`）。
 
 **教训（可复用）**：修一个「顺序」类 bug 之前，先跑本域的门，看它是否已经锚定了那个顺序——
 锚定的话，正确修法通常是「让状态跨过那一步」而不是「颠倒那一步」。
+
+### 2.8 单测 #3225 的三条既有断言（第二版修法被挡下）
+
+`unit-tests` 红了三条**既有**测试，都不是新代码的 bug，而是新形态踩到了它们钉住的设计：
+
+| 测试 | 断言 | 判定 | 处置 |
+|---|---|---|---|
+| `PasteFoldWiringTest`「ChatScreen is untouched by this feature」 | `ChatScreen.kt` 不得出现 `PastedText` / `pastedTexts` / `stashPastedText` | **对**（粘贴缓冲属于 composer；该文件归并行分支，零交集是合入安全属性） | drain 改发 `ComposerCommand.RestoreDraftPastes` 意图；`PendingTransfer` 字段改名 `carriedPastes` |
+| `B3RenderInputShapeTest`「everyClearEntranceRoutesThroughTheFunnel」 | `stashPendingTransfer(` → 清空漏斗 < **400** 字符（从 token 起算，不是从括号起算） | **对**（这个漏斗必须在出口最后且够近） | 缓冲读取挪进 `viewModel.pastesForMove(composerText)`，调用点回到 384 |
+| `PasteFoldWiringTest`「leaving edit mode puts the draft's chips back」 | 字面 `_preEditPastes.value?.let { _pastedTexts.value = it }` | **pin 落后于决策**（决策是「进入编辑清空 live 行 ⇒ 这条路径必须把快照还回来」，我仍还，只是经 `pastesAfterCancelEdit` 决定形态） | 把这个**拼写 pin 改成决策 pin**（`pastesAfterCancelEdit(` + `_pastedTexts.value =`），并在注释里写明为什么「清空 live 行」只有靠这条路径还回来才安全 |
+
+第三条是本支**唯一**改动既有测试的一处：pin 的原意（快照必须回来）被完整保留，去掉的只是它对实现写法的耦合；
+降级规则自身的负向由 M12 变异臂守着。
+
+**处置后本地复跑**：`chat_ui_interaction_check` OK；五个邻门（`stale_closure_guard` /
+`discarded_return_guard` / `chat_session_id_binding_check` / `claim_release_guard` /
+`provider_remember_key_check`）全绿；harness **29 用例**全绿；**13 条**变异臂各自翻红（新增 M13：
+删掉 composer 侧的还原调用 ⇒ 意图测试红）。
+
+**教训（可复用）**：既有 shape 断言是「上一次决定的化石」。改实现前先 `grep` 相关 token 被谁钉住——
+被钉住时，正确做法通常是**换通道**（意图 / 命令）而不是绕过断言；只有 pin 明显落后于决策时才动测试，
+且必须保留原意 + 用变异臂守住新形态。
 
 ---
 
