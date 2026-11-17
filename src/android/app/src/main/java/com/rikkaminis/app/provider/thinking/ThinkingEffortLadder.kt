@@ -39,6 +39,24 @@ object ThinkingEffortLadder {
     fun clampEffortForModel(effort: String, lid: String): String =
         if (effort == "xhigh" && (lid.contains("mimo") || lid.contains("agnes"))) "high" else effort
 
+    /**
+     * [fix/thinking-level-ceiling-1118] Every tier STRICTLY WEAKER than [tier], ladder
+     * order. Empty when [tier] is off the ladder or already the weakest one.
+     *
+     * This is the shape a "this tier is unsupported" complaint can be turned into: the
+     * gateway names the tier it rejected, and everything below it stays legal. Callers
+     * must treat an EMPTY answer as "nothing learned" rather than "nothing is legal" —
+     * clamping a request onto an empty set is not defined here and the gateway never
+     * said the weaker tiers fail too.
+     *
+     * Lives here so the ordering has exactly one owner; `EffortTierLearner` must not
+     * grow a second copy of the ladder.
+     */
+    fun tiersBelow(tier: String): List<String> {
+        val i = LADDER.indexOf(tier.lowercase())
+        return if (i <= 0) emptyList() else LADDER.subList(0, i).toList()
+    }
+
     /** Snap a requested tier onto the model's declared set, walking DOWN then up. */
     fun clampEffort(effort: String, values: List<String>?): String {
         if (values.isNullOrEmpty()) return effort
