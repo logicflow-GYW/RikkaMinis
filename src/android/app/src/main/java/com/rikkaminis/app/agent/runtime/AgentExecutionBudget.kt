@@ -113,6 +113,12 @@ class AgentExecutionBudget(
     /**
      * 消耗已知的 token 用量。仅在 [maxEstimatedTokens] 非 null 时检查并记账；
      * 为 null（token 计数不可靠）时返回 Allowed 且不记账，snapshot 保持 null，不伪造精确值。
+     *
+     * [W1118 R5-F01] 可用额度必须同时扣除已预留给 child 的部分：`cap - used -
+     * reservedChildTokens`。旧式 `cap - used` 让父级可以花掉已承诺给 child 的配额，
+     * 把 `used + reservedChildTokens <= cap`（[tryReserveChildBudget] 处声明的
+     * 不变量）打破——随后 child 拿着已获准的预留调用 [consumeChildTokens] 反而被
+     * 拒绝，即"预留成功、兑现失败"。
      */
     fun consumeEstimatedTokens(tokens: Long): BudgetDecision {
         require(tokens >= 0) { "token consumption cannot be negative: $tokens" }
@@ -120,7 +126,8 @@ class AgentExecutionBudget(
             if (isExpiredLocked()) return BudgetDecision.Denied(BudgetExhaustedReason.DEADLINE_EXPIRED)
             val cap = maxEstimatedTokens ?: return BudgetDecision.Allowed
             val used = estimatedTokensUsed ?: 0L
-            if (used >= cap || tokens > cap - used) {
+            val available = cap - used - reservedChildTokens
+            if (available <= 0L || tokens > available) {
                 return BudgetDecision.Denied(BudgetExhaustedReason.TOKEN_BUDGET_EXCEEDED)
             }
             estimatedTokensUsed = used + tokens

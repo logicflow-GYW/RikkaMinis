@@ -357,7 +357,7 @@ fun ProviderConnectionScreen(
                             onClick = {
                                 if (mode != ImageEndpointMode.auto) {
                                     providerRepository.updateInstance(
-                                        currentInstance().copy(imageEndpointMode = ImageEndpointMode.auto),
+                                        withImageEndpointMode(currentInstance(), ImageEndpointMode.auto),
                                     )
                                 }
                             },
@@ -368,7 +368,7 @@ fun ProviderConnectionScreen(
                             onClick = {
                                 if (mode != ImageEndpointMode.imagesGenerations) {
                                     providerRepository.updateInstance(
-                                        currentInstance().copy(imageEndpointMode = ImageEndpointMode.imagesGenerations),
+                                        withImageEndpointMode(currentInstance(), ImageEndpointMode.imagesGenerations),
                                     )
                                 }
                             },
@@ -379,7 +379,7 @@ fun ProviderConnectionScreen(
                             onClick = {
                                 if (mode != ImageEndpointMode.chatCompletions) {
                                     providerRepository.updateInstance(
-                                        currentInstance().copy(imageEndpointMode = ImageEndpointMode.chatCompletions),
+                                        withImageEndpointMode(currentInstance(), ImageEndpointMode.chatCompletions),
                                     )
                                 }
                             },

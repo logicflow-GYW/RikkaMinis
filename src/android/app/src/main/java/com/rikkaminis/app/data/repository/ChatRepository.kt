@@ -641,13 +641,44 @@ class ChatRepository(
      * boundary cut to trim the kept assistant row to the parts before the
      * target tool_use. Mirrors iOS ChatStore.updateMessageParts.
      */
-    suspend fun updateMessageParts(id: String, partsJson: String) =
+    suspend fun updateMessageParts(id: String, partsJson: String) {
         // [fix/da1019-partsjson-funnel] Second writer of the same column, so it
         // takes the same ceiling: `ChatViewModel.rerunFromToolBlock` rewrites a
         // row in place with the parts of an existing (possibly oversized) row,
         // and an uncapped write here reinstates exactly the payload the append
         // path truncated — the 2 MB CursorWindow crash walks straight back in.
         dao.updateMessageParts(id, capPartsJsonForRow(partsJson))
+        refreshTailPreviewAfterPartsRewrite(id, partsJson)
+    }
+
+    /**
+     * [W1118-D5 F-03] Keep `sessions.last_message` in step when the row that
+     * IS the session tail gets its parts rewritten.
+     *
+     * Two production callers rewrite parts in place:
+     *  - `ChatViewModel.rerunFromToolBlock` first drops every row after the
+     *    trimmed assistant row, so that row becomes the tail; the drawer kept
+     *    showing the text of the tool call (or of the deleted turn) until the
+     *    next append.
+     *  - `ChatViewModel.updatePersistedAssistantTurn` (early turn persist)
+     *    rewrites the just-appended assistant row with its final payload.
+     *
+     * The tail test reads the session id through a column projection
+     * ([ChatDao.sessionIdOf]) — never the whole row, which is what
+     * `dao_loadmessages_check` (and every big-session crash before it) is
+     * about — and then compares the stored tail payload against the payload we
+     * just wrote. A non-tail row leaves the preview alone: the drawer shows the
+     * tail, and the tail is the authority for that column.
+     *
+     * `extractTextPreview` returning null keeps the previous preview, exactly
+     * like [updateSessionPreview] (never blank a good line with nothing).
+     */
+    private suspend fun refreshTailPreviewAfterPartsRewrite(id: String, partsJson: String) {
+        val sessionId = dao.sessionIdOf(id) ?: return
+        if (dao.lastMessageParts(sessionId) != capPartsJsonForRow(partsJson)) return
+        val preview = extractTextPreview(partsJson) ?: return
+        dao.updateLastMessage(sessionId, preview, System.currentTimeMillis())
+    }
 
     /** [T-error-persist-android] Set/clear the error sticker on a row by id. */
     suspend fun updateMessageErrorInfo(messageId: String, errorInfo: String?) =

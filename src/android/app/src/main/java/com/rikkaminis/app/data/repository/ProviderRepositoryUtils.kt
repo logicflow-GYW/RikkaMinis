@@ -341,3 +341,25 @@ internal fun pairEntryIdsById(
     }
     return map
 }
+
+/**
+ * [W1118-D5 F-02] Tri-state boolean read for the import/parse paths
+ * ([ProviderRepository.parseImportedModelEntries]).
+ *
+ * `JSONObject.has(key)` is TRUE for a key present with an explicit `null`
+ * value, and `optBoolean(key)` then coerces `JSONObject.NULL` to `false`. For
+ * the capability flags whose Kotlin type is `Boolean?`
+ * (`LLMModel.supportsReasoning`, `declaresNoEffortTiers`) the third state is
+ * meaningful — "unknown, inherit the catalog entry or the heuristic" — so an
+ * explicit `null` in an imported document used to be rewritten into
+ * "definitely does not support reasoning", which hides the Deep Thinking
+ * toggle in chat and makes `mergeImportInstanceJSON`'s `restored == local`
+ * idempotence check fail on a document that was already correct.
+ *
+ * Contract: absent key → null (legacy documents, same as before); explicit
+ * `null` → null; `true`/`false` → the value. Non-boolean scalars keep
+ * `optBoolean`'s lenient coercion so a hand-edited `"supportsReasoning": 1`
+ * still imports as true.
+ */
+internal fun optionalBooleanOrNull(obj: JSONObject, key: String): Boolean? =
+    if (obj.has(key) && !obj.isNull(key)) obj.optBoolean(key) else null
