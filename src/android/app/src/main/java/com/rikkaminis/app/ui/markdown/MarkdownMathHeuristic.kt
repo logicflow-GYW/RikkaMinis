@@ -71,9 +71,12 @@ internal object MarkdownMathHeuristic {
      * `lim n to inf`, `O(n log n)`. Five regressions, one cause.
      *
      * So these tokens are excluded from the LONG-word test: a formula may use
-     * any number of them and still be a formula. They are deliberately NOT
-     * excluded from the word count — see [looksLikeNaturalLanguage] for the
-     * money sentence that needs `min` to count.
+     * any number of them and still be a formula. They are NOT excluded from the
+     * word count in general — see [looksLikeNaturalLanguage] for the money
+     * sentence that needs `min` to count. The one exception is the CALL form
+     * (`sin(`, `log (x)`): a function name followed by `(` is structural
+     * evidence of a formula rather than a word, so it is not counted at all
+     * ([incr1117-B F-06]).
      *
      * Exact-token match, case-insensitive — `maximum` is not `max`, `sine` is
      * not `sin`, `logo` is not `log`. The list is deliberately closed: adding
@@ -175,12 +178,26 @@ internal object MarkdownMathHeuristic {
      *    `log x + log y` and `sin x cos x` read as sentences while the `-` in
      *    `3-day` still reads as prose evidence.
      *
-     *    [incr1116-B F-10] They DO count toward the total, though, and that is
-     *    what keeps unit abbreviations out of the formula branch:
-     *    `50 for 30-min or ` has three words only if `min` is one of them, and
-     *    its long word is `for` — so it stays prose. Excluding them from the
-     *    count entirely (the first cut) made the span look like a two-word
-     *    formula, and the `-` of `30-min` then rendered both dollars as KaTeX.
+     *    [incr1116-B F-10] They still count toward the total UNLESS they are
+     *    written as a call — and that distinction is what keeps unit
+     *    abbreviations out of the formula branch: `50 for 30-min or ` has three
+     *    words only if `min` is one of them, and its long word is `for` — so it
+     *    stays prose. Excluding them from the count entirely (the first cut)
+     *    made the span look like a two-word formula, and the `-` of `30-min`
+     *    then rendered both dollars as KaTeX.
+     *
+     *    [incr1117-B F-06] That first cut over-corrected the other way:
+     *    `sin(theta) + cos(theta)` is four counted words with `theta` as the
+     *    long one, so the guard called a formula a sentence and both `$`
+     *    vanished again. The fix is the lexical call shape, not a wider
+     *    exemption: a token in [MATH_FUNCTION_TOKENS] followed by `(`
+     *    (whitespace allowed in between) is a function CALL — structural
+     *    evidence of a formula — so it is not counted and cannot be the long
+     *    word. `30-min` has no `(` after `min`, so the unit abbreviation keeps
+     *    counting and `$50 for 30-min or $100` stays prose; and a sentence
+     *    whose first token merely looks call-shaped (`sin (the angle) of a
+     *    circle`) keeps its other long words (`angle`, `circle`) and stays
+     *    prose.
      *
      * The two together keep `$x - y$`, `$x+y$`, `$1+1=2$`, `$x^2$` and
      * `$\frac{1}{2}$` classified as math (they fail the word-count or the
@@ -202,15 +219,28 @@ internal object MarkdownMathHeuristic {
             var j = i
             while (j < content.length && content[j].isAsciiLetter()) j++
             val token = content.substring(i, j)
-            // [incr1116-B F-10] Every token is a word; a function name just
-            // cannot be the LONG one. See the KDoc: the count has to include
-            // `min`/`max`/`sec` so `50 for 30-min or ` reaches three words,
-            // while `max a b` still fails the long-word test and stays math.
-            words++
-            if (token.lowercase() !in MATH_FUNCTION_TOKENS &&
-                j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH
-            ) {
-                hasLongWord = true
+            val lower = token.lowercase()
+            // [incr1117-B F-06] A function name written as a CALL (`sin(`,
+            // `log (x)`) is structural evidence of a formula, not a word: it is
+            // neither counted nor allowed to be the long word. The `(` is what
+            // separates it from `30-min` — the unit abbreviation has no call
+            // and therefore still counts, which is what keeps
+            // `50 for 30-min or ` prose ([incr1116-B F-10]).
+            var k = j
+            while (k < content.length && content[k].isWhitespace()) k++
+            val isFunctionCall = k < content.length && content[k] == '(' && lower in MATH_FUNCTION_TOKENS
+            if (!isFunctionCall) {
+                // [incr1116-B F-10] Every other token is a word; a function name
+                // just cannot be the LONG one. See the KDoc: the count has to
+                // include `min`/`max`/`sec` so `50 for 30-min or ` reaches
+                // three words, while `max a b` still fails the long-word test
+                // and stays math.
+                words++
+                if (lower !in MATH_FUNCTION_TOKENS &&
+                    j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH
+                ) {
+                    hasLongWord = true
+                }
             }
             i = j
         }

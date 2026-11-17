@@ -132,11 +132,52 @@ class MarkdownMathHeuristicMoneyTest {
         // count) is what separates `$50 for 30-min or $100` — prose, three
         // words, long word `for` — from `$\max a b$`, which has no long word at
         // all and stays a formula.
+        //
+        // [incr1117-B F-06] The one token that IS dropped from the count is the
+        // CALL form (`sin(`, `sin (`) — see the arms below. `30-min` carries no
+        // `(`, so these two sentences are unchanged by that refinement.
         assertEquals(false, MarkdownMathHeuristic.looksLikeMath("50 for 30-min or "))
         assertEquals(false, MarkdownMathHeuristic.looksLikeMath("50 for 15-sec or "))
         // The formula arm is unchanged: three tokens whose only 3+ letter word
         // is the function name itself.
         assertEquals(true, MarkdownMathHeuristic.looksLikeMath("max a b"))
         assertEquals(true, MarkdownMathHeuristic.looksLikeMath("log x + log y"))
+    }
+
+    // ── [incr1117-B F-06] a function CALL is structural formula evidence ────
+
+    @Test
+    fun `a function call with a parenthesised argument is math`() {
+        // The regression: `sin(theta) + cos(theta)` is four counted words with
+        // `theta` as the long one, so the [incr1116-B F-10] rule called a
+        // formula a sentence and both `$` vanished. `sin(` / `cos(` are calls,
+        // not words, so the guard sees at most one long word and stays out.
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("sin(theta) + cos(theta)"))
+    }
+
+    @Test
+    fun `a mixed function call expression is math`() {
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("sin(alpha) + cos(x)"))
+    }
+
+    @Test
+    fun `a log and exp call expression is math`() {
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("log(err) + exp(x)"))
+    }
+
+    @Test
+    fun `whitespace before the call parenthesis still counts`() {
+        // LaTeX lets the author write `\sin (x)`; the heuristic has to accept
+        // the same spacing, otherwise the same formula renders or not depending
+        // on one space.
+        assertEquals(true, MarkdownMathHeuristic.looksLikeMath("sin (x) + cos (y)"))
+    }
+
+    @Test
+    fun `a prose sentence with a call shaped head stays prose`() {
+        // Negative control: skipping the call token must not turn a sentence
+        // into a formula. `the` / `angle` / `of` / `circle` are still ordinary
+        // long words, so the guard still fires.
+        assertEquals(false, MarkdownMathHeuristic.looksLikeMath("sin (the angle) of a circle"))
     }
 }
