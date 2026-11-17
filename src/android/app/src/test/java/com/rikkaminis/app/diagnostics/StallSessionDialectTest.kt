@@ -108,4 +108,16 @@ class StallSessionDialectTest {
         val rejected = runCatching { assertProducerWritesSession(stripped) }.isFailure
         assertTrue("the probe must reject a writer that no longer emits the field", rejected)
     }
+
+    // ─── helper ─────────────────────────────────────────────────────────────
+
+    private fun source(): String {
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
+            val f = File(dir, hangSource)
+            if (f.exists()) return f.readText()
+            dir = dir.parentFile
+        }
+        throw java.io.FileNotFoundException("$hangSource not found from user.dir")
+    }
 }
