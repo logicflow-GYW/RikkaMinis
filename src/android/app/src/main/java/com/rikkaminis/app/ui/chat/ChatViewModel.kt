@@ -3833,26 +3833,27 @@ class ChatViewModel(
         if (_preEditAttachments.value == null) {
             _preEditAttachments.value = _attachments.value
         }
-        // [incr1116-B F-05] Same snapshot-once rule for the paste chips, plus
-        // the re-entry case: editing another message while already in edit mode
-        // must start from the snapshot, not from the chip the previous edit
-        // appended.
-        // [incr1117-B F-03] …and the first entry must CLEAR the live chips, the
-        // way the attachment branch above replaces `_attachments` with the
-        // restaged set. Snapshot-only left the draft's own blocks in the buffer,
-        // so the fold below appended the edited turn's paste AFTER them: two
-        // chips on screen, and `expandPastedTextWithSplit` (which consumes every
-        // detached block, not just the one this edit re-folded) pushed the
-        // user's unsent draft paste into the EDITED history message. While
-        // editing, the composer represents this turn — the draft's chips wait in
+        // [incr1116-B F-05] Same snapshot-once rule for the paste chips: the row
+        // visible while editing A is A's refolded chip, so editing B without
+        // leaving A must never carry it over.
+        // [incr1117-B F-03] …and the live chips are CLEARED on entry, the way
+        // the attachment branch above replaces `_attachments` with the restaged
+        // set — snapshot alone left the draft's own blocks in the buffer. While
+        // editing, the composer represents this turn; the draft's chips wait in
         // the snapshot and come back on cancelEdit().
-        val preEditPastes = _preEditPastes.value
-        if (preEditPastes == null) {
-            _preEditPastes.value = _pastedTexts.value
-            _pastedTexts.value = emptyList()
-        } else if (_pastedTexts.value != preEditPastes) {
-            _pastedTexts.value = preEditPastes
-        }
+        //
+        // [incr1117-B F-03] Re-entry (editing B without leaving A) must NOT
+        // restore the snapshot. The draft's chips were parked in
+        // `_preEditPastes` precisely so they stay out of the edited turn;
+        // putting them back made the refold below append B's own block AFTER
+        // them — two chips on screen, and `expandPastedTextWithSplit` (which
+        // consumes every detached block) wrote the user's UNSENT draft paste
+        // into history message B. Entry — first or repeated — always means
+        // "snapshot once, live row empty"; only cancelEdit() hands the snapshot
+        // back.
+        val entry = editPastesOnEnter(_pastedTexts.value, _preEditPastes.value)
+        _preEditPastes.value = entry.snapshot
+        _pastedTexts.value = entry.live
         _attachments.value = restaged.map { r ->
             val mime = android.webkit.MimeTypeMap.getSingleton()
                 .getMimeTypeFromExtension(
@@ -5402,4 +5403,67 @@ sealed interface ComposerCommand {
         val trimExistingEnd: Boolean = true,
         val trailingSpace: Boolean = true,
     ) : ComposerCommand
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [incr1117-B F-03 / F-03b] Two composer decisions that used to be spelled
+// inline inside a 4000-line class and a Compose effect — where no JVM test could
+// reach them, which is why both shipped broken. They are pure on purpose: the
+// bodies hold the rule, the call sites only apply it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * [incr1117-B F-03] What the paste row must look like when edit mode is entered.
+ *
+ * @property snapshot what `cancelEdit()` hands back — the user's draft, captured
+ *   ONCE, on the first entry. A repeated entry (editing B without leaving A)
+ *   keeps the original snapshot: the row visible while editing A is A's refolded
+ *   chip, which is exactly what must NOT become the draft.
+ * @property live the chips the composer holds while editing — always empty.
+ *   Entering edit mode means "the composer represents this turn", the same way
+ *   the attachment branch replaces `_attachments` with the restaged set; the
+ *   edited turn's own paste is put back by the refold that follows, not by
+ *   carrying anything over.
+ *
+ * The defect this replaces: re-entry assigned `live = snapshot`, so the draft's
+ * detached blocks sat in the row next to the edited turn's. `stashPastedText`
+ * appended B's block after them, and `expandPastedTextWithSplit` consumes EVERY
+ * detached block at send time — the unsent draft paste was written permanently
+ * into history message B.
+ */
+internal data class EditPastesEntry(
+    val snapshot: List<PastedText>,
+    val live: List<PastedText>,
+)
+
+/** @see EditPastesEntry */
+internal fun editPastesOnEnter(
+    current: List<PastedText>,
+    snapshot: List<PastedText>?,
+): EditPastesEntry = EditPastesEntry(
+    snapshot = snapshot ?: current.toList(),
+    live = emptyList(),
+)
+
+/**
+ * [incr1117-B F-03b] Did this drained system share put anything in the composer?
+ *
+ * The share drain used to call `markShareInjected()` unconditionally. When every
+ * item failed to land — the staged file is gone, the byte copy threw, or the
+ * shared "text" is whitespace — the flag was armed over an empty draft, so
+ * `MoveToCapsuleGate.observeFrame` could never latch `sawContent` and therefore
+ * could never spend the arm: the "Move to…" pill reappeared over the next
+ * unrelated draft the user typed.
+ *
+ * @param attachmentLanded which attachment items `addAttachmentFromStagedShare`
+ *   actually added (its return value, not its intent).
+ */
+internal fun shareDrainLanded(
+    items: List<com.rikkaminis.app.share.PendingShare.Item>,
+    attachmentLanded: (com.rikkaminis.app.share.PendingShare.Item) -> Boolean,
+): Boolean = items.any { item ->
+    when (item.kind) {
+        com.rikkaminis.app.share.PendingShare.Item.Kind.INLINE_TEXT -> item.value.isNotBlank()
+        com.rikkaminis.app.share.PendingShare.Item.Kind.ATTACHMENT -> attachmentLanded(item)
+    }
 }

@@ -321,6 +321,13 @@ fun ChatScreen(
         val sharedDir = withContext(Dispatchers.IO) {
             com.rikkaminis.app.share.SharedShareStore.sharedFileDirectory(context)
         }
+        // [incr1117-B F-03] The arm must follow CONTENT, not the intent to share.
+        // `addAttachmentFromStagedShare` returns null when the staged file is gone
+        // or the byte copy failed, and a whitespace-only INLINE_TEXT appends
+        // nothing — arming on those left `sawContent` false forever, so the arm
+        // could never be spent and the "Move to…" pill popped up over the next
+        // unrelated draft. One item that really reached the composer is enough.
+        val landed = mutableSetOf<com.rikkaminis.app.share.PendingShare.Item>()
         for (item in pending.items) {
             when (item.kind) {
                 com.rikkaminis.app.share.PendingShare.Item.Kind.INLINE_TEXT -> {
@@ -335,11 +342,20 @@ fun ChatScreen(
                 }
                 com.rikkaminis.app.share.PendingShare.Item.Kind.ATTACHMENT -> {
                     // Suspend: copies the staged bytes on IO, adds the attachment on Main.
-                    viewModel.addAttachmentFromStagedShare(java.io.File(sharedDir, item.value))
+                    if (viewModel.addAttachmentFromStagedShare(java.io.File(sharedDir, item.value)) != null) {
+                        landed += item
+                    }
                 }
             }
         }
-        viewModel.markShareInjected()
+        if (shareDrainLanded(pending.items, landed::contains)) {
+            viewModel.markShareInjected()
+        } else {
+            com.rikkaminis.app.logging.AppLogger.info(
+                "ChatScreen",
+                "[Share] ${pending.items.size} item(s) landed nothing; capsule not armed",
+            )
+        }
         withContext(Dispatchers.IO) {
             com.rikkaminis.app.share.SharedShareStore.cleanSharedFiles(context)
         }
