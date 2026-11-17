@@ -201,7 +201,10 @@ internal object ConfigBuiltins {
                 description = "When ON, the agent can dispatch sub-agents — real chat sessions with the full tool set — via spawn_agent (synchronous) and minis-sessions-cli send (async / parallel). ON by default; turn it off to forbid the agent from opening new sessions.",
                 prefs = subagentPrefs,
                 key = com.rikkaminis.app.data.SubagentPrefs.KEY_ENABLED,
-                defaultValue = true,
+                // [C-INCR1117-F02] Same constant the reset row and isEnabled
+                // read, so a future default move happens in one place instead
+                // of leaving this registration (and the reset) behind.
+                defaultValue = com.rikkaminis.app.data.SubagentPrefs.DEFAULT,
             )
         )
 

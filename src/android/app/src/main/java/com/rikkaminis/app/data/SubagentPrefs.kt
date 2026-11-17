@@ -33,11 +33,24 @@ object SubagentPrefs {
     const val PREFS = "minis_subagent_prefs"
     const val KEY_ENABLED = "subagent.enabled"
 
+    /**
+     * [C-INCR1117-F02] The shipped value, stated once.
+     *
+     * Three call sites must agree on it — [isEnabled] seeds a device that
+     * never made a choice, `ConfigBuiltins` declares it to the registry
+     * (minis-config / backup), and the "Restore defaults" row writes it back.
+     * Before this constant the reset row still wrote the OLD default
+     * (`false`), so restoring defaults turned the feature off while a fresh
+     * install had it on. Anything that needs "the default" must read this,
+     * never spell the value out again.
+     */
+    const val DEFAULT = true
+
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     fun isEnabled(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_ENABLED, true)
+        prefs(context).getBoolean(KEY_ENABLED, DEFAULT)
 
     fun setEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply()
