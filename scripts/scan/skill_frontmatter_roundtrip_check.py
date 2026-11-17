@@ -117,18 +117,101 @@ SB_MSG_UPDATED = "R.string.skills_browser_success_updated"
 SB_MSG_IMPORTED = "R.string.skills_browser_success_imported"
 
 
+# [incr1117b-C3.1] What counts as a terminal exit from the branch body: a bare
+# `return`, or a `throw`. A LABELED return (`return@withContext` / `return@let`)
+# is NOT terminal here — inside `withContext { … }` / `.let { … }` it leaves the
+# lambda only, so control still falls out of the `when` into the success path
+# below it. `@` is not a word character, so the old `\breturn\b` accepted the
+# labeled form and the gate stayed green on a real drop-through.
+SB_TERMINAL_RE = re.compile(r"\breturn\b(?!\s*@)|\bthrow\b")
+
+# [incr1117b-C3.2] Continuation markers used when deciding where a branch body
+# ends: a line ending in one of these, or a next line starting with one of
+# these, continues the same expression (so `?:\n foo()` / `&&\n bar()` / a
+# wrapped `?:` chain is not cut in half).
+BRANCH_ENDS_WITH_CONT = ("?:", "=", "&&", "||", "+", "-", "*", "/", ".", ",",
+                         "(", "[", "->")
+BRANCH_STARTS_WITH_CONT = (".", "?:", "&&", "||", "+", "-", "*", "/", ",",
+                           "->")
+
+
+def _line_col(text, idx):
+    """Column of the first non-space character on the line containing `idx`."""
+    start = text.rfind("\n", 0, idx) + 1
+    i = start
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    return i - start
+
+
+def _branch_body_end(text, start, arrow_col):
+    """Index where the `when` branch body beginning at `start` ends, or None
+    when it never closes (unbalanced — the caller fails closed).
+
+    The body ends at the branch boundary: a newline at bracket depth 0 whose
+    next non-empty line is at the arrow's column or shallower — unless the
+    expression visibly continues (see the two CONTINUE tuples, plus a
+    K&R-less `else` / `catch` / `finally` on its own line). A closing bracket
+    reached at depth 0 belongs to the enclosing construct, so it ends the body
+    too (inline `when (x) { is A -> return; else -> … }`).
+    """
+    depth = 0
+    i, n = start, len(text)
+    while i < n:
+        c = text[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif c == ";" and depth == 0:
+            # statement separator inside an inline `when (x) { is A -> return;
+            # else -> … }` — the next arm is not part of this branch body.
+            return i
+        elif c == "\n" and depth == 0:
+            seg = text[start:i].rstrip()
+            j = i + 1
+            while j < n and text[j] in " \t":
+                j += 1
+            if j >= n:
+                return i
+            if text[j] == "\n":
+                i += 1
+                continue
+            cont_next = text[j:j + 2] in BRANCH_STARTS_WITH_CONT
+            m = re.match(r"(else|catch|finally)\b\s*", text[j:j + 16])
+            if m is not None:
+                # `else ->` is a SIBLING branch of the same `when`, not a
+                # continuation of this one. `else {` / `else if (…)` is.
+                rest = j + m.end()
+                cont_next = cont_next or text[rest:rest + 2] != "->"
+            cont_prev = not seg or seg.endswith(BRANCH_ENDS_WITH_CONT)
+            if not cont_next and not cont_prev and \
+                    _line_col(text, j) <= arrow_col:
+                return i
+        i += 1
+    if depth > 0:
+        return None
+    return n
+
+
 def branch_body_at(text_masked, marker):
     """Body of the branch introduced by `marker` (a `when` condition ending in
-    `->`), delimited by brace matching. Returns (body, problem).
+    `->`), delimited by bracket matching against the branch boundary. Returns
+    (body, problem).
 
-    [incr1117-A F-11] Two shapes exist in Kotlin and both must be read, or the
-    gate turns ROT the moment the source picks the other one:
-      · block body       `is Failure -> { … }`  → the text inside the braces
-      · single expression `is Failure -> foo()` → the rest of that line (or the
-        next non-empty line when the arrow ends its line)
+    [incr1117-A F-11] Every Kotlin branch shape must be readable, or the gate
+    turns ROT the moment the source picks another one:
+      · block body        `is Failure -> { … }`
+      · block expression   `is Failure -> if (c) { …; return }` — the old
+        reader truncated at the arrow's end-of-line and cut this to
+        `if (c) {`, so a terminating branch read as "no return" (false red)
+      · nested `when`      `is Failure -> when { … }`
+      · single expression  `is Failure -> foo()`
     `problem` is a string when the branch cannot be delimited at all (marker
-    gone / braces unbalanced): the caller must fail closed then — "could not
-    find the code" is never "clean".
+    gone / marker ambiguous / braces unbalanced): the caller must fail closed
+    then — "could not find the code" is never "clean".
     """
     idx = text_masked.find(marker)
     if idx < 0:
@@ -136,30 +219,31 @@ def branch_body_at(text_masked, marker):
                       "failed-download branch is gone, so nothing stops it from "
                       "falling through into the success path (ROT — update this "
                       "gate)" % marker)
+    # [incr1117b-C3.2] The first occurrence used to be THE branch. A second
+    # `when` over the same result type (a later handler, a helper) makes that a
+    # silent misread: the gate would judge whichever one happens to come first.
+    hits = text_masked.count(marker)
+    if hits != 1:
+        return None, ("found %d occurrences of '%s' in "
+                      "MinisSkillsBrowserScreen.kt — cannot tell which one is "
+                      "the refresh path, so the fall-through cannot be judged "
+                      "(fail-closed; ROT — update this gate)"
+                      % (hits, marker))
+    arrow_col = _line_col(text_masked, idx)
     k = idx + len(marker)
     n = len(text_masked)
     while k < n and text_masked[k] in " \t\r\n":
         k += 1
-    if k < n and text_masked[k] == "{":
-        close = match_bracket(text_masked, k)
-        if close < 0:
-            return None, ("the '%s' branch body never closes (unbalanced braces) "
-                          "— fail-closed: the drop-through cannot be judged "
-                          "(ROT — update this gate)" % marker)
-        return text_masked[k + 1:close], None
-    # single-expression body — to the end of the line; when the arrow ends the
-    # line, the expression sits on the next non-empty line.
-    eol = text_masked.find("\n", k)
-    if eol < 0:
-        eol = n
-    if not text_masked[k:eol].strip():
-        k = eol + 1
-        while k < n and text_masked[k] in " \t\r\n":
-            k += 1
-        eol = text_masked.find("\n", k)
-        if eol < 0:
-            eol = n
-    return text_masked[k:eol], None
+    if k >= n:
+        return None, ("the '%s' branch has no body at all — fail-closed: the "
+                      "drop-through cannot be judged (ROT — update this gate)"
+                      % marker)
+    end = _branch_body_end(text_masked, k, arrow_col)
+    if end is None:
+        return None, ("the '%s' branch body never closes (unbalanced brackets) "
+                      "— fail-closed: the drop-through cannot be judged "
+                      "(ROT — update this gate)" % marker)
+    return text_masked[k:end], None
 
 def function_body(text_nc, text_masked, signature):
     """The {...} block of the function whose signature matches `signature`
@@ -848,16 +932,19 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
     # arrow in place) kept the gate green: a Failure that then falls through
     # re-enters the success path and the HUD reports success for a download
     # that failed. The anchor is now the branch BODY: it must terminate.
+    # [incr1117b-C3.1] "Terminate" excludes labeled returns (`return@withContext`
+    # leaves the enclosing lambda only) and includes `throw`.
     failure_body, failure_problem = branch_body_at(sb_masked, SB_FAILURE_BRANCH)
     if failure_problem is not None:
         check("arm9 browser refresh treats a failed download as terminal",
               False, failure_problem)
     else:
         check("arm9 browser refresh treats a failed download as terminal",
-              re.search(r"\breturn\b", failure_body) is not None,
-              "the '%s' branch has no `return` in its body — a Failure that "
-              "falls through re-enters the success path (ROT — update this gate)"
-              % SB_FAILURE_BRANCH)
+              SB_TERMINAL_RE.search(failure_body) is not None,
+              "the '%s' branch has no terminating `return` / `throw` in its "
+              "body (a labeled `return@…` exits the enclosing lambda only) — a "
+              "Failure that falls through re-enters the success path "
+              "(ROT — update this gate)" % SB_FAILURE_BRANCH)
 
     # arm10 [dv22-B6 §1042-B-07]: the browser import judges duplication BEFORE
     # the full-fat import. The dedup variable name is derived from the
@@ -1170,6 +1257,80 @@ DIRTY_SB_FAILURE_FALLTHROUGH = GOOD_SB.replace(
     """            onStateChange(HudState.ERROR, result.reason)
 """)
 
+
+# ── [incr1117b-C3] witnesses for the branch-body reader ────────────────────
+
+def _mutate(text, old, new):
+    """Fixture builder that refuses to become a no-op.
+
+    A `.replace` whose anchor drifted silently returns the text unchanged: a
+    DIRTY_* fixture then equals GOOD and goes NOT-RED (loud), but a GOOD_*
+    fixture still reads green — for no reason at all. Raising here turns that
+    drift into a startup failure instead of a green lie."""
+    if old not in text:
+        raise SystemExit("fixture anchor drifted (no match): %r" % old[:70])
+    return text.replace(old, new)
+
+
+# C3.1 — the branch terminates with a LABELED return. Inside `withContext { … }`
+# (or `.let { … }`) that exits the lambda only, so control still falls out of
+# the `when` into the success path: a failed download reports success.
+DIRTY_SB_LABELED_RETURN = _mutate(
+    GOOD_SB,
+    """            onStateChange(HudState.ERROR, result.reason)
+            return
+""",
+    """            onStateChange(HudState.ERROR, result.reason)
+            return@withContext
+""")
+
+# C3.2 — a legitimate terminating shape: `-> if (cond) { …; return }`. The old
+# reader cut it down to `if (cond) {` and called a terminating branch "no
+# return" (false red on correct code).
+GOOD_SB_MULTILINE_IF = _mutate(
+    GOOD_SB,
+    """        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+""",
+    """        is SkillRepository.UpdateResult.Failure -> if (result.reason.isNotBlank()) {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        } else {
+            onStateChange(HudState.ERROR, "download failed")
+            return
+        }
+""")
+
+# `throw` is a terminal exit as well — the criterion must say so by decision,
+# not by accident (the old `\breturn\b` read this as a drop-through).
+GOOD_SB_THROW = _mutate(
+    GOOD_SB,
+    """            onStateChange(HudState.ERROR, result.reason)
+            return
+""",
+    """            onStateChange(HudState.ERROR, result.reason)
+            throw IllegalStateException(result.reason)
+""")
+
+# C3.2 — two `Failure` branches in one file: "the first occurrence" is no
+# longer THE refresh path, so the gate must fail closed instead of judging
+# whichever one comes first.
+DIRTY_SB_TWO_MARKERS = GOOD_SB + '''
+// a second handler over the same result type: the marker is not unique any
+// more, and reading the first one would silently judge the wrong branch.
+internal fun otherOutcome(result: SkillRepository.UpdateResult) {
+    when (result) {
+        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+        else -> Unit
+    }
+}
+'''
+
 # [dv22-B6 §1042-B-07] dirty variants — each flips exactly the arm10 decision
 # it names, keeping arm9 green (the update() call site is untouched).
 
@@ -1269,6 +1430,25 @@ def selftest():
     print("selftest clean tree: %s" % ("PASS" if not f else "FAIL %s" % f))
     ok &= not f
 
+    # [incr1117b-C3] Legitimate branch shapes must stay GREEN. A dirty-only
+    # selftest cannot tell "the reader got better" from "the reader went blind
+    # in the other direction" — both show up as more red lines.
+    for label, sb_t in [
+        ("Failure branch returns via `if (…) { … }`", GOOD_SB_MULTILINE_IF),
+        ("Failure branch throws", GOOD_SB_THROW),
+    ]:
+        f = run(GOOD_SR, GOOD_SM, sb_t)
+        print("selftest clean shape %-28s: %s %s"
+              % (label, "GREEN" if not f else "WRONG-RED", f[:1]))
+        ok &= not f
+
+    # Fixture integrity: the two-marker witness is appended (not `.replace`d),
+    # so its count is the only thing that proves it still holds two markers.
+    hits = DIRTY_SB_TWO_MARKERS.count(SB_FAILURE_BRANCH)
+    print("selftest fixture two-marker count %-22s: %s (%d)"
+          % ("", "OK" if hits == 2 else "BROKEN", hits))
+    ok &= hits == 2
+
     for entry in [
         ("polarity reverted", DIRTY_SR_POLARITY, GOOD_SM, GOOD_SB),
         ("delimiter walk reverted", DIRTY_SR_WALK, GOOD_SM, GOOD_SB),
@@ -1281,6 +1461,11 @@ def selftest():
          DIRTY_SB_NO_FAILURE_ARM, "failed download as terminal"),
         ("browser Failure branch loses its return", GOOD_SR, GOOD_SM,
          DIRTY_SB_FAILURE_FALLTHROUGH, "failed download as terminal"),
+        # ── [incr1117b-C3] branch-body reader ──
+        ("browser Failure branch returns@ a label", GOOD_SR, GOOD_SM,
+         DIRTY_SB_LABELED_RETURN, "terminating `return` / `throw`"),
+        ("browser Failure branch has two markers", GOOD_SR, GOOD_SM,
+         DIRTY_SB_TWO_MARKERS, "cannot tell which one is the refresh path"),
         ("browser import without dedup", GOOD_SR, GOOD_SM, DIRTY_SB_NO_DEDUP,
          "resolves the update target before importing"),
         ("browser dedup id not carried", GOOD_SR, GOOD_SM, DIRTY_SB_NO_PASSTHROUGH),
