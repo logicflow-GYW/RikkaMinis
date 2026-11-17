@@ -100,6 +100,19 @@ object ContentDiag {
         if (cur != null && cur.messageId == messageId) current.set(null)
     }
 
+    /**
+     * [W1118-T6 D9 F-07] Session id of the message being rendered right now, or
+     * null when nothing large is on screen.
+     *
+     * Separate from [currentRenderLogFields] because the two consumers want
+     * different shapes: the JankDiag stdout line wants the whole fingerprint,
+     * while the stall LOG needs a `session=<id>` field that
+     * `LaunchCycleBeacon.readLastSessionId` can parse (it greps the first 2 KB
+     * of the newest `stall-*.log` on the next launch to attribute a crash or a
+     * stall to the chat that was on screen).
+     */
+    fun currentRenderSessionId(): String? = current.get()?.sessionId
+
     /** For HangDetector: a greppable fragment for the message on-screen, or "". */
     fun currentRenderLogFields(): String {
         val cur = current.get() ?: return ""
