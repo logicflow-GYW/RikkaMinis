@@ -166,7 +166,11 @@ class ShareHostPolicyTest {
     }
 
     private fun assertDestroyReleaseWired(source: String) {
+        // Scope to onDestroy's own body: the release helper's DEFINITION also
+        // contains its name, so an unscoped `contains` would stay green after
+        // the call was deleted (caught by the CI round trip on 524eaa3f).
         val body = source.substringAfter("override fun onDestroy()")
+            .substringBefore("private fun releaseUncommittedStagedFiles(")
         assertTrue("onDestroy must consult the pure decision", body.contains(
             "ShareHostPolicy.shouldReleaseStagedOnDestroy(",
         ))
