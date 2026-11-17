@@ -117,7 +117,20 @@ R2 五条为什么不判 P0：全部需要 `:modelservice` 进程内的并发/�
 
 两文件在**基线树**上 `Tests run: 14, Failures: 14`（9 条正向 + 5 条负控，负控在基线红是因为其变异目标尚不存在，属预期），修后 `OK (14 tests)`。
 
-### 2.10 本支本地证据汇总
+### 2.10 既有门锚点适配（本支触发的两条）
+
+首轮 CI（run `44022836418` / #3216 @ `11353c1c`）在 `unit-tests` 抓到**两条既有门**因我的改动翻红 —— 不是产品缺陷，是门的锚点问题，逐条说明处置：
+
+| 门 | 失败信息 | 原因 | 处置 |
+|---|---|---|---|
+| `ScheduledTaskDeleteReleaseShapeTest > declaredVersion_treatsNonPositiveAndNonNumericAsUnusable` | `private fun declaredVersionOf( not found` | 我把 `declaredVersionOf` 由 `private` 提为 `internal`（让 import 路径共用同一契约） | **改门锚**：锚点改为 `fun declaredVersionOf(`（**可见性不是决策**，修饰符一变门就失明）。断言内容（`INVALID_DECLARED_VERSION` / `value <= 0` / 缺失键返回 null）**一字未改**，同一批臂仍覆盖同一决策；另把该门里「导入侧读 `optInt("version",-1)`」的过时说明文字更新为「两侧共用 `declaredVersionOf`，由 `ScheduledTasksVersionContractTest` 钉住」 |
+| `BrowserTeardownAndFailureSignalTest > tab teardown routes the manager destroy through the main thread` | `every manager.destroy() call in the pool must sit inside the helper (found 2 of 3)` | 我在 `evictIdleTabs` 的 KDoc 里写了 `tab.manager.destroy()` 这个字面量，门的**全文件计数**把它算成第 3 处 | **改注释，不改门**：门是对的（它要证明所有 manager teardown 都经 `destroyManagerOnMain`）。改门需「三件齐」，而这里成本更低且不削弱判据：注释改述为「only the manager teardown was hopped to Main」。改后全文件 `manager.destroy()` 计数回到 2（两处都在 helper 内） |
+
+复跑（`user.dir` = `src/android/app`，与 CI 同）：`ScheduledTaskDeleteReleaseShapeTest` **9/9 绿**、`BrowserTabPoolDisposeLatchTest` **10/10 绿**。
+
+可复用：**别在全文件计数的门旁边写被判计数的字面量**（注释也算）；把私有函数提可见性时，锚 `private fun xxx(` 的形状门必然失明 —— 锚要落在「决策」上，不落在修饰符上。
+
+### 2.11 本支本地证据汇总
 
 | 装置 | 基线 | 修后 |
 |---|---|---|
@@ -172,6 +185,11 @@ R2 五条为什么不判 P0：全部需要 `:modelservice` 进程内的并发/�
 
 ## 5. 收口
 
-- 本地窄验证：见 §2.10（并发 20/20 · 调度 66/66 · 形状 14/14）。
-- 分支 CI：`head_sha` 与代码 tip 逐字符一致（详见下方实测行）。
-- **停止节点**：分支 CI 绿即停，**不合 main**（并集合并由主会话执行）。
+- 本地窄验证：见 §2.11（并发 20/20 · 调度 66/66 · 形状 14/14）。
+- **分支 CI：`#3222` / run `44025135204` @ `d0e1fa6cd810755d71e29ce8fe6e4a001b862ef3`（= 本地 tip 逐字符一致）五 job 全 success**：
+  - `unit-tests`：**9387 PASSED / 0 真失败**（日志里 4 条含 ` FAILED` 的行全是**测试名子串**：`slot denied produces FAILED without calling provider PASSED` 等；1 条 SKIPPED = 既有 `ComposerLiveSourceTest` 负控）。Gradle 只在失败时打印 `N tests completed, M failed`，本次日志无该行 + `BUILD SUCCESSFUL` 即「0 失败」的证据形态。
+  - 本支 5 个新测试类的 **28 条用例逐条 PASSED**（`BrowserTabPoolDisposeLatchTest` 10 / `ScheduledTaskCrashMarkerTest` 6 / `ScheduledTasksVersionContractTest` 5 / `SuspendedSessionsResidueTest` 3 / `TrackerRunBoundaryOutcomeTest` 4；按类名 grep `…Test > …PASSED` 实测计数 = 28）。
+  - `scan-gate`：`Summary: 115 passed, 0 failed` + 运行时 `##[notice] scanners moved in this push (or the diff was unreadable) — running the fixture self-test` + **`✅ ALL 354 CASES PASS`** ⇒ 这次**夹具是真跑的**（与「CI 绿 ≠ 夹具跑过」的旧口径区分：本条引的是运行时 notice 与夹具汇总行，不是脚本源码里的 echo）。
+  - `publish`：job success 但两个真实发布步 **skipped**（`Move the rolling tag android-latest` / `Publish to Releases`）= main 门控生效，分支未污染 release 资产。
+- **停止节点已到达**：分支 CI 绿 + head_sha 逐字符一致 ⇒ 本支结束，**不合 main**（并集合并由主会话执行）。
+- **报告与代码 sha 的关系（如实说明一处偏差）**：本文件的**初稿**在 amend 时随代码提交一起进了 `d0e1fa6c`（`git add -A` 把它带上了）。因此：**CI 验证的 sha `d0e1fa6c` 里已含本报告初稿**，其后的报告提交只补了本节的 CI 实测数字与 §2.10 —— `git diff --name-only d0e1fa6c HEAD` = `fix-reports/FIX-W1118-service.md`（**非报告差异为空**，唯一满足的是「代码面」不受影响这一点，而不是「报告完全独立成提交」的字面形态）。下一批起：写报告前先 `git commit` 代码，避免 `git add -A` 把草稿带进代码提交。
