@@ -37,6 +37,7 @@ import com.rikkaminis.app.util.Utf16Sanitizer
 import com.rikkaminis.app.util.saveOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -468,6 +469,19 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     val task = args.optString("task", "").trim().ifBlank { args.optString("query", "").trim() }
     val title = args.optString("tool_title", "Sub-agent").ifBlank { "Sub-agent" }
 
+    // [INCR-1117 A-F06] The switch is a hard gate, not only a schema/prompt
+    // filter. Reading `SubagentPrefs` at schema/prompt build time leaves a
+    // replay (or a hand-crafted call) able to open a session while the user has
+    // dispatch turned off — the memory tools are double-gated the same way
+    // (`_memoryEnabled` at the executor, not just in the fragment).
+    if (!com.rikkaminis.app.data.SubagentPrefs.isEnabled(context)) {
+        return ToolExecutionResult(
+            "Error: sub-agent dispatch is disabled in Settings (runtime.subagentEnabled). " +
+                "The user can enable it in Settings → Agent Runtime.",
+            false, toolTitle = title,
+        )
+    }
+
     if (task.isBlank()) {
         return ToolExecutionResult(
             "Error: spawn_agent requires 'task' — a complete, self-contained task " +
@@ -499,10 +513,21 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     val childTitle = task.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
         ?.let { if (it.length > 30) it.take(30).trimEnd() + "…" else it }
 
+    // [INCR-1117 A-F07] The wait is bounded by what is LEFT of this run's
+    // deadline, not just by the fixed cap: the deadline is only consulted at
+    // turn boundaries, so a flat 900 s wait could block far longer than the run
+    // it belongs to has left. No budget attached → the plain cap. The same
+    // value is used in the timeout envelope below, so the message the caller
+    // reads names the wait it actually experienced.
+    val waitSeconds = SubagentSkill.effectiveWaitSeconds(
+        budgetRemainingMs = traceObserver.activeRunBudget?.remaining()?.millisRemaining,
+        capSeconds = SubagentSkill.WAIT_TIMEOUT_SECONDS,
+    )
+
     val params = JSONObject()
         .put("prompt", SubagentSkill.buildTaskPrompt(task))
         .put("wait", true)
-        .put("waitTimeout", SubagentSkill.WAIT_TIMEOUT_SECONDS)
+        .put("waitTimeout", waitSeconds)
         .put("thinkingLevel", effectiveThinkingLevel.name.lowercase())
         .also { if (!childTitle.isNullOrBlank()) it.put("title", childTitle) }
 
@@ -515,11 +540,16 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     // children concurrently). A pin the user takes during the window is left
     // alone — we only undo the exact value we wrote.
     val depth = com.rikkaminis.app.data.SubagentDispatchPin.begin(activeSessionId)
-    var ourPin: Long? = null
     if (depth == 1) {
         val alreadyPinned = runCatching { chatRepository.getSession(activeSessionId)?.pinnedAt }.getOrNull()
         if (alreadyPinned == null) {
-            ourPin = runCatching { chatRepository.pinSession(activeSessionId, true) }.getOrNull()
+            // [INCR-1117 A-F02] The value we wrote is recorded WITH the count.
+            // Which dispatch pins and which one finishes last are different
+            // coroutines under concurrency, so a `var ourPin` local here left
+            // the last `end` with nothing to restore — and the parent pinned
+            // for good.
+            runCatching { chatRepository.pinSession(activeSessionId, true) }.getOrNull()
+                ?.let { com.rikkaminis.app.data.SubagentDispatchPin.noteWrittenPin(activeSessionId, it) }
         }
     }
 
@@ -540,12 +570,23 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
             )
         }
     } finally {
-        if (com.rikkaminis.app.data.SubagentDispatchPin.end(activeSessionId) == 0 && ourPin != null) {
-            runCatching {
-                // Undo only OUR pin: a manual pin taken meanwhile has a newer
-                // value (or a null after an unpin) and must survive.
-                if (chatRepository.getSession(activeSessionId)?.pinnedAt == ourPin) {
-                    chatRepository.pinSession(activeSessionId, false)
+        // [INCR-1117 A-F03] The restore is a suspend (Room) round trip, and on a
+        // user stop this coroutine is ALREADY cancelled: the first suspension
+        // point throws CancellationException, `runCatching` swallowed it, and
+        // the parent stayed pinned for good. NonCancellable lets a bounded
+        // best-effort undo (two statements) finish on the way out — it is not a
+        // reason to keep the job alive, and no new scope/Job is involved.
+        withContext(NonCancellable) {
+            if (com.rikkaminis.app.data.SubagentDispatchPin.end(activeSessionId) == 0) {
+                val ourPin = com.rikkaminis.app.data.SubagentDispatchPin.takeWrittenPin(activeSessionId)
+                if (ourPin != null) {
+                    runCatching {
+                        // Undo only OUR pin: a manual pin taken meanwhile has a
+                        // newer value (or a null after an unpin) and must survive.
+                        if (chatRepository.getSession(activeSessionId)?.pinnedAt == ourPin) {
+                            chatRepository.pinSession(activeSessionId, false)
+                        }
+                    }
                 }
             }
         }
@@ -559,10 +600,15 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     // outcomes are unit-tested without an Android context.
     return SubagentSkill.resultOf(
         status = result.optString("status", ""),
-        text = result.optString("responseText", ""),
+        // [INCR-1117 A-F01] `responseText` is JSONObject.NULL when the turn
+        // produced none, and Android's `optString(…, fallback)` returns the
+        // literal "null" for it — which made resultOf's `ifBlank` guard dead
+        // code (an empty completion read as "null", a refusal as "…: null").
+        text = SubagentSkill.replyText(result),
         sessionId = childSessionId,
         timedOut = result.optBoolean("timedOut", false),
         title = title,
+        timeoutSeconds = waitSeconds,
     )
 }
 

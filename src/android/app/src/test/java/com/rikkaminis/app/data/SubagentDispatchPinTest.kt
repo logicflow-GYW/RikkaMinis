@@ -2,6 +2,7 @@ package com.rikkaminis.app.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -58,11 +59,47 @@ class SubagentDispatchPinTest {
     }
 
     @Test
+    fun `the last end can undo a pin written by another dispatch`() {
+        // [INCR-1117 A-F02] Two overlapping dispatches on one parent: the
+        // depth-1 dispatch writes the pin, the OTHER one finishes last and is
+        // the only one still running when the window closes. Its `end` must
+        // find the value the first dispatch wrote — a call-site local (the
+        // pre-fix `var ourPin`) is null there and restores nothing, leaving the
+        // parent pinned for good.
+        SubagentDispatchPin.begin("s1")
+        SubagentDispatchPin.noteWrittenPin("s1", 111L)
+        SubagentDispatchPin.begin("s1")
+
+        assertEquals(1, SubagentDispatchPin.end("s1"))
+        assertTrue("a still-running dispatch keeps the window open", SubagentDispatchPin.isDispatching("s1"))
+        assertEquals(0, SubagentDispatchPin.end("s1"))
+
+        assertEquals(
+            "the finishing dispatch must read the value it did not write",
+            111L,
+            SubagentDispatchPin.takeWrittenPin("s1") ?: -1L,
+        )
+        assertNull(
+            "consumed — a later window must not undo a pin it never wrote",
+            SubagentDispatchPin.takeWrittenPin("s1"),
+        )
+    }
+
+    @Test
+    fun `a window that never pinned records nothing`() {
+        SubagentDispatchPin.begin("s1")
+        assertEquals(0, SubagentDispatchPin.end("s1"))
+        assertNull(SubagentDispatchPin.takeWrittenPin("s1"))
+    }
+
+    @Test
     fun `clear forgets every session`() {
         SubagentDispatchPin.begin("a")
         SubagentDispatchPin.begin("b")
+        SubagentDispatchPin.noteWrittenPin("a", 7L)
         SubagentDispatchPin.clear()
         assertFalse(SubagentDispatchPin.isDispatching("a"))
         assertFalse(SubagentDispatchPin.isDispatching("b"))
+        assertNull("a teardown must not leave a restore value behind", SubagentDispatchPin.takeWrittenPin("a"))
     }
 }

@@ -107,6 +107,80 @@ class SubagentBudgetGateTest {
         )
     }
 
+    @Test
+    fun `the dispatch switch is checked at execution, not only in the schema`() {
+        // [INCR-1117 A-F06] The switch gated the schema and the routing
+        // fragment only, so a replayed or hand-crafted call still opened a
+        // session. The memory tools are double-gated the same way.
+        val body = spawn()
+        val promptAt = body.indexOf("ChatMutationMethods.prompt(")
+        assertTrue("the dispatch call site is gone", promptAt > 0)
+        val gateAt = body.indexOf("SubagentPrefs.isEnabled(context)")
+        assertTrue("dispatch must refuse while the user has it off", gateAt > 0)
+        assertTrue("the refusal must come before the child session is opened", gateAt < promptAt)
+    }
+
+    @Test
+    fun `the wait is capped by the run budget, not only by the fixed constant`() {
+        // [INCR-1117 A-F07] The run deadline is only consulted at turn
+        // boundaries, so a flat 900 s tool wait can outlive its own run.
+        val body = spawn()
+        val promptAt = body.indexOf("ChatMutationMethods.prompt(")
+        assertTrue("the dispatch call site is gone", promptAt > 0)
+        val budgetAt = body.indexOf("remaining()?.millisRemaining")
+        assertTrue("the wait must shrink with what the deadline has left", budgetAt in 0 until promptAt)
+        assertTrue(
+            "the arithmetic must live in the JVM-tested pure function",
+            body.contains("SubagentSkill.effectiveWaitSeconds("),
+        )
+        assertTrue(
+            "the timeout envelope must name the wait actually used",
+            body.contains("timeoutSeconds = waitSeconds"),
+        )
+    }
+
+    @Test
+    fun `the pin value is restored from the shared window record, not a local`() {
+        // [INCR-1117 A-F02] Which dispatch pins and which one finishes last are
+        // different coroutines when two dispatches overlap on one parent.
+        val body = spawn()
+        assertTrue(
+            "the written value must be recorded with the count",
+            body.contains("SubagentDispatchPin.noteWrittenPin("),
+        )
+        val finallyAt = body.indexOf("} finally {")
+        assertTrue("the release must live in a finally", finallyAt > 0)
+        val takeAt = body.indexOf("SubagentDispatchPin.takeWrittenPin(")
+        assertTrue("the last dispatch must read the recorded value", takeAt > finallyAt)
+    }
+
+    @Test
+    fun `the pin restore survives a cancelled coroutine`() {
+        // [INCR-1117 A-F03] `getSession` / `pinSession` are suspend (Room). On a
+        // user stop the coroutine is already cancelled, so the restore threw at
+        // its first suspension point and `runCatching` swallowed it.
+        val body = spawn()
+        val finallyAt = body.indexOf("} finally {")
+        assertTrue("the release must live in a finally", finallyAt > 0)
+        val nonCancelAt = body.indexOf("withContext(NonCancellable)", finallyAt)
+        assertTrue("a cancelled stop must still restore the pin", nonCancelAt > finallyAt)
+        val endAt = body.indexOf("SubagentDispatchPin.end(")
+        assertTrue("the restore must stay inside the non-cancellable block", endAt > nonCancelAt)
+    }
+
+    @Test
+    fun `a json null reply is resolved before it becomes the answer text`() {
+        // [INCR-1117 A-F01] Android's `optString(name, fallback)` returns the
+        // literal "null" for `JSONObject.NULL` — reading the field that way is
+        // the defect itself, so the reader must go through the isNull helper.
+        val body = spawn()
+        assertTrue("the reply must be read through SubagentSkill.replyText", body.contains("SubagentSkill.replyText("))
+        assertFalse(
+            "reading responseText with optString is the defect",
+            body.contains("optString(\"responseText\""),
+        )
+    }
+
     /** Source of the function starting at [signature], cut at the next top-level
      *  declaration so ordering assertions cannot see the neighbouring function. */
     private fun functionRegion(src: String, signature: String): String {
