@@ -532,13 +532,22 @@ internal object ProviderMutationMethods {
         // [da1023-C] updateEntry returns the canonical persisted id (null when
         // the write was rejected fail-closed) — report the persisted entry,
         // not the pre-persist copy whose uuid no longer matches the row.
-        val persistedId = repo.updateEntry(updated)
-            ?: throw RPCException(-32602, "Entry update rejected (blank or colliding model id): $entryId")
+        // [WAVE-1118 D9-F04] …and the unselect below must use that same id:
+        // it used to reuse the caller's pre-rename id, matched no row after a
+        // rename, and still answered `unselected: true`.
+        val persistedId = persistModelsUpdate(
+            updated = updated,
+            unselectRequested = unselectRequested,
+            updateEntry = {
+                repo.updateEntry(updated)
+                    ?: throw RPCException(-32602, "Entry update rejected (blank or colliding model id): $entryId")
+            },
+            unselectEntry = { id -> repo.unselectEntry(id) },
+        )
         val persisted = repo.config.value.modelEntries.firstOrNull { it.id == persistedId }
             ?: updated.copy(uuid = persistedId)
         if (unselectRequested) {
             // Removal (not a hide) — the entry leaves the selected set.
-            repo.unselectEntry(entryId)
             return entryToJson(persisted).apply {
                 put("removed", true)
                 put("unselected", true)
@@ -1135,3 +1144,36 @@ internal fun addedModelEntry(
     ),
     isCustom = true,
 )
+
+/**
+ * [WAVE-1118 D9-F04] Persist a `provider.models.update` and, when the caller
+ * asked for removal, unselect **the row that was actually persisted**.
+ *
+ * `[da1023-C]` made `updateEntry` answer the canonical persisted id: a rename
+ * lands under the new composite key (`inst-1:new-id`). The unselect that
+ * follows a rename + `isHidden = true` still passed the caller's pre-rename id,
+ * matched zero rows, and the RPC answered `unselected: true` while the entry
+ * stayed in the selected set — i.e. a model the caller believes is out of
+ * rotation still gets routed to.
+ *
+ * Split out with lambdas instead of taking a `ProviderRepository` so the
+ * ordering is JVM-testable: the repository needs an Android `Context`, this
+ * decision does not.
+ *
+ * The rejected-write arm (`null` → `-32602`) stays at the call site, inside
+ * the [updateEntry] lambda: that is the shape
+ * `scripts/scan/entry_composite_key_guard_check.py` arm 5 reads (it requires
+ * `repo.updateEntry(updated)` and a fail-closed elvis in this function), and
+ * keeping the two together is also the honest reading — "persist, or refuse
+ * before anything else happens".
+ */
+internal fun persistModelsUpdate(
+    updated: ModelEntry,
+    unselectRequested: Boolean,
+    updateEntry: (ModelEntry) -> String,
+    unselectEntry: (String) -> Unit,
+): String {
+    val persistedId = updateEntry(updated)
+    if (unselectRequested) unselectEntry(persistedId)
+    return persistedId
+}

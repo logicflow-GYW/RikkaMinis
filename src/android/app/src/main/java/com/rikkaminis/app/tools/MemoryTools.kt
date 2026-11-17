@@ -109,7 +109,10 @@ object MemoryTools {
         val toolTitle = resolveToolTitle(inputJson, "memory_write")
         return try {
             val obj = JSONObject(inputJson)
-            val content = obj.optString("content", "")
+            // [WAVE-1118 D8-F03] An explicit `content: null` used to arrive as the
+            // literal "null" on Android — not blank, so the tool wrote the word
+            // "null" into the memory log instead of refusing an empty write.
+            val content = obj.optArgString("content", "")
 
             if (content.isBlank()) {
                 ToolResult("Error: Missing required 'content' parameter", false, toolTitle)
@@ -129,8 +132,8 @@ object MemoryTools {
         val toolTitle = resolveToolTitle(inputJson, "memory_get")
         return try {
             val obj = JSONObject(inputJson)
-            val keywords = obj.optString("keywords", "")
-            val scope = obj.optString("scope", "all")
+            val keywords = obj.optArgString("keywords", "")
+            val scope = obj.optArgString("scope", "all")
 
             val result = repository.getMemory(keywords, scope)
             ToolResult(result, true, toolTitle)

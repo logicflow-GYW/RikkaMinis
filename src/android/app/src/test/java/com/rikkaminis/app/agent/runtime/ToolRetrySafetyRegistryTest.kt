@@ -130,4 +130,34 @@ class ToolRetrySafetyRegistryTest {
         assertTrue(RetrySafety.IDEMPOTENT_WRITE.conservativeness < RetrySafety.NON_IDEMPOTENT_WRITE.conservativeness)
         assertTrue(RetrySafety.NON_IDEMPOTENT_WRITE.conservativeness < RetrySafety.UNKNOWN.conservativeness)
     }
+
+    // ── [WAVE-1118 D8-F04] registry ↔ exposed-tool parity ──────────────
+
+    /**
+     * The registry is only consulted by tool NAME, so a tool that reaches the
+     * model but is missing here fails closed into [RetrySafety.UNKNOWN]: no
+     * retry after a transport failure, and an outcome-unknown mark that keeps
+     * the whole run out of `SUCCEEDED`.
+     *
+     * `app_guide` was added to [com.rikkaminis.app.tools.AgentTools] (and
+     * documented as "read-only, always available") while this table was not
+     * updated — the exact shape `conversation_history` had before [U10]. The
+     * iteration comes from the production registry factory, so the next tool
+     * added there fails this test instead of silently degrading.
+     */
+    @Test
+    fun `every exposed tool has an explicit safety level`() {
+        val names = com.rikkaminis.app.tools.AgentTools.makeAgentTools().map { it.name }
+        // Guard against a green-on-empty-list pass.
+        assertTrue("expected a non-trivial tool set, got $names", names.size >= 10)
+        assertTrue("app_guide must be exposed", "app_guide" in names)
+        val missing = names.filterNot { ToolRetrySafetyRegistry.isRegistered(it) }
+        assertEquals("tools exposed with no trusted safety level: $missing", emptyList<String>(), missing)
+    }
+
+    @Test
+    fun `app_guide is readable and therefore retry safe`() {
+        assertEquals(RetrySafety.READ_ONLY, ToolRetrySafetyRegistry.defaultSafetyFor("app_guide"))
+        assertEquals(RetrySafety.READ_ONLY, ToolRetrySafetyRegistry.lookup("app_guide"))
+    }
 }
