@@ -3942,6 +3942,34 @@ class ChatViewModel(
     }
 
     /**
+     * [incr1118 D1-F02] The draft's folded chips, for the one caller that has to
+     * hand them back AFTER clearing the composer.
+     *
+     * The exit-edit pill is three steps and the middle one is destructive:
+     * remember the chips → [cancelEdit] (restores attachments + the snapshot) →
+     * the composer's clear funnel (which drops the paste buffer by design, audit
+     * P1-C). Anything still needed after that has to be read before it.
+     */
+    fun peekPreEditPastes(): List<PastedText> = _preEditPastes.value.orEmpty()
+
+    /**
+     * [incr1118 D1-F02] Put back the chips read by [peekPreEditPastes], once the
+     * composer has been cleared.
+     *
+     * They come back in the only shape a send can still expand after that clear:
+     * detached. Their `[Pasted#N]` literals died with the edit prefill, so an
+     * inline row would render a chip whose content no path can resolve — the
+     * exact silent-loss shape this finding is about.
+     */
+    fun restoreDraftPastesAfterClear(pastes: List<PastedText>) {
+        if (pastes.isEmpty()) return
+        val restored = pastesAfterCancelEdit(pastes, _inputText.value)
+        if (restored.isEmpty()) return
+        val restoredIds = restored.mapTo(mutableSetOf()) { it.id }
+        _pastedTexts.value = restored + _pastedTexts.value.filterNot { it.id in restoredIds }
+    }
+
+    /**
      * Enqueue a prompt to be injected into the currently running agent loop.
      * The message appears immediately in the chat with isQueued=true; when the
      * current agent loop finishes, drainQueuedPrompts() consumes the queue.
@@ -5497,6 +5525,7 @@ internal fun pastesAfterCancelEdit(
 ): List<PastedText> = snapshot.map { entry ->
     if (entry.inlineMarker && entry.placeholder !in liveText) entry.copy(inlineMarker = false) else entry
 }
+
 
 /**
  * [incr1118 D2-F02] Which paste chips a "Move to…" transfer must carry.

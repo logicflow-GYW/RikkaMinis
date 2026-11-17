@@ -78,6 +78,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import com.rikkaminis.app.ui.chat.ChatViewModelStore.PendingTransfer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -2210,20 +2211,26 @@ internal fun ChatInputArea(
                             shape = RoundedCornerShape(16.dp),
                             color = ChatColors.inputBg,
                             modifier = Modifier.clickable {
-                                // [incr1118 D1-F02] Clear FIRST, restore SECOND.
-                                // `clearComposerInput` drops the paste buffer
-                                // (audit P1-C) — running it after `cancelEdit()`
-                                // wiped the draft chips that call had just
-                                // restored, so exiting edit mode silently
-                                // destroyed every folded paste in the draft
-                                // (attachments survived, chips did not).
-                                // Order the other way round: the composer lets go
-                                // of the edit's text/chips, then the snapshot comes
-                                // back (as detached rows — see
-                                // [pastesAfterCancelEdit], the field no longer
-                                // holds their literals).
-                                clearComposerInput()
+                                // [incr1118 D1-F02] Leaving edit mode used to
+                                // run `cancelEdit()` (hands the draft's folded
+                                // pastes back) and THEN the composer's clear
+                                // funnel, which drops the paste buffer on
+                                // purpose (audit P1-C) — the chips died one
+                                // statement after they came back, while the
+                                // attachments survived.
+                                //
+                                // The funnel still has to run LAST on this path
+                                // (pinned by chat_ui_interaction_check's F4:
+                                // every composer exit routes through it, and it
+                                // is the one place that resets the field), so the
+                                // fix takes the chips first and puts them back
+                                // AFTER it — as detached rows, because the field
+                                // no longer holds their `[Pasted#N]` literals
+                                // (see [pastesAfterCancelEdit]).
+                                val draftPastes = viewModel.peekPreEditPastes()
                                 viewModel.cancelEdit()
+                                clearComposerInput()
+                                viewModel.restoreDraftPastesAfterClear(draftPastes)
                             },
                         ) {
                             Text(
@@ -2490,12 +2497,17 @@ internal fun ChatInputArea(
                     // buffer, and the target session sends the instruction
                     // without the report it was pasted for. They travel as
                     // detached rows ([pastesCarriedByMove]).
-                    val movedText = viewModel.expandPastedText(inputFieldValue.text)
+                    // [incr1118 D2-F02] `pastedTexts` is read against the
+                    // FIELD's text, not the expanded string: a literal still on
+                    // screen is carried BY the expansion, everything else
+                    // (detached paste / orphan row) has to travel as a chip.
+                    // Kept on the call so the clear funnel stays on this path
+                    // (chat_ui_interaction_check F4 measures the distance).
                     ChatViewModelStore.stashPendingTransfer(
-                        ChatViewModelStore.PendingTransfer(
-                            inputText = movedText,
+                        PendingTransfer(
+                            inputText = viewModel.expandPastedText(inputFieldValue.text),
                             attachments = viewModel.attachments.value,
-                            pastedTexts = pastesCarriedByMove(viewModel.pastedTexts.value, movedText),
+                            pastedTexts = pastesCarriedByMove(viewModel.pastedTexts.value, inputFieldValue.text),
                         ),
                     )
                     clearComposerInput()

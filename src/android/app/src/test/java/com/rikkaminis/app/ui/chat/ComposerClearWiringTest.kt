@@ -90,18 +90,30 @@ class ComposerClearWiringTest {
     // ── D1-F02: order ───────────────────────────────────────────────────────
 
     @Test
-    fun `exit-edit clears the composer before restoring the snapshot`() {
+    fun `exit-edit hands the draft chips back after the clear funnel`() {
+        // The funnel must stay LAST on this path: `chat_ui_interaction_check`'s
+        // F4 pins that "every composer exit routes through the clear funnel",
+        // and the funnel is what resets the field. So the chips cannot be
+        // restored by `cancelEdit()` alone — it runs before the funnel and the
+        // funnel drops the paste buffer (audit P1-C). The draft snapshot is
+        // therefore read first and written back afterwards.
         val input = src("ChatInputArea.kt")
         val cancelAt = input.indexOf("viewModel.cancelEdit()")
         assertTrue("exit-edit cancelEdit call not found", cancelAt >= 0)
         val blockAt = input.lastIndexOf("clickable {", cancelAt)
         assertTrue("exit-edit clickable block not found", blockAt >= 0)
-        val clearAt = input.indexOf("clearComposerInput()", blockAt)
-        assertTrue("exit-edit no longer clears the composer", clearAt >= 0 && clearAt < cancelAt)
+        val blockEnd = input.indexOf("},", cancelAt).let { if (it < 0) input.length else it }
+        val block = input.substring(blockAt, blockEnd)
+
+        val peekAt = block.indexOf("peekPreEditPastes()")
+        val clearAt = block.indexOf("clearComposerInput()")
+        val restoreAt = block.indexOf("restoreDraftPastesAfterClear(")
+        assertTrue("draft chips are not remembered before the funnel", peekAt in 0 until clearAt)
+        assertTrue("the exit no longer routes through the clear funnel", clearAt in 0 until restoreAt)
         assertTrue(
-            "clearComposerInput() drops the paste buffer — running it AFTER cancelEdit() " +
-                "destroys the chips cancelEdit just restored",
-            clearAt < cancelAt,
+            "the chips must come back AFTER clearComposerInput() (which drops the buffer), " +
+                "otherwise they are wiped again",
+            restoreAt > clearAt,
         )
     }
 
