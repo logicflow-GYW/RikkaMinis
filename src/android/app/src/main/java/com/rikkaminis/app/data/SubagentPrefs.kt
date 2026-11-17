@@ -21,11 +21,11 @@ import android.content.SharedPreferences
  * degraded loop; that reason is gone. A user who explicitly turned it off
  * keeps their stored `false` — this constant only seeds devices that never
  * made a choice.
-
- * This is a side-effectful capability (agent can open N sessions, burn tokens,
- * run long-lived work) so it is OFF by default and deliberately a single,
- * user-visible switch — mirroring the user's "打开则有，不打开则没有" framing.
-
+ *
+ * It is still side-effectful (agent can open N sessions, burn tokens, run
+ * long-lived work), so it stays ONE user-visible switch — mirroring the
+ * user's "打开则有，不打开则没有" framing.
+ *
  * Persisted in its own prefs file and also registered in ConfigBuiltins so it
  * surfaces in Settings → Agent Runtime and travels with in-app backup.
  */
