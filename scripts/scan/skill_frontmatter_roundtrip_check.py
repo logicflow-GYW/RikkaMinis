@@ -117,6 +117,50 @@ SB_MSG_UPDATED = "R.string.skills_browser_success_updated"
 SB_MSG_IMPORTED = "R.string.skills_browser_success_imported"
 
 
+def branch_body_at(text_masked, marker):
+    """Body of the branch introduced by `marker` (a `when` condition ending in
+    `->`), delimited by brace matching. Returns (body, problem).
+
+    [incr1117-A F-11] Two shapes exist in Kotlin and both must be read, or the
+    gate turns ROT the moment the source picks the other one:
+      · block body       `is Failure -> { … }`  → the text inside the braces
+      · single expression `is Failure -> foo()` → the rest of that line (or the
+        next non-empty line when the arrow ends its line)
+    `problem` is a string when the branch cannot be delimited at all (marker
+    gone / braces unbalanced): the caller must fail closed then — "could not
+    find the code" is never "clean".
+    """
+    idx = text_masked.find(marker)
+    if idx < 0:
+        return None, ("'%s' not found in MinisSkillsBrowserScreen.kt — the "
+                      "failed-download branch is gone, so nothing stops it from "
+                      "falling through into the success path (ROT — update this "
+                      "gate)" % marker)
+    k = idx + len(marker)
+    n = len(text_masked)
+    while k < n and text_masked[k] in " \t\r\n":
+        k += 1
+    if k < n and text_masked[k] == "{":
+        close = match_bracket(text_masked, k)
+        if close < 0:
+            return None, ("the '%s' branch body never closes (unbalanced braces) "
+                          "— fail-closed: the drop-through cannot be judged "
+                          "(ROT — update this gate)" % marker)
+        return text_masked[k + 1:close], None
+    # single-expression body — to the end of the line; when the arrow ends the
+    # line, the expression sits on the next non-empty line.
+    eol = text_masked.find("\n", k)
+    if eol < 0:
+        eol = n
+    if not text_masked[k:eol].strip():
+        k = eol + 1
+        while k < n and text_masked[k] in " \t\r\n":
+            k += 1
+        eol = text_masked.find("\n", k)
+        if eol < 0:
+            eol = n
+    return text_masked[k:eol], None
+
 def function_body(text_nc, text_masked, signature):
     """The {...} block of the function whose signature matches `signature`
     (first occurrence), via brace matching on the string-masked text."""
@@ -778,6 +822,7 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
     # update() call added later in the file cannot silently stand in for it.
     try:
         sb_nc = mask_comments(sb_text if sb_text is not None else "")
+        sb_masked = mask_code(sb_text if sb_text is not None else "")
     except KotlinLexError as exc:
         return ["ROT: MinisSkillsBrowserScreen.kt does not lex (%s) — fail-closed" % exc]
     # arm9 [incr1116-A F-06] — three criteria, all about the same decision:
@@ -797,11 +842,22 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
           "the screen writes '%s' again: that path patches SKILL.md alone and "
           "reports success for a refresh whose scripts/references were never "
           "fetched (ROT — update this gate)" % SB_UPDATE_CALL)
-    check("arm9 browser refresh treats a failed download as terminal",
-          SB_FAILURE_BRANCH in sb_nc,
-          "expected '%s' in MinisSkillsBrowserScreen.kt — a Failure that falls "
-          "through re-enters the success path (ROT — update this gate)"
-          % SB_FAILURE_BRANCH)
+    # [incr1117-A F-11] The third criterion used to be `SB_FAILURE_BRANCH in
+    # sb_nc` — presence of the arrow, not the decision. Deleting only the
+    # `return` inside the branch (leaving `onStateChange(ERROR, …)` and the
+    # arrow in place) kept the gate green: a Failure that then falls through
+    # re-enters the success path and the HUD reports success for a download
+    # that failed. The anchor is now the branch BODY: it must terminate.
+    failure_body, failure_problem = branch_body_at(sb_masked, SB_FAILURE_BRANCH)
+    if failure_problem is not None:
+        check("arm9 browser refresh treats a failed download as terminal",
+              False, failure_problem)
+    else:
+        check("arm9 browser refresh treats a failed download as terminal",
+              re.search(r"\breturn\b", failure_body) is not None,
+              "the '%s' branch has no `return` in its body — a Failure that "
+              "falls through re-enters the success path (ROT — update this gate)"
+              % SB_FAILURE_BRANCH)
 
     # arm10 [dv22-B6 §1042-B-07]: the browser import judges duplication BEFORE
     # the full-fat import. The dedup variable name is derived from the
@@ -1104,6 +1160,16 @@ DIRTY_SB_NO_FAILURE_ARM = GOOD_SB.replace(
 """,
     "")
 
+# [incr1117-A F-11] The shape the arrow-presence criterion could not see: the
+# branch is still there, the HUD still reports the error, but control falls out
+# of the `when` and re-enters the success path below it.
+DIRTY_SB_FAILURE_FALLTHROUGH = GOOD_SB.replace(
+    """            onStateChange(HudState.ERROR, result.reason)
+            return
+""",
+    """            onStateChange(HudState.ERROR, result.reason)
+""")
+
 # [dv22-B6 §1042-B-07] dirty variants — each flips exactly the arm10 decision
 # it names, keeping arm9 green (the update() call site is untouched).
 
@@ -1213,6 +1279,8 @@ def selftest():
          DIRTY_SB_FALLBACK, "no SKILL.md-only update() fallback"),
         ("browser download failure falls through", GOOD_SR, GOOD_SM,
          DIRTY_SB_NO_FAILURE_ARM, "failed download as terminal"),
+        ("browser Failure branch loses its return", GOOD_SR, GOOD_SM,
+         DIRTY_SB_FAILURE_FALLTHROUGH, "failed download as terminal"),
         ("browser import without dedup", GOOD_SR, GOOD_SM, DIRTY_SB_NO_DEDUP,
          "resolves the update target before importing"),
         ("browser dedup id not carried", GOOD_SR, GOOD_SM, DIRTY_SB_NO_PASSTHROUGH),
