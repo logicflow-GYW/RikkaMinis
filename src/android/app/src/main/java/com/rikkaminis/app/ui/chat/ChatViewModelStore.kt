@@ -205,6 +205,17 @@ object ChatViewModelStore {
     data class PendingTransfer(
         val inputText: String,
         val attachments: List<InputAttachment>,
+        /**
+         * [incr1118 D2-F02] Folded paste chips the source could not carry in
+         * [inputText]: the transfer expands resolvable `[Pasted#N]` literals
+         * into the text, so anything still in the buffer is a block with no
+         * literal (detached paste / orphan row). They travel here and are
+         * re-stashed as detached rows on the target, which appends them after
+         * the body on send — the same "body, then material" shape a fresh paste
+         * produces. Default empty so a caller with nothing to carry compiles
+         * unchanged.
+         */
+        val pastedTexts: List<PastedText> = emptyList(),
     )
 
     @Volatile

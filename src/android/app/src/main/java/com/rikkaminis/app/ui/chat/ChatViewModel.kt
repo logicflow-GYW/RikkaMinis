@@ -3195,6 +3195,15 @@ class ChatViewModel(
         resetContextPressureState()
         _canResume.value = false
         _attachments.value = emptyList()
+        // [incr1118 D1-F06] The paste chips are composer content, exactly like
+        // the attachments above — and only a send or the composer's own clear
+        // funnel used to drop them. The Context-Full dialog's "Clear Chat"
+        // ([ChatScreen] clears the transcript directly, no ComposerCommand.Clear)
+        // therefore left every chip alive: a wiped chat still showed paste
+        // chips, and the next message carried blocks from the conversation the
+        // user had just deleted. `clearPastedText` drops the rows AND the orphan
+        // id reservations in one place.
+        clearPastedText()
         // [sweep-p1] Editing state must go too (backlog §72): a mid-edit
         // clearChat used to leave _preEditAttachments/_editingMessageId
         // alive, so tapping "Exit Edit Mode" after the wipe restored the
@@ -3917,7 +3926,17 @@ class ChatViewModel(
         _preEditAttachments.value = null
         // [incr1116-B F-05] Drop the chips this edit re-folded; leaving them
         // would append the same block to the next message the user sends.
-        _preEditPastes.value?.let { _pastedTexts.value = it }
+        // [incr1118 D1-F02] …and hand the draft's own chips back in the shape
+        // the composer can still honour: an INLINE chip is only expandable
+        // while its `[Pasted#N]` literal is in the text, and the exit path
+        // clears the text (the edit prefill was never the draft). Restoring it
+        // as inline left a chip whose content no send could resolve —
+        // `expandPastePlaceholders` matches literals, `appendUnlinkedPastes`
+        // only takes detached rows — i.e. a visible chip that silently dropped
+        // its text. See [pastesAfterCancelEdit].
+        _preEditPastes.value?.let { snapshot ->
+            _pastedTexts.value = pastesAfterCancelEdit(snapshot, _inputText.value)
+        }
         _preEditPastes.value = null
         _editingMessageId.value = null
     }
@@ -4133,6 +4152,15 @@ class ChatViewModel(
                 text = context.getString(R.string.sysmsg_wait_compact),
                 iconKind = "compact",
             )
+            // [incr1118 D1-F04] A refused send must hand the composer back.
+            // ChatInputArea clears the field (and the paste buffer) BEFORE it
+            // calls us — that is the send contract, and every other early
+            // return honours it by re-stashing ([R5-C C-C-05] edit, the
+            // context-exhausted dialog's pending stash, the queued-prompt
+            // path). This branch returned bare, so a wall of text the user just
+            // typed (or a paste it had already expanded) was dropped in
+            // exchange for an inline "wait for compaction" notice.
+            setInputText(text)
             return
         }
         // Context pressure check — warns at the needsCompact threshold but
@@ -4200,8 +4228,6 @@ class ChatViewModel(
         // "image attachment shows up as Move to" symptom in T185. Mirrors
         // iOS AIChatView.swift:2255 (`hasInjectedShareContent = false`
         // inside the send button's tap closure).
-        if (_hasInjectedShareContent.value) _hasInjectedShareContent.value = false
-
         // [T-per-message-load-balance] Advance the per-message rotation for
         // this new user turn (loadBalance groups only; no-op otherwise)
         // BEFORE snapshotting the provider, so this turn is served by the
@@ -4211,8 +4237,17 @@ class ChatViewModel(
         val initialProvider = currentProvider
         if (initialProvider == null) {
             _error.value = "No provider configured"
+            // [incr1118 D1-F04] Same contract as the compaction branch above:
+            // the composer was cleared by the caller, so the text goes back.
+            setInputText(text)
             return
         }
+        // [incr1118 D1-F04] Spent ONLY by a send that actually starts. It used
+        // to be cleared above the provider gate, so a send refused here (no
+        // provider yet — first launch, a deleted/disabled provider) burned the
+        // share arm on a turn that never happened: the "Move to…" capsule lost
+        // its flag and the shared draft could no longer be moved anywhere.
+        if (_hasInjectedShareContent.value) _hasInjectedShareContent.value = false
         var provider: LLMProvider = initialProvider
 
         _error.value = null
@@ -5435,6 +5470,61 @@ internal data class EditPastesEntry(
     val snapshot: List<PastedText>,
     val live: List<PastedText>,
 )
+
+/**
+ * [incr1118 D1-F02] What the paste row must look like after `cancelEdit()`.
+ *
+ * The snapshot was taken while the composer still held the DRAFT: an inline
+ * chip's `[Pasted#N]` literal sat in the draft text at a caret the user chose.
+ * Entering edit mode replaced that text with the edited turn's prefill, and the
+ * exit path clears the field on the way out (the prefill is not the draft) —
+ * so the literal is gone while the block is not.
+ *
+ * An inline row without its literal is unexpandable: [expandPastePlaceholders]
+ * matches literals only, [appendUnlinkedPastes] takes detached rows only, and
+ * [unexpandedPasteMarkers] has nothing to complain about. The chip renders, the
+ * send succeeds, the content is GONE. Re-typing the literal to "fix" that would
+ * put noise in a field the user just emptied; the honest shape is the detached
+ * arm — no literal, block appended after the body — which is exactly how the
+ * same paste would travel if it were pasted today.
+ *
+ * Rule: keep an entry inline only when the composer still carries its literal
+ * (a caller that cancels without clearing the field keeps the old shape).
+ */
+internal fun pastesAfterCancelEdit(
+    snapshot: List<PastedText>,
+    liveText: String,
+): List<PastedText> = snapshot.map { entry ->
+    if (entry.inlineMarker && entry.placeholder !in liveText) entry.copy(inlineMarker = false) else entry
+}
+
+/**
+ * [incr1118 D2-F02] Which paste chips a "Move to…" transfer must carry.
+ *
+ * `PendingTransfer` used to ship the field text and the attachments only. The
+ * source expands its inline markers into the text before stashing
+ * ([ChatViewModel.expandPastedText] consumes every entry it can resolve), so
+ * what is left in the buffer are the blocks that are NOT in the text: detached
+ * pastes (the common "paste a report, then type an instruction" draft) and
+ * orphan rows whose literal the user deleted. Both were dropped on the floor —
+ * the source's `clearComposerInput()` then emptied the buffer, so the material
+ * was unrecoverable and the target session silently sent the instruction alone.
+ *
+ * They travel as detached rows: nothing in the transferred text references
+ * them, so the target appends them after the body on send (the documented
+ * "body, then material" order) and no re-written literal can collide with the
+ * target session's own chips.
+ */
+internal fun pastesCarriedByMove(
+    pastes: List<PastedText>,
+    movedText: String,
+): List<PastedText> = pastes.filter { entry ->
+    // An inline row whose literal is still in the moved text was already
+    // carried BY the text — carrying the block again would send it twice.
+    !(entry.inlineMarker && entry.placeholder in movedText)
+}.map { entry ->
+    if (entry.inlineMarker) entry.copy(inlineMarker = false) else entry
+}
 
 /** @see EditPastesEntry */
 internal fun editPastesOnEnter(

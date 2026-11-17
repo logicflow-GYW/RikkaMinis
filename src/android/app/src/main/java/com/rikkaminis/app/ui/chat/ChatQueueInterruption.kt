@@ -109,6 +109,20 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     for (entity in remaining) {
         agentHistory.add(entity.toLLMMessage())
     }
+    // [incr1118 D2-F01] Same rewind contract as retryLast / retryFromMessage /
+    // rerunFromToolBlock / switchModelAndRerun ([FIX-R4-P F-05/F-02],
+    // [R5-C C-C-04②]) — edit-and-resend deletes the tail, so:
+    //   * a CompactMarker anchored in the deleted range must not survive
+    //     (`loadSession()`'s createdAt heal would re-anchor it onto the edited
+    //     rows and keep injecting a summary of turns the user rewound past);
+    //   * the context-pressure reading belongs to the PRE-edit transcript: a
+    //     ~180K reading from 20 turns ago blocked the edited (shorter) send
+    //     behind the Context-Full dialog, and could fire a pointless
+    //     auto-compact of what is now a 4-turn history.
+    // Must run AFTER the history rebuild: `dropCompactMarkerIfRewound` reads
+    // `agentHistory` to decide whether the marker's anchors are still live.
+    dropCompactMarkerIfRewound(sid)
+    resetContextPressureState()
     AppLogger.info(
         ChatViewModel.TAG_STREAM,
         "✏️ truncateBeforeEdit cutoffSortOrder=$cutoffSortOrder remaining=${remaining.size}"

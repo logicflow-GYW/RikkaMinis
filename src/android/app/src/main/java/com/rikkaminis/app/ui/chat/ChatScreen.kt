@@ -455,6 +455,15 @@ fun ChatScreen(
             viewModel.requestComposerCommand(ComposerCommand.AppendText(transfer.inputText, separator = "\n", trimExistingEnd = false, trailingSpace = false))
         }
         for (a in transfer.attachments) viewModel.addAttachment(a)
+        // [incr1118 D2-F02] The blocks the source could not put in the text
+        // (detached pastes / orphan rows) come back as chips here. `inlineMarker
+        // = false` is the only correct arm: the target text has no literal for
+        // them, so an inline row would render a chip nothing can expand.
+        // `stashPastedText` mints an id free in THIS session (it also reserves
+        // literals already on screen), so the source's ids can never leak in.
+        for (p in transfer.pastedTexts) {
+            viewModel.stashPastedText(p.text, inlineMarker = false)
+        }
         // [fix/move-to-capsule-empty-1116] Only a transfer that actually
         // carried something re-arms the capsule. Unconditional marking meant an
         // empty "move" (nothing stashed) landed here and lit the pill in the
@@ -4153,8 +4162,22 @@ fun ChatScreen(
                                 // wasn't enough — users still saw a tappable
                                 // Retry that silently no-op'd.
                                 onRetry = if (isStreaming) null else ({
-                                    coroutineScope.launch {
-                                        tracedScrollToItem("RETRY-FROM-MSG", (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), 0)
+                                    // [incr1118 D1-F05] A retry starts a NEW
+                                    // stream. Jumping the viewport to the bottom
+                                    // without telling the follow reducer left a
+                                    // history reader in DETACHED: the jump
+                                    // scrolled once, then every token of the
+                                    // freshly started answer was ignored (the
+                                    // streaming collector only moves a follower)
+                                    // and the Down-FAB stayed on screen over a
+                                    // viewport that was already at the bottom.
+                                    // Same intent as Resume below it.
+                                    followState = dispatchFollow(sessionId, followState, FollowEvent.Retry, listState, isUserDragging, isStreaming)
+                                    // [incr1118 D1-F08] `safeBottomScrollIndex`
+                                    // is the one resolver: an unmeasured list
+                                    // (0 items) yields null instead of index 0.
+                                    safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
+                                        coroutineScope.launch { tracedScrollToItem("RETRY-FROM-MSG", idx, 0) }
                                     }
                                     safeMutate { viewModel.retryFromMessage(item.message.id) }
                                 }),
@@ -4173,8 +4196,10 @@ fun ChatScreen(
                                         // StateFlow write), and the live 150 ms IME burst then
                                         // committed its older snapshot straight over the edit.
                                         viewModel.requestComposerCommand(ComposerCommand.ReplaceText(prefill, caretOverride = prefill.length))
-                                        coroutineScope.launch {
-                                            tracedScrollToItem("EDIT-MSG", (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), 0)
+                                        // [incr1118 D1-F08] shared index resolver:
+                                        // an unmeasured list yields null, not 0.
+                                        safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
+                                            coroutineScope.launch { tracedScrollToItem("EDIT-MSG", idx, 0) }
                                         }
                                         inputFocusRequester.requestFocus()
                                     }
@@ -4266,8 +4291,12 @@ fun ChatScreen(
                                 onRerunFromHere = if (!isStreaming) ({
                                     val anchorId = item.tools.firstOrNull()?.id
                                     if (anchorId != null) {
-                                        coroutineScope.launch {
-                                            tracedScrollToItem("RERUN-FROM-TOOLRUN", (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), 0)
+                                        // [incr1118 D1-F05] Re-run = new stream →
+                                        // re-engage follow (see RETRY-FROM-MSG).
+                                        followState = dispatchFollow(sessionId, followState, FollowEvent.Retry, listState, isUserDragging, isStreaming)
+                                        // [incr1118 D1-F08] shared index resolver.
+                                        safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
+                                            coroutineScope.launch { tracedScrollToItem("RERUN-FROM-TOOLRUN", idx, 0) }
                                         }
                                         safeMutate { viewModel.rerunFromToolBlock(item.messageId, anchorId) }
                                     }
@@ -4303,7 +4332,13 @@ fun ChatScreen(
                                 error = item.error,
                                 errorDetail = item.errorDetail,
                                 onRetry = {
-                                    coroutineScope.launch { tracedScrollToItem("INLINE-RETRY-LAST", (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), 0) }
+                                    // [incr1118 D1-F05] Inline error retry = new
+                                    // stream → re-engage follow.
+                                    followState = dispatchFollow(sessionId, followState, FollowEvent.Retry, listState, isUserDragging, isStreaming)
+                                    // [incr1118 D1-F08] shared index resolver.
+                                    safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
+                                        coroutineScope.launch { tracedScrollToItem("INLINE-RETRY-LAST", idx, 0) }
+                                    }
                                     safeMutate { viewModel.retryLast() }
                                 },
                             )
@@ -4384,8 +4419,12 @@ fun ChatScreen(
                                                     onRerunFromHere = if (!isStreaming) ({
                                                         val messageId = item.messageId
                                                         val blockId = block.id
-                                                        coroutineScope.launch {
-                                                            tracedScrollToItem("RERUN-FROM-AGG-TOOL", (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0), 0)
+                                                        // [incr1118 D1-F05] Re-run =
+                                                        // new stream → re-engage follow.
+                                                        followState = dispatchFollow(sessionId, followState, FollowEvent.Retry, listState, isUserDragging, isStreaming)
+                                                        // [incr1118 D1-F08] shared index resolver.
+                                                        safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
+                                                            coroutineScope.launch { tracedScrollToItem("RERUN-FROM-AGG-TOOL", idx, 0) }
                                                         }
                                                         safeMutate { viewModel.rerunFromToolBlock(messageId, blockId) }
                                                     }) else null,

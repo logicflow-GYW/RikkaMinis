@@ -2210,8 +2210,20 @@ internal fun ChatInputArea(
                             shape = RoundedCornerShape(16.dp),
                             color = ChatColors.inputBg,
                             modifier = Modifier.clickable {
-                                viewModel.cancelEdit()
+                                // [incr1118 D1-F02] Clear FIRST, restore SECOND.
+                                // `clearComposerInput` drops the paste buffer
+                                // (audit P1-C) — running it after `cancelEdit()`
+                                // wiped the draft chips that call had just
+                                // restored, so exiting edit mode silently
+                                // destroyed every folded paste in the draft
+                                // (attachments survived, chips did not).
+                                // Order the other way round: the composer lets go
+                                // of the edit's text/chips, then the snapshot comes
+                                // back (as detached rows — see
+                                // [pastesAfterCancelEdit], the field no longer
+                                // holds their literals).
                                 clearComposerInput()
+                                viewModel.cancelEdit()
                             },
                         ) {
                             Text(
@@ -2470,10 +2482,20 @@ internal fun ChatInputArea(
                     // target session with nothing to expand it (that session's
                     // guard would then refuse to send). The TEXT travels; the
                     // chips stay behind with the buffer they belong to.
+                    // [incr1118 D2-F02] The inline arm is fully covered by the
+                    // expansion above (every resolvable literal becomes text),
+                    // so what the buffer still holds are the blocks NOT in the
+                    // text — detached pastes and orphan rows. Leaving those
+                    // behind loses them for good: the clear below empties the
+                    // buffer, and the target session sends the instruction
+                    // without the report it was pasted for. They travel as
+                    // detached rows ([pastesCarriedByMove]).
+                    val movedText = viewModel.expandPastedText(inputFieldValue.text)
                     ChatViewModelStore.stashPendingTransfer(
                         ChatViewModelStore.PendingTransfer(
-                            inputText = viewModel.expandPastedText(inputFieldValue.text),
+                            inputText = movedText,
                             attachments = viewModel.attachments.value,
+                            pastedTexts = pastesCarriedByMove(viewModel.pastedTexts.value, movedText),
                         ),
                     )
                     clearComposerInput()

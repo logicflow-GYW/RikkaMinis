@@ -21,9 +21,13 @@ package com.rikkaminis.app.ui.chat
  *
  * **The rule.** "Worth showing" and "worth moving" are the same predicate:
  * the draft must still hold something that actually travels — non-blank text,
- * or at least one attachment. Folded pastes that are not referenced by the
- * field text do not travel (the paste buffer is per-ViewModel and stays
- * behind), so they do not count.
+ * or at least one attachment. Folded pastes do not count here: a detached chip
+ * alone is not worth waking the capsule for, because the capsule is a MOVE
+ * offer and a chip-only draft has nothing to say (an edit to this predicate
+ * would change what the pill offers — see the incr1118 report). They DO travel
+ * with a draft that qualifies: [ChatViewModelStore.PendingTransfer.pastedTexts]
+ * carries the blocks the text cannot ([pastesCarriedByMove]), so a move no
+ * longer drops them.
  *
  * Pure by design: the composer cannot be composed in a JVM unit test, so the
  * decision lives here and the Compose call site only reads it.
