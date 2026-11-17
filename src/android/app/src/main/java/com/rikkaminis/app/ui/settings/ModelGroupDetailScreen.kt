@@ -52,7 +52,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
@@ -380,24 +379,50 @@ fun ModelGroupDetailScreen(
                             systemLabel = stringResource(R.string.voice_provider_system),
                         )
                         val providerDisabled = instance?.isEnabled == false
+                        // [model-group-member-id] The row is the drag-reorder
+                        // surface, so it must name the exact model being moved:
+                        // `provider · model id`, the same line the chat picker
+                        // shows under a member. The DECISION (including what a
+                        // missing provider or missing id leaves behind) lives in
+                        // ModelGroupMemberRowText, pinned by a plain JVM test.
+                        val secondaryLine = ModelGroupMemberRowText.secondaryLine(
+                            providerLabel = instanceLabel,
+                            modelId = entry.model.id,
+                        )
                         var showMenu by remember { mutableStateOf(false) }
 
                         ReorderableItem(reorderState, key = entryId) { _ ->
                             ListItem(
-                                modifier = Modifier.alpha(if (providerDisabled) 0.4f else 1f),
-                                headlineContent = { Text(entry.model.displayName) },
+                                // No whole-row alpha any more: a disabled provider
+                                // used to fade the id to 40% and the red warning
+                                // with it. The state is now carried by the red
+                                // line below, so the id stays readable.
+                                headlineContent = {
+                                    Text(
+                                        text = entry.model.displayName,
+                                        color = if (providerDisabled) {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        },
+                                    )
+                                },
                                 supportingContent = {
-                                    if (providerDisabled) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(instanceLabel)
+                                    Column {
+                                        if (secondaryLine.isNotEmpty()) {
                                             Text(
-                                                " · Provider disabled",
+                                                text = secondaryLine,
+                                                maxLines = 1,
+                                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                        if (providerDisabled) {
+                                            Text(
+                                                text = "Provider disabled",
                                                 color = MaterialTheme.colorScheme.error,
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
                                         }
-                                    } else {
-                                        Text(instanceLabel)
                                     }
                                 },
                                 leadingContent = {
