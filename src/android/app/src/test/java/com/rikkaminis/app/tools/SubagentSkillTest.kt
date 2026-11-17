@@ -1,5 +1,6 @@
 package com.rikkaminis.app.tools
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -136,6 +137,90 @@ class SubagentSkillTest {
         assertFalse(r.success)
         assertTrue(r.output.contains("status=Cancelled"))
         assertTrue(r.output.contains("no reason given"))
+    }
+
+    // ── Reply reading: a JSON null must never become the text "null" ─────
+
+    @Test
+    fun `a json null responseText reads as empty`() {
+        // `ChatMutationMethods.prompt` writes `JSONObject.NULL` when the turn
+        // produced no text. Android's `optString(name, fallback)` returns the
+        // STRING "null" for it (JSON-java returns the fallback) — the JVM json
+        // jar cannot reproduce the Android side, which is exactly why the
+        // reading must go through isNull rather than optString.
+        val reply = JSONObject().put("status", "Completed").put("responseText", JSONObject.NULL)
+        assertEquals("", SubagentSkill.replyText(reply))
+    }
+
+    @Test
+    fun `replyText returns real text and treats an absent field as empty`() {
+        assertEquals("done", SubagentSkill.replyText(JSONObject().put("responseText", "done")))
+        assertEquals("", SubagentSkill.replyText(JSONObject()))
+    }
+
+    @Test
+    fun `an empty reply maps to the no-text envelope, never to the word null`() {
+        val reply = JSONObject().put("responseText", JSONObject.NULL)
+        val r = SubagentSkill.resultOf(
+            status = "Completed",
+            text = SubagentSkill.replyText(reply),
+            sessionId = "s9",
+            timedOut = false,
+        )
+        assertTrue(r.success)
+        assertTrue(r.output.contains("without producing text"))
+        assertFalse("the literal null must never reach the model", r.output.contains("null"))
+    }
+
+    @Test
+    fun `a refusal with a json null reason says no reason given`() {
+        val reply = JSONObject().put("responseText", JSONObject.NULL)
+        val r = SubagentSkill.resultOf(
+            status = "Error",
+            text = SubagentSkill.replyText(reply),
+            sessionId = "",
+            timedOut = false,
+        )
+        assertFalse(r.success)
+        assertTrue(r.output.contains("status=Error"))
+        assertTrue(r.output.contains("no reason given"))
+        assertFalse("a refusal must not read as the reason 'null'", r.output.contains("null"))
+    }
+
+    // ── Budget-derived wait ─────────────────────────────────────────────
+
+    @Test
+    fun `no budget attached means the plain cap`() {
+        assertEquals(900, SubagentSkill.effectiveWaitSeconds(budgetRemainingMs = null, capSeconds = 900))
+    }
+
+    @Test
+    fun `a healthy budget does not shorten the cap`() {
+        assertEquals(900, SubagentSkill.effectiveWaitSeconds(3_600_000L, 900))
+        assertEquals(900, SubagentSkill.effectiveWaitSeconds(900_000L, 900))
+    }
+
+    @Test
+    fun `the wait shrinks to what the deadline has left`() {
+        assertEquals(30, SubagentSkill.effectiveWaitSeconds(30_000L, 900))
+        assertEquals(5, SubagentSkill.effectiveWaitSeconds(5_999L, 900))
+    }
+
+    @Test
+    fun `a sub-second remainder still waits a real second`() {
+        assertEquals(1, SubagentSkill.effectiveWaitSeconds(0L, 900))
+        assertEquals(1, SubagentSkill.effectiveWaitSeconds(999L, 900))
+        assertEquals(1, SubagentSkill.effectiveWaitSeconds(-1_000L, 900))
+    }
+
+    @Test
+    fun `an absurd budget cannot overflow the int conversion`() {
+        assertEquals(900, SubagentSkill.effectiveWaitSeconds(Long.MAX_VALUE, 900))
+    }
+
+    @Test
+    fun `a zero cap stays zero instead of inventing a wait`() {
+        assertEquals(0, SubagentSkill.effectiveWaitSeconds(60_000L, 0))
     }
 
     // ── Skill plumbing kept for SkillRepository ─────────────────────────

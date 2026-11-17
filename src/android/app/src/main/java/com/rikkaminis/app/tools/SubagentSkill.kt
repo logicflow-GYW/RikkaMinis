@@ -35,6 +35,37 @@ object SubagentSkill {
      */
     const val WAIT_TIMEOUT_SECONDS = 900
 
+    /**
+     * Floor for the budget-derived wait ([effectiveWaitSeconds]).
+     *
+     * A sub-second remainder must still produce a real wait whose normal
+     * timeout envelope comes back, rather than a distinct "0 s" shape the
+     * caller has no branch for.
+     */
+    const val MIN_WAIT_SECONDS = 1
+
+    // ── Budget ───────────────────────────────────────────────────────────
+
+    /**
+     * How long this dispatch may block, given what is left of the run's
+     * deadline.
+     *
+     * [INCR-1117 A-F07] [WAIT_TIMEOUT_SECONDS] used to be applied
+     * unconditionally, and the run's deadline is only consulted at turn
+     * boundaries — so with 5 s of budget left a tool call could block the full
+     * 900 s and outlive the run it belongs to. The wait is capped by the
+     * remaining budget and floored at [MIN_WAIT_SECONDS].
+     *
+     * Pure on purpose (no budget object, no clock): the arithmetic is the part
+     * that can be wrong, and it is JVM-tested. `null` = no budget attached →
+     * the plain cap.
+     */
+    fun effectiveWaitSeconds(budgetRemainingMs: Long?, capSeconds: Int): Int {
+        if (budgetRemainingMs == null) return capSeconds
+        val fromBudget = (budgetRemainingMs / 1000L).coerceAtMost(capSeconds.toLong()).toInt()
+        return minOf(capSeconds, maxOf(MIN_WAIT_SECONDS, fromBudget))
+    }
+
     // ── Tool definition ──────────────────────────────────────────────────
 
     fun definition(): AgentToolDefinition = AgentToolDefinition(
@@ -89,6 +120,27 @@ object SubagentSkill {
     }.trimEnd()
 
     // ── Result mapping ───────────────────────────────────────────────────
+
+    /**
+     * Read one reply field without turning a JSON null into the literal
+     * `"null"`.
+     *
+     * [INCR-1117 A-F01] `ChatMutationMethods.prompt` writes
+     * `put("responseText", result.responseText ?: JSONObject.NULL)` — the wire
+     * shape `minis-sessions-cli send` and the scheduled-task path both read, so
+     * the null stays. What differs is how the two `org.json` implementations
+     * read it back: JSON-java's `optString(name, fallback)` returns the
+     * fallback for `JSONObject.NULL`, Android's returns the literal `"null"`
+     * (its `JSON.toString(NULL)` is `"null"`). The tool runs on Android, so a
+     * blank answer arrived as `"null"` and [resultOf]'s `ifBlank` guard was
+     * dead code: an empty completion reported `null` as the answer and a
+     * refusal reported `… (status=…): null`.
+     *
+     * `isNull` means "null or absent" in BOTH implementations, which is why the
+     * resolution belongs on the reader side.
+     */
+    fun replyText(reply: org.json.JSONObject, key: String = "responseText"): String =
+        if (reply.isNull(key)) "" else reply.optString(key, "")
 
     /**
      * Map a `ChatMutationMethods.prompt` reply onto the caller's tool result.

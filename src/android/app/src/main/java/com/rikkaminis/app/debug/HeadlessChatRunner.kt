@@ -20,7 +20,9 @@ import com.rikkaminis.app.ui.chat.decideSessionModelResolution
 import com.rikkaminis.app.ui.chat.restoreFromBinding
 import com.rikkaminis.app.ui.chat.selectEntry
 import com.rikkaminis.app.ui.chat.setThinkingLevel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -396,6 +398,14 @@ internal object HeadlessChatRunner {
      * `isStreaming` flips back to false (or `timeoutMs` elapses) and return
      * the concatenated text of the last assistant message; otherwise return
      * immediately with `responseText=null`.
+     *
+     * [INCR-1117 A-F04] CANCELLATION OF THE CALLER ENDS THIS TURN. The turn
+     * streams on the session's own `viewModelScope`, so dropping the wait alone
+     * used to leave it running tools and burning tokens after the user pressed
+     * stop on the dispatching turn (sub-agent: the child; RPC: the session this
+     * request opened). A timeout is deliberately NOT a cancellation: the turn
+     * may still be running and the caller gets the ordinary timeout envelope
+     * (`timedOut = true`, "may still be running").
      */
     suspend fun prompt(
         context: Context,
@@ -557,14 +567,28 @@ internal object HeadlessChatRunner {
         if (!started) {
             return@withContext droppedSendResult()
         }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            // Skip the initial false (if we were called before sendMessage flipped true)
-            if (vm.isStreaming.value) {
-                // Wait for the next false transition.
-                vm.isStreaming.first { !it }
-            }
-            true
-        } ?: false
+        // [INCR-1117 A-F04] Stop means stop for the CHILD too. The turn below
+        // streams on its own viewModelScope, so a cancelled caller (user pressed
+        // stop on the dispatching turn; RPC connection went away) used to sail
+        // on — running tools and spending tokens for an answer nobody waits for.
+        // NonCancellable so the cancel itself is not cut short; then rethrow, so
+        // the caller still learns it was a stop (never reported as a failure).
+        // Timeout keeps the OLD semantics on purpose: a timed-out dispatch
+        // leaves the child running and says so in the envelope, because a
+        // timeout is "the answer is late", not "abandon the work".
+        val finished = try {
+            withTimeoutOrNull(timeoutMs) {
+                // Skip the initial false (if we were called before sendMessage flipped true)
+                if (vm.isStreaming.value) {
+                    // Wait for the next false transition.
+                    vm.isStreaming.first { !it }
+                }
+                true
+            } ?: false
+        } catch (ce: CancellationException) {
+            withContext(NonCancellable) { runCatching { vm.cancelStream() } }
+            throw ce
+        }
 
         // Best-effort: read this turn's assistant text from the DB so we don't
         // depend on the in-memory UI list (which may not have flushed yet).

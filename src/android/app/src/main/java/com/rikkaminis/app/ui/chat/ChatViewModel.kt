@@ -3837,9 +3837,19 @@ class ChatViewModel(
         // the re-entry case: editing another message while already in edit mode
         // must start from the snapshot, not from the chip the previous edit
         // appended.
+        // [incr1117-B F-03] …and the first entry must CLEAR the live chips, the
+        // way the attachment branch above replaces `_attachments` with the
+        // restaged set. Snapshot-only left the draft's own blocks in the buffer,
+        // so the fold below appended the edited turn's paste AFTER them: two
+        // chips on screen, and `expandPastedTextWithSplit` (which consumes every
+        // detached block, not just the one this edit re-folded) pushed the
+        // user's unsent draft paste into the EDITED history message. While
+        // editing, the composer represents this turn — the draft's chips wait in
+        // the snapshot and come back on cancelEdit().
         val preEditPastes = _preEditPastes.value
         if (preEditPastes == null) {
             _preEditPastes.value = _pastedTexts.value
+            _pastedTexts.value = emptyList()
         } else if (_pastedTexts.value != preEditPastes) {
             _pastedTexts.value = preEditPastes
         }
@@ -3935,6 +3945,10 @@ class ChatViewModel(
         // two can't drift.
         _messages.value = _messages.value + queuedPromptBubble(prompt)
         clearAttachments()
+        // [incr1117-B F-05] Handing the draft to the running agent loop consumes
+        // it — the share arm is spent too, otherwise the "Move to…" capsule
+        // stays armed and reappears over the next draft the user types.
+        if (_hasInjectedShareContent.value) _hasInjectedShareContent.value = false
         Log.i(TAG, "Enqueued prompt (${trimmed.length}ch, ${pendingAttachments.size} attachments), queue=${_promptQueue.value.size}")
     }
 
