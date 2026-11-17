@@ -165,6 +165,9 @@ class ShareReceiverActivity : ComponentActivity() {
                 STATE_ITEMS,
                 PendingShare(staged, System.currentTimeMillis()).toJson().toString(),
             )
+            // [W1118-T6 D11 F-02] A rebuild will re-own exactly these files —
+            // the destroy that precedes it must not delete them.
+            stateSavedForRestore = true
         }
     }
 
@@ -195,6 +198,96 @@ class ShareReceiverActivity : ComponentActivity() {
     /** Staged filenames behind [items] — the in-flight bookkeeping names. */
     private fun attachmentNames(items: List<PendingShare.Item>): List<String> =
         items.filter { it.kind == PendingShare.Item.Kind.ATTACHMENT }.map { it.value }
+
+    /**
+     * [W1118-T6 D11 F-02] Names THIS instance claimed in [StagedInFlightFiles]
+     * (a subset of the process-wide registry, which also holds claims taken by
+     * earlier instances of the same share flow).
+     *
+     * The registry has no owner and no TTL: a name is protected from
+     * [SharedShareStore.cleanSharedFiles] until somebody releases it. The
+     * producers release on success ([finishWithAttachmentFlow]) and on failure
+     * (the individual copy/write arms), but an Activity cancelled mid-copy —
+     * back press, task switch, low-memory death of the Activity while the
+     * process lives on — runs neither, so its claims survived the process and
+     * pinned the file AND its bytes in the 500 MB budget forever. Tracking them
+     * per instance is what makes [onDestroy] able to release exactly its own.
+     */
+    private val claimedNames: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * [W1118-T6 D11 F-02] True once the staged set changed owner: the pending
+     * share was persisted (files referenced), the provider-import path
+     * discarded them, or the failure path released the claims. From then on
+     * [onDestroy] must not touch them — see
+     * [ShareHostPolicy.shouldReleaseStagedOnDestroy].
+     */
+    @Volatile private var stagedHandedOff = false
+
+    /**
+     * [W1118-T6 D11 F-02] True once [onSaveInstanceState] handed this
+     * instance's staged set to the system.
+     *
+     * Android skips `onSaveInstanceState` for a FINISHING Activity, so a saved
+     * state means the destroy is a system-initiated one whose rebuild will
+     * restore the same list (`restoreStagedItems`) — the files are that
+     * rebuild's content and must survive the destroy. See
+     * [ShareHostPolicy.shouldReleaseStagedOnDestroy].
+     */
+    @Volatile private var stateSavedForRestore = false
+
+    /**
+     * [W1118-T6 D11 F-02] Last-chance release for staged files this instance
+     * never handed off.
+     *
+     * Which callback fires when matters: `onDestroy` runs on the main thread
+     * after `lifecycleScope` has been cancelled, so the extraction coroutine
+     * cannot finish its own cleanup — `withContext(Dispatchers.Main) { … }`
+     * never runs and neither does the claim release inside it. `isFinishing`
+     * is NOT consulted: a rebuild (rotation) also destroys the instance, and
+     * that is exactly the case the registry's restore path handles
+     * (`restoreStagedItems`), hence the `isChangingConfigurations` half of the
+     * decision. Files that already landed are deleted on the spot (their bytes
+     * are debited from the ledger); claims whose copy was still in flight are
+     * released without deleting — see the comment inline.
+     */
+    override fun onDestroy() {
+        val releaseUncommitted = ShareHostPolicy.shouldReleaseStagedOnDestroy(
+            handedOff = stagedHandedOff,
+            isChangingConfigurations = isChangingConfigurations,
+            stateSavedForRestore = stateSavedForRestore,
+        )
+        super.onDestroy()
+        if (!releaseUncommitted) return
+        releaseUncommittedStagedFiles()
+    }
+
+    /** See [onDestroy]. Runs on Main, after the IO coroutine was cancelled. */
+    private fun releaseUncommittedStagedFiles() {
+        val staged = attachmentNames(stagedItemsSnapshot())
+        if (staged.isNotEmpty()) {
+            AppLogger.warning(
+                TAG,
+                "destroyed without a hand-off — releasing ${staged.size} staged file(s)",
+            )
+            releaseStagedFiles(staged)
+        }
+        // Claims with no item behind them: the copy/write was still running when
+        // the Activity died, so its coroutine will never append the item nor
+        // reach its own release. Drop the claim only — deleting now would race a
+        // writer that still holds the descriptor, and any bytes it managed to
+        // land are reconciled by the next cleanSharedFiles (absolute ledger).
+        val abandoned = claimedNames.toList()
+        if (abandoned.isNotEmpty()) {
+            AppLogger.warning(
+                TAG,
+                "destroyed mid-copy — releasing ${abandoned.size} in-flight claim(s)",
+            )
+            StagedInFlightFiles.endAll(abandoned)
+            claimedNames.removeAll(abandoned)
+        }
+    }
 
     /**
      * Extract items from the incoming intent, appending each one to
@@ -248,6 +341,13 @@ class ShareReceiverActivity : ComponentActivity() {
         // not, they are genuine orphans and the next clean must be free to
         // remove them (a name left registered would be protected forever).
         StagedInFlightFiles.endAll(attachmentNames(items))
+        // [W1118-T6 D11 F-02] The staged set has an owner from here on: the
+        // persisted pending share when the save landed, or — when it did not —
+        // nobody but the disk, which the next cleanSharedFiles is free to reap
+        // (the names are out of the registry). Either way this instance has
+        // nothing left to release, so onDestroy must leave the files alone.
+        stagedHandedOff = true
+        claimedNames.clear()
         // shared_content=true only when the pending share actually persisted —
         // otherwise MainActivity runs the ShareCoordinator lookup for nothing.
         launchMainActivity(withSharedContent = saved)
@@ -347,9 +447,40 @@ class ShareReceiverActivity : ComponentActivity() {
             .show()
     }
 
-    /** Run the existing provider-import logic and toast the outcome. Returns true on success. */
+    /**
+     * Run the existing provider-import logic and toast the outcome. Returns
+     * true on success.
+     *
+     * [W1118-T6 D11 F-01] `MinisApp.providerRepository` is `lateinit` and
+     * `MinisApp.onCreate` returns before assigning it in safe mode, in the
+     * one-way `isInitSkipped` latch, and in the newer-database degraded mode.
+     * This Activity is an exported `ACTION_SEND` target: the system launches it
+     * directly, past `MainActivity`'s guards, so a share of a provider-export
+     * JSON followed by "import" used to dereference the field and throw
+     * `UninitializedPropertyAccessException` — new crash logs while the app is
+     * already in safe mode. Ask the pure policy first, then read the field
+     * under a try/catch as a second belt: a future init path that skips the
+     * assignment must degrade to "import failed" (the file still lands in the
+     * chat through the attachment flow), never to a crash.
+     */
     private fun importProviderJson(json: String): Boolean {
-        val repo = (applicationContext as? com.rikkaminis.app.MinisApp)?.providerRepository
+        val app = applicationContext as? com.rikkaminis.app.MinisApp
+        val mayUseRepositories = app != null && ShareHostPolicy.mayUseAppRepositories(
+            isSafeMode = com.rikkaminis.app.crash.CrashFrequencyDetector.isSafeMode(),
+            isInitSkipped = com.rikkaminis.app.crash.CrashFrequencyDetector.isInitSkipped(),
+            isNewerDbGuidance = app.dbVersionDecision ==
+                com.rikkaminis.app.data.db.DatabaseVersionGuard.Decision.SHOW_NEWER_DB_GUIDANCE,
+        )
+        val repo = if (mayUseRepositories && app != null) {
+            try {
+                app.providerRepository
+            } catch (e: Throwable) {
+                AppLogger.warning(TAG, "providerRepository not initialized: ${e.message}")
+                null
+            }
+        } else {
+            null
+        }
         if (repo == null) {
             AppLogger.warning(TAG, "providerRepository unavailable; cannot import")
             toast(getString(com.rikkaminis.app.R.string.share_provider_json_import_failed))
@@ -369,20 +500,32 @@ class ShareReceiverActivity : ComponentActivity() {
     /**
      * Delete the staged files backing [items] and debit the cumulative byte
      * counter. Used when the staged set has been consumed without going through
-     * [SharedShareStore.cleanSharedFiles] (the provider-import path).
+     * [SharedShareStore.cleanSharedFiles] (the provider-import path, and the
+     * destroy-without-hand-off cleanup in [onDestroy]).
      */
     private fun discardStagedAttachments(items: List<PendingShare.Item>) {
+        releaseStagedFiles(attachmentNames(items))
+        // [W1118-T6 D11 F-02] A consumed staged set is nobody's content any
+        // more: deleting it IS the hand-off, so the destroy must not repeat it.
+        stagedHandedOff = true
+    }
+
+    /**
+     * [W1118-T6 D11 F-02] Delete [names] from the staging dir, debit their
+     * bytes and release their in-flight claims. Idempotent: a name whose file
+     * is already gone only releases the claim (a delete that failed leaves an
+     * orphan the next cleanSharedFiles must be allowed to retry — [R5-A3 F-07]).
+     */
+    private fun releaseStagedFiles(names: Collection<String>) {
         val dir = SharedShareStore.sharedFileDirectory(this)
-        for (item in items) {
-            if (item.kind != PendingShare.Item.Kind.ATTACHMENT) continue
-            val f = File(dir, item.value)
+        for (name in names) {
+            val f = File(dir, name)
             val len = f.length()
             if (runCatching { f.delete() }.getOrDefault(false) && len > 0) {
                 debitStagedBytes(len)
             }
-            // [R5-A3 F-07] Released either way: a delete that failed leaves an
-            // orphan the next cleanSharedFiles must be allowed to retry.
-            StagedInFlightFiles.end(item.value)
+            StagedInFlightFiles.end(name)
+            claimedNames.remove(name)
         }
     }
 
@@ -440,6 +583,7 @@ class ShareReceiverActivity : ComponentActivity() {
                         // an orphan. The pending-share entry that will reference it
                         // is only written at hand-off (finishWithAttachmentFlow).
                         StagedInFlightFiles.begin(name)
+                        claimedNames.add(name)
                         val dest = File(SharedShareStore.sharedFileDirectory(this), name)
                         // [FIX-R3-E F-14] A write that throws mid-text used to
                         // leave the partial file on disk with NOTHING in the
@@ -452,6 +596,7 @@ class ShareReceiverActivity : ComponentActivity() {
                         } catch (e: Throwable) {
                             runCatching { dest.delete() }
                             StagedInFlightFiles.end(name)
+                            claimedNames.remove(name)
                             AppLogger.warning(TAG, "AttachText staging failed: ${e.message}")
                             false
                         }
@@ -529,6 +674,7 @@ class ShareReceiverActivity : ComponentActivity() {
         // copy can take seconds (100 MB cap) and the name has no pending-share
         // entry until hand-off.
         StagedInFlightFiles.begin(name)
+        claimedNames.add(name)
         val dest = File(SharedShareStore.sharedFileDirectory(this), name)
         return when (
             val outcome = copySharedStream(
@@ -548,6 +694,7 @@ class ShareReceiverActivity : ComponentActivity() {
                 // [R5-A3 F-07] The core already deleted the partial file; drop
                 // the claim so the orphan decision goes back to the disk.
                 StagedInFlightFiles.end(name)
+                claimedNames.remove(name)
                 AppLogger.warning(TAG, "copyUriToStaging($uri): ${outcome.describe()}")
                 null
             }

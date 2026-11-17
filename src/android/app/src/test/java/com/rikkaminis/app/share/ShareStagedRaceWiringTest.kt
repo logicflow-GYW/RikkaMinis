@@ -201,11 +201,28 @@ class ShareStagedRaceWiringTest {
 
     @Test
     fun `the provider-import discard path releases each consumed name`() {
+        // [W1118-T6 D11 F-02] The per-file delete/release loop moved into the
+        // shared `releaseStagedFiles(...)` helper — the destroy path
+        // (uncommitted staged files abandoned mid-flow) needs the exact same
+        // three steps, and duplicating them is how the two paths drift. The
+        // intent of this test is unchanged: every consumed name is deleted,
+        // debited and released, and the discard path is what feeds it.
         val discard = activity.substringAfter("private fun discardStagedAttachments")
-        assertTrue("the discard path must still delete the staged files", discard.contains("f.delete()"))
+            .substringBefore("\n    }")
+        assertTrue(
+            "the discard path must hand its consumed attachments to the release path",
+            discard.contains("releaseStagedFiles(attachmentNames(items))"),
+        )
+        val release = activity.substringAfter("private fun releaseStagedFiles(names: Collection<String>)")
+            .substringBefore("\n    }")
+        assertTrue("the release path must still delete the staged files", release.contains("f.delete()"))
         assertTrue(
             "every consumed attachment must leave the in-flight set",
-            discard.contains("StagedInFlightFiles.end(item.value)"),
+            release.contains("StagedInFlightFiles.end(name)"),
+        )
+        assertTrue(
+            "and the ledger must be debited for what actually came off disk",
+            release.contains("debitStagedBytes(len)"),
         )
     }
 

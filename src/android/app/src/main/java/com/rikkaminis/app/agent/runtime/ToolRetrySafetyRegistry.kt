@@ -34,6 +34,11 @@ object ToolRetrySafetyRegistry {
         "memory_get" to RetrySafety.READ_ONLY,
         // [U10] reads persisted rows, writes nothing → safe to retry.
         "conversation_history" to RetrySafety.READ_ONLY,
+        // [WAVE-1118 D8-F04] `app_guide` reads assets/ guides (a cached index +
+        // a Markdown body) and writes nothing. It was missing here while being
+        // registered in AgentTools, so its failures fell to UNKNOWN → no retry,
+        // and an outcome-unknown mark that blocks SUCCEEDED for the whole run.
+        "app_guide" to RetrySafety.READ_ONLY,
         // 创建/覆盖/编辑文件：append 与覆盖语义下重复执行可能不一致
         "file_write" to RetrySafety.NON_IDEMPOTENT_WRITE,
         "file_edit" to RetrySafety.NON_IDEMPOTENT_WRITE,

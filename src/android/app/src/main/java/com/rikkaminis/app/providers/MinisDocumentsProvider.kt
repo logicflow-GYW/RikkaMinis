@@ -207,14 +207,24 @@ class MinisDocumentsProvider : DocumentsProvider() {
 
     override fun queryDocument(documentId: String, projection: Array<String>?): Cursor {
         val cursor = MatrixCursor(projection ?: DOCUMENT_PROJECTION)
-        val file = resolveDoc(documentId)
-        val displayName = if (isRootDocId(documentId)) "Minis" else file.name
+        // [W1118-T6 D11 F-09] Answer with the NORMALIZED id, the same one
+        // `queryChildDocuments` hands out. `DocumentsContract` does not
+        // normalize what the client sends: a client that asks for
+        // "/shared/a.txt" (or " shared/a.txt ") resolved fine — `resolveDoc` and
+        // `flagsFor` both normalize — but got its own raw string back, so the
+        // provider reported a document id that no listing of it ever produces
+        // and the client's cache keys split. Latent today (this provider is not
+        // registered in the manifest yet, see the class KDoc), which is exactly
+        // why it is worth closing before registration rather than after.
+        val cleanId = normalizeDocId(documentId)
+        val file = resolveDoc(cleanId)
+        val displayName = if (cleanId.isEmpty()) "Minis" else file.name
         cursor.newRow()
-            .add(Document.COLUMN_DOCUMENT_ID, documentId)
+            .add(Document.COLUMN_DOCUMENT_ID, cleanId)
             .add(Document.COLUMN_DISPLAY_NAME, displayName)
             .add(Document.COLUMN_MIME_TYPE, mimeFor(file))
             .add(Document.COLUMN_LAST_MODIFIED, file.lastModified())
-            .add(Document.COLUMN_FLAGS, flagsFor(documentId, file))
+            .add(Document.COLUMN_FLAGS, flagsFor(cleanId, file))
             .add(Document.COLUMN_SIZE, if (file.isFile) file.length() else 0L)
         return cursor
     }

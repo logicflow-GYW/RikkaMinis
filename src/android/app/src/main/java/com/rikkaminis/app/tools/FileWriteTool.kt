@@ -54,7 +54,11 @@ object FileWriteTool {
             // refusal below can tell "forgot append" from "meant to replace
             // but did not say why".
             val overwrite = args.optBoolean("overwrite", false)
-            val overwriteReason = args.optString("overwrite_reason", "")
+            // [WAVE-1118 D8-F03] optArgString, not optString — see ToolArgsJson.kt:
+            // an explicit `overwrite_reason: null` read back as the literal
+            // "null" on Android, so `isBlank()` was false and the
+            // OVERWRITE_NOT_JUSTIFIED refusal could never fire.
+            val overwriteReason = args.optArgString("overwrite_reason", "")
 
             if (path.isBlank()) {
                 return ToolExecutionResult("Error: 'path' is required", false, toolTitle = toolTitle)

@@ -18,9 +18,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.app.AlertDialog
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
@@ -100,6 +102,20 @@ class MainActivity : ComponentActivity() {
      * Defer the actual navigate to the first [onResume] after [onStart].
      */
     private var pendingLaunchSessionRoute: String? = null
+
+    /**
+     * [W1118-T6 D11 F-05] Route a buffered share still has to land on.
+     *
+     * A Compose state (not a plain field) because the navigation is executed
+     * from a [LaunchedEffect] after `setContent` composed: assigning it from
+     * `onCreate`/`onNewIntent` (both outside composition) must schedule a
+     * recomposition, and the effect re-runs on the value change.
+     *
+     * Consumed by the `LaunchedEffect(pendingShareChatRoute.value)` in
+     * `setContent`, which asks [ShareHostPolicy.shareNeedsChatRoute] whether a
+     * chat is live before navigating.
+     */
+    private val pendingShareChatRoute = mutableStateOf<String?>(null)
 
     /**
      * [r5-d2 D-F-06] Set right after THIS activity successfully launches some
@@ -478,6 +494,14 @@ class MainActivity : ComponentActivity() {
         // buffer is populated before any ChatScreen composes.
         if (intent?.getBooleanExtra("shared_content", false) == true) {
             com.rikkaminis.app.share.ShareCoordinator.processPendingShare(this)
+            // [W1118-T6 D11 F-05] ... and make sure a chat is (or gets) on
+            // screen: this onCreate may be a RESTORE of the screen the user was
+            // on (config change / Activity destroyed while stopped), in which
+            // case the launch-mode dispatcher is skipped and a settings page
+            // would come back with no ChatScreen to drain the buffer.
+            pendingShareChatRoute.value = Routes.chat(
+                com.rikkaminis.app.data.ComposerDraftStore.nextDraftId(this),
+            )
         }
 
         // Wire FLAG_KEEP_SCREEN_ON to (Appearance → Keep Screen Awake) AND
@@ -588,6 +612,47 @@ class MainActivity : ComponentActivity() {
             // chat". Hoisted to the setContent root it survives every theme
             // recomposition, so the back stack is untouched.
             val navController = rememberNavController().also { this.navController = it }
+
+            // [W1118-T6 D11 F-05] Deliver a buffered share to a chat.
+            //
+            // Why this cannot live in onNewIntent: the decision needs the nav
+            // back stack (is a ChatScreen composed RIGHT NOW?), and the
+            // navigation has to happen after the NavHost owns a graph. The
+            // effect keys on the armed route, so a share that arrives while the
+            // app is already composed re-runs it immediately, while a share
+            // that arrived before the first composition finds it armed here.
+            LaunchedEffect(pendingShareChatRoute.value) {
+                val route = pendingShareChatRoute.value ?: return@LaunchedEffect
+                pendingShareChatRoute.value = null
+                val top = navController.currentBackStackEntry
+                if (top == null) {
+                    // The NavHost installs its graph during THIS composition pass,
+                    // so an effect that runs after apply always sees an entry. If
+                    // that ever changes, say so instead of navigating blind: the
+                    // buffer then expires on its own (pre-fix behaviour).
+                    AppLogger.warning("Share", "no nav back stack yet — share buffer left to expire")
+                    return@LaunchedEffect
+                }
+                val chatIsLive = !com.rikkaminis.app.share.ShareHostPolicy.shareNeedsChatRoute(
+                    topRoute = top.destination.route,
+                    topIsChatKeptAliveOverlay =
+                        ChatRoutePresence.isChatKeptAliveOverlay(top.destination.navigatorName),
+                    belowRoute = navController.previousBackStackEntry?.destination?.route,
+                    chatRoute = Routes.CHAT,
+                )
+                if (chatIsLive) {
+                    // A live ChatScreen drains the buffer on the version bump that
+                    // processPendingShare just made; navigating would yank the user
+                    // out of the chat they are reading.
+                    AppLogger.info("Share", "buffered share will be drained by the chat on screen")
+                    return@LaunchedEffect
+                }
+                AppLogger.info(
+                    "Share",
+                    "buffered share with no chat on screen (route=${top.destination.route}) — opening one",
+                )
+                navController.navigate(route) { launchSingleTop = true }
+            }
 
             MinisTheme(darkTheme = darkTheme, fontScale = fontScale) {
 
@@ -889,6 +954,16 @@ class MainActivity : ComponentActivity() {
         val sharedContent = intent.getBooleanExtra("shared_content", false)
         if (sharedContent) {
             com.rikkaminis.app.share.ShareCoordinator.processPendingShare(this)
+            // [W1118-T6 D11 F-05] A warm start lands on whatever route the user
+            // left behind. Only ChatScreen drains ShareCoordinator's buffer, and
+            // the share re-launch intent carries no data URI, so a share that
+            // arrived while the user stood on settings used to expire unread
+            // after 30 s. Arm the route; the effect in setContent decides
+            // whether a navigation is actually needed (a chat may already be on
+            // screen).
+            pendingShareChatRoute.value = Routes.chat(
+                com.rikkaminis.app.data.ComposerDraftStore.nextDraftId(this),
+            )
         }
         // [r5-d2 D-F-06] A warm-start intent that carries its own destination
         // owns the back stack: the branch below navigates to it, and the

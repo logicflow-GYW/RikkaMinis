@@ -576,6 +576,10 @@ internal object HeadlessChatRunner {
         // Timeout keeps the OLD semantics on purpose: a timed-out dispatch
         // leaves the child running and says so in the envelope, because a
         // timeout is "the answer is late", not "abandon the work".
+        // [WAVE-1118 D9-F01] Kept hand-written here on purpose: this is the
+        // reference implementation and SubagentBudgetGateTest pins its shape.
+        // The three entries below (retry / rerunFromToolBlock / compact) share
+        // the same rule through `abandoningWaitStopsRun`.
         val finished = try {
             withTimeoutOrNull(timeoutMs) {
                 // Skip the initial false (if we were called before sendMessage flipped true)
@@ -714,12 +718,16 @@ internal object HeadlessChatRunner {
                 retriedMessageId = targetMsgId,
             )
         }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            if (vm.isStreaming.value) {
-                vm.isStreaming.first { !it }
-            }
-            true
-        } ?: false
+        // [WAVE-1118 D9-F01] Same rule as prompt(): a cancelled caller stops
+        // the retry's stream instead of leaving it running headless.
+        val finished = abandoningWaitStopsRun(vm::cancelStream) {
+            withTimeoutOrNull(timeoutMs) {
+                if (vm.isStreaming.value) {
+                    vm.isStreaming.first { !it }
+                }
+                true
+            } ?: false
+        }
         val msgs = app.chatRepository.loadMessages(sessionId)
         val answerIdx = turnAnswerIndex(msgs.map { TurnAnswerRow(it.id, it.role) }, priorAnswerIds)
         val answer = if (answerIdx >= 0) msgs[answerIdx] else null
@@ -842,10 +850,13 @@ internal object HeadlessChatRunner {
                 retriedMessageId = assistantMessageId,
             )
         }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            if (vm.isStreaming.value) vm.isStreaming.first { !it }
-            true
-        } ?: false
+        // [WAVE-1118 D9-F01] Same rule as prompt() / retry().
+        val finished = abandoningWaitStopsRun(vm::cancelStream) {
+            withTimeoutOrNull(timeoutMs) {
+                if (vm.isStreaming.value) vm.isStreaming.first { !it }
+                true
+            } ?: false
+        }
         val msgs = app.chatRepository.loadMessages(sessionId)
         val answerIdx = turnAnswerIndex(msgs.map { TurnAnswerRow(it.id, it.role) }, priorAnswerIds)
         val answer = if (answerIdx >= 0) msgs[answerIdx] else null
@@ -972,10 +983,17 @@ internal object HeadlessChatRunner {
         // Wait for _isCompacting to flip true → false. If runCompactNow
         // early-returned (nothing to compact, no provider, etc.) it never
         // flipped true at all — give it a short grace window then bail.
-        val flippedOn = withContext(Dispatchers.Default) {
-            withTimeoutOrNull(2000L) {
-                if (!vm.isCompacting.value) vm.isCompacting.first { it }
-                true
+        // [WAVE-1118 D9-F01] Both waits of this entry are inside the same
+        // cancellation rule: `cancelStream()` is also what cancels `compactJob`
+        // (ChatViewModel.cancelStream → compactJob?.cancel()), so a cancelled
+        // caller must reach it here too — otherwise the compaction keeps
+        // spending the summary budget for a client that is gone.
+        val flippedOn = abandoningWaitStopsRun(vm::cancelStream) {
+            withContext(Dispatchers.Default) {
+                withTimeoutOrNull(2000L) {
+                    if (!vm.isCompacting.value) vm.isCompacting.first { it }
+                    true
+                }
             }
         }
         if (flippedOn != true) {
@@ -986,11 +1004,13 @@ internal object HeadlessChatRunner {
                 error = "compact_skipped_no_change",
             )
         }
-        val finished = withContext(Dispatchers.Default) {
-            withTimeoutOrNull(timeoutMs) {
-                vm.isCompacting.first { !it }
-                true
-            } ?: false
+        val finished = abandoningWaitStopsRun(vm::cancelStream) {
+            withContext(Dispatchers.Default) {
+                withTimeoutOrNull(timeoutMs) {
+                    vm.isCompacting.first { !it }
+                    true
+                } ?: false
+            }
         }
         val newSummary = vm.compactSummary.value
         // `Changed` alone is not enough: a successful compact that folds a range

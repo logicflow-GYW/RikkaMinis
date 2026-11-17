@@ -209,9 +209,13 @@ object LaunchCycleBeacon {
 
     /**
      * [T-android-perf-logging] Best-effort last-opened session id, read from
-     * the most recent stall-*.log header if present (the HangDetector writes
-     * the session id into its stall report). Returns "unknown" when no stall
-     * artefact carries one — keeps the log line populated without throwing.
+     * the most recent stall-*.log header if present. [HangDetector.writeStallSample]
+     * writes that `session=<id>` line from [ContentDiag]'s current-render
+     * marker — until [W1118-T6 D9 F-07] nothing actually did, so this reader
+     * matched a field no producer wrote and every reported `lastSessionId` was
+     * "unknown". Returns "unknown" when the newest stall sample has no session
+     * on screen (a hang with no large message rendering) — keeps the log line
+     * populated without throwing.
      */
     private fun readLastSessionId(context: Context): String {
         return try {
@@ -225,7 +229,7 @@ object LaunchCycleBeacon {
                     val count = reader.read(chars)
                     if (count <= 0) "" else String(chars, 0, count)
                 }
-            Regex("session[=:]\\s*([0-9a-fA-F-]{8,})").find(head)?.groupValues?.get(1) ?: "unknown"
+            parseStallSessionId(head) ?: "unknown"
         } catch (_: Throwable) {
             "unknown"
         }
@@ -376,3 +380,16 @@ object LaunchCycleBeacon {
         }
     }
 }
+
+/**
+ * [W1118-T6 D9 F-07] Parse the `session=<id>` field out of a `stall-*.log`
+ * header (the producer is [HangDetector.writeStallSample]).
+ *
+ * File-scope on purpose: [readLastSessionId] runs on an Android `Context` and
+ * cannot be exercised from a JVM test, but the dialect it depends on can —
+ * reader and producer are pinned against the same literal by
+ * `StallSessionDialectTest`. A `:` separator is accepted too (older builds of
+ * the field used one).
+ */
+internal fun parseStallSessionId(stallLogHead: String): String? =
+    Regex("session[=:]\\s*([0-9a-fA-F-]{8,})").find(stallLogHead)?.groupValues?.get(1)
