@@ -108,6 +108,7 @@ PASS pre 臂：刚写的 loader 被立刻删掉（缺陷）   ← 基线循环�
 - **改法**：`stop()` 的 reaper 改为 `val gone = internalAwaitProcessGone(proc, REAP_WAIT_MS)`，`!gone` 时 `Log.e` 带 pid 与原因；`REAP_WAIT_MS = 2_000L` 提为具名常量（含「为什么不是更短/更长」）。
 - **用户行为变化**：无直接可见变化（不阻塞 UI、不改超时）；变化是**可诊断性**——回收失败的 tracer 现在会留一条 error，不再「shell 说停了、进程还在」而无处可查。
 - **测试**：`PersistentShellReapTest` — 假 `Process` 四条（窗内退出 / 超窗存活 / waitFor 说真但 isAlive 仍真 / waitFor 抛 InterruptedException）+ wiring 两条（`.waitFor(` 在文件内**只允许出现一次**且在 helper 内、`val exited =` 绑定；`REAP_WAIT_MS` 具名）。
+- **门 ROT 事件（CI #3221 抓到的）**：既有邻居用例 `PersistentShellTreeTerminationTest > stop wires explicit SIGKILL …` 把断言锚在**字面量** `proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)` 上，我改掉这行它就红——这是「锚拼写而非锚决策」的典型。按改门三件齐处理：①断言改锚到决策（有界等待仍在异步 reaper 上、预算必须是具名常量 `REAP_WAIT_MS`）②补负向断言（`try { proc.waitFor(` 不得回来）③真树重跑（42 条全绿）+ 变异 M5a 同时翻红这两条。
 - **变异**：M5a（reaper 退回丢弃返回值）→ 红线数断言（出现 2 个 `waitFor`）；M5b（verdict 只看 `waitFor`）→ 红「isAlive 仍真」。真进程臂：活 `sleep` → `false`，`destroyForcibly` 后 → `true`。
 
 ### 2.5 R3-F02 · `proot-tmp` 的 host 段无门控
@@ -167,12 +168,16 @@ PASS pre 臂：刚写的 loader 被立刻删掉（缺陷）   ← 基线循环�
 
 ## 5. 本地窄验证（不做全量 scan / 不做 gradle）
 
-- **JVM 单测**：新增 5 个测试类 / **28 条**全绿（`shared/work/incr1118/t2probe/run.sh`；生产纯函数由 `extract.py` 从真文件按符号抽取，不是重写）。
-- **变异矩阵**：M1–M6b 共 **10 条**，每条**只**翻红它对应的臂；恢复后 28 条全绿。
+- **JVM 单测**：新增 5 个测试类 / **28 条** + 被改锚的邻居 `PersistentShellTreeTerminationTest` **14 条** = **42 条**全绿（`shared/work/incr1118/t2probe/run.sh`；生产纯函数由 `extract.py` 从真文件按符号抽取，不是重写）。
+- **变异矩阵**：M1–M6b 共 **10 条**，每条**只**翻红它对应的臂（M5a 额外翻红邻居那条改锚后的用例，符合预期）；恢复后 42 条全绿。
 - **相邻门**（逐个跑，`--root` 用位置参数）：`xproc_boundary` / `exec_gate_release` / `discarded_return_guard` / `process_logging_gate` / `modeluse_proto_single_source` / `readonly_mount_write_guard` / `sandbox_defect_field_contract` / `offload_host_path` / `offload_relative_path_unify` / `storage_budget` / `marker_boundary` / `claim_release_guard` / `outcome_known_chain` —— **13/13 rc=0**。
 - **语法/注释体检**：6 个改动文件 kotlinc 单文件无 `syntax error`；块注释配平与基线一致（本轮自查抓到我自己的两处 `/*` 嵌套：`mounts/*` 与测试 KDoc 里的 `/* *\/`，均已修）。
 - **CI**：见 §6（`head_sha` 与分支 tip 逐字符一致才收工）。
 
 ## 6. CI
 
-（待推送后回填：run id / head_sha / 五 job 结论 / 单测总数）
+- **#3221 / run `44017833140` @ `03d0e0c0`（分支 tip 逐字符一致）**：`scan-gate` / `build-apk` / `lint` **success**，`publish` skipped（main 门控），**`unit-tests` failure** ——
+  唯一失败 = `PersistentShellTreeTerminationTest > stop wires explicit SIGKILL …`（因为断言锚在被我改掉的那行字面量上，见 §2.4「门 ROT 事件」）。**不是产品缺陷**：该用例的意图（有界等待在异步 reaper 上、caller 不阻塞）在我改完的代码里依然成立。
+- 处置：改锚到决策 + 补负向断言（同一提交 `fix(test): …`），重 dispatch 后再回填第二轮结论。
+
+（第二轮：待回填）
