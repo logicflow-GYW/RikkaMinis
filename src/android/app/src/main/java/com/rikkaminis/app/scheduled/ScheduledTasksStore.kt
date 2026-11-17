@@ -48,7 +48,7 @@ object ScheduledTasksStore {
      * positive integer (`0`, a negative number, a string). Never a real
      * version: real versions count up from 1.
      */
-    private const val INVALID_DECLARED_VERSION = -1
+    internal const val INVALID_DECLARED_VERSION = -1
 
     private val lock = Mutex()
 
@@ -138,7 +138,26 @@ object ScheduledTasksStore {
         val outcome = lock.withLock {
             val live = loadLocked(context)
             val rawEntries = document.optJSONArray("tasks")?.length() ?: 0
-            val declaredVersion = if (document.has("version")) document.optInt("version", -1) else null
+            // [WAVE-1118 D7 F-04] Read `version` through the SAME strict gate
+            // as the live file ([declaredVersionOf]) instead of
+            // `optInt("version", -1)`, which maps `1.5` -> 1 (and `true` -> 1)
+            // and so let a document this build does not understand through the
+            // version refusal in [ScheduledTasksRestorePlan.decide] — while the
+            // very same bytes were later rejected as unreadable by [loadLocked].
+            // Two contracts for one field meant "import accepts, then the file
+            // is unreadable"; now there is one.
+            val declaredVersion = declaredVersionOf(document)
+            // A value that is not a positive whole number is not a version this
+            // build reads: refuse it here, with a notice a human can act on,
+            // instead of letting the plan print "format v-1".
+            if (declaredVersion == INVALID_DECLARED_VERSION) {
+                AppLogger.warning(TAG, "restore refused: backup section declares an unusable version")
+                return@withLock ScheduledTasksRestoreOutcome(
+                    applied = false,
+                    notice = "backup section declares an unusable version value (a positive whole " +
+                        "number is required); kept this device's ${live.tasks.size} task(s) as-is",
+                )
+            }
             val parsed = try {
                 ScheduledTasksCodec.parse(document.toString())
             } catch (t: Throwable) {
@@ -425,6 +444,29 @@ object ScheduledTasksStore {
         }
     }
 
+    /**
+     * [WAVE-1118 D7 F-05] Best-effort: drop a persisted `running` marker that
+     * the settlement could not clear itself.
+     *
+     * Called from `ScheduledTaskRunner.finalizeLocked`'s catch block, where the settlement write failed. Without this the marker
+     * outlives the run and the next beat reads it as "the process died mid-run"
+     * — a failure the run did not earn, which counts toward the fuse and can
+     * DISABLE the task. Refuses while the file is unreadable (every other
+     * read-modify-write does), which is fine: there is nothing to rewrite there.
+     *
+     * @return true when a matching marker was removed from the document.
+     */
+    suspend fun clearRunningMarker(context: Context, taskId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                val current = loadLocked(context)
+                if (unreadable) return@withLock false
+                val next = ScheduledTaskTransitions.clearRunningMarker(current, taskId)
+                if (next === current) return@withLock false
+                writeLocked(context, next)
+            }
+        }
+
     /** Crash recovery: marker without an in-process run counts one failure. */
     suspend fun crashFailure(
         context: Context,
@@ -505,7 +547,7 @@ object ScheduledTasksStore {
      *   when it is a positive integer, or [INVALID_DECLARED_VERSION] when the
      *   value exists but is not one.
      */
-    private fun declaredVersionOf(root: JSONObject): Int? {
+    internal fun declaredVersionOf(root: JSONObject): Int? {
         if (!root.has("version")) return null
         val number = root.opt("version") as? Number ?: return INVALID_DECLARED_VERSION
         val value = number.toInt()

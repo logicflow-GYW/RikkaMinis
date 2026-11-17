@@ -113,7 +113,20 @@ object SessionConcurrencyManager {
                 }
                 is SessionSlotController.AcquireOutcome.Queued -> {
                     queuedForLog[0] = true
-                    _suspendedSessions.value = _suspendedSessions.value + sessionId
+                    // [WAVE-1118 R4 F-01] `_suspendedSessions` is a per-SESSION
+                    // display list while the queue itself is keyed by runId, so
+                    // ONE session may hold several waiters. Appending
+                    // unconditionally put the id in the list once per run, and
+                    // every removal site used `List - sessionId` (drops only the
+                    // FIRST match) — the leftover copies outlived every waiter,
+                    // so `isSuspended()` reported "queued" forever with nothing
+                    // queued or running and the UI kept showing 「等待中」.
+                    // Both halves are required: never append a duplicate here,
+                    // and drop EVERY copy when the last waiter leaves
+                    // ([dropSuspended]).
+                    if (sessionId !in _suspendedSessions.value) {
+                        _suspendedSessions.value = _suspendedSessions.value + sessionId
+                    }
                     pending[runId] = PendingRun(sessionId, runId)
                 }
                 is SessionSlotController.AcquireOutcome.Duplicate -> {
@@ -130,7 +143,14 @@ object SessionConcurrencyManager {
                 "[concurrency] queue session=$sessionId " +
                     "active=${controller.snapshot().activeCount} " +
                     "waiting=${controller.snapshot().waitingCount} " +
-                    "cap=${maxConcurrent}",
+                    // [WAVE-1118 R4 F-02] Log the capacity the gate ACTUALLY
+                    // enforces (`controller.maxConcurrent`, frozen when the lazy
+                    // controller was built), not the live preference getter.
+                    // `ConcurrencyPrefs` documents that a new cap applies on the
+                    // next process start; logging the fresh value here made the
+                    // probe line contradict itself (`active=2 waiting=1 cap=4`)
+                    // and mis-read as "the cap is 4 but nothing uses it".
+                    "cap=${controller.maxConcurrent}",
             )
         }
         when (outcome) {
@@ -297,7 +317,7 @@ object SessionConcurrencyManager {
         // 同一会话并发两次发送时两个 run 共用一个 sessionId，提升第一个就清标记，
         // 会让仍在排队的第二个在 UI 上不再显示“等待中”。PROMOTED 的不算（已进 running）。
         if (!hasOtherWaiting(p.sessionId, p)) {
-            _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+            dropSuspended(p.sessionId)
         }
         _runningSessions.value = _runningSessions.value + p.sessionId
         activeRunIdsBySession.getOrPut(p.sessionId) { ArrayDeque() }.addLast(runId)
@@ -318,7 +338,7 @@ object SessionConcurrencyManager {
         // [D-2] 槽位释放后队列头部被提升：记录释放后的占用，配合 queue 打点完整还原
         // 每一轮占压-释放周期，判断 cap 是否够用。
         val snap = controller.snapshot()
-        Log.i(TAG, "[concurrency] promote active=${snap.activeCount} waiting=${snap.waitingCount} cap=${maxConcurrent}")
+        Log.i(TAG, "[concurrency] promote active=${snap.activeCount} waiting=${snap.waitingCount} cap=${controller.maxConcurrent}")
     }
 
     /** 协程取消回调：从队列原子移除；已被提升的过期取消直接忽略。 */
@@ -330,7 +350,7 @@ object SessionConcurrencyManager {
             // [fix/audit-0917-b9] 同 promote：还有别的 waiter 在等就保留标记，
             // 否则取消一个排队项会让另一个仍在排队的 run 失去“等待中”显示。
             if (!hasOtherWaiting(p.sessionId, null)) {
-                _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+                dropSuspended(p.sessionId)
             }
             controller.cancel(runId)
         }
@@ -343,9 +363,25 @@ object SessionConcurrencyManager {
             if (p.state == PendingRun.State.PROMOTED) return // resume 已发出，等待收敛
             pending.remove(runId)
             if (!hasOtherWaiting(p.sessionId, null)) {
-                _suspendedSessions.value = _suspendedSessions.value - p.sessionId
+                dropSuspended(p.sessionId)
             }
             controller.cancel(runId)
         }
+    }
+
+    /**
+     * [WAVE-1118 R4 F-01] 把 [sessionId] 从挂起展示列表中**全部**移除。
+     *
+     * 旧写法 `list - sessionId` 只删第一个匹配项：同一会话排队两次时列表里有两份，
+     * 最后一个 waiter 离开后仍残留一份，`isSuspended()` 从此恒为 true（会话在 UI 上
+     * 永远显示「等待中」，且没有任何 `releaseSlot` 能清掉它）。入队侧同时保证不追加
+     * 重复项（见 [acquireSlot] 的 Queued 分支）——两边都做，任一侧回归都不会复活该缺陷。
+     *
+     * 调用方必须已持有本对象锁（`_suspendedSessions` 的所有写入都在锁内）。
+     */
+    private fun dropSuspended(sessionId: String) {
+        val current = _suspendedSessions.value
+        if (sessionId !in current) return
+        _suspendedSessions.value = current.filter { it != sessionId }
     }
 }

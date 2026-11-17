@@ -100,8 +100,10 @@ class ScheduledTaskDeleteReleaseShapeTest {
         assertFalse(
             "the coercing read is still present somewhere in the store — "
                 + "`optInt(\"version\", VERSION)` maps 0 / a negative / a string "
-                + "onto this build's version; the import side already reads "
-                + "`optInt(\"version\", -1)` so a foreign value is refused there",
+                + "onto this build's version. (The import side no longer has its own "
+                + "`optInt` contract either: since WAVE-1118 D7 F-04 both readers go "
+                + "through `declaredVersionOf`, pinned by "
+                + "ScheduledTasksVersionContractTest.)",
             code.contains("optInt(\"version\", ScheduledTasksCodec.VERSION)") ||
                 code.contains("optInt(\"version\", VERSION)"),
         )
@@ -109,7 +111,11 @@ class ScheduledTaskDeleteReleaseShapeTest {
 
     @Test
     fun declaredVersion_treatsNonPositiveAndNonNumericAsUnusable() {
-        val helper = functionBody(storeCode(), "private fun declaredVersionOf(")
+        // [WAVE-1118 D7 F-04] Visibility-agnostic anchor: the reader is
+        // `internal` now so the IMPORT path can share it (and the JVM test can
+        // pin it). Anchoring on `private fun` would make this arm fail on a
+        // pure visibility change — the decision, not the modifier, is the subject.
+        val helper = functionBody(storeCode(), "fun declaredVersionOf(")
         assertTrue(
             "a version that is not a positive integer must be flagged, not "
                 + "rounded into a usable one",
