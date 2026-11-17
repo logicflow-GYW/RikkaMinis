@@ -122,4 +122,69 @@ class RootfsResetFilesTest {
             File(locked, "payload.txt").setWritable(true, true)
         }
     }
+
+    @Test
+    fun `a non-empty unreadable directory is removed instead of being left behind`() {
+        // [C-F01] `chmod 000` on a NON-empty directory: the walk cannot open it,
+        // so visitFileFailed fires -- and the 1116-CD F-04 pass restored only
+        // `u+w`, which unlinks an empty directory and nothing more.
+        // `Files.delete` then threw DirectoryNotEmptyException, `runCatching`
+        // swallowed it, and the reset reported success with the whole subtree
+        // still on disk. Restoring `u+rwx` and walking the subtree ourselves is
+        // the difference between "reset happened" and "reset said it happened".
+        val rootfs = temp.newFolder("rootfs-noread")
+        val locked = File(rootfs, "noread").apply { mkdirs() }
+        File(locked, "payload.txt").writeText("old")
+        File(locked, "nested").mkdirs()
+        File(locked, "nested/deep.txt").writeText("deep")
+        assertTrue(File(locked, "payload.txt").setWritable(false, false))
+        assertTrue(locked.setReadable(false, false))
+        assertTrue(locked.setExecutable(false, false))
+        // A root JVM ignores these bits, so the test would pass for the wrong
+        // reason there -- skip rather than report a false green.
+        org.junit.Assume.assumeFalse("mode bits are not enforced for root", locked.canRead())
+        try {
+            clearRootfsForReinstall(rootfs)
+
+            assertFalse("the unreadable subtree must be gone", locked.exists())
+            assertTrue("the walk must still leave the root itself", rootfs.isDirectory)
+        } finally {
+            locked.setReadable(true, true)
+            locked.setExecutable(true, true)
+            locked.setWritable(true, true)
+            File(locked, "nested/deep.txt").setWritable(true, true)
+            File(locked, "payload.txt").setWritable(true, true)
+        }
+    }
+
+    @Test
+    fun `unlinking a symlink in a read-only directory never chmods its target`() {
+        // The reset restores owner access before retrying a delete, and chmod
+        // FOLLOWS a symlink: without the guard in restoreOwnerAccess, cleaning
+        // up a link that lives inside a read-only directory would rewrite the
+        // mode of whatever the link points at, outside the rootfs. A link never
+        // needs its own bits -- it is unlinked through its parent.
+        val rootfs = temp.newFolder("rootfs-ro-link")
+        val external = temp.newFolder("external")
+        val keep = File(external, "user-data").apply { writeText("keep") }
+        assertTrue(keep.setWritable(false, false))
+        val before = Files.getPosixFilePermissions(keep.toPath())
+        val locked = File(rootfs, "rodir").apply { mkdirs() }
+        Files.createSymbolicLink(File(locked, "escape").toPath(), keep.toPath())
+        assertTrue(locked.setWritable(false, false))
+        try {
+            clearRootfsForReinstall(rootfs)
+
+            assertFalse("the read-only directory must be gone", File(rootfs, "rodir").exists())
+            assertEquals("the link target must be untouched", "keep", keep.readText())
+            assertEquals(
+                "the link target's mode must be untouched",
+                before,
+                Files.getPosixFilePermissions(keep.toPath()),
+            )
+        } finally {
+            locked.setWritable(true, true)
+            keep.setWritable(true, true)
+        }
+    }
 }
