@@ -775,24 +775,52 @@ private fun MCPFormTab(
                                     )
                                     oauthBusy = true
                                     oauthScope.launch {
-                                        // [deep-audit-1040 B-04] Persist the secret
-                                        // so the token exchange can read it;
-                                        // harmless if the flow is cancelled. The
-                                        // write opens EncryptedSharedPreferences
-                                        // (Keystore), so it runs on IO — captured
-                                        // above so nothing Compose-owned is read
-                                        // off the main thread.
-                                        withContext(Dispatchers.IO) {
-                                            if (secretWrite != SecretWrite.LEAVE_UNTOUCHED) {
-                                                com.rikkaminis.app.mcp.oauth.MCPOAuthStore.setClientSecret(
-                                                    context, sid,
-                                                    if (secretWrite == SecretWrite.CLEAR) null else secretValue.trim(),
-                                                )
+                                        // [wave-1118 D4 F-02] Everything that can
+                                        // fail sits inside ONE try/finally, and the
+                                        // flag reset lives only in the `finally`:
+                                        // the Keystore write and the Custom Tab
+                                        // launch (no browser installed → the
+                                        // platform throws) are both third-party
+                                        // calls, and a body that skips the reset on
+                                        // the way out leaves Authorize disabled for
+                                        // the rest of the sheet's life with no way
+                                        // to retry. Cancellation is rethrown so a
+                                        // dismissed sheet is not reported as a
+                                        // failed authorization.
+                                        val result = try {
+                                            // [deep-audit-1040 B-04] Persist the secret
+                                            // so the token exchange can read it;
+                                            // harmless if the flow is cancelled. The
+                                            // write opens EncryptedSharedPreferences
+                                            // (Keystore), so it runs on IO — captured
+                                            // above so nothing Compose-owned is read
+                                            // off the main thread.
+                                            withContext(Dispatchers.IO) {
+                                                if (secretWrite != SecretWrite.LEAVE_UNTOUCHED) {
+                                                    com.rikkaminis.app.mcp.oauth.MCPOAuthStore.setClientSecret(
+                                                        context, sid,
+                                                        if (secretWrite == SecretWrite.CLEAR) null else secretValue.trim(),
+                                                    )
+                                                }
                                             }
+                                            com.rikkaminis.app.mcp.oauth.MCPOAuthController(context)
+                                                .authorize(sid, url.trim(), cfg)
+                                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                            throw cancelled
+                                        } catch (t: Throwable) {
+                                            // No new resource string this round: the
+                                            // throwable's own message is what the
+                                            // Failed branch shows as well.
+                                            AppLogger.warning(
+                                                "MCPSheet",
+                                                "OAuth authorize for \"$sid\" failed: ${t.message}",
+                                            )
+                                            errorText = t.message?.takeIf { it.isNotBlank() } ?: errorText
+                                            null
+                                        } finally {
+                                            oauthBusy = false
                                         }
-                                        val result = com.rikkaminis.app.mcp.oauth.MCPOAuthController(context)
-                                            .authorize(sid, url.trim(), cfg)
-                                        oauthBusy = false
+                                        if (result == null) return@launch
                                         when (result) {
                                             is com.rikkaminis.app.mcp.oauth.MCPOAuthController.Result.Success -> {
                                                 oauthAuthorized = true

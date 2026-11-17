@@ -536,7 +536,15 @@ fun BackupSettingsScreen(
         true
     }
 
-    /** Lower the claim from [claimRestorePayload]. Never call it after a handoff. */
+    /**
+     * Lower the claim from [claimRestorePayload]. Never call it after a handoff.
+     *
+     * [wave-1118 D4 F-05] Also the exit for an export that claimed the same gate
+     * and then failed to hand off to the SAF picker (`exportLauncher.launch`
+     * throwing): the gate is shared, so the release goes through this one site
+     * instead of a hand-written `operationBusy = false` that the busy-gate count
+     * could not tell apart from lowering another path's claim.
+     */
     val releaseRestorePayload: () -> Unit = { operationBusy = false }
 
     // [fix-minisbak-import] .minisbak 转换 + 恢复交接的唯一入口：文件选择器
@@ -549,7 +557,20 @@ fun BackupSettingsScreen(
     // 挡导入重入，operationBusy 挡其他备份/恢复操作；恢复前在同一帧内让锁，
     // 让出与调用之间没有挂起点，主线程上不会被打断，锁不外泄。
     val convertAndRestore: (ByteArray, CharArray?) -> Unit = convertAndRestore@{ pkg, pw ->
-        if (operationBusy || minisbakConverting) return@convertAndRestore
+        // [wave-1118 D4 F-07] Refusing here must SAY so. The JSON branch of the
+        // same picker callback reports `backup_err_busy` (claimRestorePayload),
+        // so a silent return made the two halves of one action behave
+        // differently: pick a `.minisbak` while a backup/restore is in flight
+        // and nothing at all happened on screen. Same shared predicate, same
+        // message, so the two branches cannot drift again.
+        if (!canStartRestorePayload(
+                operationBusy = operationBusy,
+                minisbakConverting = minisbakConverting,
+            )
+        ) {
+            errorMessage = context.getString(R.string.backup_err_busy)
+            return@convertAndRestore
+        }
         minisbakConverting = true
         operationBusy = true
         scope.launch {
@@ -1452,7 +1473,22 @@ fun BackupSettingsScreen(
                 // location) so the picker never waits on generation. The
                 // callback remembers this request's withSecrets.
                 exportWithSecrets = withSecrets
-                exportLauncher.launch(ConfigBackup.suggestedFileName())
+                // [wave-1118 D4 F-05] The flag was claimed above; if the
+                // launcher itself throws (no document provider registered, or
+                // the launcher is not registered yet) the result callback never
+                // fires and nothing else lowers the claim — the whole backup
+                // screen would stay locked for the life of the screen. Report
+                // and release instead of dying inside onClick. Released through
+                // the shared helper on purpose: `backup_busy_gate_check` counts
+                // hand-written `operationBusy = false` sites, and a new one here
+                // would be indistinguishable from someone lowering another
+                // path's gate.
+                try {
+                    exportLauncher.launch(ConfigBackup.suggestedFileName())
+                } catch (t: Throwable) {
+                    releaseRestorePayload()
+                    errorMessage = String.format(errWriteFmt, t.message ?: errUnknown)
+                }
             }
         }
         AlertDialog(
