@@ -98,7 +98,10 @@ object FileReadTool {
             // joined content string), spiking Java heap past the executor
             // watermark and triggering innocent PRoot shell reclaims.
             // Output is byte-identical to the old readLines path.
-            val requestedLines = if (args.has("lines")) args.optInt("lines") else null
+            // [WAVE-1118 D8-F03] `has` + `optInt` read `{"lines": null}` as 0 —
+            // "return zero lines" for a caller that asked for no paging. The
+            // reader helper treats an explicit null exactly like an absent key.
+            val requestedLines = args.optArgIntOrNull("lines")
             val isTail = direction == "tail"
 
             var totalLines = 0

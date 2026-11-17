@@ -240,14 +240,20 @@ class DebugRPCHandler(private val context: Context) {
         }
 
         val baos = ByteArrayOutputStream()
-        // record-ok: deep-audit-1048 A-02 radius — this DEBUG RPC screenshot
-        // channel is outside the 5 production files in scope. A failed encode
-        // still answers a `size: 0` payload (latent, debug-only, no file is
-        // published). Deferred as §1048-A2 R5 with a trigger condition; fix it
-        // through saveOutcome(streamOpened = true, compressed = …) like the
-        // 1048 sites when that surface is next touched.
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
-        bitmap.recycle()
+        // [WAVE-1118 D9-F08] recycle in a finally — the sibling copy of these
+        // three lines in DebugScreenshotRing.capture took this shape in
+        // [audit-0917]; this one still skipped the recycle whenever compress()
+        // threw (recycled/immutable bitmap, OOM on a big PNG), leaking a
+        // screen-sized ARGB_8888 frame per failed encode.
+        try {
+            // record-ok: deep-audit-1048 A-02 radius — DEBUG RPC screenshot channel,
+            // outside the 5 files in scope: a failed encode answers `size: 0`
+            // (latent, debug-only, nothing published). §1048-A2 R5 owns the fix —
+            // route it through saveOutcome(streamOpened = true, compressed = …).
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
+        } finally {
+            bitmap.recycle()
+        }
         val pngBytes = baos.toByteArray()
         val base64 = android.util.Base64.encodeToString(pngBytes, android.util.Base64.NO_WRAP)
 
@@ -273,7 +279,13 @@ class DebugRPCHandler(private val context: Context) {
                             cont.resume(bitmap)
                         } else {
                             // Fallback to canvas draw
-                            cont.resume(canvasCapture(rootView, scale))
+                            // [WAVE-1118 D9-F08] release the frame PixelCopy
+                            // refused BEFORE allocating the replacement — it
+                            // used to be abandoned (a second full-screen
+                            // bitmap allocated on top of an unreleased one).
+                            cont.resume(discardFailedCapture(bitmap, Bitmap::recycle) {
+                                canvasCapture(rootView, scale)
+                            })
                         }
                     },
                     Handler(Looper.getMainLooper()),

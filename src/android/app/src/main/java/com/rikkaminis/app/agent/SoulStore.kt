@@ -602,8 +602,16 @@ lang: "auto"
             // Fallback: copy + delete tmp on filesystems that reject
             // cross-inode rename (shouldn't apply inside filesDir, but
             // defensive — keeps us from leaving a stale .tmp behind).
-            target.writeText(text)
-            tmp.delete()
+            // [WAVE-1118 D8-F06] The cleanup has to be in a finally: the old
+            // order (write, then delete) skipped the delete exactly when the
+            // fallback write threw — disk full / permission, i.e. the reason a
+            // rename usually failed in the first place — and that is the one
+            // path that must not leave a `SOUL.md.tmp` nobody ever removes.
+            try {
+                target.writeText(text)
+            } finally {
+                tmp.delete()
+            }
         }
     }
 

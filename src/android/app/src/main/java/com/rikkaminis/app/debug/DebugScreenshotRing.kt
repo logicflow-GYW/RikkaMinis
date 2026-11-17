@@ -91,8 +91,15 @@ object DebugScreenshotRing {
                 PixelCopy.request(
                     activity.window, bitmap,
                     { result ->
-                        if (result == PixelCopy.SUCCESS) cont.resume(bitmap)
-                        else cont.resume(canvasCapture(rootView, scale))
+                        if (result == PixelCopy.SUCCESS) {
+                            cont.resume(bitmap)
+                        } else {
+                            // [WAVE-1118 D9-F08] release the refused frame
+                            // before allocating the canvas replacement.
+                            cont.resume(discardFailedCapture(bitmap, Bitmap::recycle) {
+                                canvasCapture(rootView, scale)
+                            })
+                        }
                     },
                     Handler(Looper.getMainLooper()),
                 )

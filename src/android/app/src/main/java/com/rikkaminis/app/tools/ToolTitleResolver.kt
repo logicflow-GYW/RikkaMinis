@@ -15,5 +15,8 @@ import org.json.JSONObject
  * [fallback] instead of throwing.
  */
 internal fun resolveToolTitle(argsJson: String, fallback: String): String =
-    runCatching { JSONObject(argsJson).optString("tool_title", fallback) }
+    // [WAVE-1118 D8-F03] optArgString, not optString: on Android an explicit
+    // `{"tool_title": null}` was read back as the literal "null" and the tool
+    // capsule showed `null` as its title.
+    runCatching { JSONObject(argsJson).optArgString("tool_title", fallback) }
         .getOrDefault(fallback)

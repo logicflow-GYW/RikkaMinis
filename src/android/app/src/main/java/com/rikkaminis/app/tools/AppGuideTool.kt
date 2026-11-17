@@ -54,7 +54,10 @@ object AppGuideTool {
 
     fun execute(argsJson: String, context: Context): ToolExecutionResult {
         val toolTitle = resolveToolTitle(argsJson, NAME)
-        val query = runCatching { JSONObject(argsJson).optString("query", "") }.getOrDefault("")
+        // [WAVE-1118 D8-F03] optArgString: an explicit `query: null` read back as
+        // "null" on Android and answered the miss message instead of the
+        // missing-argument one.
+        val query = runCatching { JSONObject(argsJson).optArgString("query", "") }.getOrDefault("")
         if (query.isBlank()) {
             return ToolExecutionResult(
                 "Error: 'query' is required — pass a package name (com.tencent.mm) or an app name (WeChat).",
