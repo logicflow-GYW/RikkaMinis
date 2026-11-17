@@ -240,6 +240,21 @@ internal fun ChatInputArea(
     // their pending candidate back through onValueChange even after we
     // cleared inputText. Drop those late commits during a short window.
     var lastSendTimeMs by remember { mutableStateOf(0L) }
+    // [fix/composer-post-send-residue] The body the last composer clear removed,
+    // plus when it went. The T217-2 window above only covers commits that still
+    // carry a composing region (composition != null) inside 500 ms; a
+    // third-party IME that replays the whole body with composition == null (or
+    // after 500 ms) sailed straight through it, wrote the already-sent text back
+    // into the emptied field, and re-committed it to the ViewModel 150 ms later
+    // (which also re-filled the persisted draft slot). Record the cleared body
+    // here — `clearComposerInput` is the single funnel every clear entrance goes
+    // through — and let `isComposerClearResidue` decide whether an arriving edit
+    // is a replay of it.
+    var lastClearedText by remember { mutableStateOf<String?>(null) }
+    var lastClearedAtMs by remember { mutableStateOf(0L) }
+    // One-shot observability latch, same shape as `dictationSkipLogged`: proof
+    // from a real device that the replay guard fired, without per-event noise.
+    var clearResidueLogged by remember { mutableStateOf(false) }
     // [fix/voice-crash-observability tail] IME burst debounce state. Buffers
     // the latest large-increment edit and the job that flushes it 150 ms
     // after the last burst, so voice dictation's N-event bursts collapse to
@@ -289,8 +304,22 @@ internal fun ChatInputArea(
     // [voice-ime-1116] Clearing is a composer write too: it is recorded inside
     // the funnel below so the mirror effect never reads the emptied ViewModel
     // as an external intent (see [shouldMirrorComposerText]).
+    // [fix/composer-post-send-residue] Stamp WHAT the clear removed, so a late
+    // IME replay of that body can be told from a fresh keystroke (see
+    // `isComposerClearResidue`). Kept as its own lambda, declared before the
+    // funnel, because the funnel's shape test measures a bounded window from
+    // its declaration — a block of comments inside it pushes the existing
+    // resets out of range (the 406-character lesson).
+    val stampClearedBody: () -> Unit = {
+        val clearedBody = inputFieldValue.text
+        if (clearedBody.isNotEmpty()) {
+            lastClearedText = clearedBody
+            lastClearedAtMs = SystemClock.elapsedRealtime()
+        }
+    }
     val clearComposerInput: () -> Unit = {
         cancelPendingImeBurst()
+        stampClearedBody()
         selfWrite.text = ""
         viewModel.setInputText("")
         inputFieldValue = androidx.compose.ui.text.input.TextFieldValue("")
@@ -1815,6 +1844,39 @@ internal fun ChatInputArea(
                             if (tfv.composition != null && now - lastSendTimeMs < 500L && tfv.text.isNotEmpty()) {
                                 return@BasicTextField
                             }
+                            // [fix/composer-post-send-residue] Second guard,
+                            // content-based. The window above needs a composing
+                            // region; third-party IMEs (Sogou / iFlytek / Baidu /
+                            // voice engines) replay the WHOLE cleared body with
+                            // composition == null, or later than 500 ms. Dropping
+                            // it here keeps the composer empty AND keeps the
+                            // ViewModel + persisted draft slot clean — without
+                            // this the replay re-commits the already-sent text
+                            // 150 ms later and it survives a cold start.
+                            if (isComposerClearResidue(
+                                    incoming = tfv.text,
+                                    fieldText = inputFieldValue.text,
+                                    vmText = inputText,
+                                    clearedText = lastClearedText,
+                                    msSinceClear = now - lastClearedAtMs,
+                                )
+                            ) {
+                                if (!clearResidueLogged) {
+                                    clearResidueLogged = true
+                                    AppLogger.info(
+                                        "ComposerResidue",
+                                        "[fix/composer-post-send-residue] dropped a late IME replay of the cleared body " +
+                                            "(len=${tfv.text.length}, " +
+                                            "composition=${tfv.composition != null}, " +
+                                            "dt=${now - lastClearedAtMs}ms)",
+                                    )
+                                }
+                                return@BasicTextField
+                            }
+                            // An edit that is NOT a replay means the user took
+                            // the composer back; a stale stamp must never
+                            // swallow a later edit that happens to match.
+                            if (tfv.text.isNotEmpty()) lastClearedText = null
                             // [feat/paste-fold-marker] Fold a long paste into a
                             // `[Pasted#N]` marker BEFORE anything downstream
                             // reads the edit. Two properties depend on this
