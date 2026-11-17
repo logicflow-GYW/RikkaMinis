@@ -60,6 +60,36 @@ internal object MarkdownMathHeuristic {
     private const val NATURAL_LANGUAGE_MIN_WORD_LENGTH = 3
 
     /**
+     * [incr1117-B F-11] Prose's SECOND, count-independent signal: English
+     * function words.
+     *
+     * The word-count gate above is a proxy — "three or more ASCII words, one of
+     * them long" — and every proxy has a hole. Widening the call exemption (see
+     * [looksLikeNaturalLanguage]) opened this one: `100 + min(fee) total ` has
+     * only two counted words left, so the gate said "not a sentence" and the
+     * `+` scan rendered a price sentence as KaTeX, deleting both `$`. Same shape
+     * as backlog §CD F-11 (`10 min - 20 max or`).
+     *
+     * A formula, however, never writes an English function word as a standalone
+     * token — not as an argument name either, which is why this net reads the
+     * WHOLE content and not just the text outside the call groups (`x +
+     * sin(the angle)` must stay prose). Prose almost always writes one, and one
+     * is enough, whatever the word count is.
+     *
+     * Deliberately closed and short. `to` is NOT in it on purpose:
+     * `lim n to inf` is a documented formula shape (see
+     * [MATH_FUNCTION_TOKENS]) and `to`/`in`/`of` style prepositions would eat
+     * it. Single letters (`a`, `x`) are never included — `f(a, b)` is a formula.
+     * The trade-off is the same one the other nets make: a span holding a
+     * variable literally named `in`/`of` stays text (missed formula, `$` still
+     * visible) instead of a price sentence being swallowed by KaTeX.
+     */
+    private val PROSE_FUNCTION_WORDS: Set<String> = setOf(
+        "the", "and", "or", "of", "for", "per", "each", "total", "with",
+        "from", "by", "as", "in", "at", "is", "than", "that", "this", "if", "not",
+    )
+
+    /**
      * [review-1114 B] Tokens that are ordinary 3+ letter ASCII words AND the
      * strongest possible evidence that the span is a formula.
      *
@@ -74,9 +104,10 @@ internal object MarkdownMathHeuristic {
      * any number of them and still be a formula. They are NOT excluded from the
      * word count in general — see [looksLikeNaturalLanguage] for the money
      * sentence that needs `min` to count. The one exception is the CALL form
-     * (`sin(`, `log (x)`): a function name followed by `(` is structural
-     * evidence of a formula rather than a word, so it is not counted at all
-     * ([incr1117-B F-06]).
+     * ([incr1117-B F-06], widened in [incr1117-B F-11]): a name followed by a
+     * BALANCED `( … )` list — arguments, commas and nested calls included — is
+     * one structural unit of a formula, so neither the name nor anything inside
+     * the parentheses is counted, and none of it can be the long word.
      *
      * Exact-token match, case-insensitive — `maximum` is not `max`, `sine` is
      * not `sin`, `logo` is not `log`. The list is deliberately closed: adding
@@ -190,16 +221,30 @@ internal object MarkdownMathHeuristic {
      *    `sin(theta) + cos(theta)` is four counted words with `theta` as the
      *    long one, so the guard called a formula a sentence and both `$`
      *    vanished again. The fix is the lexical call shape, not a wider
-     *    exemption: a token in [MATH_FUNCTION_TOKENS] followed by `(`
-     *    (whitespace allowed in between) is a function CALL — structural
-     *    evidence of a formula — so it is not counted and cannot be the long
-     *    word. `30-min` has no `(` after `min`, so the unit abbreviation keeps
-     *    counting and `$50 for 30-min or $100` stays prose; and a sentence
-     *    whose first token merely looks call-shaped (`sin (the angle) of a
-     *    circle`) keeps its other long words (`angle`, `circle`) and stays
-     *    prose.
+     *    exemption: a token followed by `(` (whitespace allowed in between) is
+     *    a function CALL — structural evidence of a formula — so it is not
+     *    counted and cannot be the long word. `30-min` has no `(` after `min`,
+     *    so the unit abbreviation keeps counting and `$50 for 30-min or $100`
+     *    stays prose; and a sentence whose first token merely looks call-shaped
+     *    (`sin (the angle) of a circle`) keeps its other long words (`angle`,
+     *    `circle`) and stays prose.
      *
-     * The two together keep `$x - y$`, `$x+y$`, `$1+1=2$`, `$x^2$` and
+     *    [incr1117-B F-11] That exemption stopped at the function NAME: the
+     *    arguments inside the parentheses still counted, so
+     *    `sin(alpha) + cos(beta) + tan(gamma)` came back as three words with a
+     *    long word — a formula called a sentence again. The unit is therefore
+     *    the whole CALL, not the head token: `name` + the BALANCED `( … )`
+     *    group behind it (arguments, commas, nested calls and all) is one piece
+     *    of formula structure. An unbalanced `(` is not a call — the head keeps
+     *    counting, which is the fail-safe side.
+     *
+     *    Widening that exemption has a price the count gate cannot pay on its
+     *    own: `100 + min(fee) total ` now counts two words, drops under the
+     *    three-word gate, and the `+` scan would render a price sentence as
+     *    KaTeX. That is what [PROSE_FUNCTION_WORDS] is for — see the top of the
+     *    function body.
+     *
+     * The rules together keep `$x - y$`, `$x+y$`, `$1+1=2$`, `$x^2$` and
      * `$\frac{1}{2}$` classified as math (they fail the word-count or the
      * long-word test) while every multi-word English/Chinese-free sentence is
      * rejected, and a formula built out of function names (`log x + log y`,
@@ -208,6 +253,11 @@ internal object MarkdownMathHeuristic {
      */
     private fun looksLikeNaturalLanguage(content: String): Boolean {
         if (content.indexOf('\\') >= 0) return false
+        // [incr1117-B F-11] Net 1 — function words, count-independent. Read over
+        // the WHOLE content on purpose: a call group must not hide prose
+        // (`x + sin(the angle) + 3`), so this scan does not skip anything.
+        if (containsProseFunctionWord(content)) return true
+        // Net 2 — the original count gate, now blind to whole call groups.
         var words = 0
         var hasLongWord = false
         var i = 0
@@ -218,33 +268,81 @@ internal object MarkdownMathHeuristic {
             }
             var j = i
             while (j < content.length && content[j].isAsciiLetter()) j++
-            val token = content.substring(i, j)
-            val lower = token.lowercase()
-            // [incr1117-B F-06] A function name written as a CALL (`sin(`,
-            // `log (x)`) is structural evidence of a formula, not a word: it is
-            // neither counted nor allowed to be the long word. The `(` is what
-            // separates it from `30-min` — the unit abbreviation has no call
-            // and therefore still counts, which is what keeps
-            // `50 for 30-min or ` prose ([incr1116-B F-10]).
-            var k = j
-            while (k < content.length && content[k].isWhitespace()) k++
-            val isFunctionCall = k < content.length && content[k] == '(' && lower in MATH_FUNCTION_TOKENS
-            if (!isFunctionCall) {
-                // [incr1116-B F-10] Every other token is a word; a function name
-                // just cannot be the LONG one. See the KDoc: the count has to
-                // include `min`/`max`/`sec` so `50 for 30-min or ` reaches
-                // three words, while `max a b` still fails the long-word test
-                // and stays math.
-                words++
-                if (lower !in MATH_FUNCTION_TOKENS &&
-                    j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH
-                ) {
-                    hasLongWord = true
-                }
+            // [incr1117-B F-06 / F-11] A CALL — the name plus its balanced
+            // `( … )` list — is one structural unit of a formula: neither the
+            // name nor its arguments are words, and none of them can be the
+            // long word. The `(` is what separates it from `30-min` — the unit
+            // abbreviation has no call and therefore still counts
+            // ([incr1116-B F-10]).
+            val groupEnd = callGroupEnd(content, j)
+            if (groupEnd > 0) {
+                i = groupEnd
+                continue
+            }
+            // [incr1116-B F-10] Every other token is a word; a function name
+            // just cannot be the LONG one. See the KDoc: the count has to
+            // include `min`/`max`/`sec` so `50 for 30-min or ` reaches three
+            // words, while `max a b` still fails the long-word test and stays
+            // math.
+            words++
+            if (content.substring(i, j).lowercase() !in MATH_FUNCTION_TOKENS &&
+                j - i >= NATURAL_LANGUAGE_MIN_WORD_LENGTH
+            ) {
+                hasLongWord = true
             }
             i = j
         }
         return words >= NATURAL_LANGUAGE_MIN_WORDS && hasLongWord
+    }
+
+    /**
+     * [incr1117-B F-11] "There is an English function word in here."
+     *
+     * Exact token match, case-insensitive, over the raw content — the call
+     * groups included (see [PROSE_FUNCTION_WORDS] for why that matters).
+     */
+    private fun containsProseFunctionWord(content: String): Boolean {
+        var i = 0
+        while (i < content.length) {
+            if (!content[i].isAsciiLetter()) {
+                i++
+                continue
+            }
+            var j = i
+            while (j < content.length && content[j].isAsciiLetter()) j++
+            if (content.substring(i, j).lowercase() in PROSE_FUNCTION_WORDS) return true
+            i = j
+        }
+        return false
+    }
+
+    /**
+     * [incr1117-B F-11] Offset just past the balanced `( … )` list that follows
+     * [tokenEnd] (whitespace before the `(` allowed), or `-1` when the token is
+     * not call-shaped — no `(` at all, or the parentheses do not balance.
+     *
+     * Unbalanced input returns `-1` on purpose: while a formula streams in,
+     * `sin(x + 1` is half written, and the fail-safe answer is "this is not a
+     * structural group yet" — the head keeps counting as a word rather than the
+     * rest of the content disappearing into a group that never closes.
+     */
+    private fun callGroupEnd(content: String, tokenEnd: Int): Int {
+        var k = tokenEnd
+        while (k < content.length && content[k].isWhitespace()) k++
+        if (k >= content.length || content[k] != '(') return -1
+        var depth = 0
+        var i = k
+        while (i < content.length) {
+            when (content[i]) {
+                '(' -> depth++
+                ')' -> {
+                    depth--
+                    if (depth == 0) return i + 1
+                }
+            }
+            i++
+        }
+        return -1
     }
 
     private fun Char.isAsciiLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'
