@@ -542,16 +542,24 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         }
     }
 
+    // ONE source for the child's id. `ChatViewModel` also has a `sessionId`
+    // property (THIS conversation) — using it here renamed the parent and left
+    // the child as "Sub-agent task", which is exactly what the first on-device
+    // probe (1.0.0+3191) showed: the drawer's top row became the probe string.
+    val childSessionId = result.optString("sessionId", "")
+
     // Session titles are generated from the FIRST user message, which for a
-    // dispatch is this preamble — every sub-agent session therefore landed as
-    // "Sub-agent task" and the drawer could not tell four dispatches apart
-    // (observed on device, 2026-11-17). Name it after the task instead: the
-    // title model has already run by the time the dispatch returns, so this
-    // write is not racing a fresh generation.
+    // dispatch is this preamble — every sub-agent session lands as the same
+    // label. Name it after the task instead: the title model has already run by
+    // the time the dispatch returns, so this write is not racing a fresh one.
     val derivedTitle = task.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
-    if (sessionId.isNotBlank() && !derivedTitle.isNullOrBlank()) {
-        val title = if (derivedTitle.length > 30) derivedTitle.take(30).trimEnd() + "…" else derivedTitle
-        runCatching { chatRepository.updateSessionTitle(sessionId, title) }
+    if (childSessionId.isNotBlank() && !derivedTitle.isNullOrBlank()) {
+        val childTitle = if (derivedTitle.length > 30) {
+            derivedTitle.take(30).trimEnd() + "…"
+        } else {
+            derivedTitle
+        }
+        runCatching { chatRepository.updateSessionTitle(childSessionId, childTitle) }
     }
 
     // [deep-audit-1044 A-04] A delivered prompt that finished answers
@@ -561,7 +569,7 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
     return SubagentSkill.resultOf(
         status = result.optString("status", ""),
         text = result.optString("responseText", ""),
-        sessionId = result.optString("sessionId", ""),
+        sessionId = childSessionId,
         timedOut = result.optBoolean("timedOut", false),
         title = title,
     )
