@@ -108,6 +108,23 @@ class SubagentBudgetGateTest {
     }
 
     @Test
+    fun `a cancelled caller stops the turn it started`() {
+        // [INCR-1117 A-F04] The turn streams on the session's own
+        // viewModelScope, so releasing the wait is not enough: stop on the
+        // dispatching turn must also stop the child, which keeps running tools
+        // and spending tokens otherwise.
+        val src = readRepoFile(HEADLESS_RUNNER)
+        val waitAt = src.indexOf("val finished = try {")
+        assertTrue("the wait must be written so its cancellation is handled", waitAt > 0)
+        val nonCancelAt = src.indexOf("withContext(NonCancellable)", waitAt)
+        assertTrue("cancelling the child must not itself be cancelled", nonCancelAt > waitAt)
+        val cancelAt = src.indexOf("vm.cancelStream()", nonCancelAt)
+        assertTrue("a cancelled caller must stop the turn it started", cancelAt > nonCancelAt)
+        val rethrowAt = src.indexOf("throw ce", cancelAt)
+        assertTrue("the stop must still reach the caller as a stop", rethrowAt > cancelAt)
+    }
+
+    @Test
     fun `the dispatch switch is checked at execution, not only in the schema`() {
         // [INCR-1117 A-F06] The switch gated the schema and the routing
         // fragment only, so a replayed or hand-crafted call still opened a
@@ -204,5 +221,7 @@ class SubagentBudgetGateTest {
     private companion object {
         const val PROMPT_AND_TOOLS =
             "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatPromptAndTools.kt"
+        const val HEADLESS_RUNNER =
+            "src/android/app/src/main/java/com/rikkaminis/app/debug/HeadlessChatRunner.kt"
     }
 }
