@@ -2,6 +2,7 @@ package com.rikkaminis.app.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.rikkaminis.app.BuildConfig
 import com.rikkaminis.app.logging.AppLogger
 import org.json.JSONObject
 import java.io.File
@@ -84,7 +85,12 @@ object PendingUpdateStore {
      *  - older than [MAX_AGE_MS] (cleared)
      *  - target version no longer newer than the running build
      */
-    fun getPending(context: Context): PendingUpdate? {
+    fun getPending(
+        context: Context,
+        // [W1118-D5 F-08] Overridable so the version gate can be pinned by a
+        // JVM test without BuildConfig; production callers take the default.
+        currentVersionName: String = BuildConfig.VERSION_NAME,
+    ): PendingUpdate? {
         val p = requirePrefs(context)
         val raw = p.getString(KEY, null) ?: return null
         val pending = decodePending(raw)
@@ -96,6 +102,19 @@ object PendingUpdateStore {
         val age = System.currentTimeMillis() - pending.downloadedAtMs
         if (age > MAX_AGE_MS) {
             AppLogger.info(TAG, "pending update expired age=${age}ms; clearing")
+            clearPending(context)
+            return null
+        }
+        // [W1118-D5 F-08] The KDoc above promised this gate but only
+        // [UpdateChecker.resumablePending] performed it, so every future
+        // direct caller would have received a record for a build that is
+        // already installed (or older). Same comparison, normalized the same
+        // way — see the asymmetry note in UpdateChecker.
+        if (pendingTargetIsStale(pending.targetVersionName, currentVersionName)) {
+            AppLogger.info(
+                TAG,
+                "pending target ${pending.targetVersionName} <= running $currentVersionName; clearing",
+            )
             clearPending(context)
             return null
         }
@@ -208,3 +227,19 @@ object PendingUpdateStore {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 }
+
+/**
+ * [W1118-D5 F-08] True when a persisted download's target version is no longer
+ * NEWER than the running build — i.e. the record can never be resumed.
+ *
+ * Both sides go through [normalizeTag] because [PendingUpdate.targetVersionName]
+ * is stored normalized (it comes from `upgradeCandidate.versionName`) while
+ * `BuildConfig.VERSION_NAME` carries whatever the build script wrote
+ * (`1.0.0+NNNN`). Comparing the raw strings would make every build look older
+ * than itself whenever a `v` prefix or a `+build` suffix is present.
+ *
+ * Pure so the gate is JVM-testable; the `<= 0` boundary is the contract
+ * ("no longer newer" includes equal).
+ */
+internal fun pendingTargetIsStale(targetVersionName: String, runningVersionName: String): Boolean =
+    compareVersions(normalizeTag(targetVersionName), normalizeTag(runningVersionName)) <= 0

@@ -113,6 +113,7 @@ class PartsJsonFunnelTest {
         override suspend fun listSessions(): List<ChatSessionEntity> = emptyList()
         override suspend fun getSession(id: String): ChatSessionEntity? = null
         override suspend fun getMessage(id: String): MessageEntity? = null
+        override suspend fun sessionIdOf(id: String): String? = null
         override suspend fun sessionsUpdatedSince(cutoff: Long): List<ChatSessionEntity> = emptyList()
         override suspend fun updateSessionModel(id: String, modelId: String, updatedAt: Long) {}
         override suspend fun updateSessionBinding(

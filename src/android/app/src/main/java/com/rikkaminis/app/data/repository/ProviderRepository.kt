@@ -3445,7 +3445,11 @@ class ProviderRepository(private val context: Context) {
             }
             val contextWindow = if (m.has("contextWindow")) m.optInt("contextWindow").takeIf { it > 0 } else null
             val maxOutputTokens = if (m.has("maxOutputTokens")) m.optInt("maxOutputTokens").takeIf { it > 0 } else null
-            val supportsReasoning = if (m.has("supportsReasoning")) m.optBoolean("supportsReasoning") else null
+            // [W1118-D5 F-02] Tri-state read: `has()` is true for an explicit
+            // JSON null, so the old `if (has) optBoolean else null` turned
+            // "unknown" into "not supported" for any externally produced
+            // document (iOS export, hand-edited backup).
+            val supportsReasoning = optionalBooleanOrNull(m, "supportsReasoning")
             val interleavedReasoningField = m.optString("interleavedReasoningField", "").ifEmpty { null }
             // [T-fix-import-id-roundtrip] Restore the reasoning-capability pair
             // the export side now writes. Each key is read independently with a
@@ -3457,6 +3461,10 @@ class ProviderRepository(private val context: Context) {
                     .mapNotNull { idx -> arr.optString(idx, "").takeIf { it.isNotBlank() } }
                     .takeIf { it.isNotEmpty() }
             }
+            // [W1118-D5 F-02] `declaresNoEffortTiers` keeps its own inline
+            // tri-state test: it is already `has(...) && !isNull(...)` (null =
+            // unknown), and `provider_import_id_roundtrip_check` arm 3 anchors
+            // on this read being present in the parse body.
             val declaresNoEffortTiers = if (m.has("declaresNoEffortTiers") && !m.isNull("declaresNoEffortTiers")) {
                 m.optBoolean("declaresNoEffortTiers")
             } else null
@@ -3497,7 +3505,8 @@ class ProviderRepository(private val context: Context) {
                     displayName = overridesObj.optString("displayName", "").ifEmpty { null },
                     maxOutputTokens = if (overridesObj.has("maxOutputTokens")) overridesObj.optInt("maxOutputTokens").takeIf { it > 0 } else null,
                     contextWindow = if (overridesObj.has("contextWindow")) overridesObj.optInt("contextWindow").takeIf { it > 0 } else null,
-                    supportsReasoning = if (overridesObj.has("supportsReasoning")) overridesObj.optBoolean("supportsReasoning") else null,
+                    // [W1118-D5 F-02] Same tri-state rule as the base model above.
+                    supportsReasoning = optionalBooleanOrNull(overridesObj, "supportsReasoning"),
                     inputModalities = ovIn,
                     outputModalities = ovOut,
                     // [T-fix-backup-field-evap] Restore the user-set thinking
