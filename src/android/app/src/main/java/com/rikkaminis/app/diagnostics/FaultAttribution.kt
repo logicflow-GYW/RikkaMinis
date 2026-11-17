@@ -16,11 +16,22 @@ package com.rikkaminis.app.diagnostics
  *
  * Signals (checked in priority order, first hit wins):
  *   - auth / quota vocabulary → credentials (fix keys / top up)
- *   - UnknownHost / connect / timeout / reset / TLS vocabulary → connection
  *   - HTTP 4xx/5xx status vocabulary → service (endpoint alive, unhappy)
  *   - worker death / first-chunk budget vocabulary → service
  *     (the endpoint accepted the request and then went silent)
+ *   - UnknownHost / connect / timeout / reset / TLS vocabulary → connection
  *   - unknown → ambiguous (shown as "unclear")
+ *
+ * [W1118-T6 R6 F-01] Service is checked BEFORE connection. The old order made
+ * its multi-word vocabulary unreachable: "timeout" (connection) is a substring
+ * of "first chunk timeout" (service), so a first-chunk budget failure — the
+ * endpoint accepted and then went silent, the exact case the service layer
+ * exists for — was reported as the user's network/proxy's fault. Connection's
+ * own vocabulary (sockettimeout, read timed out, connection reset, DNS, TLS)
+ * carries no service phrase, so nothing moves the other way. This module still
+ * has no production consumer (the panel that will read it is a registered
+ * follow-up), which is precisely why the classification is fixed here: wiring
+ * it up must not ship the misattribution.
  *
  * Pure JVM + unit-testable; deliberately string-based because the failure
  * reasons we classify are already free-form strings coming out of
@@ -32,6 +43,13 @@ object FaultAttribution {
 
     data class Result(val layer: Layer, val labelResKey: String)
 
+    /**
+     * [W1118-T6 R6 F-01] Checked AFTER [SERVICE_PATTERNS]. Every phrase here is
+     * connection-leg vocabulary that a service answer does not contain — keep
+     * it that way: a phrase that can appear inside an HTTP status / first-chunk
+     * message ("timeout" alone is exactly that) belongs in the service list or
+     * nowhere.
+     */
     private val CONNECTION_PATTERNS = listOf(
         "unknownhost", "unable to resolve", "dns",          // resolution
         "connectexception", "connection refused",           // TCP
@@ -74,11 +92,13 @@ object FaultAttribution {
         if (CREDENTIAL_PATTERNS.any { raw.contains(it) }) {
             return Result(Layer.CREDENTIALS, "fault_layer_credentials")
         }
-        if (CONNECTION_PATTERNS.any { raw.contains(it) }) {
-            return Result(Layer.CONNECTION, "fault_layer_connection")
-        }
+        // [W1118-T6 R6 F-01] Service BEFORE connection: "first chunk timeout"
+        // contains "timeout", so the old order shadowed every service phrase.
         if (SERVICE_PATTERNS.any { raw.contains(it) }) {
             return Result(Layer.SERVICE, "fault_layer_service")
+        }
+        if (CONNECTION_PATTERNS.any { raw.contains(it) }) {
+            return Result(Layer.CONNECTION, "fault_layer_connection")
         }
         return Result(Layer.UNCLEAR, "fault_layer_unclear")
     }

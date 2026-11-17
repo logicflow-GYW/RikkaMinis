@@ -405,11 +405,24 @@ object CrashFrequencyDetector {
             // dismissal clock untouched: the user has not seen or resolved
             // anything, so the next cold start (or the recreated Activity)
             // must still be able to prompt.
+            //
+            // [W1118-T6 D11 F-06 / R6 F-02] The two lines that used to run
+            // here — `pendingShareFiles = null` and `setSafeMode(false)` — did
+            // the exact opposite of this comment, and both were reachable:
+            //   · clearing the burst made the recreated Activity take the
+            //     "no pending burst" branch, which invokes onClosed() = finish()
+            //     → the app exits and the crash logs are never offered again;
+            //   · `setSafeMode(false)` fires safeModeCleared to subscribers while
+            //     the process is still in the one-way `_initSkipped` state
+            //     (`lateinit` repositories never built), i.e. it announces a
+            //     recovery that did not happen. The burst stays pending and
+            //     safe mode stays ON for this process; the next cold start
+            //     re-evaluates from the crash files, and only finishClose()
+            //     (the user actually dismissing) stamps the clock and clears
+            //     the latch.
             android.util.Log.w(TAG, "dialog failed: ${t.message}")
             promptInFlight = false
             promptHost = null
-            pendingShareFiles = null
-            setSafeMode(false)
             onClosed?.invoke()
         }
     }

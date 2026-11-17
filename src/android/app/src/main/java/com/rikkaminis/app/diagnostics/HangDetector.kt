@@ -172,6 +172,23 @@ object HangDetector {
      * hanging" gate.
      */
     private val hangCountedThisProcess = AtomicBoolean(false)
+
+    /**
+     * [W1118-T6 R6 F-03] True when the persisted counter has to be settled but
+     * this process has not necessarily counted the hang itself — i.e. the
+     * count was inherited from a previous process ([start] seeds it from disk)
+     * or counted here ([recordHang]). [healQuietHang] clears it once the count
+     * reads 0, so healthy ticks stop reading prefs again.
+     *
+     * Separate from [hangCountedThisProcess] on purpose: that flag answers
+     * "did WE count it" (and is read by the cold-start reasoning), this one
+     * answers "is there still something to settle".
+     */
+    private val healPending = AtomicBoolean(false)
+
+    /** [W1118-T6 R6 F-03] `start()` wall clock — the inherited-count grace gate. */
+    private val startedAtMs = AtomicLong(0L)
+
     private const val KEY_LAST_HANG_AT = "last_hang_at_ms"
 
     private const val STALL_LOG_DIR = "logs"
@@ -223,6 +240,14 @@ object HangDetector {
             _renderBreakerActive.value = true
             Log.w(TAG, "render breaker seeded ACTIVE from persisted hang count")
         }
+        // [W1118-T6 R6 F-03] A counter inherited from the previous process is
+        // NOT un-healable: the cold-start breakers only need it during launch,
+        // and healQuietHang lets it settle once this process has been alive for
+        // a full quiet window (see QuietHealPolicy.mayAttemptHeal). Without
+        // this seed the only way to clear a count from an earlier process was
+        // to hang again in this one.
+        startedAtMs.set(System.currentTimeMillis())
+        if (currentHangCount(context) > 0) healPending.set(true)
         scheduleHeartbeat()
         // Use a non-daemon thread so the watchdog isn't reaped while the app
         // is still alive but scheduled out. Daemon threads also die earlier
@@ -265,7 +290,21 @@ object HangDetector {
         val lastHangAt = prefs.getLong(KEY_LAST_HANG_AT, 0L)
         if (lastHangAt > 0 && System.currentTimeMillis() - lastHangAt < RESET_AFTER_QUIET_MS) return
         synchronized(hangCounterLock) {
-            if (prefs.getInt(KEY_HANG_COUNT, 0) == 0) return
+            // [W1118-T6 D9 F-06] Both halves are re-read INSIDE the lock. The
+            // outer checks above are only a cheap shortcut: recordHang can take
+            // this lock between them and this block, and the old shape re-checked
+            // just `count == 0` here — so a hang recorded 0 ms ago (count 1 → 2,
+            // last_hang_at = now, render breaker tripped) was zeroed and the
+            // breaker cleared by the very tick that started before it landed.
+            if (!QuietHealPolicy.mayResetOnHealthyTick(
+                    hangCount = prefs.getInt(KEY_HANG_COUNT, 0),
+                    lastHangAtMs = prefs.getLong(KEY_LAST_HANG_AT, 0L),
+                    nowMs = System.currentTimeMillis(),
+                    quietMs = RESET_AFTER_QUIET_MS,
+                )
+            ) {
+                return
+            }
             prefs.edit()
                 .putInt(KEY_HANG_COUNT, 0)
                 .putLong(KEY_LAST_HANG_AT, 0L)
@@ -319,23 +358,45 @@ object HangDetector {
     // -- internals -----------------------------------------------------------
 
     /**
-     * [fix/r5-d3] Self-heal for a hang counted by THIS process. Runs on the
-     * watchdog thread from the healthy branch (a heartbeat just landed, so the
-     * main thread is responsive right now). [markHealthyTick] owns the rule —
-     * only after [RESET_AFTER_QUIET_MS] of quiet — and zeroes the count and
+     * [fix/r5-d3] Self-heal for a hang counted by THIS process — and, since
+     * [W1118-T6 R6 F-03], for a counter inherited from a previous one. Runs on
+     * the watchdog thread from the healthy branch (a heartbeat just landed, so
+     * the main thread is responsive right now). [markHealthyTick] owns the rule
+     * — only after [RESET_AFTER_QUIET_MS] of quiet — and zeroes the count and
      * the render breaker together under [hangCounterLock], so the reset still
      * shares one critical section with [recordHang]'s read-modify-write.
      *
-     * The gate flag keeps this from touching a counter carried over from a
-     * previous process: the cold-start breakers read that count, and a
-     * process that just launched has not earned a reset yet. The flag clears
-     * once the count reads 0, so healthy ticks stay free of prefs reads.
+     * Two gates, both in [QuietHealPolicy.mayAttemptHeal]:
+     *  - nothing to settle (the heal flag is clear and nothing was counted here)
+     *    → return without touching prefs, so healthy ticks stay cheap;
+     *  - a counter that was NOT counted by this process needs the process to
+     *    have been alive for a full quiet window first. The cold-start breakers
+     *    read that counter during launch, and the old unconditional "only heal
+     *    what we counted" gate left an inherited count of three or more
+     *    permanently un-healable (forced home + degraded markdown on every
+     *    launch until a new hang happened to land in the same process).
      */
     private fun healQuietHang() {
-        if (!hangCountedThisProcess.get()) return
         val ctx = appContext ?: return
+        // [W1118-T6 R6 F-03] Settle an inherited count too, but only after this
+        // process has been up for a full quiet window: that is later than every
+        // cold-start read of the count (shouldForceHomeOnLaunch is consulted
+        // during launch) and it means the main thread has just proved itself
+        // responsive for the same window markHealthyTick requires.
+        if (!QuietHealPolicy.mayAttemptHeal(
+                countedThisProcess = hangCountedThisProcess.get(),
+                carriedOverCount = healPending.get(),
+                processAliveMs = System.currentTimeMillis() - startedAtMs.get(),
+                quietMs = RESET_AFTER_QUIET_MS,
+            )
+        ) {
+            return
+        }
         markHealthyTick()
-        if (currentHangCount(ctx) == 0) hangCountedThisProcess.set(false)
+        if (currentHangCount(ctx) == 0) {
+            hangCountedThisProcess.set(false)
+            healPending.set(false)
+        }
     }
 
     private fun scheduleHeartbeat() {
@@ -477,6 +538,16 @@ object HangDetector {
         builder.append(
             "===== HANG @ $ts (duration ~${durationMs}ms) sample=$label escalation=$escalation =====\n",
         )
+        // [W1118-T6 D9 F-07] The stall log is the only artefact a crash/stall
+        // report has AFTER the fact, and `LaunchCycleBeacon.readLastSessionId`
+        // parses `session=<id>` out of the first 2 KB of the newest one to say
+        // "the chat that was on screen was X". Nothing ever wrote that field —
+        // the id only reached the JankDiag println below (stdout / daily log,
+        // which the beacon does not read), so the reported lastSessionId was
+        // "unknown" on every cycle since the field was introduced. Written
+        // right after the header and BEFORE the 25 stack frames so it stays
+        // inside the beacon's 2 KB window.
+        ContentDiag.currentRenderSessionId()?.let { builder.append("session=$it\n") }
         builder.append("thread: main\n")
         for (frame in mainStack.take(25)) builder.append("  at $frame\n")
         builder.append("\n")
@@ -526,6 +597,7 @@ object HangDetector {
             // process deliberately stays untouched — the cold-start
             // breakers depend on it.
             hangCountedThisProcess.set(true)
+            healPending.set(true)
             // [T-android-render-breaker] Trip the render degrade one hang BEFORE
             // the system would ANR-kill us (baseline showed death between #2/#3).
             // [fix/r4-s F-13] The trip lives inside the counter's critical
