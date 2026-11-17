@@ -81,6 +81,25 @@ class SubagentBudgetGateTest {
         )
     }
 
+    @Test
+    fun `the dispatched session is named after its task`() {
+        // Observed on device (2026-11-17): every dispatch landed as
+        // "Sub-agent task" in the drawer because session titles come from the
+        // first user message, which is the dispatch preamble. The dispatch must
+        // overwrite the title from the task text once the session id is known.
+        val body = spawn()
+        val promptAt = body.indexOf("ChatMutationMethods.prompt(")
+        val titleAt = body.indexOf("chatRepository.updateSessionTitle(")
+        assertTrue(
+            "a dispatched session must be named from the task, not the preamble",
+            titleAt > promptAt,
+        )
+        assertTrue(
+            "the name must come from the task text",
+            body.contains("firstOrNull { it.isNotEmpty() }"),
+        )
+    }
+
     /** Source of the function starting at [signature], cut at the next top-level
      *  declaration so ordering assertions cannot see the neighbouring function. */
     private fun functionRegion(src: String, signature: String): String {

@@ -542,6 +542,18 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         }
     }
 
+    // Session titles are generated from the FIRST user message, which for a
+    // dispatch is this preamble — every sub-agent session therefore landed as
+    // "Sub-agent task" and the drawer could not tell four dispatches apart
+    // (observed on device, 2026-11-17). Name it after the task instead: the
+    // title model has already run by the time the dispatch returns, so this
+    // write is not racing a fresh generation.
+    val derivedTitle = task.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+    if (sessionId.isNotBlank() && !derivedTitle.isNullOrBlank()) {
+        val title = if (derivedTitle.length > 30) derivedTitle.take(30).trimEnd() + "…" else derivedTitle
+        runCatching { chatRepository.updateSessionTitle(sessionId, title) }
+    }
+
     // [deep-audit-1044 A-04] A delivered prompt that finished answers
     // "Completed"; a refusal or a timeout must reach the caller as a failure,
     // never as the answer. Mapping lives in SubagentSkill.resultOf so the four
