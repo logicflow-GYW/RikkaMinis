@@ -178,6 +178,10 @@ PASS pre 臂：刚写的 loader 被立刻删掉（缺陷）   ← 基线循环�
 
 - **#3221 / run `44017833140` @ `03d0e0c0`（分支 tip 逐字符一致）**：`scan-gate` / `build-apk` / `lint` **success**，`publish` skipped（main 门控），**`unit-tests` failure** ——
   唯一失败 = `PersistentShellTreeTerminationTest > stop wires explicit SIGKILL …`（因为断言锚在被我改掉的那行字面量上，见 §2.4「门 ROT 事件」）。**不是产品缺陷**：该用例的意图（有界等待在异步 reaper 上、caller 不阻塞）在我改完的代码里依然成立。
-- 处置：改锚到决策 + 补负向断言（同一提交 `fix(test): …`），重 dispatch 后再回填第二轮结论。
-
-（第二轮：待回填）
+- 处置：改锚到决策 + 补负向断言（提交 `b368b1f0`），重 dispatch。
+- **第二轮（停止节点）：#3226 / run `44027322035` @ `eb93e467`（分支 tip）= 五 job 全绿**。
+  - `unit-tests` success：**9387 PASSED / 0 FAILED**，`BUILD SUCCESSFUL in 5m 3s`；本批 5 个新测试类的 **28 条逐条 PASSED**，改锚后的 `PersistentShellTreeTerminationTest > stop wires explicit SIGKILL …` PASSED（日志逐条核过，不是只看 job 绿）。
+  - `scan-gate` success：`Summary: 115 passed, 0 failed` + 夹具自测**本轮真跑**：`scanners moved in this push (or the diff was unreadable) — running the fixture self-test` → `✅ ALL 354 CASES PASS`。
+  - `lint` / `build-apk` success。**lint 首轮（attempt 1）红是 Maven Central 429**（`Could not GET …/hamcrest-*.jar 429`），非代码问题，`rerun-failed-jobs` 后绿。
+  - `publish`：`Move the rolling tag android-latest` 与 `Publish to Releases` **两步 skipped**（main 门控），release 未被本支污染。
+- **停止节点声明**：代码 + 测试的绿 sha = `eb93e467`；随后只追加了一个 docs 提交（本报告终稿 + §6 回填），`git diff eb93e467..tip --name-only` 仅 `fix-reports/FIX-W1118-sandbox.md`，**不含任何代码/测试差异**。未合 main（起手权在主会话）。
