@@ -456,13 +456,13 @@ fun ChatScreen(
         }
         for (a in transfer.attachments) viewModel.addAttachment(a)
         // [incr1118 D2-F02] The blocks the source could not put in the text
-        // (detached pastes / orphan rows) come back as chips here. `inlineMarker
-        // = false` is the only correct arm: the target text has no literal for
-        // them, so an inline row would render a chip nothing can expand.
-        // `stashPastedText` mints an id free in THIS session (it also reserves
-        // literals already on screen), so the source's ids can never leak in.
-        for (p in transfer.pastedTexts) {
-            viewModel.stashPastedText(p.text, inlineMarker = false)
+        // (detached pastes / orphan rows) come back as chips. Raised as an
+        // intent, not written here: the paste buffer belongs to the composer
+        // (PasteFoldWiringTest pins that this file never names it), and the
+        // composer is the only place that can mint an id free in THIS session
+        // and pick the one shape a send can still expand (detached).
+        if (transfer.carriedPastes.isNotEmpty()) {
+            viewModel.requestComposerCommand(ComposerCommand.RestoreDraftPastes(transfer.carriedPastes))
         }
         // [fix/move-to-capsule-empty-1116] Only a transfer that actually
         // carried something re-arms the capsule. Unconditional marking meant an

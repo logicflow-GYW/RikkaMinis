@@ -3942,6 +3942,19 @@ class ChatViewModel(
     }
 
     /**
+     * [incr1118 D2-F02] The blocks a "Move to…" must carry besides the text.
+     *
+     * Read against the composer's live text: a `[Pasted#N]` literal still on
+     * screen is carried BY [expandPastedText] inside the transfer payload, so
+     * only the rows with no literal left (detached paste, orphan row) need to
+     * travel as chips. Kept here (not at the call site) so the move call stays
+     * compact — the composer-clear criteria measure the distance from the stash
+     * call to the clear funnel.
+     */
+    fun pastesForMove(composerText: String): List<PastedText> =
+        pastesCarriedByMove(_pastedTexts.value, composerText)
+
+    /**
      * [incr1118 D1-F02] The draft's folded chips, for the one caller that has to
      * hand them back AFTER clearing the composer.
      *
@@ -5449,6 +5462,17 @@ sealed interface ComposerCommand {
         /** null = caret to the end of [text]. */
         val caretOverride: Int? = null,
     ) : ComposerCommand
+
+    /**
+     * [incr1118 D2-F02] Put folded blocks back into the chip row — the
+     * cross-session "Move to…" transfer's second cargo, after [AppendText].
+     *
+     * A command rather than a direct call because the paste buffer belongs to
+     * the composer: ChatScreen (which drains the transfer) must not touch it,
+     * and the ordinary write path already goes through this intent channel.
+     * The receiving composer decides the shape (detached rows).
+     */
+    data class RestoreDraftPastes(val pastes: List<PastedText>) : ComposerCommand
 
     /**
      * [dv24/B-05] Append [text] to whatever the composer holds right now —

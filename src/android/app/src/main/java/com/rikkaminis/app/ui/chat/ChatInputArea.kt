@@ -408,6 +408,12 @@ internal fun ChatInputArea(
                     )
                 }
                 ComposerCommand.Clear -> clearComposerInput()
+                // [incr1118 D2-F02] The cross-session transfer's folded blocks
+                // land in the chip row through the same intent channel as its
+                // text; the composer owns the buffer, the screen only asks.
+                is ComposerCommand.RestoreDraftPastes -> {
+                    viewModel.restoreDraftPastesAfterClear(command.pastes)
+                }
                 // [dv24/B-05] The two text intents: resolved HERE against the
                 // field's live text, then committed through the funnel above.
                 is ComposerCommand.ReplaceText -> commitComposerBody(
@@ -2507,7 +2513,7 @@ internal fun ChatInputArea(
                         PendingTransfer(
                             inputText = viewModel.expandPastedText(inputFieldValue.text),
                             attachments = viewModel.attachments.value,
-                            pastedTexts = pastesCarriedByMove(viewModel.pastedTexts.value, inputFieldValue.text),
+                            carriedPastes = viewModel.pastesForMove(inputFieldValue.text),
                         ),
                     )
                     clearComposerInput()

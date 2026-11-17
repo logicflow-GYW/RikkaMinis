@@ -130,35 +130,49 @@ class ComposerPasteCarryTest {
     ).readText()
 
     @Test
-    fun `PendingTransfer declares the paste field`() {
+    fun `PendingTransfer declares the carried-blocks field`() {
         val src = chatSrc("ChatViewModelStore.kt")
         assertTrue(
             "PendingTransfer must carry the folded blocks the text cannot",
-            src.contains("val pastedTexts: List<PastedText>"),
+            src.contains("val carriedPastes: List<PastedText>"),
         )
     }
 
     @Test
-    fun `move-to stash fills pastedTexts from the live buffer`() {
+    fun `move-to stash fills the carried blocks from the live buffer`() {
         val src = chatSrc("ChatInputArea.kt")
         val at = src.indexOf("stashPendingTransfer(")
         assertTrue("stash call site missing", at >= 0)
         val call = src.substring(at, minOf(src.length, at + 900))
         assertTrue(
             "the stash must carry the buffer, or the clear right after it destroys the blocks",
-            call.contains("pastedTexts = pastesCarriedByMove("),
+            call.contains("carriedPastes = viewModel.pastesForMove("),
         )
     }
 
     @Test
-    fun `move-to drain restores the blocks as detached chips`() {
+    fun `move-to drain asks the composer to restore the blocks`() {
         val src = chatSrc("ChatScreen.kt")
-        val at = src.indexOf("for (p in transfer.pastedTexts)")
-        assertTrue("drain must re-stash the carried blocks", at >= 0)
+        assertTrue(
+            "the transfer's folded blocks must reach the target composer as an intent",
+            src.contains("ComposerCommand.RestoreDraftPastes(transfer.carriedPastes)"),
+        )
+        // The buffer is the composer's: this screen must never write it.
+        assertFalse(
+            "ChatScreen owns no paste state (PasteFoldWiringTest pins the same rule)",
+            src.contains("stashPastedText"),
+        )
+    }
+
+    @Test
+    fun `the composer restores the carried blocks as detached chips`() {
+        val src = chatSrc("ChatInputArea.kt")
+        val at = src.indexOf("is ComposerCommand.RestoreDraftPastes ->")
+        assertTrue("the composer must consume the restore intent", at >= 0)
         val block = src.substring(at, minOf(src.length, at + 200))
         assertTrue(
-            "an inline row on the target would render a chip nothing can expand",
-            block.contains("inlineMarker = false"),
+            "restoration must go through the demoting helper (detached rows)",
+            block.contains("restoreDraftPastesAfterClear("),
         )
     }
 
