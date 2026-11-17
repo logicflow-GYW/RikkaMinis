@@ -376,10 +376,15 @@ class PasteFoldWiringTest {
     @Test
     fun `leaving edit mode puts the draft's chips back`() {
         val body = blockAfter(viewModel, "fun cancelEdit()")
+        // [incr1118 D1-F02] The pin moved from a spelling to the decision it
+        // guards: entering edit mode CLEARS the live row, so this path must
+        // return the snapshot — through `pastesAfterCancelEdit`, which only
+        // demotes an inline chip whose literal the field no longer holds
+        // (an inline row without its literal is a chip no send can expand).
         assertTrue(
             "cancelEdit must restore the snapshot in place of the turn's refolded chip — " +
                 "the cleared first entry is only safe because this path returns it",
-            body.contains("_preEditPastes.value?.let { _pastedTexts.value = it }"),
+            body.contains("pastesAfterCancelEdit(") && body.contains("_pastedTexts.value ="),
         )
     }
 

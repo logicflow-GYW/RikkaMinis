@@ -78,6 +78,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import com.rikkaminis.app.ui.chat.ChatViewModelStore.PendingTransfer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -407,6 +408,12 @@ internal fun ChatInputArea(
                     )
                 }
                 ComposerCommand.Clear -> clearComposerInput()
+                // [incr1118 D2-F02] The cross-session transfer's folded blocks
+                // land in the chip row through the same intent channel as its
+                // text; the composer owns the buffer, the screen only asks.
+                is ComposerCommand.RestoreDraftPastes -> {
+                    viewModel.restoreDraftPastesAfterClear(command.pastes)
+                }
                 // [dv24/B-05] The two text intents: resolved HERE against the
                 // field's live text, then committed through the funnel above.
                 is ComposerCommand.ReplaceText -> commitComposerBody(
@@ -2210,8 +2217,26 @@ internal fun ChatInputArea(
                             shape = RoundedCornerShape(16.dp),
                             color = ChatColors.inputBg,
                             modifier = Modifier.clickable {
+                                // [incr1118 D1-F02] Leaving edit mode used to
+                                // run `cancelEdit()` (hands the draft's folded
+                                // pastes back) and THEN the composer's clear
+                                // funnel, which drops the paste buffer on
+                                // purpose (audit P1-C) — the chips died one
+                                // statement after they came back, while the
+                                // attachments survived.
+                                //
+                                // The funnel still has to run LAST on this path
+                                // (pinned by chat_ui_interaction_check's F4:
+                                // every composer exit routes through it, and it
+                                // is the one place that resets the field), so the
+                                // fix takes the chips first and puts them back
+                                // AFTER it — as detached rows, because the field
+                                // no longer holds their `[Pasted#N]` literals
+                                // (see [pastesAfterCancelEdit]).
+                                val draftPastes = viewModel.peekPreEditPastes()
                                 viewModel.cancelEdit()
                                 clearComposerInput()
+                                viewModel.restoreDraftPastesAfterClear(draftPastes)
                             },
                         ) {
                             Text(
@@ -2470,10 +2495,25 @@ internal fun ChatInputArea(
                     // target session with nothing to expand it (that session's
                     // guard would then refuse to send). The TEXT travels; the
                     // chips stay behind with the buffer they belong to.
+                    // [incr1118 D2-F02] The inline arm is fully covered by the
+                    // expansion above (every resolvable literal becomes text),
+                    // so what the buffer still holds are the blocks NOT in the
+                    // text — detached pastes and orphan rows. Leaving those
+                    // behind loses them for good: the clear below empties the
+                    // buffer, and the target session sends the instruction
+                    // without the report it was pasted for. They travel as
+                    // detached rows ([pastesCarriedByMove]).
+                    // [incr1118 D2-F02] `pastedTexts` is read against the
+                    // FIELD's text, not the expanded string: a literal still on
+                    // screen is carried BY the expansion, everything else
+                    // (detached paste / orphan row) has to travel as a chip.
+                    // Kept on the call so the clear funnel stays on this path
+                    // (chat_ui_interaction_check F4 measures the distance).
                     ChatViewModelStore.stashPendingTransfer(
-                        ChatViewModelStore.PendingTransfer(
+                        PendingTransfer(
                             inputText = viewModel.expandPastedText(inputFieldValue.text),
                             attachments = viewModel.attachments.value,
+                            carriedPastes = viewModel.pastesForMove(inputFieldValue.text),
                         ),
                     )
                     clearComposerInput()
