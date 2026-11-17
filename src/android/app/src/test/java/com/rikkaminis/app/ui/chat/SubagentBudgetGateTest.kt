@@ -2,6 +2,7 @@ package com.rikkaminis.app.ui.chat
 
 import java.io.File
 import java.io.FileNotFoundException
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -82,26 +83,23 @@ class SubagentBudgetGateTest {
     }
 
     @Test
-    fun `the dispatched session is named after its task, not the parent`() {
-        // On-device probe (1.0.0+3191): the drawer's TOP row turned into the
-        // probe string while the child stayed "Sub-agent task". `ChatViewModel`
-        // also exposes `sessionId` (THIS conversation), so an unqualified use
-        // silently renamed the parent. The id must come from the dispatch reply.
+    fun `the child is named at creation, before the title generator can run`() {
+        // On-device probes (1.0.0+3191 then +3192): renaming AFTER the turn
+        // loses — the child's auto-title generator finishes later and overwrites
+        // it, and the first attempt managed to rename the PARENT instead
+        // (ChatViewModel has its own `sessionId`). The title generator only
+        // fires while the row reads "New Chat", so the fix is to name the row
+        // when it is created: the title must travel in the dispatch params.
         val body = spawn()
         val promptAt = body.indexOf("ChatMutationMethods.prompt(")
-        val childIdAt = body.indexOf("val childSessionId = result.optString(\"sessionId\"")
+        assertTrue("the dispatch call site is gone", promptAt > 0)
         assertTrue(
-            "the child id must be read from the dispatch reply",
-            childIdAt > promptAt,
+            "the child title must be part of the dispatch params",
+            body.contains("put(\"title\""),
         )
-        val titleAt = body.indexOf("chatRepository.updateSessionTitle(")
-        assertTrue(
-            "a dispatched session must be named from the task",
-            titleAt > childIdAt,
-        )
-        assertTrue(
-            "the rename must target the CHILD (never the view model's own sessionId)",
-            body.substring(titleAt).startsWith("chatRepository.updateSessionTitle(childSessionId"),
+        assertFalse(
+            "a post-hoc rename races the child's title generator — it must not come back",
+            body.contains("chatRepository.updateSessionTitle("),
         )
         assertTrue(
             "the name must come from the task text",

@@ -491,11 +491,20 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         )
     }
 
+    // Name the child after its task, at CREATION time. The auto-title
+    // generator only fires while the row still reads "New Chat"
+    // (`sessionTitleNeedsGenerationOf`), so a title provided on create
+    // suppresses it — the earlier attempt to write the title after the turn
+    // lost to that generator on device (1.0.0+3191/3192 probes).
+    val childTitle = task.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+        ?.let { if (it.length > 30) it.take(30).trimEnd() + "…" else it }
+
     val params = JSONObject()
         .put("prompt", SubagentSkill.buildTaskPrompt(task))
         .put("wait", true)
         .put("waitTimeout", SubagentSkill.WAIT_TIMEOUT_SECONDS)
         .put("thinkingLevel", effectiveThinkingLevel.name.lowercase())
+        .also { if (!childTitle.isNullOrBlank()) it.put("title", childTitle) }
 
     // [rework/spawn-agent-as-real-session] Auto-pin the dispatcher. A session
     // waiting on a sub-agent stops updating its own row while every child does,
@@ -542,25 +551,7 @@ internal suspend fun ChatViewModel.executeSpawnAgentTool(argsJson: String): Tool
         }
     }
 
-    // ONE source for the child's id. `ChatViewModel` also has a `sessionId`
-    // property (THIS conversation) — using it here renamed the parent and left
-    // the child as "Sub-agent task", which is exactly what the first on-device
-    // probe (1.0.0+3191) showed: the drawer's top row became the probe string.
     val childSessionId = result.optString("sessionId", "")
-
-    // Session titles are generated from the FIRST user message, which for a
-    // dispatch is this preamble — every sub-agent session lands as the same
-    // label. Name it after the task instead: the title model has already run by
-    // the time the dispatch returns, so this write is not racing a fresh one.
-    val derivedTitle = task.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
-    if (childSessionId.isNotBlank() && !derivedTitle.isNullOrBlank()) {
-        val childTitle = if (derivedTitle.length > 30) {
-            derivedTitle.take(30).trimEnd() + "…"
-        } else {
-            derivedTitle
-        }
-        runCatching { chatRepository.updateSessionTitle(childSessionId, childTitle) }
-    }
 
     // [deep-audit-1044 A-04] A delivered prompt that finished answers
     // "Completed"; a refusal or a timeout must reach the caller as a failure,
