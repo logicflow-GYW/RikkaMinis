@@ -2,11 +2,13 @@
 
 - **分支**：`fix/w1118-chat`（worktree `/var/minis/shared/work/incr1118/wt1`）
 - **基线**：`c85131ad`（= 当前 main，已含 FIX-1117B 五支）
-- **代码 tip**：`1274de37`（`fix(chat): composer/transcript state handoffs lose user content (WAVE-1118 D1/D2)`）
+- **代码 tip**：`5b471b4e`（`fix(chat): keep the clear funnel last on the exit-edit path (CI gate round)`）
+  —— 代码分两次提交：`1274de37`（六条修复）+ `5b471b4e`（分支 CI #3217 的门禁反馈，见 §2.7；意图不变，形态改为门与
+  「字段唯一写者」都要求的那个）
 - **来源**：`shared/work/meta-audit/reports/wave1118/` 的 `Wave_1118_D1_Report.md`（F-01…F-08）、
   `Wave_1118_D2_Report.md`（F-01…F-06）、`Wave_1118_D10_Report.md` **仅 F-05**；
   纪律见 `shared/work/incr1118/fix/POLICY.md`
-- **改动面**：6 个生产文件（+198/−17）+ 4 个新测试类（28 用例）——
+- **改动面**：6 个生产文件（+237/−16，两次提交合计）+ 4 个新测试类（+644，28 用例）——
   `ChatViewModel.kt` / `ChatScreen.kt` / `ChatInputArea.kt` / `ChatQueueInterruption.kt` /
   `ChatViewModelStore.kt` / `MoveToCapsuleGate.kt`（仅 KDoc）
 - **未跑**（按任务书硬约束）：全量 `scan.sh` / `test_scan.py` / gradle。编译证据交分支 CI。
@@ -75,7 +77,7 @@
 **变异（12 臂，每条只翻对应断言）**
 
 ```
-M1  ChatInputArea.kt        RED -> exit-edit clears the composer before restoring the snapshot
+M1  ChatInputArea.kt        RED -> exit-edit hands the draft chips back after the clear funnel
 M2  ChatViewModel.kt        RED -> clearChat drops the paste chips
 M3  ChatQueueInterruption.kt RED -> truncateBeforeEdit resets (marker/pressure) | AFTER rebuild | package parity
 M4  ChatQueueInterruption.kt RED -> truncateBeforeEdit resets AFTER the history rebuild      (顺序臂)
@@ -101,24 +103,42 @@ M5 的第一次结果暴露了测试自身的漏洞（`no early refusal` 因「�
 
 ### 2.1 D1-F02 · 退出编辑销毁草稿芯片（P1）
 
-**修法**（`ChatInputArea.kt` + `ChatViewModel.kt`）
+**先证**：`cancelEdit()` 把 `_preEditPastes` 写回 `_pastedTexts`（附件同理），紧接着
+`clearComposerInput()` 调 `viewModel.clearPastedText()`（audit P1-C 的设计，发送/清空场景防芯片残留）——
+两条各自合理，串起来就是「先恢复后抹除」。附件不受影响（`clearComposerInput` 不动 attachments），
+所以症状是「附件回来了、粘贴芯片没了」。
 
-1. 退出编辑胶囊：`cancelEdit()` → `clearComposerInput()` **换成** `clearComposerInput()` → `cancelEdit()`。
-   `clearComposerInput()` 按 audit P1-C 的设计就是要丢掉粘贴缓冲，所以它必须在「恢复快照」之前跑。
-2. 只反顺序还不够：`cancelEdit()` 恢复快照时，composer 里的草稿正文已经不在了（编辑 prefill 不是草稿），
-   而 **inline 芯片只有在字面量还在正文里时才能被展开**（`expandPastePlaceholders` 只认字面量、
-   `appendUnlinkedPastes` 只收 detached）。原样恢复 inline 会得到一个「看得见、发送后内容蒸发、
-   且 `unexpandedPasteMarkers` 也不报警」的芯片。
-   新增纯函数 `pastesAfterCancelEdit(snapshot, liveText)`：**字面量还在 → 保持 inline；不在 → 降级 detached**。
+**第二层（只改顺序并不够）**：能恢复的快照里，inline 芯片的 `[Pasted#N]` 字面量原本在**草稿正文**里，
+而退出编辑时正文已经被编辑 prefill 覆盖、随即被清空。`expandPastePlaceholders` 只认字面量、
+`appendUnlinkedPastes` 只收 detached、`unexpandedPasteMarkers` 也不会报警 —— 原样恢复 inline 会得到一个
+**看得见、发送后内容蒸发** 的芯片。
+
+**修法（三个动作，漏斗仍在最后）**
+
+```
+val draftPastes = viewModel.peekPreEditPastes()        // 先记住草稿芯片（只读）
+viewModel.cancelEdit()                                 // 退出编辑：恢复附件 + 快照
+clearComposerInput()                                   // 清输入框（漏斗，按设计丢缓冲）
+viewModel.restoreDraftPastesAfterClear(draftPastes)    // 放回，且只以 detached 形态
+```
+
+- `pastesAfterCancelEdit(snapshot, liveText)`（纯函数）：**字面量还在 → 保持 inline；不在 → 降级 detached**。
+  `cancelEdit()` 内部也用它（对「不清空正文就取消」的调用方保持旧形态）。
+- `restoreDraftPastesAfterClear` 再跑一次同一规则（此时正文已是空串）并按 id 去重，保证不会与现存芯片重复。
+
+**为什么不是「把 clearComposerInput 挪到 cancelEdit 之前」**：我第一版就是这么写的，分支 CI #3217 的
+`chat_ui_interaction_check` 两条判据把它挡住了（详见 §2.7）。门的要求是对的 —— 这个漏斗是**唯一**重置
+字段的地方，每个 composer 出口都必须经过它，且必须最后经过。所以正确解法是「把芯片带过漏斗」，不是颠倒顺序。
 
 **测试**：`ComposerPasteCarryTest` 的 `exit edit *` 四条（保留 inline / 降级 detached / 一个都不丢 /
-`[Pasted#1]` 不被 `[Pasted#10]` 误命中）+ `ComposerClearWiringTest.exit-edit clears the composer before
-restoring the snapshot` + `ComposerPasteCarryTest.exit-edit restores through the helper, not the raw snapshot`。
+`[Pasted#1]` 不被 `[Pasted#10]` 误命中）+ `ComposerClearWiringTest.exit-edit hands the draft chips back
+after the clear funnel`（记住 → 漏斗 → 放回，三段顺序）+ `ComposerPasteCarryTest.exit-edit restores
+through the helper, not the raw snapshot`。
 
-**变异**：M1（顺序退回）→ 只翻顺序断言；M12（去掉降级）→ 两条降级断言红。
+**变异**：M1（把放回挪到漏斗之前）→ 只翻顺序断言；M12（去掉降级）→ 两条降级断言红。
 
-**用户行为变化**：退出编辑后，草稿里的折叠粘贴块仍然在（以 detached 芯片形态），发送时会拼在正文之后。
-附件行为不变。
+**用户行为变化**：退出编辑后，草稿里的折叠粘贴块仍然在（以 detached 芯片形态），发送时拼在正文之后；
+附件、正文清空的行为与修复前一致（正文本来就不快照，见 §4-h）。
 
 ### 2.2 D1-F04 · 拒绝分支丢输入（P1）
 
@@ -202,7 +222,9 @@ inline 条目（`expandPastePlaceholders` 返回 consumed，`expandPastedTextWit
 - `PendingTransfer` 增 `pastedTexts: List<PastedText> = emptyList()`（默认值让旧调用点原样编译）。
 - 纯函数 `pastesCarriedByMove(pastes, movedText)`：**字面量已在正文里的不搬**（不然目标会「屏上一份 + 发送时再拼一份」），
   其余一律转成 **detached** 携带（目标正文没有对应字面量，inline 形态在那边不可展开）。
-- 源侧（`ChatInputArea` 的 Move-to 回调）传入 `pastesCarriedByMove(viewModel.pastedTexts.value, movedText)`。
+- 源侧（`ChatInputArea` 的 Move-to 回调）传入 `pastesCarriedByMove(viewModel.pastedTexts.value, inputFieldValue.text)`。
+  判断基准是**字段的实时文本**（不是展开后的串，也不是 `viewModel.inputText` 的 150 ms 防抖快照）：
+  字面量还在屏幕上 ⇒ 它会被上面的展开带进正文，不该再搬一份。
 - 目标侧（`ChatScreen` 的 transfer drain）逐条 `stashPastedText(p.text, inlineMarker = false)`——
   由目标自己重新分配 id（`nextFreePasteId` 还会把屏上已有字面量计入 used），源侧 id 不会串。
 - `MoveToCapsuleGate` 只改 KDoc（说明「芯片会随合格草稿一起走」）；**判据本体不动**：
@@ -215,6 +237,37 @@ inline 条目（`expandPastePlaceholders` 返回 consumed，`expandPastedTextWit
 **变异**：M10（源侧不填）→ 只翻源侧接线；M11（目标侧按 inline 还原）→ 只翻目标侧接线；M12 见 §2.1。
 
 **用户行为变化**：「Move to…」之后，目标的芯片行里出现同样的粘贴块，发送时拼在正文之后（与新建粘贴的顺序一致）。
+
+### 2.7 分支 CI #3217 的门禁反馈（本支第一版修法被挡下）
+
+`chat_ui_interaction_check`（114 绿 / 1 红）在 ChatInputArea 上给了两条：
+
+```
+[E2-transfer] the transfer site passes `movedText`, not the field's live value (inputFieldValue.text)
+[F4] the exit-edit pill at line 2226 acts on the composer without routing through clearComposerInput
+     on the same path -- the field reset is bypassed
+```
+
+两条都不是「门瞎了」，而是**门锚定的正是我改动的两个决定点**：
+
+- **E2**：Move-to 的 `inputText =` 必须是字段的实时值表达式。我原来把它提成了 `movedText` 局部变量 ⇒ 判据失配。
+  改回内联后，`pastesCarriedByMove` 也改成读 `inputFieldValue.text`（更正确：字面量还在屏幕上就不该重复搬）。
+- **F4**：退出编辑胶囊必须**在锚点之后**经过 `clearComposerInput`（reach 200 字符，途中不许有块边界）。
+  我第一版是把 `clearComposerInput()` 挪到 `cancelEdit()` **之前** ⇒ 方向相反。门依据的是「这个漏斗是字段的
+  唯一重置点，每个出口最后都要过它」，我认同这个决定，所以改造实现而不是改造门：把芯片**带过**漏斗
+  （§2.1 的 peek → cancel → funnel → restore 四步），并把 F4 的 `[F4] the cross-session move` 也算进距离预算
+  （stash 调用里加了注释后，锚点到漏斗的距离一度 405 字符 > reach 400，缩回嵌套类短名 `PendingTransfer(...)`
+  才落回 386 —— 这一条同样是门抓到的（第二次红），我第一次没算注释的长度预算）。
+
+**处置后本地复跑**：`chat_ui_interaction_check` → `CHAT-UI-INTERACTION GATE OK`；
+四个直接邻门（锁 `stale_closure_guard`（我加了引用 `followState`/`sessionId` 的 lambda）、
+`discarded_return_guard`（`stashPastedText` 返回值丢弃）、`chat_session_id_binding_check`、
+`claim_release_guard`（动了 `sendMessage` 的守卫区））全绿；harness 28 用例仍全绿；12 条变异臂仍各自翻红
+（M1 的变异改成「把放回挪到漏斗之前」，因此断言名也随之改为 `exit-edit hands the draft chips back after
+the clear funnel`）。
+
+**教训（可复用）**：修一个「顺序」类 bug 之前，先跑本域的门，看它是否已经锚定了那个顺序——
+锚定的话，正确修法通常是「让状态跨过那一步」而不是「颠倒那一步」。
 
 ---
 
@@ -285,6 +338,7 @@ Move-to 只搬文本、不搬块；目标会话会被 `unexpandedPasteMarkers` �
    `cancelEdit` 不在 Move-to 两侧；`finally` 只恢复文本），**没有**装置证伪。按 P2 登记，不作为「已证」。
 2. **D2-F03 的竞态窗口**无实测数据（未跑真机、未造延迟 repo），登记里写的是「毫秒级」，不是测量值。
 3. 本支**未**跑全量 `scan.sh` / `test_scan.py` / gradle（任务书硬约束）；编译与测试类执行的真证据只在分支 CI。
+   本地只跑了本门（`chat_ui_interaction_check`）+ 四个直接邻门 + 28 用例切片 harness。
    本地的 28 用例是**切片编译**（`ChatFollowController.kt` 原文件 + 两条纯函数原文 + `PastedText` 原文），
    与 CI 的完整 classpath 不同源，不能互相替代。
 4. `D1-INV-12` 里点名的第六处 `FAB-UP`（`tracedScrollToItem("FAB-UP", 0, 0)`）**不是**跳底：它按设计跳第 0 行，
