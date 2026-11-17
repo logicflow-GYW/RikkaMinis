@@ -104,7 +104,7 @@ private enum class BackingState { ABSENT, PRESENT, UNKNOWN }
  * Decide whether the L2S backing directory exists, without ever turning "I
  * could not look" into "it is not there".
  *
- * [C1.1] `Files.exists` answers false both for ENOENT and for EACCES, and it
+ * C1.1: `Files.exists` answers false both for ENOENT and for EACCES, and it
  * swallows the exception that tells them apart. The pre-flight check used to
  * read that single boolean, so a rootfs directory whose own mode bits deny
  * search (`chmod 000`, or a tarball that carried 0700 onto a directory the app
