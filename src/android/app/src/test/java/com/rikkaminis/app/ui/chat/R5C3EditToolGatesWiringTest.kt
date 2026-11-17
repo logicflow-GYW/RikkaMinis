@@ -122,37 +122,22 @@ class R5C3EditToolGatesWiringTest {
         )
     }
 
-    // ── C-C-07①: sub-agent tool calls are budgeted, usage only after gate ───
+    // ── C-C-07①: dispatch is budgeted before the child runs ─────────────────
 
     @Test
-    fun `sub-agent tool calls are budgeted and usage counts only accepted dispatches`() {
-        val gate = prompt.indexOf("if (!config.isSubagent) {")
-        val record = prompt.indexOf("runCatching { skillRepository?.recordSkillUse(skill.id) }")
-        assertTrue("sub-agent kind gate missing", gate > 0)
-        assertTrue("recordSkillUse must run only after the kind gate ($gate < $record)", record > gate)
-        // The gate belongs to the sub-agent's OWN tool executions — the
-        // executeSubTool lambda — NOT to the spawn dispatch (executeTool already
-        // charged that call, so a gate there would double-charge the spawn and
-        // leave every inner call free). Assert inside the lambda: deadline +
-        // TOOL_CALLS consume both precede the executor call, and the refusal
-        // carries the dispatch-level marker that keeps
-        // ShellBudgetStopSymmetryTest's run-level gate list at two entries.
-        val lamStart = prompt.indexOf("executeSubTool = { name, subArgs ->")
-        val exec = prompt.indexOf("executeSubagentTool(name, subArgs", lamStart)
-        assertTrue("sub-agent executor lambda missing", lamStart > 0)
-        assertTrue("executor call missing", exec > lamStart)
-        val lam = prompt.substring(lamStart, exec)
+    fun `sub-agent dispatch charges the run's budget before the child runs`() {
+        val at = prompt.indexOf("internal suspend fun ChatViewModel.executeSpawnAgentTool(")
+        assertTrue("the dispatch function is gone", at > 0)
+        val body = prompt.substring(at)
+        val call = body.indexOf("ChatMutationMethods.prompt(")
+        assertTrue("the dispatch call site is gone", call > 0)
         assertTrue(
-            "inner executions must honour the run deadline",
-            lam.contains("run deadline reached — sub-agent tool call refused"),
+            "dispatch must refuse past the run deadline before prompting",
+            body.indexOf("activeRunBudget?.isExpired() == true") in 0 until call,
         )
         assertTrue(
-            "inner executions must consume a TOOL_CALLS unit",
-            lam.contains("t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS)"),
-        )
-        assertTrue(
-            "a refusal must be a dispatch-level budget failure (not a silent ok)",
-            lam.contains("throw SubagentBudgetExhaustedException"),
+            "what the child spends must be charged to THIS run's provider budget",
+            body.indexOf("DIMENSION_PROVIDER_ATTEMPTS") in 0 until call,
         )
     }
 

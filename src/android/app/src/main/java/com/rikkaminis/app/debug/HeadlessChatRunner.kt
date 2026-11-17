@@ -168,7 +168,16 @@ internal object HeadlessChatRunner {
      * automation we materialize it eagerly so subsequent reads can resolve
      * the id.
      */
-    suspend fun ensureSession(context: Context, modelId: String? = null): String =
+    suspend fun ensureSession(
+        context: Context,
+        modelId: String? = null,
+        // [rework/spawn-agent-as-real-session] Callers that already know what
+        // the session is for (a dispatched sub-agent) pass a title here. The
+        // auto-title generator only runs when the row still says "New Chat",
+        // so a title provided at creation suppresses it cleanly — writing the
+        // title AFTER the first turn instead races that generator and loses.
+        title: String? = null,
+    ): String =
         withContext(Dispatchers.IO) {
             val app = app(context)
             val resolvedModel = modelId
@@ -187,7 +196,7 @@ internal object HeadlessChatRunner {
                 ?.defaultThinkingLevel
             val s = app.chatRepository.createSession(
                 modelId = resolvedModel,
-                title = null,
+                title = title,
                 thinkingLevel = defaultThinking?.name,
             )
             // Mark source so the UI session list shows it came from RPC.

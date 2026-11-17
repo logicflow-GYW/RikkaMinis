@@ -1,6 +1,5 @@
 package com.rikkaminis.app.data.repository
 
-import com.rikkaminis.app.tools.SkillInfo
 import com.rikkaminis.app.tools.SubagentSkill
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -25,23 +24,14 @@ import org.junit.Test
  * [SkillRepository.resolveMergeBase] is the single exit for the polarity
  * decision, so it is testable without Android; the tests below mirror the exact
  * call shape `writeSkillMd` uses (resolveMergeBase → mergeFrontmatter) and then
- * hand the result to the real consumer, `SubagentSkill.parseSubagentConfig`, to
- * prove the extended keys are reachable after the landing — not just present in
- * a string.
+ * extract the landed block back out, to prove the extended keys are still
+ * reachable after the landing — not just present somewhere in the document.
  *
  * Expectations are hard-coded literals, never derived from the functions under
  * test (a derived expectation would let a mutation pass while wearing its own
  * teeth).
  */
 class SkillFrontmatterPolarityTest {
-
-    /** Production-shaped SkillInfo stub: body is frontmatter-STRIPPED. */
-    private data class Stub(
-        override val name: String,
-        override val description: String = "",
-        override val body: String = "",
-        override val frontmatter: String = "",
-    ) : SkillInfo
 
     private val diskDocument = """
         ---
@@ -152,16 +142,13 @@ class SkillFrontmatterPolarityTest {
             version = "2.1.0",
             body = "You are a researcher. Do research.",
         )
-        val config = SubagentSkill.parseSubagentConfig(
-            Stub(
-                name = "Researcher",
-                frontmatter = SubagentSkill.extractFrontmatterBlock(written),
-                body = "You are a researcher. Do research.",
-            ),
+        val block = SubagentSkill.extractFrontmatterBlock(written)
+        assertTrue("the subagent flag must survive the landing", block.contains("subagent: true"))
+        assertTrue("the landed budget must be readable", block.contains("max_turns: 50"))
+        assertTrue(
+            "the landed allowlist must be readable",
+            block.contains("allowed_tools: [file_read, shell_execute]"),
         )
-        assertTrue(config.isSubagent)
-        assertEquals(50, config.maxTurns)
-        assertEquals(setOf("file_read", "shell_execute"), config.allowedTools)
     }
 
     @Test
@@ -187,11 +174,9 @@ class SkillFrontmatterPolarityTest {
             written.contains("subagent:"),
         )
         assertTrue(written.contains("max_turns: 9"))
-        val config = SubagentSkill.parseSubagentConfig(
-            Stub(name = "Old Name", frontmatter = SubagentSkill.extractFrontmatterBlock(written)),
-        )
-        assertFalse(config.isSubagent)
-        assertEquals(9, config.maxTurns)
+        val block = SubagentSkill.extractFrontmatterBlock(written)
+        assertFalse("no subagent flag may appear", block.contains("subagent:"))
+        assertTrue("the surviving budget must be readable", block.contains("max_turns: 9"))
     }
 
     @Test
@@ -366,11 +351,9 @@ class SkillFrontmatterPolarityTest {
         assertFalse("the stale disk budget must not survive", fixed.contains("max_turns: 7"))
         // …and the real consumer reads the extended keys back off the document,
         // so "landed" means reachable, not merely present in a string.
-        val config = SubagentSkill.parseSubagentConfig(
-            Stub(name = "Old Name", frontmatter = SubagentSkill.extractFrontmatterBlock(fixed)),
-        )
-        assertTrue(config.isSubagent)
-        assertEquals(50, config.maxTurns)
+        val block = SubagentSkill.extractFrontmatterBlock(fixed)
+        assertTrue("the incoming flag must land", block.contains("subagent: true"))
+        assertTrue("the incoming budget must land", block.contains("max_turns: 50"))
 
         // The pre-fix call shape: update() re-seeds from readSkillMdFrontmatter(id),
         // i.e. the on-disk block becomes the merge base.

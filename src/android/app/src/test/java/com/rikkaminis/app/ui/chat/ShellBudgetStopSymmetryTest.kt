@@ -177,16 +177,38 @@ internal data class BudgetGate(
  * [toolsSrc] and reports the terminating signals present in its `if (!…) { … }`
  * body.
  *
- * [FIX-R4-Q F-14] Dispatch-level refusals are excluded: the sub-agent dispatch
- * gates its provider requests on the host run's budget and throws
- * `SubagentBudgetExhaustedException` when refused, so the dispatch fails as a
- * tool result while the RUN keeps going (setting `t7BudgetStopReason` there
- * would end the parent run because a sub-agent ran out of attempts). That gate
- * is pinned by `SubagentBudgetGateTest`; this collector is about the gates that
- * terminate the run, and only those may — indeed must — set a stop reason.
+ * Dispatch-level refusals are excluded BY POSITION, not by class name: every
+ * budget gate inside `ChatViewModel.executeSpawnAgentTool` guards a dispatch
+ * that fails as a tool result while the RUN keeps going (setting
+ * `t7BudgetStopReason` there would end the parent run because a sub-agent ran
+ * out of attempts). The old filter matched a `SubagentBudgetExhaustedException`
+ * token; after the dispatch rework (`rework/spawn-agent-as-real-session`) that
+ * type is gone and the refusal is a plain failed `ToolExecutionResult`, so a
+ * token-shaped filter silently reclassified the dispatch gates as run-level.
+ * The function-region test pins the decision and survives renames. Those gates
+ * are pinned by `SubagentBudgetGateTest`; this collector is about the gates
+ * that terminate the run, and only those may — indeed must — set a stop reason.
  */
 internal fun collectBudgetGates(toolsSrc: String): List<BudgetGate> {
     val lines = toolsSrc.split("\n")
+    // Region of the sub-agent dispatch: its budget gates refuse a TOOL, not the
+    // run (see the KDoc above). Computed from the source shape so a rename of
+    // the refusal type cannot turn them into run-level gates again.
+    val dispatchStart = lines.indexOfFirst {
+        it.startsWith("internal suspend fun ChatViewModel.executeSpawnAgentTool(")
+    }
+    var dispatchEnd = lines.size
+    if (dispatchStart >= 0) {
+        for (k in dispatchStart + 1 until lines.size) {
+            val l = lines[k]
+            if (l.startsWith("@") || l.startsWith("internal ") || l.startsWith("private ") ||
+                l.startsWith("public ") || l.startsWith("fun ")
+            ) {
+                dispatchEnd = k
+                break
+            }
+        }
+    }
     val out = mutableListOf<BudgetGate>()
     lines.forEachIndexed { i, line ->
         val dim = Regex("DIMENSION_([A-Z_]+)").find(line) ?: return@forEachIndexed
@@ -204,9 +226,9 @@ internal fun collectBudgetGates(toolsSrc: String): List<BudgetGate> {
             j++
         }
         val text = body.toString()
-        // Not a run-level gate when its refusal is a dispatch failure — see the
-        // KDoc above ([FIX-R4-Q F-14]).
-        if (text.contains("SubagentBudgetExhaustedException")) return@forEachIndexed
+        // Not a run-level gate when it lives in the dispatch function — see the
+        // KDoc above (position-based, survives renames).
+        if (dispatchStart >= 0 && i in dispatchStart until dispatchEnd) return@forEachIndexed
         out += BudgetGate(
             dimension = dimension,
             line = i + 1,

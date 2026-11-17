@@ -218,10 +218,16 @@ class ChatRepository(
      *
      * @param pinned true = pin (timestamp set to now), false = unpin
      *   (pinned_at reset to null). Idempotent either way.
+     * @return the written `pinned_at` (null when unpinned). Callers that pin
+     *   on someone else's behalf (sub-agent dispatch auto-pin) compare this
+     *   value before unpinning, so a manual pin taken during the window is
+     *   not undone by the restore.
      */
-    suspend fun pinSession(sessionId: String, pinned: Boolean) {
+    suspend fun pinSession(sessionId: String, pinned: Boolean): Long? {
         val now = System.currentTimeMillis()
-        dao.updatePinnedAt(sessionId, if (pinned) now else null, now)
+        val value = if (pinned) now else null
+        dao.updatePinnedAt(sessionId, value, now)
+        return value
     }
 
     /**

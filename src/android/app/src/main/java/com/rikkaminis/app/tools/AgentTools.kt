@@ -20,19 +20,18 @@ object AgentTools {
         // attempt those calls. Mirrors the iOS gate at
         // AIChatViewModel.makeAgentTools(memoryEnabled:).
         memoryEnabled: Boolean = true,
-        // [T-subagent-toggle] When the sub-agent / cross-session dispatch
-        // switch is OFF (default), drop spawn_agent from the schema entirely
-        // so the model can't attempt it — mirrors the memory toggle pattern.
-        // When ON, expose it; the sub-agent's own tool set is filtered inside
-        // SubagentSkill.buildFilteredTools (spawn_agent itself is FORBIDDEN
-        // there, so recursion via nested spawn_agent is impossible).
-        // [fix/diff-audit-0904-F4] Note: this anti-recursion filter covers the
-        // spawn_agent tool path only. A headless session created via
-        // `minis-sessions-cli send` (also gated by this switch) reads the same
-        // toggle and CAN expose spawn_agent to its model — i.e. one nesting
-        // level through the send path is reachable by design; only deeper
-        // recursion (sub-agent spawning sub-agents) is blocked.
-        subagentEnabled: Boolean = false,
+        // [T-subagent-toggle] When sub-agent dispatch is OFF, drop spawn_agent
+        // from the schema entirely so the model can't attempt it — mirrors the
+        // memory toggle pattern. ON is the app default since
+        // [rework/spawn-agent-as-real-session 2026-11-17]: a dispatched
+        // sub-agent is a real session with the full tool set, so there is no
+        // second, filtered tool set to keep in sync and no degraded path to
+        // hide.
+        // Nested dispatch: `spawn_agent` stays in the schema for child
+        // sessions (they are ordinary sessions), and the dispatch prompt tells
+        // the child not to recurse. One level is the intended shape; deeper
+        // nesting is a prompt-level rule, not a schema trick.
+        subagentEnabled: Boolean = true,
     ): List<AgentToolDefinition> = buildList {
         add(shellExecuteDefinition())
         add(FileReadTool.definition())

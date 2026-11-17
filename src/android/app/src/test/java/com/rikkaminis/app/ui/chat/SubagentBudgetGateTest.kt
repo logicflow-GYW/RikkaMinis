@@ -2,77 +2,113 @@ package com.rikkaminis.app.ui.chat
 
 import java.io.File
 import java.io.FileNotFoundException
-import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [FIX-R4-Q F-14] Wiring assertions for the sub-agent dispatch path.
+ * Wiring assertions for the sub-agent dispatch path.
  *
- * The main loop gates every provider request on the run's observation budget
- * (`AgentLoopEngine`: deadline check + `t7ConsumeAndTrace(PROVIDER_ATTEMPTS)`),
- * and records skill usage whenever a SKILL.md is read. The sub-agent path did
- * neither: a runaway sub-agent burned provider attempts the budget never
- * counted, and skills dispatched through `spawn_agent` never showed up in the
- * "最近使用" ordering.
+ * Dispatch is a real session now (rework 2026-11-17), so the behaviour lives
+ * behind `ChatMutationMethods.prompt` — Android-coupled and not JVM-callable.
+ * What CAN silently rot is the wiring around it, and each assertion below is a
+ * defect that has already happened once somewhere in this tree:
  *
- * These are source-shape assertions on purpose: the behaviour lives inside a
- * Compose-free but Android-coupled tool dispatcher, and what can silently rot
- * is the WIRING (a gate that exists but sits after the request, a `continue`
- * that skips it, a second dispatch arm that forgets the counter).
+ *  - a budget gate that exists but sits AFTER the call it was meant to guard;
+ *  - dispatch that returns immediately instead of waiting for an answer;
+ *  - a cancellation that is swallowed into "sub-agent failed";
+ *  - a pin taken for the dispatch window that is never released.
  */
 class SubagentBudgetGateTest {
 
     private val promptAndTools by lazy { readRepoFile(PROMPT_AND_TOOLS) }
 
-    @Test
-    fun subagentRequestIsGatedByDeadlineAndAttemptBudgetBeforeTheGateway() {
-        val spawn = functionRegion(promptAndTools, "internal suspend fun ChatViewModel.executeSpawnAgentTool(")
-        val gatewayAt = spawn.indexOf("ProviderExecutionGateway.stream(")
-        assertTrue("gateway call not found in the spawn dispatch", gatewayAt > 0)
+    private fun spawn(): String =
+        functionRegion(promptAndTools, "internal suspend fun ChatViewModel.executeSpawnAgentTool(")
 
-        val deadlineAt = spawn.indexOf("activeRunBudget?.isExpired() == true")
+    @Test
+    fun `deadline and provider-attempt gates run before the session is prompted`() {
+        val body = spawn()
+        val promptAt = body.indexOf("ChatMutationMethods.prompt(")
+        assertTrue("the dispatch call site is gone", promptAt > 0)
+
+        val deadlineAt = body.indexOf("activeRunBudget?.isExpired() == true")
+        assertTrue("the dispatch must refuse past the run deadline", deadlineAt in 0 until promptAt)
+
+        val consumeAt = body.indexOf("DIMENSION_PROVIDER_ATTEMPTS")
         assertTrue(
-            "the sub-agent must refuse a request past the run deadline, before the gateway call",
-            deadlineAt in 0 until gatewayAt,
-        )
-        val consumeAt = spawn.indexOf("DIMENSION_PROVIDER_ATTEMPTS")
-        assertTrue(
-            "the sub-agent must consume a PROVIDER_ATTEMPTS unit before the gateway call",
-            consumeAt in 0 until gatewayAt,
-        )
-        assertTrue(
-            "a refused request must be distinguishable from a provider failure",
-            spawn.contains("SubagentBudgetExhaustedException"),
+            "one provider attempt must be charged to THIS run before the child runs",
+            consumeAt in 0 until promptAt,
         )
     }
 
     @Test
-    fun subagentSkillUsageIsRecorded() {
-        val spawn = functionRegion(promptAndTools, "internal suspend fun ChatViewModel.executeSpawnAgentTool(")
+    fun `dispatch asks for the final answer instead of fire-and-forget`() {
+        val body = spawn()
+        assertTrue("dispatch must block for the answer", body.contains(".put(\"wait\", true)"))
         assertTrue(
-            "dispatching a sub-agent is a skill use — record it once the skill resolved",
-            spawn.contains("recordSkillUse(skill.id)"),
+            "the wait must be bounded",
+            body.contains("SubagentSkill.WAIT_TIMEOUT_SECONDS"),
         )
-        val subagentTool = functionRegion(promptAndTools, "internal suspend fun ChatViewModel.executeSubagentTool(")
+    }
+
+    @Test
+    fun `a user stop is rethrown, not reported as a sub-agent failure`() {
+        val body = spawn()
+        val catchAt = body.indexOf("catch (ce: CancellationException)")
+        assertTrue("CancellationException must be handled before the generic catch", catchAt > 0)
+        val rethrowAt = body.indexOf("throw ce", catchAt)
+        assertTrue("the cancellation must be rethrown", rethrowAt > catchAt)
+        val genericAt = body.indexOf("catch (t: Throwable)")
+        assertTrue("the generic catch must come after the cancellation arm", genericAt > catchAt)
+    }
+
+    @Test
+    fun `the dispatcher is pinned for the dispatch and released in a finally block`() {
+        val body = spawn()
+        val beginAt = body.indexOf("SubagentDispatchPin.begin(")
+        assertTrue("dispatch must pin the parent", beginAt > 0)
+        val promptAt = body.indexOf("ChatMutationMethods.prompt(")
+        assertTrue("the pin must be taken before the child runs", beginAt < promptAt)
+
+        val finallyAt = body.indexOf("} finally {")
+        assertTrue("the release must be in a finally block (a throw must not leak a pin)", finallyAt > beginAt)
+        val endAt = body.indexOf("SubagentDispatchPin.end(")
+        assertTrue("dispatch must release the pin", endAt > finallyAt)
+
         assertTrue(
-            "the sub-agent's own FileReadTool arm must record SKILL.md reads like the main arm",
-            subagentTool.contains("recordSkillUse(sid)"),
+            "restore must only undo OUR pin, not a manual one taken meanwhile",
+            body.contains("pinnedAt == ourPin"),
+        )
+    }
+
+    @Test
+    fun `the child is named at creation, before the title generator can run`() {
+        // On-device probes (1.0.0+3191 then +3192): renaming AFTER the turn
+        // loses — the child's auto-title generator finishes later and overwrites
+        // it, and the first attempt managed to rename the PARENT instead
+        // (ChatViewModel has its own `sessionId`). The title generator only
+        // fires while the row reads "New Chat", so the fix is to name the row
+        // when it is created: the title must travel in the dispatch params.
+        val body = spawn()
+        val promptAt = body.indexOf("ChatMutationMethods.prompt(")
+        assertTrue("the dispatch call site is gone", promptAt > 0)
+        assertTrue(
+            "the child title must be part of the dispatch params",
+            body.contains("put(\"title\""),
+        )
+        assertFalse(
+            "a post-hoc rename races the child's title generator — it must not come back",
+            body.contains("chatRepository.updateSessionTitle("),
         )
         assertTrue(
-            "the sub-agent file-read arm must still be the plain tool call",
-            subagentTool.contains("FileReadTool.NAME -> FileReadTool.execute("),
-        )
-        assertEquals(
-            "exactly one arm records sub-agent skill reads (a second copy would double count)",
-            1,
-            Regex("skillIdFromPath\\(readPath\\)").findAll(subagentTool).count(),
+            "the name must come from the task text",
+            body.contains("firstOrNull { it.isNotEmpty() }"),
         )
     }
 
     /** Source of the function starting at [signature], cut at the next top-level
-     *  declaration (a line starting at column 0 with `internal`/`private`/`fun`/
-     *  `@`), so ordering assertions cannot see the neighbouring function. */
+     *  declaration so ordering assertions cannot see the neighbouring function. */
     private fun functionRegion(src: String, signature: String): String {
         val at = src.indexOf(signature)
         assertTrue("signature not found: $signature", at >= 0)

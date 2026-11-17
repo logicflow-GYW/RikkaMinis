@@ -187,8 +187,9 @@ internal object ConfigBuiltins {
         prefs.registerOnSharedPreferenceChangeListener(concurrencyListener)
         // [T-subagent-toggle] Cross-session sub-agent dispatch switch. Same
         // prefs+key as SubagentPrefs so Settings / minis-config / the agent
-        // all read-write one source of truth. OFF by default (side-effectful:
-        // lets the agent open new sessions and run long-lived work).
+        // all read-write one source of truth. ON by default: sub-agent
+        // dispatch is the app's built-in delegation capability (a real
+        // session with the full tool set), not an optional skill feature.
         val subagentPrefs = context.getSharedPreferences(
             com.rikkaminis.app.data.SubagentPrefs.PREFS,
             Context.MODE_PRIVATE,
@@ -197,10 +198,10 @@ internal object ConfigBuiltins {
             PrefsBoolField(
                 path = "runtime.subagentEnabled",
                 displayName = "Sub-agent / cross-session dispatch",
-                description = "When ON, the agent can spawn independent sub-agents and dispatch work to other chat sessions (exposes the spawn_agent tool and enables minis-sessions-cli send). OFF by default: this lets the agent open new sessions and run long-lived work, so it stays disabled until you explicitly turn it on.",
+                description = "When ON, the agent can dispatch sub-agents — real chat sessions with the full tool set — via spawn_agent (synchronous) and minis-sessions-cli send (async / parallel). ON by default; turn it off to forbid the agent from opening new sessions.",
                 prefs = subagentPrefs,
                 key = com.rikkaminis.app.data.SubagentPrefs.KEY_ENABLED,
-                defaultValue = false,
+                defaultValue = true,
             )
         )
 

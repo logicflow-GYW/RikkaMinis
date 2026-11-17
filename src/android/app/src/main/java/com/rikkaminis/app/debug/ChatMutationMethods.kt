@@ -104,7 +104,11 @@ internal object ChatMutationMethods {
         val app = app(context)
         val existingId = params.optString("sessionId", "").ifEmpty { null }
         val isNew = existingId == null
-        val sessionId = existingId ?: HeadlessChatRunner.ensureSession(context)
+        // Title at creation time (optional). A title set on the row suppresses
+        // the auto-title generator (`title == "New Chat"` is its only trigger);
+        // setting it after the first turn instead races that generator.
+        val createdTitle = params.optString("title", "").trim().ifEmpty { null }
+        val sessionId = existingId ?: HeadlessChatRunner.ensureSession(context, title = createdTitle)
 
         // Resolve model override (mutually exclusive with sessionId binding).
         // [dv25-A05] Only an explicit request changes the binding; passing null

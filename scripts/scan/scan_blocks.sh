@@ -577,14 +577,15 @@ else
     echo ""
 fi
 
-# --- 31. Sub-agent turn hand-back guard (deep-audit-1017 FIX-C / ISSUE-04) ---
-#   Every continue branch that hands a turn back to the model must first append
-#   the turn's visible text to the history as ASSISTANT (otherwise the model
-#   cannot see what it already wrote and rewrites it -> duplicated body), and
-#   the loop-wrapping catch(Exception) must rethrow CancellationException (a
-#   user stop was otherwise recorded as a sub-agent failure).
-echo "━━━ [31/115] Sub-agent turn hand-back guard ━━━"
-if python3 scripts/scan/subagent_handback_check.py "$ROOT"; then
+# --- 31. Sub-agent dispatch guard (rework/spawn-agent-as-real-session) ---
+#   spawn_agent is a dispatch into a REAL session now (ChatMutationMethods.prompt,
+#   the same path as `minis-sessions-cli send`). The loop-internal contracts are
+#   gone with the second loop; what can rot around the call is: the call itself,
+#   `wait = true` + bounded timeout, the run budget charged BEFORE the call,
+#   CancellationException rethrown, the parent pinned and released in a finally,
+#   and the outcome mapped by SubagentSkill.resultOf (never hand-written).
+echo "━━━ [31/115] Sub-agent dispatch guard ━━━"
+if python3 scripts/scan/subagent_dispatch_check.py "$ROOT"; then
     PASS=$((PASS + 1))
     echo ""
 else
