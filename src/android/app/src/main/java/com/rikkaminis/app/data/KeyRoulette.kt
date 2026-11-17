@@ -163,10 +163,14 @@ object KeyRoulette {
     }
 
     /**
-     * [rv1014-D2] Atomically replace the state file with the sanitized
-     * content: write to a temp file first, then move over the original. A
-     * failure at any point leaves the original file untouched (the migration
-     * retries on the next cold start) and cleans up the temp file.
+     * [rv1014-D2] Atomically replace the state file: write to a temp file
+     * first, then move over the original. A failure at any point leaves the
+     * original file untouched (the migration retries on the next cold start)
+     * and cleans up the temp file.
+     *
+     * Also the write path for the hot rotation ([persistLocked], [W1118-D5
+     * F-05]) — the payload there is built fresh, not sanitized, but "replace
+     * the whole file" needs the same atomicity either way.
      */
     private fun rewriteSanitized(f: File, sanitized: org.json.JSONObject) {
         val tmp = File(f.parentFile, "$FILE_NAME.tmp")
@@ -270,7 +274,11 @@ object KeyRoulette {
             // monotonic draw counter against a 24h millisecond window and was
             // therefore always true (i.e. it never pruned anything).
             root.put(providerId, slice)
-            f.writeText(root.toString())
+            // [W1118-D5 F-05] Same atomic replace the migration uses: a
+            // truncate+write here loses the file (or leaves half a JSON object)
+            // if the process dies mid-write, and every provider's LRU order is
+            // read back from this file on the next cold start.
+            rewriteSanitized(f, root)
         }
     }
 }
