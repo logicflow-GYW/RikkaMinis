@@ -1,6 +1,6 @@
 # rikkaminis-dev-history 按天索引
 
-快速跳转到每日开发日志。共 2694 条记录，104 天。
+快速跳转到每日开发日志。共 2734 条记录，105 天。
 
 ## 2026-08-03（11 条）
 
@@ -5641,7 +5641,7 @@
 - `23:39` **PRoot 上游同步合入 main（2026-11-15 深夜，用户两次放行「检查后合并」「确认推送」）**
   - **结果**：应用 `main` `4d985a8e` → **`c9903d2c`**（`--no-ff` merge `chore/proot-upstre…
 
-## 2026-11-16（18 条）
+## 2026-11-16（31 条）
 
 - `00:39` **rikkahub 输入栏毛玻璃 → RikkaMinis 移植（2026-11-15 夜，分支 `feat/composer-glass-1115`）**
   - **用户诉求演进**：先「研究 rikkahub 输入栏背景效果能不能抄」→ 看了硬编码版后明确要「像他那样**可调**」。
@@ -5679,3 +5679,86 @@
   - 1. **跟随退出真机验收完成**：方案二 `d8d818aa`（读回 `afterContentPadding`）装机 `1.0.0+3164`，用户真机确认…
 - `13:38` **新提交审计 → 空集，改审三分支完整 diff（2026-11-16 13:4x）**
   - **事实**：`git fetch` 后 `e55fec1..origin/main` 为空 —— 今天所有代码已经全部合入并审过。所以「审新提交」没有对象。
+- `13:42` **dev-history 本地档案重建 + 脱敏规则 CJK 边界 bug（2026-11-16 13:4x）**
+  - 用户「把本地的文档也更新一下」→ `dev-history-sync` 流水线跑完（rebuild → sanitize → build_sagas → 再 s…
+- `15:30` **file_write 台账护栏落地 + 真机验证（2026-11-16 15:2x）**
+  - **背景（查证后的事实）**：`shared/backlog.md` 同形态覆盖事故**共 6 次**，不是 3 次
+- `15:50` **file_write 护栏分支合并 main（2026-11-16 15:5x）**
+  - 用户「检查一下云端上的那个分支，没问题就合并」→ 云端唯一分支 `fix/append-only-write-guard-1116` @ `09ba40d1`。
+- `17:14` **设置页即时生效（Chat Tuning + Runtime Limits）—— 2026-11-16 下午**
+  - 用户问「聊天微调和运行时限制能不能直接即时生效，不用按保存」。查证后动手：**分支 `feat/live-apply-settings-1116` @ `379…
+- `17:32` **live-apply 设置页合并 main（2026-11-16 17:3x）**
+  - **分支** `feat/live-apply-settings-1116` @ `379b84ef` → **merge `088f0c38`**（API m…
+- `18:59` **Loomy 三号转网关（2026-11-16 晚间）**
+  - 3 份 `auth-session.json`（session/userid/phone/updatedAt）→ aigw 网关格式，全 ALIVE。
+- `20:15` **Move-to 胶囊空草稿修复（2026-11-16 晚，分支 `fix/move-to-capsule-empty-1116` @ `6208e8c5`，CI #3171 全绿，未合并）**
+  - 用户报「外部分享文件后输入框右上角那个 Move to… 标识一直挂着，很碍眼」。查实：胶囊 = T51/T185 的「把当前草稿移到另一个会话」快捷入口，`h…
+- `21:14` **顶栏胶囊落地（2026-11-16 21:1x，分支 `feat/topbar-capsule-1116` @ `b50c948`，CI #3176 全绿，未合并）**
+  - 按方案 B 实现（只有 `composerGlassOn` 才换胶囊形态）。三个文件 + 两个测试：
+- `21:51` **顶部渐隐「横线」修复（2026-11-16 21:4x，分支 `feat/topbar-capsule-1116` @ `9b65e947`，CI #3179 全绿）**
+  - **真机反馈**：上下滑动时顶栏底部有明显一条横向区隔/线；rikkahub 同样位置看不出来。
+- `23:12` **顶栏渐隐「错位/横线」收敛过程（2026-11-16，分支 `feat/topbar-capsule-1116`，最终 `00faacd1` / CI #3184 全绿）**
+  - **设备实测的几何（关键，别再靠推算）**：Redmi Note 12 Turbo、density 2.75；`dumpsys` 确认装的是 `1.0.0+NN…
+- `23:29` **顶栏渐隐最终形态：照抄 rikkahub 曲线（2026-11-16 深夜，`fce31359` / CI #3185 全绿）**
+  - **用户一句话点破**：「你可以去他那里找找答案」——之前四版都是我自己发明曲线，全错。
+- `23:45` **顶栏渐隐第 6 版定稿（2026-11-16 深夜，`229b38fd` / CI #3186 全绿）**
+  - 用户对第 5 版（照抄 rikkahub 曲线 + 24dp 尾巴）的反馈两条，都对：
+- `23:54` **顶栏胶囊 + 顶部渐隐：方向放弃（2026-11-16 深夜，用户拍板）**
+  - **结局**：分支 `feat/topbar-capsule-1116`（6 次迭代）与诊断分支 `diag/fade-tint-1116` **全部删除**（…
+
+## 2026-11-17（27 条）
+
+- `00:11` **spawn_agent（进程内子代理）结构性缺陷取证（2026-11-17 凌晨，为用户「砍掉第 2 种」决策做研究）**
+  - **规模事实**：spawn_agent = 第二套 agent loop，生产代码约 970 行（`SubagentSkill.kt` 354 + `exec…
+- `01:23` **spawn_agent 重做为「真实会话派发 + 应用层内置」（2026-11-17 凌晨，分支 `fix/spawn-agent-as-real-session-1117` @ `3cbecf4a`，CI #3190 五 job 全绿）**
+  - **用户三条拍板**：①砍掉进程内第二套子代理循环，保留 `spawn_agent` 名字换成真实会话派发（= "拦截第 2 种转成第 1 种"）；②子代理从「…
+- `09:46` **合并 spawn_agent 真会话分支 + 生成 INCR-1117 增量审计包（2026-11-17 上午）**
+  - **合并**：`fix/spawn-agent-as-real-session-1117` @ `8c744a4a` → main `949566ac`
+- `10:29` **INCR-1117 外部审计消化（2026-11-17 上午，窗口 `755bd775..949566ac`）**
+  - **21 条（A 11 / B 7 / C 3），我逐条回源核实后：P0=0，P1=9，修 12 条，派 6 支**
+- `10:44` **INCR-1117 T6：arm9「失败必须终止」换锚（2026-11-17，分支 `fix/scan-arm9-terminal-1117`）**
+  - **A-F11 先证=确认（BLIND 实证）**：基线 `949566ac` 的门 `skill_frontmatter_roundtrip_check.py…
+- `10:46` **INCR-1117 T5：子代理「恢复默认」写死旧默认（C-F02，P1）— 分支 `fix/subagent-default-reset-1117`**
+  - **先证三条全成立**：`SubagentPrefs.isEnabled` 用字面量 `true`；`ConfigBuiltins:204` `defaultV…
+- `10:48` **INCR-1117 T2 支（聊天 UI 三条）收口：CI #3197 绿 @ `eefada32`**
+  - 分支 `fix/chat-ui-audit-1117`（worktree `incr1117/wt2`，基线 `949566ac`），**未合 main**。
+- `10:48` **T3（B-F06）行内公式启发式：函数调用不当词（2026-11-17 上午，`fix/math-heuristic-callparen-1117` @ `06bb64ba`，CI #3196 五 job 全绿）**
+  - **规则**：token ∈ `MATH_FUNCTION_TOKENS` 且后跟 `(`（允许空白）= 函数调用，**不计 words 也不当长词**；`30…
+- `10:50` **INCR-1117 T4：rootfs 重置遇不可读非空目录（C-F01）修复完成（2026-11-17 上午）**
+  - **分支** `fix/rootfs-reset-unreadable-1117`（基线 `949566ac`）：代码 `0d6399b4` + 报告 `bf3…
+- `10:51` **INCR-1117 T1 修复支完成：spawn_agent 派发生命周期六条（2026-11-17 上午）**
+  - **分支** `fix/spawn-dispatch-lifecycle-1117` · worktree `incr1117/wt1` · 基线 `94956…
+- `11:28` **INCR-1117 闭环 + FIX-1117 备包（2026-11-17 11:3x）**
+  - **合并**：`integration/incr1117` → main **`e6a0276e`**（`--no-ff`，parents=`949566ac …
+- `11:58` **INCR-1117B T3：行内公式散文判据（B5 未闭合 + B4 新假阳性）— 2026-11-17 午**
+  - **分支** `fix/math-prose-args-1117b` · worktree `incr1117b/wt3` · 基线 `e6a0276e`
+- `11:58` **WAVE-1118 重装版全库扫描 17 包（2026-11-17 12:1x）**
+  - **背景**：FIX-1117 三包已发、报告已回，用户**移交另一个会话**处理（本会话不重复处理，已写进 STATUS 与 README）。
+- `11:59` **INCR-1117B T5：arm9 分支体判据收紧（2026-11-17，分支 `fix/scan-arm9-body2-1117b`）**
+  - **分支** 基线 `e6a0276e` · 代码 `da32270f`（门 +218/−33 单文件）· 报告 `5d09a9fe`（docs-only +2…
+- `12:05` **INCR-1117B T2：编辑态粘贴 chips 重入 + 分享胶囊空武装（2026-11-17 中午）**
+  - **分支** `fix/chat-edit-share-1117b`（worktree `incr1117b/wt2`，基线 `e6a0276e`）· 代码 `…
+- `12:14` **FIX-1117B-T4：rootfs 重置两道护栏（C1.1 + C1.2）（2026-11-17 午）**
+  - **分支** `fix/rootfs-reset-guard-1117b`（worktree `incr1117b/wt4`，基线 `e6a0276e`）：代码…
+- `12:41` **FIX-1117B（修复 diff 审计）已合 main + WAVE-1118 八个修复支已派发（2026-11-17 中午）**
+  - **1117B（三份「审修复 diff」报告，14 条）**：判级表 `shared/work/incr1117b/TRIAGE-1117b.md`。
+- `12:54` **INCR-1117B T1：spawn 派发 pin 窗口原子化（A3-a/A3-b/A4 + 门 ROT）（2026-11-17 午）**
+  - **分支** `fix/spawn-pin-window-1117b`，基线 `e6a0276e`；代码 `845c6b63` + 门修复 `69314ba0`…
+- `13:22` **FIX-W1118-provider（T3）：D6+R5 判级，修 2 条、证伪 1 条（2026-11-17 午）**
+  - **分支** `fix/w1118-provider`（worktree `incr1118/wt3`，基线 `c85131ad`）· 代码 `598564a3…
+- `13:26` **W1118 T7（ui-settings）收口：修 4 条 + 跨域 4 条 + 判级重判 4 条（2026-11-17 午）**
+  - **分支** `fix/w1118-ui-settings`（worktree `incr1118/wt7`，基线 `c85131ad`）：代码 `6dc2b9…
+- `13:36` **W1118-T8（data 支）：D5 八条落地 + 一轮门 ROT（2026-11-17 午）**
+  - **分支** `fix/w1118-data`（wt8，基线 `c85131ad`）：代码 `b588be89` + 门兼容 `0277767c` + 报告 `…
+- `13:51` **INCR-1118 T5（service/scheduled/browser）修复支完成 —— 2026-11-17 午后**
+  - **分支** `fix/w1118-service`（worktree `incr1118/wt5`，基线 `c85131ad`）
+- `14:13` **WAVE-1118 T6（platform）：D11 平台外壳 + D9 F-06/F-07 + R6（2026-11-17 下午）**
+  - **分支 `fix/w1118-platform`**（worktree `incr1118/wt6`，基线 `c85131ad`）：代码 `29b89684`…
+- `14:16` **WAVE-1118 T4（tools/debug）收口：6 条修复，CI #3229 全绿（2026-11-17 下午）**
+  - **分支** `fix/w1118-tools`（worktree `incr1118/wt4`，基线 `c85131ad`）：代码 `d258c791`（20…
+- `14:20` **INCR-1118 T2（sandbox）D3 + R3：修 5 / 登记 4 / 反驳 2（2026-11-17 午后）**
+  - **分支** `fix/w1118-sandbox`（worktree `incr1118/wt2`，基线 `c85131ad`）· 代码 `4fe2c376`…
+- `14:27` **INCR-1118 T1（chat 域）：六条 P1 修复支收口（2026-11-17 下午）**
+  - **分支** `fix/w1118-chat`（worktree `incr1118/wt1`，基线 `c85131ad`）；代码三次提交
+- `14:50` **WAVE-1118 收口（2026-11-17 傍晚）— 85 条 → main `98c34e6b`，五 job 全绿（含 publish）**
+  - **结果**：main CI `44032250243` @ `98c34e6b` 五 job success，release APK 更新（14.2 MB, …

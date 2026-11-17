@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-16）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-17）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-11-16，共 104 天
-- 条目总数：2694（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：4328113 / 总行数：50704
+- 合并范围：2026-08-03 ～ 2026-11-17，共 105 天
+- 条目总数：2734（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：4393973 / 总行数：51522
 
 ---
 
@@ -50697,6 +50697,824 @@ backlog 现状：496 段 / 11130 行；写入前已 `cp backlog.md.bak-1333`。*
 **新增一条 P3**：`§VOICE-IME-1116-BOUNDARY` —— 听写守卫会把「非 composer 入口的外部写」推迟而非丢弃（当前不可达，需第五个 `setInputText` 调用点才活）。
 
 backlog 497 段 / 11154 行。
+
+<!-- 2026-11-16 13:42:56 -->
+## dev-history 本地档案重建 + 脱敏规则 CJK 边界 bug（2026-11-16 13:4x）
+
+
+用户「把本地的文档也更新一下」→ `dev-history-sync` 流水线跑完（rebuild → sanitize → build_sagas → 再 sanitize 三件套）。
+
+**结果**：条目 2631 → **2694**（+63），覆盖到 11-16（11-15 留 45 条 / 11-16 留 18 条）；INDEX、SAGAS（25 主题 / 218 孤儿 8.1%）同步重建。结构校验：anchors == header == 2694、乱序 0、奇数围栏条目集合 = 8（新增 `2026-10-28 17:07:31`，源日志本身就 1 个 fence）。
+
+**查出并修掉一个真脱敏漏洞（P0 级，公开仓库用）**：`sanitize_dev_history.py` 的 SHAPE 规则用 `\b` 包住 IP/UUID/32-hex。Python `str` 模式下 `\b` 是 **Unicode** 边界，CJK 属 `\w` ⇒ `***PRIVATE_IP***经设备dumpsys…` **没有尾边界**，全量脱敏跑完仍残留私有 IP（探针把它抓了出来：`Remaining sensitive: private-ip(1)`）。
+修法：私有 IP 用 `(?<![\d.]) … (?![\d.])`，UUID / 32-hex 用 `(?<![0-9a-f]) … (?![0-9a-f])`，一律不用 `\b`。
+验证：`test_sanitize.py` PASS（37 replacements，无误伤）；CJK 夹具（`***PRIVATE_IP***经设备` / `***PRIVATE_IP***后面` / `***PRIVATE_IP***。`）全被掩，40-hex 与 `127.0.0.1` 保留。
+
+**SKILL.md 升 2.1.2**：新增「`\b` is NOT a digit boundary next to CJK」小节（含「加 SHAPE 规则必须用 CJK 贴着测两端」的纪律）、奇数围栏清单补 10-28、规模基线改 2694/25/218。
+
+**可复用**：凡是「正则跑完说 clean」的脱敏/过滤装置，必须用**目标语料的实际字符邻接**验证一遍——拉丁文夹具全绿而中文语料漏一个，是这类装置的典型静默失效面。
+
+<!-- 2026-11-16 15:30:37 -->
+## file_write 台账护栏落地 + 真机验证（2026-11-16 15:2x）
+
+
+**背景（查证后的事实）**：`shared/backlog.md` 同形态覆盖事故**共 6 次**，不是 3 次
+（10-17 135段/~44万字节、10-18 ~209段→25行、10-23 358段→19行、10-24 1.5MB、10-30 494段/1.92MB→6.3KB、11-16 484段/2.09MB→1256字节），
+全部是 `file_write` 漏 `append=true`。10-18 造的 `shared_append.sh` 是**可选入口**，10-23 明确记「正是为此而存在，我漏用了」，现已不存在。
+结论：护栏装错层——知识层 6/6 失败，工具层靠记性，只有恢复层（快照/挂载/镜像）真的救命。
+
+**修复**（分支 `fix/append-only-write-guard-1116` @ `09ba40d1`，**未合并 main**）：
+- `tools/AppendOnlyWriteGuard.kt`：`/var/minis/shared/backlog.md`（精确）+ `/var/minis/memory/`（前缀）默认不可整份覆盖；
+  拒绝文案自带字节数与两条出路；路径先 `normalizeLinuxPath`，`//` `./` `..` 无法绕过。
+- `tools/WriteSnapshotPlan.kt` + `FileWriteTool.takeSnapshot`：整份替换命中白名单，或 ≥8 KiB 文件缩到不足一半 → 同级 `.bak-<stamp>` 快照 + 输出里点名。append/新建/普通重写零成本。
+- 21 个 JVM 测试 + 三次变异负控精确命中（2/1/4 条红）。
+- 复用既有范式：`OffloadedPayloadGuard.Refuse`（写路径语义守卫）、`MemoryRestoreGuard`（append-only 数据）。
+
+**真机验证 10 项全过**（1.0.0+3165 / CI #3165 head=`09ba40d1`）：无 append 覆盖 memory 探针→拒绝且文件未变；`overwrite` 无 reason→拒绝；
+`overwrite`+reason→写入且生成 17 字节快照；append→成功不快照；12.5KB→6B 普通文件→快照；小文件重写→不快照；
+对真实 `backlog.md` 直接覆盖→拒绝且 **md5 与备份逐字节一致**；append 追加 §WRITE-GUARD-1116→497→498 段、机械门 OK。
+
+**可复用手法**：验证写路径守卫要用**自己造的探针文件**（不存在→允许创建，之后所有拒绝测试零风险）；
+测真实台账前先 `cp` + `md5sum`，测完再比 md5 —— 这样「被拒绝」这件事本身才是可证伪的，而不是凭返回文案。
+
+**已知边界**：①符号链接从普通路径指向台账不被识别（快照仍覆盖）；②`.bak-*` 无保留策略会累积。均已登记触发条件（§WRITE-GUARD-1116）。
+
+<!-- 2026-11-16 15:50:35 -->
+## file_write 护栏分支合并 main（2026-11-16 15:5x）
+
+
+用户「检查一下云端上的那个分支，没问题就合并」→ 云端唯一分支 `fix/append-only-write-guard-1116` @ `09ba40d1`。
+
+**检查结论：无阻塞问题，已合并。**
+- 分支 CI #3165 / run `43822474546` @ `09ba40d1`（head_sha 逐字符一致），五 job 全绿，**9344 PASSED / 0 FAILED**，publish 的两步真发布动作 **skipped**（main 门控生效）；`AppendOnlyWriteGuardTest` 21 条逐条 PASSED。
+- diff 只有 4 文件：`AppendOnlyWriteGuard.kt`（+160）、`WriteSnapshotPlan.kt`（+75）、`FileWriteTool.kt`（+91）、测试（+313）。无调试残留、无冲突标记。
+- **独立于 CI 的证据（我自己做的行为验证，装在设备上的 3165 就是这个分支的产物）**：
+  ① 新建 `/var/minis/memory/.guard-probe-1116.md`（不存在 ⇒ 允许）；② 无 append 覆盖 ⇒ **拒绝**，md5 与内容逐字节未变；
+  ③ `overwrite=true` + reason ⇒ 允许，并生成 `80 bytes` 同级快照（内容=旧字节）；④ append ⇒ 允许且**不**快照；
+  ⑤ 12 KB 普通文件 → 5 字节 ⇒ 自动快照；⑥ 小文件重写 ⇒ 不快照。探针用完即删。
+- 顺带核了「写 memory 的其它入口」：`MemoryTools` / `MemoryRepository` / `MemoryRollupRunner|Engine` 都**不走** `FileWriteTool`（grep 0 命中），所以 memory_write / memory_rollup 不会被护栏误伤；`file_edit` 走自己的 `AtomicFileWrite`，也不受影响。
+
+**合并**：API merge（等价 `--no-ff`）→ `c126bb37e1`，**parents = 2**（`83e3d001` + `09ba40d1`），merge tree `b8788a29` **与分支 tip 树逐字节相同**。
+main CI #3166 / run `43824999283` 五 job 全 success，publish 真执行（`Move the rolling tag` + `Publish to Releases` 均 success），release 资产更新 `2026-11-16T07:48:58Z` / 14.88 MB。远端分支 DELETE 204，远端只剩 main。
+
+**走了的检查捷径（本次沙箱网络坏了）**：`git clone` / codeload tarball 全部 `OpenSSL SSL_read: unexpected eof`（16 MB 处截断，`-C -` 续传被服务端忽略）。
+替代手法：`git/trees/<sha>?recursive=1` 拿全树文件清单（2526 项）+ `contents/<path>?ref=<sha>` 取单文件 base64 + `compare/main...<branch>` 拿 patch。
+⇒ **沙箱克隆不通时不必卡在克隆上**，API 三件套足够做完 diff 走查与调用点核查。
+
+**走查登记三条 P3（backlog §WRITE-GUARD-1116-REVIEW，机械门 OK）**：① `WriteSnapshotPlan.snapshotPath()` 生产无调用点（`takeSnapshot` 自己拼，两份真相源）；② `file_edit` 整份重写不过护栏、无快照；③ 护栏是词法绝对路径匹配，相对路径不被识别。
+
+<!-- 2026-11-16 17:14:53 -->
+## 设置页即时生效（Chat Tuning + Runtime Limits）—— 2026-11-16 下午
+
+
+用户问「聊天微调和运行时限制能不能直接即时生效，不用按保存」。查证后动手：**分支 `feat/live-apply-settings-1116` @ `379b84ef`，CI #3168 全绿（9344 PASSED / 0 FAILED，publish 真发布两步 skipped），未合并 main。**
+
+### 关键发现（可复用）
+
+1. **`LimitsSliderRow` 的 `onCommit` 其实是「每帧」**：组件内部 `Slider(onValueChange = { onCommit(...) })`。
+   名字骗人 —— 直接在里面写盘会「每个 step 一次 apply() + 每次同步回调自己的 prefs listener」。
+   正解：加 `onCommitFinished`（Material3 `onValueChangeFinished`，手指抬起一次），写盘放这里；
+   `onCommit` 只动本地 state。既有 `AppearanceScreen.FontScaleSliderRow` 就是这个范式。
+2. **`AgentRuntimeLimitsPrefs.save(...)` 本来就是单键写原语**：39 个参数全 `= null`，内部 `?.let` 只写非空。
+   所以「40 个控件各自持久化」只需 40 行 `onCommitFinished = { save(context, x = x) }`，零新 API。
+3. **`ChatTuningPrefs.save()` 整包写 → 删除**：单键 `setInt(context, key, value)` 取代，删完 grep 零调用者。
+   整包写还有个隐患：它会重写 `composerGlassEnabled`（不在本页），旧代码为此要「save 时 fresh read」。
+4. **删 Save 会打破 3 条源码形状测试**（CI 首跑 3 红，全是 source-shape 不是行为）：
+   `ComposerGlassWiringTest`（断言顶部 Save + save 时 fresh read 开关）、
+   `PrefsListenerPrimeOrderTest`（断言 40 个 `val pending...` 快照）。
+   **教训：形状测试锚的是「决策」，决策变了必须把断言改锚到新决策**（我改成：无 Save / 每个滑块单键写 /
+   reset 传 `*_DEFAULT` 常量 / `onCommit` 与 `onCommitFinished` 同数），并在沙箱实跑 + 3 次变异负控各命中 1 条预期臂。
+5. **「即时生效」的语义边界要跟用户说清**：值立刻落盘 ≠ 立刻改变正在跑的 agent run。
+   agent-loop 限值仍是「下一轮 run 读取」，worker 作用域（providerSlots/首字节超时）仍是「下个 worker 进程 spawn」，
+   /tmp 收割仍是「下次 sweep」—— 这些不该中途变（会打断在飞的 run）。改动不碰这层语义。
+6. **发现一个死旋钮**：`prewarmRowLimit`（Chat Tuning「冷启动预渲染行数」）全仓零消费点，调了没任何反应。
+   已登记 backlog §LIVE-APPLY-1116（倾向直接删掉这个 knob）。
+
+### 装置与证据
+
+- 沙箱 JVM 装置 `shared/work/live-apply-1116/jvm/run.sh`：真源码 + 真测试 + `android.content` 最小桩，
+  一次性编译跑 2 个测试类（15 tests OK）。
+- 变异负控三次：reset 改回读 state → 「constants by name」红；删 ChatTuning 一个 onCommitFinished → 9→8 红；
+  删 RuntimeLimits 一个 → 39→38 红。每次只红一条预期臂。
+- 门：i18n ALL CLEAN（新增 `settings_live_apply_hint` + 改 2 条文案，7 语言）、prefs_listener_holder_guard 全绿
+  （C8/C9 仍覆盖 RuntimeLimits 的 reset 批写）、ime_inset / chat_ui / deeplink_routes / memory_ui 全绿。
+
+<!-- 2026-11-16 17:32:57 -->
+## live-apply 设置页合并 main（2026-11-16 17:3x）
+
+
+**分支** `feat/live-apply-settings-1116` @ `379b84ef` → **merge `088f0c38`**（API merge，**parents=2** = `c126bb37 379b84ef`；merge tree `378fc522` 与分支 tip 树逐字节相同）。
+
+**范围**（`origin/main...HEAD`，12 文件 +283/−325）：`ChatTuningPrefs`（删整包 `save`，加单键 `setInt`）、`ChatTuningScreen`（删 Save + 9 个 `onCommitFinished`）、`RuntimeLimitsScreen`（删 Save + 39 个 `onCommitFinished` + 开关立即写 + reset 直写 40 常数）、两个形状测试改锚、7 语言各 5 行。
+
+**走查的机械核对（这次都跑成脚本，别靠肉眼）**：
+1. listener `when(key)` 臂 = **40**；`AgentRuntimeLimitsPrefs.save` body 写 **39 个 KEY**，差集只有 `KEY_COMPACT_MODEL_ENTRY_ID`（不在 reset 参数内，已迁到 ModelGroups）⇒ 每个 live-apply 写入的 key 都有刷新臂。
+2. reset 传参 **39 个 = `context` + save 签名全部 38 个 Int 参数**，无遗漏无多余（拼错会编译失败，遗漏会静默不重置）。
+3. `ChatTuningScreen` 9 个 KEY 各出现 2 次（arm + onCommitFinished）；`composerGlassEnabled` 在该页 grep 0 —— 开关被 Appearance 独占，测试已改为断言 `!contains("KEY_COMPOSER_GLASS_ENABLED")`。
+4. `ChatTuningPrefs` 无 cached 字段 ⇒ 单键写不依赖 prime（RuntimeLimits 侧 listener 内已有 `prime()` 保留）。
+
+**证据三层**：
+- CI #3168 / run `43836064565` @ `379b84ef5286…`（与本地 HEAD 逐字符一致）五 job success，单测 **9344 PASSED / 0 FAILED**，`PrefsListenerPrimeOrderTest > … reset writes defaults as constants, not state` 与 `ComposerGlassWiringTest > the tuning page has no Save and every slider writes its own key on release` 逐条 PASSED；scan-gate **115 passed / 0 failed**。
+- **独立于 CI**：沙箱装置 `shared/work/live-apply-1116/jvm/run.sh` 对真源码跑 15 tests OK；三次变异负控（删一个 ChatTuning onCommitFinished / 删一个 RuntimeLimits onCommitFinished / reset 常数改回 state 变量）各只红 1 条预期臂，恢复后树干净。
+- main CI `43839047710` @ `088f0c38` 五 job success，单测 9344/0；publish 真执行（`Deleting previously uploaded asset` + `Uploading RikkaMinis-arm64-v8a.apk`，资产 `09:31:57Z` / 14.88 MB）。
+
+**如实记录的口径**：本批未改 `scripts/scan/**` ⇒ scan-gate 日志里是 `skipping the fixture self-test`，所以「CI 绿」**不含夹具自测**（门的牙由上面的变异负控在本地补）。
+
+**清理**：远端分支 DELETE 204，远端只剩 main；本地分支已 `-D`，HEAD 落在 `origin/main`。另有 worktree `fgs-deadline-1116/repo` 停在 `fix/composer-glass-arc-clip-1116`（`ebc69417` 已在 main）—— 非本批产物，未动。
+
+**残余（不阻塞，未新登记）**：Material3 Slider 的 `onValueChangeFinished` 只在拖拽/无障碍 setProgress 时触发，**键盘方向键调值不落盘**（要再拖一下）。`AppearanceScreen.FontScaleSliderRow` 早已是同一范式 ⇒ 属既有平台行为，不是本批引入。
+
+<!-- 2026-11-16 18:59:10 -->
+## Loomy 三号转网关（2026-11-16 晚间）
+
+
+3 份 `auth-session.json`（session/userid/phone/updatedAt）→ aigw 网关格式，全 ALIVE。
+产出 `/var/minis/shared/work/aigw-forge-1116-batch/`（min.json + paste-batch.txt）。
+
+- uid/手机：261116143005738029/***PHONE***（NK0580040）、261116150752760254/***PHONE***（NK0581633）、261116143028562485/***PHONE***（NK0582654）
+- 三号均：10 模型可见、个人 25000 / 每日 5000 / 可用 30000，session 到期 11-30。
+- **坑（重要）**：单文件模式 `--input` 的输出 tag 取 uid 前 10 位，三号中两个 uid 前 10 位相同（`2611161430`）
+  ⇒ 第二次输出**覆盖**第一次，只剩两个文件且看不出少了一个。**多号必须用 `--batch` 一次出批文件**，
+  否则会静默丢号。已记入技能改进候选。
+- 农场号特征：1/2 号「新手任务积分流水同分钟」；三号 uid 前缀同 2611161430 时段签发，同批注册。
+- 双源验证：脚本结构校验 + 网关源码 `AccountTransfer.decode` 落池 3/3（scripts/verify_against_gateway.sh）。
+
+<!-- 2026-11-16 20:15:56 -->
+## Move-to 胶囊空草稿修复（2026-11-16 晚，分支 `fix/move-to-capsule-empty-1116` @ `6208e8c5`，CI #3171 全绿，未合并）
+
+
+用户报「外部分享文件后输入框右上角那个 Move to… 标识一直挂着，很碍眼」。查实：胶囊 = T51/T185 的「把当前草稿移到另一个会话」快捷入口，`hasInjectedShareContent` 只有三条清除路径（发送 / 清空会话 / 成功移动），删光附件、清空文本都不清 → 空胶囊常驻；Popup 不可聚焦 + `onDismissRequest = {}` ⇒ 关不掉；点它在空状态下仍会执行移动，目标会话再 `markShareInjected()` ⇒ 胶囊跟着搬家（真机日志 `[MoveTo] draining transfer … text=0ch attachments=0`）。文案还是硬编码英文 `"Move to…"`（7 语言都有 `move_to_sheet_title` 不用；i18n 门只查 `R.string` 键，不管 Kotlin 字面量）。
+
+修法（用户选 A）：`MoveToCapsuleGate.shouldShow == canMove == (text.isNotBlank() || 附件数>0)`；onSelect 空草稿直接 return；ChatScreen 转移 drain 只对有内容的 transfer 点亮；文案改用 `R.string.move_to_sheet_title`。
+
+**坑 1（工具）**：`rg -rn "pattern"` 不是「-r 递归 + -n 行号」——`-r` 是 `--replace`，`-rn` = 用 "n" 替换匹配文本输出。我一度以为仓库被批量改写（`move_to_sheet_title` → `n_sheet_title`、`moveToFirst` → `nFirst`），差点误判。rg 用 `-n` 就够，别加 `-r`。
+
+**坑 2（装置）**：`git checkout -- <file>` 会把我**未提交**的改动一起抹掉（变异脚本里第一次就踩了，对应 GLOBAL「变异前先 commit 本体」）。第二轮又把变异体 `true // MUTANT` 连同 `git add -A` 一起提交上去——修完才 amend。**顺序是：改完 → 测试绿 → commit → 才允许跑变异。**
+
+**坑 3（门）**：CI 首跑 unit-tests 红在 `ComposerLiveSourceTest > every leaving site drops the pending burst flush first`。根因不是我的生产代码，是探针的 `enclosingBlock()` 用「最后一个打开的 `{`」而非「当前仍未闭合的最内层 `{`」，于是我在 stash 上方加的 `if (!canMove) { … }` 被当成 enclosing block → 假红。改成 ArrayDeque 栈后通过，且「删掉 onSelect 里的 cancelPendingImeBurst()」仍精确红 1 条（证明牙没掉）。教训：**门报 FAILED（不是 ROT）时先判「是我的代码违规，还是门解析错了」**——看它给的 slice 是不是别的兄弟块。
+
+<!-- 2026-11-16 21:14:02 -->
+## 顶栏胶囊落地（2026-11-16 21:1x，分支 `feat/topbar-capsule-1116` @ `b50c948`，CI #3176 全绿，未合并）
+
+
+按方案 B 实现（只有 `composerGlassOn` 才换胶囊形态）。三个文件 + 两个测试：
+
+1. **新 `ui/chat/ChatTopBarCapsule.kt`**：`CircleShape`（50% → 单键圆形 / 多键胶囊）+ 0.5dp `ChatColors.inputBorder` 描边 + `clip(CircleShape).hazeEffect(...)`；**只有背景层 animateFloatAsState(showBackground)，按钮不淡入**（淡掉的图标读起来像 disabled）；`enabled=false` → 裸 Row（玻璃关 = 原样）。
+2. **ChatScreen**：删掉全宽 `matchParentSize().hazeEffect` 玻璃层；`navigationIcon` / `actions` 各包一个胶囊；`containerColor` 逻辑不变。标题仍三行、仍可点。
+3. **`ComposerGlass.topFadeToBackground(height, color)`**：列表顶部渐隐（0→实底、0.6→0.82、1→透明），**必须挂在 `hazeSource` 之后（内侧）**——haze source 只录自己内容，挂外层胶囊采样不到，会比周围亮。`TOP_FADE_EXTRA_DP = 24`（rikkahub `topFadingEdge(top+24dp)`）。
+4. 删 `ComposerGlass.topBarTintAlpha`（+25 冗余）：它存在的理由是顶栏有三行小字无 scrim，现在文字压渐隐、磨砂面只剩装图标的胶囊，用共享旋钮原值（默认 30%，= rikkahub Glass 预设）。
+
+**验证**：CI #3176（`43871177346`）head_sha 与本地逐字符一致、五 job success；unit-tests 里 `the top bar shares the state…` / `a pill fades in behind its buttons…` / `the list fades into the page background inside the haze source` / `the top bar capsule takes the shared knob…` 逐条 PASSED；scan-gate `115 passed, 0 failed`；publish 两发布步 skipped（release 仍 = main 的 `1.0.0+3173`）。
+沙箱独立证据：kotlinc 语法编译（仅 unresolved reference，无语法错）、自写断言镜像 24/24。
+
+**踩过的坑**：
+- 第一次 CI 红 `ComposerGlass.kt:88 Unresolved reference 'dp'`（新写的 `0.dp` 忘 import `androidx.compose.ui.unit.dp`）。沙箱 kotlinc 因缺 Compose classpath 只会报 unresolved，这种「少 import 标准 compose 符号」在本地看不出来 → 改 Compose 文件时**新用到的每个 ui.unit/ui.graphics 符号都要顺手核 import**。
+- **GitHub 幽灵排队**：`POST /actions/runs/{id}/cancel` 与 `/force-cancel` 对「jobs 尚未创建」的 queued run 一律 409 `Cannot cancel a workflow run that has not been queued yet`；同 ref 重新 dispatch 也不会顶掉它（`concurrency.cancel-in-progress` 只对新 run 生效后的 pending 有效，实测旧 run 仍挂 queued）。唯一解 = 等它自己跑掉或网页 UI 取消。新 run 能立刻拿到 runner，所以「取消再触发」实际只多一条重复 run，没有更快 —— 真慢时直接再 dispatch 即可。
+
+**待真机确认**：48dp 胶囊上的 haze 是否看得见（渐隐把上半段压成实底，胶囊下部才有内容可糊）、标题压在渐隐上的可读性、右胶囊 3–4 键时标题截断程度、状态栏区域由「磨砂」变成「纯底色」的观感。
+
+<!-- 2026-11-16 21:51:09 -->
+## 顶部渐隐「横线」修复（2026-11-16 21:4x，分支 `feat/topbar-capsule-1116` @ `9b65e947`，CI #3179 全绿）
+
+
+**真机反馈**：上下滑动时顶栏底部有明显一条横向区隔/线；rikkahub 同样位置看不出来。
+
+**两个原因（都实测成立）**：
+1. **锚点错（主因）**：`topBarTail` 把列表子树量高一个顶栏高度并 `place(0, -extraPx)` ⇒ 列表节点本地 (0,0) 在**屏幕上方的顶栏高度处**。渐隐从节点 y=0 画 ⇒ 不透明段与 0.6 kink 全落在屏外，屏幕里只剩末端 ~24dp 斜坡且硬着陆 —— **那条线就在屏幕顶下 24dp**。
+2. **曲线**：三停线性（0→1.0/0.6→0.82/1→0）以斜率不连续收在 alpha=0 → 马赫带（没画线却看到线）。
+
+**改法**：`topFadeToBackground(aboveViewport, height, color)` 从可见顶边起画；profile 换 `topFadeAlpha = cos²(π/2·t)`、16 采样点，两端值与斜率都归零；`TOP_FADE_EXTRA_DP` 24→32。
+
+**测试教训**：`cos(π/2)` 在 float 里是 6e-17，平方 3.7e-33 ≠ 0，`assertEquals(0f, …, 0f)` 会红。生产端 `if (u >= 1f) return 0f` 把契约做实，测试用 1e-6 delta。
+
+**GitHub 并发坑（新）**：`concurrency.cancel-in-progress: true` 是**按 ref** 的——卡在 queued 20+ 分钟才分到 runner 的**旧 run** 启动时，会**取消正在跑的新 run**（实测 #3175 顶掉 #3177）。处置：先 `POST /actions/runs/{id}/cancel`（有 jobs 后返回 202 才生效），确认 `completed/cancelled` 再 dispatch。挂 queued 且无 jobs 时 cancel/force-cancel 一律 409。
+
+**证据**：CI #3179 `43877619350` @ `9b65e947` 五 job success；`the top fade reaches zero with a flat slope…` / `the fade profile is sampled from the cosine…` 等五条逐条 PASSED；scan-gate `115 passed, 0 failed`；publish 两发布步 skipped（release 仍 `1.0.0+3173`）。沙箱：kotlinc 语法编译无语法错、断言镜像 28/28、括号配平。
+
+**待真机**：横线是否消失（重点看滚动时屏幕顶下 ~30–120dp 这段）、标题在渐隐上的可读性（现在顶部比上一版更实）、胶囊下部是否还能看出模糊。
+
+<!-- 2026-11-16 23:12:02 -->
+## 顶栏渐隐「错位/横线」收敛过程（2026-11-16，分支 `feat/topbar-capsule-1116`，最终 `00faacd1` / CI #3184 全绿）
+
+
+**设备实测的几何（关键，别再靠推算）**：Redmi Note 12 Turbo、density 2.75；`dumpsys` 确认装的是 `1.0.0+NNNN` = CI run 号。
+- **Scaffold 的内容区（列表所在那层）从顶栏下方开始**，顶栏实测底边在 **297px = 108dp**（状态栏约 40dp + 68dp bar，不是我以为的 24+68=92dp）。
+- `topBarTail` 把列表往上提同样的量 ⇒ **列表自己的 y=0 才是屏幕顶**；内容区根节点的 y=0 在 108dp。
+- 由此：画在「内容区根节点 y=0」或「列表 y+108」⇒ 带子落在 108..216dp（用户说的"应该在顶栏重合，却跑到下面"）。画在「列表 y=0」⇒ 带子 0..(bar+尾巴)。
+
+**诊断手法（这轮唯一有效的手段）**：出一版把渐隐染成 `Color.Red` + 在「顶栏底边」画青色 3px、「带子终点」画绿色 3px 的一次性诊断包（分支 `diag/fade-tint-1116`，不进主线）。三张截图里量出：红带 0..140dp、青线 297px=108dp、绿线 385px=140dp ⇒ **32dp 尾巴挂在顶栏下面**。用户看到的"错位块"就是这条尾巴（顶栏内部被平台段盖满 → 看着像空的"透明玻璃"，只有下面那 32dp 的暗带可见）。
+
+**最终形态**：带高 **= 顶栏高度本身**（删掉 `TOP_FADE_EXTRA_DP`，调用点 `height = if (composerGlassOn) topBarHeightDp else 0.dp`）；曲线 = 前 **70% 平台**（标题要有底）+ 后 30% `cos²` 归零（值和斜率都归零，落点正好在顶栏底边）。
+
+**测试教训**：加了平台段后，`alpha(0.98×band) < 0.01` 会红 —— 平台把曲线压缩了，98% band 只是 93% 的 dissolve（≈1.1%）。「末端零斜率」必须**按 dissolve 段量**（`band - dissolve*0.02`），并且 `0.7f*band/band != 0.7f` 要用 1e-6 delta。
+
+**GitHub 侧**：分支 CI 只认 dispatch；`concurrency.cancel-in-progress` 按 ref 生效，卡 queued 很久的旧 run 启动时会**取消新 run**；`cancel` 对 jobs 未创建的 run 返回 409。
+
+<!-- 2026-11-16 23:29:06 -->
+## 顶栏渐隐最终形态：照抄 rikkahub 曲线（2026-11-16 深夜，`fce31359` / CI #3185 全绿）
+
+
+**用户一句话点破**：「你可以去他那里找找答案」——之前四版都是我自己发明曲线，全错。
+
+**rikkahub 的真实实现**（`ChatList.kt:196`）：
+```kotlin
+Modifier
+  .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+  .drawWithCache {
+      val brush = Brush.verticalGradient(0f to Transparent, 0.6f to Black@0.15, 1f to Black, startY=0, endY=fadeHeight)
+      onDrawWithContent { drawContent(); drawRect(brush, size=Size(size.width,fadeHeight), blendMode=DstIn) }
+  }
+```
+高度 = `innerPadding.top + 24.dp`（栏高+24dp），挂在 LazyColumn 上、`hazeSource` 之前。
+
+**我们此前三处做错，逐条对应症状**：
+1. **形状**：我搞「前 70% 不透明平台 + 后 30% 归零」= 3%/dp 的悬崖；当带宽=栏高时，悬崖正好压在栏底那条已有的视觉基准线上 → 看成一条杠。rikkahub 是**整段一条平缓斜坡**（内容 0% → 60% 处 15% → 100%）。
+2. **长度**：我们一度把带剪成正好等于栏高 → 斜坡终点落在栏底边缘；rikkahub 留 **+24dp**，终点落在内容中间，眼睛没有参照。
+3. **采样**：渐变在两个 stop 之间是**线性**的；我之前 16 个 stop 摊在整个带上（dissolve 里只有 ~5 个，≈7dp/段、相邻 alpha 差 10%）→ 出现台阶/棱。改 **48 个 stop**（最大步长 4.4%）。
+
+**最终**：`topFadeAlpha` = rikkahub 曲线（scrim 1 → 0.85 → 0），`TOP_FADE_TAIL_DP = 24`，48 stops；测试钉死「不许有 plateau」「步长 <5%」「曲线必须等于 rikkahub 的分段线性」。
+
+**方法论教训**：视觉细节别再自己推导 —— 参考实现就在仓库里，先读它的数值（stops / 高度 / blend mode），把三个数字抄过来，比读十遍几何推理有用。
+
+<!-- 2026-11-16 23:45:54 -->
+## 顶栏渐隐第 6 版定稿（2026-11-16 深夜，`229b38fd` / CI #3186 全绿）
+
+
+用户对第 5 版（照抄 rikkahub 曲线 + 24dp 尾巴）的反馈两条，都对：
+1. **玻璃的透明感没了** —— 平台段（哪怕只有 70%）把胶囊背后的行压到几乎不可见，haze 就在糊一片纯色 ⇒ 看起来是实心药丸。**rikkahub 能显玻璃，是因为他背后是壁纸（`AssistantBackground` 也挂了 hazeSource）；我们背后只有消息行**，所以「药丸背后必须有内容」是玻璃感的前提。
+2. **带子加长更别扭** —— 24dp 尾巴把 scrim 铺到栏外的开阔内容上，读作一块板。
+
+**定稿**：曲线照抄 rikkahub（内容可见度 0% → 60% 处 15% → 100%，scrim 1 → 0.85 → 0），**带高 = 栏高本身**（无尾巴），48 个采样点（相邻 alpha 步长 ≤4.4%）。
+- 药丸高度那一带（栏的下 2/3）内容约 30–40% 可见 → 玻璃能糊到东西；
+- 标题所在的顶部 ≤15% → 可读；
+- 栏底边处曲线已到 100% → 不会在那条边上「冒出一块内容」。
+
+**留给下一轮的旋钮**（若仍不满意）：只有两个数字 —— 曲线 60% 拐点的位置、带宽是否略大于栏高。别再自己发明曲线形状。
+
+**方法论**：视觉类问题第 5 次才想到「去读参考实现的数值」；前四版都在自己推导几何/曲线。下次遇到「参考实现就在仓库里」的视觉差异，第一条动作应该是读它的 stop 列表、高度、blend mode。
+
+<!-- 2026-11-16 23:54:36 -->
+## 顶栏胶囊 + 顶部渐隐：方向放弃（2026-11-16 深夜，用户拍板）
+
+
+**结局**：分支 `feat/topbar-capsule-1116`（6 次迭代）与诊断分支 `diag/fade-tint-1116` **全部删除**（远端 API 204、本地 `-D`、worktree remove），远端只剩 `main`。**从未合并进 main**（main 当时由另一会话推进到 `2a8d746`）。
+
+**为什么放弃**：两个需求在纯色背景上互相排斥 ——
+- 要「胶囊是透明玻璃」⇒ 药丸背后必须有内容可糊；
+- 要「没有那条横线」⇒ 靠近顶部的内容必须被压掉。
+**rikkahub 能两全，是因为它背后有壁纸**（`ChatList` 的胶囊同时采样 `AssistantBackground` 的 hazeSource + 消息行）；我们背景是纯色，压掉内容 = 药丸后面是纯色 = 玻璃变实心。
+六版试过：全宽玻璃条（用户嫌不是胶囊形态）、平台+cos²、照抄 rikkahub 曲线（内容 0→15%→100%）、带尾巴/不带尾巴、16/48 采样点 —— 每版都换来"玻璃没了"或"那条杠还在/更长"。
+
+**诊断资产（仍可用）**：
+- **设备几何实测**：Scaffold 内容区在顶栏下方；顶栏底边 = 297px = **108dp**（状态栏 ~40dp + 68dp）；`topBarTail` 把列表上提同量 ⇒ **列表自身 y=0 = 屏幕顶**，内容区根节点 y=0 = 108dp。
+- **诊断手法（值得复用）**：把渐隐临时染红 + 在"预期边界"画 2px 青线、在"带子终点"画绿线，构建一版诊断包，让用户装一次截图 → 用像素直接量出三个位置。三张图就定位了"带子 0..140dp、栏底 108dp、多出 32dp 尾巴"。比任何推理都快。
+- 沙箱侧可用：`android-shizuku-cli exec screencap` + base64 取回 + Pillow 逐行统计（我无图像输入，只能读像素）。
+
+**如果将来重启**：前提是先有"玻璃后面有什么"的答案（壁纸/动态背景/主题底纹），否则同样的取舍会再次死循环。别在纯色背景上再调曲线参数。
+
+## 2026-11-17
+
+<!-- 2026-11-17 00:11:53 -->
+## spawn_agent（进程内子代理）结构性缺陷取证（2026-11-17 凌晨，为用户「砍掉第 2 种」决策做研究）
+
+
+**规模事实**：spawn_agent = 第二套 agent loop，生产代码约 970 行（`SubagentSkill.kt` 354 + `executeSpawnAgentTool` 218 + `runSubagentLoop` 315 + 两个执行器/开关约 80），另有 19 个测试文件、1 个专门（`subagent_handback_check.py`）、`truncated_call_guard_check.py` 里 3 个锚点、7 语言 strings。会话子代理（`minis-sessions-cli send`）走 `HeadlessChatRunner` → 复用真实 `ChatViewModel` + 进程级 `ChatViewModelStore` = 同一套 loop 的另一个入口，`send` 默认 `--wait`（600s，上限 1800s）已具备同步返回语义。
+
+**硬伤（不是「还差打磨」，是定义冲突）**：
+1. `SubagentSkill.FORBIDDEN_TOOLS` 硬禁 `shell_execute` / `browser_use`，但 `/var/minis/skills` 下 4 个 `subagent: true` 技能（app-feature-verifier / code-pattern-sweep / loop-auditor / subagent-context-selftest）的 `allowed_tools` 里三个都写了 `shell_execute` → 被静默剔除，方法论（ls/grep/wc/logq）全部失效，只剩 file_read/file_write。
+2. `executeSubagentTool` 只有 8 个臂（file_read/write/edit、read_image、memory×3、app_guide、conversation_history），即使放行 shell 也没有执行实现。
+3. 上下文隔离过头：子代理只拿 skill body + skills 披露 + 记忆，没有会话历史 / 工具约定 / integration 披露。
+4. 过程不可见、不可中断，失败是静默降级（工具被剔掉不报错）。
+5. **双写税实证**：`runSubagentLoop` 300 行里有 9 类「主循环修了这边漏了」补丁标记（fix/sweep1014-b19 截断、deep-audit-1018 reasoning_content、fix/da1017-subagent-residue、FIX-R4-Q F-14 预算、fix/subagent-thinking、fix/subagent-context、T-length-wall-continue）。
+
+**待用户拍板的三个方案**：A 彻底删（模型改用 shell 拼 minis-sessions-cli，丢同步委派语义）；B 保留工具名换实现（`executeSpawnAgentTool` 内改调 `ChatMutationMethods.prompt(wait=true)`，删第二套 loop，模型零学习成本 = 用户说的「拦截并转成第 1 种」）；C 只改提示词（双 loop 仍在）。我的推荐 = B。
+
+<!-- 2026-11-17 01:23:17 -->
+## spawn_agent 重做为「真实会话派发 + 应用层内置」（2026-11-17 凌晨，分支 `fix/spawn-agent-as-real-session-1117` @ `3cbecf4a`，CI #3190 五 job 全绿）
+
+
+**用户三条拍板**：①砍掉进程内第二套子代理循环，保留 `spawn_agent` 名字换成真实会话派发（= "拦截第 2 种转成第 1 种"）；②子代理从「技能」下沉为「应用层」（工具只接 `task`，不再要求 `subagent: true` / 技能安装 / 会话级技能开关）；③开关默认改为 ON。
+
+**实现**：`executeSpawnAgentTool` → `ChatMutationMethods.prompt(wait=true, waitTimeout=900, thinkingLevel=继承)`，与 `minis-sessions-cli send` 同一条链（真实 ChatViewModel、全套工具、会话列表可见）。结果映射抽成纯函数 `SubagentSkill.resultOf`（Completed/空/超时/拒付四态）。派发预算：deadline + 一个 PROVIDER_ATTEMPTS 先于调用；`CancellationException` 必须重抛。
+
+**父会话自动置顶**：`SubagentDispatchPin`（引用计数、纯内存）——派发期间 `chatRepository.pinSession(parent, true)`，finally 里仅当 `pinnedAt == ourPin` 才还原（用户手动 pin 不被覆盖）。理由：等子代理的父会话不更新自己的行，`ORDER BY updated_at DESC` 会让每个子会话都压在它上面。
+
+**删除**：`runSubagentLoop`(315 行) / `executeSubagentTool` / `SubagentReasoningAccumulator` / `appendSubagentTurnText` / `SubagentBudgetExhaustedException` / `buildFilteredTools` / `SubagentConfig.parseSubagentConfig` / `SkillInfo` / `orderForSubagentContext` / `subagent_handback_check.py`（由新门 `subagent_dispatch_check.py` 6 条契约替代）/ 两个整测试文件。净 −2637 行（+814/−3451）。
+
+**CI 三次**：①#3188 红 = 生产代码引用 debug 包（debug_leak_guard [8/115]）+ 删 import 漏了 `assertNull`；②#3189 红 = `ShellBudgetStopSymmetryTest` 的 collector 用**类型名**排除 dispatch 门，类型删掉后把新 dispatch 预算门误判成 run 级 → 改成**按函数区域**排除（不锚拼写）；③#3190 绿。
+
+**证据**：单测 9297 PASSED / 0 FAILED；门 115 passed 0 failed；新门 selftest 9 臂全红 + 真树绿；本地 JVM 21 测试 + 4 变异全翻红；读源码型测试 5 类本地全绿。
+
+**登记**：backlog §HEADLESS-SINK（headless 机制仍住 `debug/` 包，本次按 ScheduledTaskRunner 先例 inline `debug-ok:` 审计，搬迁待触发条件）。
+
+**真机待验**：派发能真的开新会话并返回答案、父会话在图钉区最上、子会话里能看到完整工具（shell）、4 个 subagent 技能不再受 allowed_tools 限制、开关默认开。
+
+<!-- 2026-11-17 09:46:30 -->
+## 合并 spawn_agent 真会话分支 + 生成 INCR-1117 增量审计包（2026-11-17 上午）
+
+
+**合并**：`fix/spawn-agent-as-real-session-1117` @ `8c744a4a` → main `949566ac`
+（`--no-ff`，**parents = `2a8d746d 8c744a4a` = 2 ✓**，merge tree 与分支 tip 逐字节一致）。
+
+- 合并前补了一个提交：`8c744a4` 删掉 `SubagentPrefs` KDoc 里"still OFF by default"的矛盾段落（翻转默认值时漏改）。
+- 三项核查：①diff 逐文件过（31 文件 +898/−3458），冲突标记 0，`runSubagentLoop`/`executeSubagentTool` 等只余注释引用；②分支 CI **#3194** @ `8c744a4a` 五 job success，scan-gate `115 passed, 0 failed` + `ALL 354 CASES PASS`（本批动了 `scripts/scan/**`，夹具真跑）；③独立证据 = 真机 3190/3191/3192 三次探针（派发真开会话并返回、标题两次修法被证伪），标题"创建期写入"仍**待真机验证**（装机停在 3193）。
+- main CI **#3195 / run 43996511911** @ `949566ac` 五 job success，`Publish` 两步真执行（tag 移动 + 上传）；`9298` 条 PASSED，夹具 `ALL 354 CASES PASS`。
+- 清理：远端分支 DELETE 204（`compare` ahead=0），远端只剩 `main`。
+
+**INCR-1117 审计包**（生成器 `shared/work/incr1117/build.py`，域划分 `classify.py`）：
+- 窗口 `755bd775..949566ac`（严格接 INCR-1116 终点）：48 提交 / 90 代码文件 / +4020 −4133，PRoot 无改动（`master` 仍 `c53f378`）。
+- 三包（`mounts/背景包/待发-INCR-1117/`）：A 子代理/工具/门 42 文件 +1645/−3521；B 聊天/输入栏/渲染 24 +1443/−178；C 沙箱/服务/设置 24 +932/−434。
+- 每包 7 件：提示词 / 任务书 / 索引 / diff / 带真实行号的上下文 / 源码 zip / STATUS；行号抽核 `ChatPromptAndTools.kt:499,507` 与仓库一致。
+- 提示词新增两条硬要求（用户本轮要求）：**必须产出可导出的单一 Markdown 报告**（不截断、不拆消息、支持 artifacts 就产文件）+ **任务量不设上限**。
+
+**背景包整理**：INCR-1116 三包（A/B/CD，用户已发）→ `已发/INCR-1116/` + 逐个 `STATUS.md`（已发未回，只读）；`待发-INCR-1116/` 删除；`背景包/README.md` 与 `mounts/RikkaMinis/INDEX.md`（原本停在 10-29）都补了当前批次段。
+
+**可复用**：①`file_edit` 对含全角引号/破折号的 KDoc 可能匹配失败 → 用 python 字节级替换；②`minis-fastio find` 不支持 `--maxdepth`；③CI 证据必须逐条搜到标记，"CI 绿"本身不算夹具跑过的证据（本批 `ALL 354 CASES PASS` 已确认）。
+
+<!-- 2026-11-17 10:29:02 -->
+## INCR-1117 外部审计消化（2026-11-17 上午，窗口 `755bd775..949566ac`）
+
+
+**21 条（A 11 / B 7 / C 3），我逐条回源核实后：P0=0，P1=9，修 12 条，派 6 支**
+
+- `verify_findings.py` 不认这批报告的标题格式（`### F-01 · NEW · file:line · …`，无 `[Mx]` 哨兵）→ 机械核实为空，改为**逐条读真码**（这也是最靠谱的一步：报告 A-F01 的 `optString` 语义、A-F02 的 ourPin 局部变量、C-F02 的 `setEnabled(false)` 都是回源才敢确认）。
+- 6 支（文件集两两互斥，同一基线 `949566ac`）：T1 spawn 生命周期（A-F01/02/03/04/06/07）、T2 聊天 UI（B-F01/03/05）、T3 数学启发式（B-F06）、T4 rootfs 重置（C-F01）、T5 子代理默认值（C-F02）、T6 arm9 门（A-F11）。
+- **最有价值的三条**：①A-F01 Android `org.json` 的 `optString` 对 `JSONObject.NULL` 返回字面量 `"null"`（JSON-java 返回 fallback，两库语义相反）→ 空回答/拒付结果里出现 "null"；②B-F06 是 **1116 修法的次生回归**（函数名计入词数 → `$sin(theta)+cos(theta)$` 被判 prose）；③C-F02「恢复默认」写死 `setEnabled(false)`，与刚翻转的默认 true 相反（同类：翻转默认值时漏改的第四处）。
+- **报告质量**：3 条与既有登记逐字同域（B-F02↔§VOICE-IME-1116-BOUNDARY、A-F08↔§WRITE-GUARD-1116 边界、B-F04↔foldPreview 代理对项）→ 去重靠 backlog 查重，不能只看报告；2 条是明写设计/纵深防御 → P2。
+- 登记：`shared/work/incr1117/TRIAGE-incr1117.md`、`DISPATCH-INCR1117.md`、backlog §INCR-1117（新增 6 条 P2 三件套）。
+
+**可复用**：`minis-sessions-cli send --async --compact` 一行就能拿 session id；派发间隔 35s、逐支回读首条消息验证送达（6/6）。
+
+<!-- 2026-11-17 10:44:31 -->
+## INCR-1117 T6：arm9「失败必须终止」换锚（2026-11-17，分支 `fix/scan-arm9-terminal-1117`）
+
+
+**A-F11 先证=确认（BLIND 实证）**：基线 `949566ac` 的门 `skill_frontmatter_roundtrip_check.py` 第三条判据是 `SB_FAILURE_BRANCH in sb_nc`（含 `is … Failure ->` 这段拼写）。在真树上**只删 Failure 分支里的 `return`**（箭头、HUD 调用全留）→ **基线门 rc=0 绿**，而代码已掉进成功路径。既有负控 `DIRTY_SB_NO_FAILURE_ARM` 是**整段删分支**（箭头也没了），所以「只删 return」这个真实形态在 selftest 里也是绿的。
+
+**修法**：新增模块级 `branch_body_at(text_masked, marker)` —— 从 `->` 之后做花括号匹配取块体（**同时支持单表达式形态**，否则源码改成 `is Failure -> return` 会 ROT；箭头独占一行时取下一非空行），在 `mask_code` 视图上判 `\breturn\b`；标记消失/括号不配平 → 返回 problem 由判据 fail-closed 报违规。判据换锚后 check 名与既有文案骨架不变（`falls through re-enters the success path` / `(ROT — update this gate)`），只把「expected '<arrow>'」改成「branch has no `return` in its body」。新负控 `DIRTY_SB_FAILURE_FALLTHROUGH`（只删 return，带 needle）与旧负控并存 = 两种形态；臂数 23 不变，dirty 夹具 19 → 20。
+
+**证据**：selftest `PASS`（20 条全 RED，新行原文含 `no \`return\` in its body`）；真树 `OK … (23 arms)` rc=0；真树变异（删 return）→ **rc=1，恰一条失败行就是 arm9 第三条**，`git checkout --` 单文件恢复后 sha256 `1a9d7a52…` 逐字节一致；分支 CI **#3198 / 44003805083** @ `83513a1f` 5 job 全 success，`115 passed, 0 failed` + `ALL 354 CASES PASS`（日志确认 `scanners moved in this push` ⇒ 夹具真跑），本门两行 `✅ selftest has teeth (…=PASS)` + `✅ real tree green`。报告 commit `ab6aec41`（docs-only，不 dispatch）。
+
+**可复用**：①「门锚拼写」的证伪手法 = 先跑**基线门 + 变异体**取 BLIND，再修，同一个变异体在修后必须 rc=1 且失败行精确到那一条；②负控要覆盖**真实缺陷形态**（只删一句）而不只是「整段删」，否则假保护在 selftest 里也全绿；③分支块体定位务必支持块体 + 单表达式两种 Kotlin 形态，且在不配平时 fail-closed；④test_scan 捕获门的 stdout 只断言 PASS 标记 ⇒ CI 日志里搜不到新夹具名是正常的，别把它当「夹具没跑」的证据，判据是那条 `✅ … selftest has teeth` 在不在。
+
+<!-- 2026-11-17 10:46:33 -->
+## INCR-1117 T5：子代理「恢复默认」写死旧默认（C-F02，P1）— 分支 `fix/subagent-default-reset-1117`
+
+
+**先证三条全成立**：`SubagentPrefs.isEnabled` 用字面量 `true`；`ConfigBuiltins:204` `defaultValue = true`；`RuntimeLimitsScreen:768` reset 写 `setEnabled(context, false)`（同对话框其它 40 旋钮都传 `*_DEFAULT`）。默认值 11-17 翻转成 ON 时漏改那一行 ⇒ 恢复默认 = 关掉。
+
+**修法（阶梯第 6 级）**：`SubagentPrefs.DEFAULT = true` 一处真源，三处读它（isEnabled / reset / 注册表）。
+
+**证据**：本地 JVM 6 测试 OK；三条变异全红且**红的臂精确对应**（M1 reset 写 false→1 红、M2 注册表字面量→1 红、M3 翻转常量→仅字面量钉死那条红）。CI **#3199 / run 44003934866** @ `437c1182` 五 job success：单测 9300 PASSED、scan-gate 115 passed（**夹具被跳过**，未动 `scripts/scan/**`）、publish 两步 skipped（main 门控）。报告 `fix-reports/FIX-INCR1117-T5.md` 单独提交 `f1b12dd3` 已 push。**未合 main**。
+
+**可复用（三次踩坑）**：①旧测试锚 `indexOf("SubagentPrefs.setEnabled(context, false)")` 是缺陷的隐身衣——锚字面量=字面量一改就失明，改锚「实参」并配前修复文负控；②`parenBlock(src, "Xxx(")` 的 `at + marker.length` 会跳过构造器自己的 `(` → off-by-one，marker 传不带括号的名字；③`src.indexOf("AgentRuntimeLimitsPrefs.save(")` 会命中**注释里**的同名调用（`:123`），锚判定点要用唯一语义锚（对话框文案 `runtime_limits_restore_confirm_title`）。④CI 日志里 4 条 ` FAILED` 全是测试名子串，逐条核过再报「0 失败」。
+
+<!-- 2026-11-17 10:48:28 -->
+## INCR-1117 T2 支（聊天 UI 三条）收口：CI #3197 绿 @ `eefada32`
+
+
+分支 `fix/chat-ui-audit-1117`（worktree `incr1117/wt2`，基线 `949566ac`），**未合 main**。
+代码 `eefada32`（7 文件 +293/−1）+ 报告 `53eb6399`（`fix-reports/FIX-INCR1117-T2.md`，207 行），两提交分别 push。
+
+**三条修法**
+- B-F01 `isListAtBottom`：`visualEnd` 加 `.coerceAtLeast(0)`（只钳判定不动几何，KDoc 指向 backlog §INCR-1116 B F-09）；3 条字面量用例 + 1 条源形状断言。
+- B-F03 `editMessage` 首入分支：快照后 `_pastedTexts.value = emptyList()`（与附件替换同契约），`cancelEdit` 还原未改。
+- B-F05 分享武装：新增纯函数 `MoveToCapsuleGate.observeFrame(...)` 返回 `ShareArmFrame(sawContent, disarm)`，composer 用 `LaunchedEffect(shareInjected, inputFieldValue.text, attachments.size)` 消费 + `enqueuePrompt` 也清标记。
+
+**关键设计发现（与任务书初判法不同，值得记）**：任务书写 `shouldDisarm = shareInjected && !canMove(...)`，但分享文本是经 composer 命令队列落地（`ChatScreen.kt:334` → `ComposerCommand.AppendText`），存在「已武装、草稿仍空」的帧 —— 裸判法会**清掉每一条纯文本分享**。解 = `sawContent` 闩（见过注入内容之后才允许花掉），并写进 KDoc。
+
+**证据**：本地 54 tests 绿（23+17+14，`t2test/` 装置：`extract.py` 把 isListAtBottom 抽成独立文件与测试一次编译）；4 个变异各精确翻红对应用例（A 钳位值级+源形状 2 红 / B 清空行 / C composer 清标记 / D enqueue 清标记）；CI unit-tests **9311 PASSED 0 FAILED**、13 条新测试名逐条 PASSED、scan-gate `115 passed 0 failed`（夹具自检按设计跳过，未改 scripts/scan）、publish 两发布步 skipped。
+
+**可复用坑**：变异还原**不能**用 `git checkout -- <file>` —— 该文件本支的修改也是未提交的，会一并抹掉（本轮 ChatScreen 中招一次，重打了一遍补丁）；正确做法是变异前 `cp` 快照、还原再 `cp` 回来。
+
+<!-- 2026-11-17 10:48:40 -->
+## T3（B-F06）行内公式启发式：函数调用不当词（2026-11-17 上午，`fix/math-heuristic-callparen-1117` @ `06bb64ba`，CI #3196 五 job 全绿）
+
+
+**规则**：token ∈ `MATH_FUNCTION_TOKENS` 且后跟 `(`（允许空白）= 函数调用，**不计 words 也不当长词**；`30-min` 无括号仍计数。修的是 1116-B F-10 的次生回归（`sin(theta)+cos(theta)` 四词 + `theta` 长词 → 判散文）。
+
+**证据**：沙箱 pre/post 双臂装置（`shared/work/incr1117/jvm3/`，编译真实生产文件 + 探针镜像仓库测试的启发式臂）——pre 10 tests 3 failures（正是三条调用臂），post OK(10)；变异 m1（删修复）= 同三条红，m2（放宽成「任意函数 token」）= 货币句那条红（证明没放过宽）；45 条输入 pre/post 差分**只翻 3 行**。CI：run `44003535782` @ `06bb64ba…` 逐字符一致，unit-tests **9303 PASSED / 0 FAILED**，六条新测试名逐条 PASSED，scan-gate 115 passed 0 failed（本批未改 `scripts/scan/**` ⇒ 日志明写 fixtures skipped，**不能**写成「夹具全绿」）。报告 `fix-reports/FIX-INCR1117-T3.md` 单独提交 `111a88d9` 后单独 push。
+
+**可复用**：①任务书把「新增臂」全归为红，实测两条（`sin (x) + cos (y)`、负控 `sin (the angle) of a circle`）改前已绿——报告里如实标「回归臂而非红→绿」，别顺着任务书的分类写；②差分扫描（同一批输入跑双臂 diff）比逐条断言更快给出「无意外翻转」证据，值得固化成标配；③变异要**双向**：删修复（测有牙）+ 放宽规则（测不过宽），只做前者会漏「规则太宽」。
+
+<!-- 2026-11-17 10:50:02 -->
+## INCR-1117 T4：rootfs 重置遇不可读非空目录（C-F01）修复完成（2026-11-17 上午）
+
+
+**分支** `fix/rootfs-reset-unreadable-1117`（基线 `949566ac`）：代码 `0d6399b4` + 报告 `bf35ffb8`（未合 main，CI 绿 = 停止节点）。差异仅 3 文件：`RootfsResetFiles.kt` (+123/−10)、`RootfsResetFilesTest.kt` (+65)、`fix-reports/FIX-INCR1117-T4.md`。
+
+**先证（真跑出差异，不是纸面推演）**：沙箱里 `uid=0` 是 PRoot 伪造的（`chmod` 恒成功、属主一律显示 65534），但 **mode 位检查仍由真实内核执行** —— `su nobody -s /bin/sh -c 'ls <chmod 000 目录>'` 报 Permission denied。于是用「kotlinc 编生产文件 + 3 行 AppLogger 桩 + 以 nobody 跑 JVM」的探针，在真实权限下拿到终态：修复前 `RESULT=RESIDUE`（`0200` 非空目录连同 `payload.txt`/`nested` 整棵留下，`visitFileFailed` 里只补 `u+w` → `DirectoryNotEmptyException` 被 `runCatching` 吞），修复后 `RESULT=CLEAN`。
+
+**修法**：`visitFileFailed` 命中**目录**→ 补属主 `rwx` 后显式栈 DFS 删整棵子树（目录后序删，深度 64 层验过）；命中文件/链接维持原样；失败落 `AppLogger.warning("RootfsReset", …)` 不再静默。`CONTINUE` 与 `.l2s-backing` 跳过语义逐字未动。
+
+**副产品**：`restoreOwnerAccess` 拒绝 chmod 符号链接（`File.setWritable` 会跟随链接，把 rootfs 外目标从 0444 改成 0644 —— 负控实测到这条）。
+
+**证据**：同一测试类跑修复前产物 → 恰好 2 条新臂翻红（子树残留 / 链接目标 mode 被改），6 条既有绿；CI #3201 / run `44004306822` @ `0d6399b4` 五 job success，两条新用例 **PASSED（不是 SKIPPED）** ⇒ runner 非 root、chmod 路径真跑；9300 条 PASSED / 0 条 ` FAILED`；scan-gate `115 passed, 0 failed`（本批未改 `scripts/scan/**`，夹具按设计跳过）。
+
+**可复用**：① 沙箱里复现「非 root 才显现」的权限类 bug：`su nobody` + kotlinc 单次编译生产文件 + 桩，跑 `JUnitCore`，本地即可拿到 pre/post 差分；② 测试里用 `Assume.assumeFalse(locked.canRead())` 让 root JVM **跳过**而不是假绿；③ `File.setWritable` 等 `java.io.File` 权限 API 跟随符号链接 —— 在 rootfs 清理路径上必须显式挡掉链接。
+
+<!-- 2026-11-17 10:51:16 -->
+## INCR-1117 T1 修复支完成：spawn_agent 派发生命周期六条（2026-11-17 上午）
+
+
+**分支** `fix/spawn-dispatch-lifecycle-1117` · worktree `incr1117/wt1` · 基线 `949566ac`
+**CI #3200 / run `44004230377` @ `9b9304ba` 五 job 全 success**（publish 内两步 skipped = main 门控生效，分支构建不污染 release）。报告 commit `a0a58859` 单独 push（`git diff --stat 9b9304ba..HEAD` 只有 `fix-reports/FIX-INCR1117-T1.md`）。**未合 main**。
+
+**六条全先证成立**（无证伪）：
+- **A-F01** `optString` 把 `JSONObject.NULL` 读成 `"null"`（Android 语义；JSON-java 返 fallback）→ `resultOf` 的 `ifBlank` 是死代码。修在读者侧 `SubagentSkill.replyText`（先 `isNull`，两库同义），wire 形状不动（CLI/scheduled 依赖 null）。
+- **A-F02** `ourPin` 局部变量只在 depth==1 赋值，并发派发时最后 `end` 拿到 null ⇒ 永久置顶。修：pin 值搬进 `SubagentDispatchPin.noteWrittenPin/takeWrittenPin`，与深度同住。
+- **A-F03** `finally` 里的 `getSession`/`pinSession` 是 suspend，用户停止后协程已 cancel ⇒ 第一个挂起点抛 ⇒ `runCatching` 吞 ⇒ 还原没发生。修：`withContext(NonCancellable)`，仍在 finally 内。
+- **A-F04** 停止只解除 `withTimeoutOrNull` 等待，子会话在自己 viewModelScope 上继续跑。修：`HeadlessChatRunner.prompt` 等待段 catch CancellationException → `NonCancellable { vm.cancelStream() }` → 重抛；**timeout 保持原语义**（子会话继续跑）；`ScheduledTaskRunner.onTasksRemoved` 只清簿记、不取消在飞 run，不受影响。
+- **A-F06** 执行侧不查 `SubagentPrefs` → 函数入口加硬门（记忆工具同款双门控）。
+- **A-F07** 等待恒 900s 不随预算收缩 → 纯函数 `effectiveWaitSeconds(remainingMs, cap)`，下限 1s，`resultOf(timeoutSeconds=)` 同步说真实秒数。
+
+**验证**：门 0 改动仍 rc=0（6 contracts + selftest 9 臂全红）；邻门 truncated_call_guard rc=0；本地 JVM 44 测试（3 类）绿；**6 条源码级变异臂每条都让对应测试翻红**（optString 回退 / takeWrittenPin→null / 去掉 NonCancellable / 等待忽略预算 / 删 prefs 门 / 删 cancelStream）。
+
+**可复用**：①`test_scan.py` 夹具在本批未改 `scripts/scan/**` 时被跳过（日志 `skipping the fixture self-test`），此时代理门变异负控只能本地 `--selftest` + 自己的变异臂补，**不能把「CI 绿」写成「夹具跑过」**；②CI 单测日志里 `FAILED` 行数 4 条全是**用例名**含 FAILED（`…produces FAILED…`），计数必须先看是不是 PASSED 用例名子串；③只改 Android 源码的文件在沙箱用 kotlinc 单文件检查时，`grep -icE "expecting|unexpected|syntax"` = 0 是「结构没坏」的可复核信号（其余全是缺符号的 unresolved reference）。
+
+<!-- 2026-11-17 11:28:26 -->
+## INCR-1117 闭环 + FIX-1117 备包（2026-11-17 11:3x）
+
+
+**合并**：`integration/incr1117` → main **`e6a0276e`**（`--no-ff`，parents=`949566ac 23f9c73e` 父数 2 ✓，合并树与并集 tip 逐字节一致）。
+并集 CI **#3202** @ `23f9c73e`：115 门 0 failed · `ALL 354 CASES PASS` · 9338 单测 0 失败。main CI **#3203** 五 job 全绿，
+publish 真执行（release `android-latest` = `v1.0.0+3203`，资产更新 `03:26:27Z`）。远端 7 支 DELETE 204（删前 `ahead_by=0`），
+本地 worktree + 分支全清，只剩 main。
+
+**计数更正**：修的是 **13** 条（12 P1 + A-F07 捎带），不是 12 —— merge commit message 是口算漏了，已在 TRIAGE 与台账里注明，commit 未改写。
+
+**背景包整理**（`mounts/背景包/`）：
+- `待发-INCR-1117/` → `已发/INCR-1117/`（3 包逐个重写 `STATUS.md`：已发·已回·已闭环 + 每包的发现数/修数/分支/CI）；**注意 external mount 不支持 rename**（`mv` 报 EPERM），用 `cp -r` + `rm -r`。
+- **更正了一个历史误标**：`已发/INCR-1116/` 三个 STATUS 与 README 写「已发未回」，实际报告 11-16 就回了并消化（已修 11 / 登记 13，main `d30ceb23`，CI #3154）→ 全部改为「已回·已闭环」并补「结案」段。
+- 顶层 `README.md` 重写（目录表 / 当前状态 / 整理历史 / 生成器），`mounts/RikkaMinis/INDEX.md` 同步（顺手修了一条指向早已归档的 `待发-R5-修后复扫/` 的过期路径）。
+
+**下一轮已备好：`待发-FIX-1117/`（3 包，修复 diff 审）**，窗口 `949566ac..e6a0276e`：
+A 派发生命周期（7 文件 +393/−19）· B 聊天 UI 与行内公式（9 文件 +382/−19）· C rootfs 重置/默认值/arm9 门（8 文件 +410/−19）。
+生成器 `shared/work/incr1117/fix/build_fix.py`（显式文件集版，非自动分域）。任务书把「上一轮修法的取舍 vs 错」写成了判读口径。
+配套真机清单 `shared/work/incr1117/真机清单-1117.md`（6 条，A-F04 停机、F02/F03 置顶、B-F01 极矮视口、B-F05 胶囊、C-F02 恢复默认、C-F01 chmod 000 重置）。
+
+**可复用**：①`minis-fastio mv` 对外部挂载直接报 `external_mount`，`mv` 也 EPERM → 归档只能 `cp -r` + `rm -r` 并核文件数/体积；②查 main CI 要按 workflow 过滤（branch 维度最新 run 可能是别的 workflow，我这轮先撞上了 `scan`）。
+
+<!-- 2026-11-17 11:58:06 -->
+## INCR-1117B T3：行内公式散文判据（B5 未闭合 + B4 新假阳性）— 2026-11-17 午
+
+
+**分支** `fix/math-prose-args-1117b` · worktree `incr1117b/wt3` · 基线 `e6a0276e`
+代码 `344dc343` + 报告 `77c42c90`（差异仅 `fix-reports/FIX-1117B-T3.md`）。**未合 main。**
+
+**CI #3204 / run `44011997623` @ `344dc3435b37…`（与本地 tip 逐字符一致）五 job 全 success**：
+unit-tests **9352 PASSED / 0 ` FAILED`**（基线 9338 + 14 = 9352，算术对得上），14 条新用例逐条 PASSED；
+scan-gate `115 passed, 0 failed`（本批未改 `scripts/scan/**` ⇒ 日志明写 `skipping the fixture self-test`，
+**不能**写成「夹具全绿」）；publish 两步 skipped（main 门控）。
+
+**修法（一条规则两个面，`MarkdownMathHeuristic.kt` +133/−35）**
+- **B5**：调用组 = `name` + **配平的**`( … )`（参数/逗号/嵌套全吞）整体不计词、不产生长词；
+  head **不要求**在 `MATH_FUNCTION_TOKENS`（`f(x)=…` 也是公式——名字表管长词豁免，调用组管结构，两件事）；
+  **不配平返回 −1**（流式半截 `sin(x + 1` 时 head 继续计词，不吞后半段）。
+- **B4**：新增 `PROSE_FUNCTION_WORDS`（the/and/or/of/for/per/each/total/with/from/by/as/in/at/is/than/that/this/if/not）
+  读**整段**（含组内，`x + sin(the angle) + 3` 必须判散文）；`to` 故意排除（`lim n to inf` 是文档化公式形状）。
+  3 词 + 长词门保留（`velocity + acceleration` 的安全网）。
+
+**证据**：先证 14 条夹具在基线树上 **6 红**（B5 三条 MATH→false + B4 三条 TEXT→true，消息原文见报告）；
+修后 `OK (14 tests)`。差分装置（`jvm3/extract.py` 抽仓库内 97 条既有字面量 + 45 条手写 = 142 条，pre/post 各跑一遍）
+**只有 7 行翻转** = 6 条预期 + `x in A`（新取舍：功能词 `in` 全段扫描，漏判公式比吃掉 `$` 诚实）。
+变异三条臂：m1 删调用组→4 红（全公式臂）、m2 删功能词网→4 红（全散文臂）、m3 组吞功能词→**1 红**（精确命中那条）。
+
+**可复用**：①任务书 §5 的变异 ③「调用组扩成任意括号 ⇒ 边界组翻红」**按字面做不到**——
+`$5-$10`/`$5k-$10k`/`$10/mo-$20/mo` 在散文网之前就被货币网拦掉，任何括号放宽都碰不到；
+「任意括号」唯一有差别的形态是无 head 裸括号（`(alpha beta) + gamma`），那是合成输入。
+改落成 §4 点名的真正判据面（组吞功能词），报告里如实写明理由，不硬造红；
+②差分语料的抽取不该只喂整句——**必须含 `looksLikeMath(` 的字面量**（97 条里绝大多数是 span 内容本身），
+整句喂进去只能证明「同一句话判决没变」，证明不了 span 级不变；
+③`run.sh` 每次 `rm -rf` 重建 arm 目录 ⇒ diff 模式跑完会冲掉 test 模式的 junit.log，证据要先 `cp` 出去。
+
+<!-- 2026-11-17 11:58:22 -->
+## WAVE-1118 重装版全库扫描 17 包（2026-11-17 12:1x）
+
+
+**背景**：FIX-1117 三包已发、报告已回，用户**移交另一个会话**处理（本会话不重复处理，已写进 STATUS 与 README）。
+用户指出外部模型速度大涨、额度近乎无限，"任务可以重一些"。
+
+**覆盖台账纠正了一个旧口径**（重要）：`背景包/README` 里"508/706 = 72% 覆盖、196 个未审文件"与逐包材料对不上。
+用 35 个包的 `02-*` 材料重建（`shared/work/coverage-1117/`）：**722 个生产 .kt 里 718 个出现过在某个包清单**，
+真正的「从未被读」只有 **4 个**（`provider/ModelMetadataPrecedence.kt`、`provider/gemini/GeminiToolReplay.kt`、
+`provider/openai/OpenAIResponsesToolReplay.kt`、`ui/chat/StopCleanupPlan.kt`）；「上次审过后又改过」**27 个**。
+结论：**文件级覆盖满了，深度不够**（B00–B13 是 10-29 的宽口径切片，每包 5–104 文件）。
+
+**因此这批换成"全库重扫 + 换镜头 + 加重交付"**：`待发-WAVE-1118/` 17 包 / **722 文件 100%** / 4.6 MB：
+- 环族 R1–R6（内存治理 / offload worker / 沙箱回收 / 会话并发 / provider 流控 / 崩溃自愈）：五边 + L0–L4
+- 结构模式域 D1–D11（聊天内核、聊天其余、沙箱、设置面、数据层、provider 协议、服务备份、agent/工具、调试 RPC、其余 UI、平台外壳）：P1–P4 + A–H
+- 每包交付：不变量清单 INV / 每条发现的**最小复现测试（Kotlin JUnit 形态）** / **门设计（含负控夹具）** / **补丁草图 ≤15 行** / high 发现的反证 / 未确认清单
+- 生成器 `shared/work/wave-1118/build_all.py`（RINGS + DOMAINS 数据驱动，重装模板）
+
+**建议发送**：按 4–5 包一批；顺序 R3→R2→R1→R5→D3→D1→D9→D5→D4→D6→D2→D7→D8→D10→D11。
+
+**背景包更新**：`已发/FIX-1117/`（3 包，STATUS=已发·报告已回·移交）；README/INDEX 同步；
+`待发-FIX-1117` 已消失（cp+rm，注意 external mount 不支持 rename）。
+
+**可复用**：①估算覆盖必须从包材料反推，不能信 README 的口径数字；②扁平包（B00–B13 无子目录）会让
+"逐子目录扫材料"的脚本静默漏掉整批——脚本要同时支持 flat 与 nested。
+
+<!-- 2026-11-17 11:59:53 -->
+## INCR-1117B T5：arm9 分支体判据收紧（2026-11-17，分支 `fix/scan-arm9-body2-1117b`）
+
+
+**分支** 基线 `e6a0276e` · 代码 `da32270f`（门 +218/−33 单文件）· 报告 `5d09a9fe`（docs-only +235）
+**CI #3205 / run `44012196139` @ `da32270f` 五 job success**（head_sha 与代码提交逐字符一致；`publish` 两步 skipped = main 门控）。**未合 main**。
+
+**先证（基线门当库导入跑新夹具，实测而非推理）**：`return@withContext` → arm9 **绿**（假阴性，C3.1）；`-> if (c) { 多行 … return }` → arm9 **红**（假阳性，C3.2）；两处 Failure 分支 → **绿**（静默取首处）；`throw` → **红**（漏判合法终止）。
+
+**修法**：终止性正则 `\breturn\b(?!\s*@)|\bthrow\b`；`branch_body_at` 换成「箭头后括号深度游走 + 分支边界」原语（`_branch_body_end`：缩进 ≤ 箭头列 + 续行运算符 + `else ->` 是兄弟不算续行 + depth 0 的 `;`/闭括号即边界 + 不配平 fail-closed）；marker 计数 != 1 fail-closed 并报实际次数。
+
+**证据**：selftest 22 条 dirty 全 RED（20→22）+ 2 条 clean-shape GREEN + two-marker 计数断言；真树 `OK (23 arms)`；真树两个变异（`return@let` / 删 return）各 rc=1 且失败行精确一条 arm9；恢复 sha256 与快照一致；CI 日志 `scanners moved in this push` + `ALL 354 CASES PASS` + `115 passed, 0 failed` + 本门两行 `selftest has teeth` / `real tree green`；单测 9338 PASSED / 0 FAILED。
+
+**可复用**：① 门的 GOOD 夹具锚漂移会**静默变绿**（DIRTY 漂移会响，GOOD 不会）→ 新夹具用 `_mutate()` 锚不到就 SystemExit，non-`.replace` 构造的夹具另加计数断言；② 判定「分支体读到哪」不能只看首字符：连 `;` 与 depth-0 闭括号都要当边界，否则内联 `when` 会把 `else -> return` 吃进 Failure 分支体造成新假绿；③ 真树变异后必须抽查提取出的体边界（打印首尾），确认没越过分支去吃成功路径。
+<!-- 建议主会话登记 backlog：arm9 终止性仍是文本级（半覆盖 `if (x) { return }` 会判绿）、非 K&R `else` 换行可能假红，触发条件见报告 §6。 -->
+
+<!-- 2026-11-17 12:05:00 -->
+## INCR-1117B T2：编辑态粘贴 chips 重入 + 分享胶囊空武装（2026-11-17 中午）
+
+
+**分支** `fix/chat-edit-share-1117b`（worktree `incr1117b/wt2`，基线 `e6a0276e`）· 代码 `6059bd71` + 报告 `09d74df2` · **CI #3206 / run `44012812393` @ `6059bd71` 五 job success**（head_sha 与代码 tip 逐字符一致）。**未合 main**。
+
+**两条**
+- **B2** `editMessage()` 首次进入清空 chips，但**重入**（编辑 A 未退出直接编辑 B）走 `else if` 把快照还原成活跃行 → refold 后 `expandPastedTextWithSplit` 消费全部 detached 块 ⇒ 未发送的草稿粘贴写进历史消息 B。修：抽纯函数 `editPastesOnEnter(current, snapshot)`（`EditPastesEntry(snapshot, live)`），进入恒为「快照一次 + live 空」；`cancelEdit()` 仍还原。
+- **B3** share drain 无条件 `markShareInjected()`：附件拷贝失败返 null / 纯空白文本时不产生内容，`sawContent` 永远 false ⇒ arm 无法花掉 ⇒ 之后随手输入即弹出「移动到…」。修：`shareDrainLanded(items, attachmentLanded)`（附件以 `addAttachmentFromStagedShare != null` 为准、文本以 `isNotBlank` 为准），一项没落地就不武装（保持上次状态），未动 `MoveToCapsuleGate` 判据本体。
+
+**证据**：双臂探针（`shared/work/incr1117b/t2/`，pre=基线逐行转写，post=`extract.py` 从生产文件切原文，`MoveToCapsuleGate.kt` 用仓库真文件）pre 6 测试 3 红（正好三条缺陷臂）→ post 6 绿；仓库测试 37 绿（PasteFoldWiring 16 + MoveToCapsuleGate 21）；五条变异各只翻对应臂（m1 规则/m2 调用点/m3 arm 恒真/m4 过度 disarm/m5 去守卫）；CI 9344 PASSED / 0 FAILURE，scan-gate 115 passed（夹具按设计跳过：未改 `scripts/scan/**`），publish 未发布（main 门控）。
+
+**可复用**：①「表达式体无花括号」的抽取不能按 brace 匹配——按「花括号归零」或「depth==0 遇到空行」双规则切，且断言每块不含其他 marker；②过度 disarm 也要单独变异（文本项恒 false）否则「把分享全 disarm」这种修法会假绿；③本地跑 Gradle 测试类到不了生产编译面时，用「生产函数原文 + 纯 data class 形状副本」编真实测试类，`user.dir` 设仓库根即可跑 shape 断言；④变异还原必须 `cp` 快照（`git checkout --` 会连未提交的修复一起抹掉）。
+
+<!-- 2026-11-17 12:14:09 -->
+## FIX-1117B-T4：rootfs 重置两道护栏（C1.1 + C1.2）（2026-11-17 午）
+
+
+**分支** `fix/rootfs-reset-guard-1117b`（worktree `incr1117b/wt4`，基线 `e6a0276e`）：代码 `b5e3c5f7` + KDoc 修复 `b61baf49` + 报告 `2e347958`（**tip 相对 CI sha 只差报告**，未合 main）。
+**CI #3209 / run `44014151693` @ `b61baf49`：五 job 全 success**，`unit-tests` 9341 PASSED（`RootfsResetFilesTest` 11 条逐条 PASSED，含三条新臂，非 SKIPPED）、`scan-gate` 115 passed（**夹具按设计跳过**，本批未改 `scripts/scan/**`）、`publish` 两步 skipped。
+
+**两条 P1 的修法**
+- **C1.1**（数据丢失）：`Files.exists(backing)` 对 `EACCES` 和 `ENOENT` 都返回 false，rootfs 自身 `chmod 000` 时 backing 被判"不存在" ⇒ 整棵删除 ⇒ 用户所有伪硬链接目标消失。改成三态 `BackingState{ABSENT,PRESENT,UNKNOWN}` + `Files.readAttributes`（**异常类型**承载区分），`UNKNOWN` 先给 scope root 补属主权限复查一次，仍 `UNKNOWN` 按 PRESENT 处理并 warning（跳过一个不存在的目录成本为零）。
+- **C1.2**（越界 chmod / 自删 scope root）：`visitFileFailed(root)` 把 rootfs 目录交给子树删除，该函数没排除它 ⇒ 删不动就 `restoreOwnerAccess(root.parent)`（app 私有 files 目录）；无 backing 时直接删掉 rootfs 本身。改为显式携带 `scopeRoot`，**永不自删 scope root**（无开关），`restoreOwnerAccess` 加作用域守卫。
+
+**证据（su nobody + 真实 mode 位，11 条同跑）**：pre 3 红（backing 内容被删 / 父目录多了 OWNER_WRITE / rootfs 目录被删）、post 11 绿；变异 M1（退回单次探针+UNKNOWN→ABSENT）→ 只 C1.1 红；M2（去掉根守卫）→ 只 C1.2b 红；M3（只删 chmod 守卫）/M4（只删 fail-safe）→ 绿（**如实记为层叠冗余**）；M5（M2+M3）→ C1.2a+C1.2b 红。
+
+**可复用（三条，都会复发）**
+1. **本地 kotlinc 编过 ≠ CI 编过：KDoc 链接错误只有 KSP 看得见。** `[C1.1]` 这种"标识符后跟 `.` + 数字"的 KDoc 链接让 `KDocLinkParser` 报 `Closing bracket expected`，CI 三个 job 同时红（`#3207`），而本地同版本 2.1.0、同字节、`-nowarn` 与否都 `EXIT=0`（CLI 根本不解析 KDoc）。定位手段：`grep` 编译器 jar 里的错误串 → 命中 `org/jetbrains/kotlin/kdoc/parser/KDocLinkParser.class`。`[C-F01]` / `[incr1116-CD F-04]` 这类"标识符后跟 `-`/空格"的写法解析器就地放弃、不报错，所以一直绿。机械判据：`^[A-Za-z_][A-Za-z0-9_]*(?:\.[^A-Za-z_])`。
+2. **PRoot 隐藏 `.l2s.*` 叶子**：用 `.l2s.` 命名的探针在 pre 臂上会**假绿**（删 backing 报 ENOTEMPTY，目录幸存）。必须再加一个普通名文件才压得红。
+3. **`chmod 000` 与 `0111` 测的不是同一件事**：`000` 会让 C1.1 的复查顺手把 root 恢复，`visitFileFailed(root)` 不再触发；要测"作用域根不自删"必须用 `0111`（只有 M2 单红能证明）。
+
+<!-- 2026-11-17 12:41:08 -->
+## FIX-1117B（修复 diff 审计）已合 main + WAVE-1118 八个修复支已派发（2026-11-17 中午）
+
+
+**1117B（三份「审修复 diff」报告，14 条）**：判级表 `shared/work/incr1117b/TRIAGE-1117b.md`。
+- **证伪 1 条**：A1（`optString` 读 `sessionId`/`status` 得 `"null"`）——写端 `ChatMutationMethods.prompt` 只对 `responseText` 用 `?: JSONObject.NULL`，另两个键是非空 String，永不写 NULL。
+- **引用既有登记 1 条**：B1（极矮视口钳零后上滑被反判在底）＝ §INCR-1116 **B F-07 + B F-09**。
+- **修 9 条 → 五支**（文件集互斥）：A3+A4 pin 窗口原子化（`SubagentDispatchPin.begin/end` 变成 suspend 窗口操作：per-session `Mutex` + `NonCancellable`，`writtenPins` 记录值，失败保留记录）；B2 编辑态重入不再还原草稿粘贴快照（`editPastesOnEnter`）；B3 分享内容全落空时不武装胶囊（`shareDrainLanded`）；B5+B4 行内公式散文判据（调用组整体不计词 + 英文功能词网）；C1.1+C1.2 rootfs 重置（`readBackingState` 三态 ABSENT/PRESENT/UNKNOWN + 作用域根永不删 + 禁止 chmod 作用域外）；C3.1+C3.2 arm9 分支体判据（拒 `return@label`、接受 `throw`、边界扫描替代「首字符 `{`」、marker 非唯一则 fail-closed）。
+- **合并**：并集 `e2aa45c1` → main **`c85131ad`**（`--no-ff`，parents=2 ✓，树逐字节一致），main CI #? 全五 job success（含 publish）。随后一个一行门文案修正直推 main → **`474a163e`**（**父数 1 = 直推，未走 --no-ff**，登记在案）。五支远端 204 删除、本地/worktree 清理。
+- **可复用**：①修复把 gate 锚定的调用点搬走 ⇒ 门报 `FAIL [dispatch-pin-missing]`，这是**门 ROT 不是修法错**，处置＝改门锚到新决策 + 夹具 + selftest 三件齐；②`git branch --merged` 对「CI 绿后又补提交」的分支会判 NOT（session 在绿后 amend/追加），删支前要按「各支自身文件 vs main 逐文件 diff = 0」判等价；③分支被 amend 后 `git merge origin/<b>` 会与已合内容冲突 → 一行级修正直接在主树改更省事。
+
+**WAVE-1118（17 份报告 / 85 条发现：R1–R6 闭环审计 + D1–D11 结构模式扫描）**：索引 `shared/work/incr1118/INDEX-wave1118.txt`，派发台账 `DISPATCH-1118.md`，共用纪律 `fix/POLICY.md`。
+- 八支按目录 allowlist 切（文件集两两互斥）：chat(D1+D2+D10F05) / sandbox(D3+R3) / provider(D6+R5) / tools(D8+D9) / service(D7+R2+R4) / platform(D11+D9F06F07+R6) / ui-settings(D4+D10) / data(D5)，基线 `c85131ad`。
+- **不派支**：R1（内存治理环 7 条，跨 4 目录的 L2 开环）与 R4-F04 / R6-F04 → 登记层。
+- 报告自带「INV 清单 + 触发链 + 补丁草图 + 最小复现测试 + 门设计」，先证材料质量高于以往批次；但 severity 仍普遍偏高，按 POLICY 用触发路径重判。
+
+<!-- 2026-11-17 12:54:51 -->
+## INCR-1117B T1：spawn 派发 pin 窗口原子化（A3-a/A3-b/A4 + 门 ROT）（2026-11-17 午）
+
+
+**分支** `fix/spawn-pin-window-1117b`，基线 `e6a0276e`；代码 `845c6b63` + 门修复 `69314ba0`。
+CI **#3212 / `44017154807` @ `69314ba0`**：五 job 全 success（publish 两发布步 skipped = main 门控），unit-tests **9336 PASSED / 0 FAILED**，
+scan-gate `115 passed, 0 failed` + `ALL 354 CASES PASS`（本批动了 `scripts/scan/**` ⇒ 夹具真跑）。**未自行合 main**；主会话的 `c85131a` 并集已把代码合入（门以主线 `474a163` 落地），报告由我另开 docs 支 `--no-ff` 合入 main `e65cb88`（parents=2）。
+
+**修法**：`SubagentDispatchPin.begin/end` 成为**一个原子窗口操作**（per-session `Mutex` + `withContext(NonCancellable)`，覆盖计数 + Room 往返），
+`begin/end/noteWrittenPin/takeWrittenPin` 原始 API 转私有（让竞态不可表达）；还原失败返回 false 且**保留记录**，调用点 `AppLogger.warning`。
+A4：`SubagentDispatchPinTest` 8 条真协程行为测试（可控挂起点的 fake 仓库 + `runBlocking`/`launch`/`CompletableDeferred` 门控），
+`SubagentBudgetGateTest` 只留 1 条「调用点只能委托窗口操作」形状断言，`a cancelled caller stops the turn it started` 改用**花括号匹配**限定 `prompt()` 体内。
+
+**先证**：`t1probe/src/LegacyPinWindow.kt` 逐字转写 `e6a0276e` 的 542-554/579-592 行，对未改的 `SubagentDispatchPin`（sha256 `cc1589b8…`）跑同一契约 →
+`Tests run: 6, Failures: 2`，恰是 A3-a（`expected null, but was:<100>` 的反面：窗口 2 期间无 pin）与 A3-b；另 4 条是回归臂（修复前已绿，如实标注）。
+
+**变异臂 12 条**（双向）：探针 6（no-mutex / fresh-lock / cancellable-begin / pin-already-pinned / restore-on-every-close / unpin-any）+ 仓库内 6（M1-M4 对象、S1-S2 调用点），各红在对应用例；门牙真树 4 条（release 移出 finally / 删 last-window 守卫 / 关窗可再生 / 调用点插回 raw bookkeeping）。
+
+**门 ROT（本轮最有价值的发现）**：`subagent_dispatch_check.py` 的 D5 只锚**调用点 token**（`SubagentDispatchPin.begin(`/`.end(`），把记账搬进对象后判据失明地报红——而反过来更糟：保留 token、丢掉序列化/不可取消/只最后一个窗口还原的调用点会继续绿。按「改门三件齐」重锚：D5（调用点 + 负向禁 raw bookkeeping）+ **新增 D5b**（读对象：两个操作都要 NonCancellable + withLock；开窗只在 depth==1 pin、pin 前读并比 null；关窗 undo 前必须有「剩余深度」守卫、undo 前必须读当前值）。**臂数 9 → 20**，且每条臂现在断言**红的是哪条 code**（旧版只要求「红」）。深度守卫按语义判（解析 `depths.merge/compute` 的变量名，再看它是否出现在某个 `if (...)` 里），不锚拼写。
+
+**可复用教训**：
+1. **报告要在停止节点前提交**——本支的 `fix-reports/FIX-1117B-T1.md` 一直是工作区未跟踪文件，主会话并发清 worktree（`wt1..wt5` 整目录消失）时被抹掉；靠 main 上的旧版副本 + 补丁脚本还原。以后：报告落盘后立刻 `git add && commit`（哪怕正文没写完），CI 跑着时就提交。
+2. **worktree 突然消失先查远端分支**：本支被删 + main 前进 = 并集已合入，别再重做；`git merge-base --is-ancestor <我的 sha> origin/main` 一句话定性。
+3. 「门锚 token」的证伪手法：**改结构前先看门 grep 的是什么**（`grep -n "dispatch-pin" scripts/scan/*.py`），否则 CI 一轮才暴露。
+4. 沙箱 `runBlocking` + `CompletableDeferred` 门控 + `delay(150)` 足以稳定复现跨协程竞态（同一事件循环、确定性交错）。
+
+<!-- 2026-11-17 13:22:37 -->
+## FIX-W1118-provider（T3）：D6+R5 判级，修 2 条、证伪 1 条（2026-11-17 午）
+
+
+**分支** `fix/w1118-provider`（worktree `incr1118/wt3`，基线 `c85131ad`）· 代码 `598564a3` + 报告 `4aabc66f`
+**CI #3215 / run `44021680345` @ `4aabc66f9c0940de5de46061bee47379cf306804`（与本地 tip 逐字符一致）**：
+五 job = unit-tests / lint / build-apk / scan-gate success，publish 两步 skipped（main 门控）。
+单测 **9362 PASSED / 0 FAILED**（新 3 条逐条 PASSED）；scan-gate `115 passed, 0 failed` +
+`scanners moved in this push (or the diff was unreadable) — running the fixture self-test` + **`ALL 354 CASES PASS`**（本批未改 `scripts/scan/**`，仍跑了夹具，日志有标记）。**未合 main。**
+
+**修（2 条）**
+- **D6 F-05 + R5 F-04（P1）** `CallCancellation.executeOrCancel()`：hook 原挂在**调用方 job** 上，而调用方 body 正阻塞在 `execute()` 里 ⇒ 它永远进不了完成态 ⇒ 取消不打断阻塞读（语音 120s / 生成流 1800s 全等）；`DisposableHandle` 还直接丢弃。改为 `coroutineScope` + 子 watcher（`launch(UNDISPATCHED){ awaitCancellation() }`）+ `if (!scopeJob.isActive) cancel()` 守卫 + finally `dispose()`。**实测 2714ms → 16ms**（真 okhttp 4.12 + 真 kotlinx **1.9.0**）。守卫是必须的：我们自己的 finally 也会取消 watcher，无条件 cancel 会打断调用方还要读的健康 body。
+- **R5 F-01（P2-latent，任务书指派）** `consumeEstimatedTokens` 改 `available = cap - used - reservedChildTokens`。**engine 从不调用它**（`AgentLoopEngine:768` 明写），所以是契约修复不是可感知修复——报告里如实记 P2。
+
+**证伪（1 条，重要）**：**D6 F-01「firstDataWatchdog 未在 finally 取消 ⇒ HTTP 200 空体挂 30 分钟」不成立**。
+实测（应用在用的 **kotlinx 1.9.0**，复刻生产拓扑 `flow{emitAll(callbackFlow{}.flowOn(IO))}` + `channel.close()` + `awaitClose`）：
+`collect` **95ms 返回**，子协程在 body 返回时已被取消（1.8.1 同形 77ms）。**callbackFlow 收尾会取消子协程，collect 不等它** ⇒ 30 分钟 delay 从没机会阻塞调用方，空流照旧由 `failOnSilentEmptyCompletion` 立刻转 TransientError。
+处置：按 POLICY「证伪不硬修」**回退三处 provider 试改并删掉随之写的测试**（它在基线上也绿 = 装饰）。
+
+**可复用（三条，都会复发）**
+1. **`callbackFlow` 的子协程不会挂住 `collect`**——「watchdog 没在 finally 取消 ⇒ 流挂死」这类断言，先跑拓扑探针再定性；报告里的「scope 会等子协程」是**推理不是事实**。
+2. **探针必须复刻生产收尾三件**：①`channel.close()`（漏了则 `awaitClose` 永远等，**误判成挂死**，我第一次就踩）；②先发 HTTP 请求（漏了服务端不响应，watchdog 会关 socket 抛 SocketException）；③用应用**实际版本**的库（沙箱默认 1.8.1，应用是 1.9.0；`probe/libs/kx-1.9.0.jar` 可直接从 Maven 下）。
+3. **判级口径**：D6/R5 那些 `high` 大多是「代码与注释不一致」而非「有人会撞上」。本支 14 条里只有 1 条真 P1；F-02（图片）经双载体核对是**证伪**（`ChatStreamToolHelpers:139-143` 同一份 bytes 进两个载体）、audio 半边是 latent（唯一音频构造点 contentParts 为空）。
+
+<!-- 2026-11-17 13:26:36 -->
+## W1118 T7（ui-settings）收口：修 4 条 + 跨域 4 条 + 判级重判 4 条（2026-11-17 午）
+
+
+**分支** `fix/w1118-ui-settings`（worktree `incr1118/wt7`，基线 `c85131ad`）：代码 `6dc2b947` + 报告 `76465fe1`（tip 相对 CI sha 只差 `fix-reports/`，`git diff --name-only 6dc2b947..HEAD -- . ':!fix-reports'` 为空）。**未合 main**。
+**CI #3214 / run `44021628845` @ `6dc2b947` 五 job 全 success**：unit-tests **9375 PASSED / 0 真实 FAILED**（16 条新用例逐条 PASSED），scan-gate `115 passed` 且**夹具真跑**（日志 `scanners moved in this push (or the diff was unreadable)` + `ALL 354 CASES PASS`，不是跳过），publish 的 `Publish to Releases` skipped（main 门控）。
+
+**修的 4 条**：D4 F-01 生图端点 picker 未清 `imageEndpointResolved`（新增 `ui/settings/ProviderImageEndpointSelection.kt`，picker 三个分支收成唯一写面）；D4 F-02 `oauthBusy`（try/catch+finally 单一复位点 + CancellationException 重抛 + 失败回填 errorText）；D4 F-07 `.minisbak` 忙碌静默（改走 `canStartRestorePayload` + `backup_err_busy`）；D4 F-05 `exportLauncher.launch` 裸调（try/catch，**经共享释放点 `releaseRestorePayload()` 降锁**，避免手写 `operationBusy = false` 让 `BackupFetchBusyGateTest` 的 8/11 计数判据失明）。
+
+**判级重判（最重要，会复发）**：
+1. **「busy flag 缺 finally ⇒ 永久卡死」在本仓基本不成立**：这些标志都在 `rememberCoroutineScope().launch` 里，未捕获异常→**进程崩溃**（全树无 `CoroutineExceptionHandler`），取消→composable 已离场、状态随之消失。唯一真"卡死"形态是协程**挂住不返回**（`MCPOAuthController` 当年就是，已用 `withTimeoutOrNull(5min)` 堵掉）。所以修法不是补 finally，而是"要不要把 IO 异常变成提示"= 产品决策 → D4 F-06 六处登记不修。
+2. D10 F-03（`destroy` 时跳过 `unbindPendingListeners`）判 **P3**：listener↔WebView 是局部闭环，无 live root，GC 可回收；非泄漏。
+3. D10 F-06（`collectAsStateEffect` 无 `this` 键）判 **P3**：`StateFlow.collect` 首 emit 即当前值，同帧自愈。
+4. D4 INV-14/15 落地：`backup_prefs.chat_window_days` **不参与**备份（ConfigBackup 全树无该 prefs 引用）；`theme_mode` 外部变更**实时生效**（`MainActivity.kt:535-541` 自己监听），`AppearanceScreen` 不调 `onThemeChanged` 是对的。
+
+**跨域指针（本支按硬约束未动）**：D10 F-01 `ui/sandbox/RootfsManagementViewModel.repairRootfs` 并发（P1）、D10 F-02 `ui/sandbox/FilePreviewScreen.kt` PdfPageRenderer 句柄泄漏（P1）——**任务书"本轮重点"第 3/4 条正好落在这两个禁碰目录**；D4 F-03（`ConfigBuiltins` camelCase token，P1）、F-04（`fontScaleField` 未 publish，P2）；D10 F-05 `ui/markdown/`。补丁草图已写进报告 §4。
+
+**装置**：`shared/work/incr1118/t7/jvm/run.sh`（pre/post 双臂 + shape/behavior 两模式；pre 臂把 BASE 文件替换进 scratch 树）。变异 M2（helper 过度清理）只红 auto 臂、M3（拆 finally）只红 finally 臂、M4（只退 minisbak 守卫）只红 F-07 两臂 —— 三处都精确。配套把既有 `BackupFetchBusyGateTest`/`RestorePayloadBusyGateTest` 一起放进 shape 臂，双臂都绿 ⇒ 证明没动它们的契约。
+
+<!-- 2026-11-17 13:36:38 -->
+## W1118-T8（data 支）：D5 八条落地 + 一轮门 ROT（2026-11-17 午）
+
+
+**分支** `fix/w1118-data`（wt8，基线 `c85131ad`）：代码 `b588be89` + 门兼容 `0277767c` + 报告 `02e8255b`。**未合 main**。
+**CI #3219 / run `44023547185` @ `0277767c` 五 job 全绿**（unit-tests 6m24s BUILD SUCCESSFUL，本批 27 条新用例逐条 PASSED；scan-gate 115/0 且夹具真跑 `ALL 354 CASES PASS`；publish 两步 skipped=main 门控）。tip 相对 CI sha 只差报告。
+
+**七条修（D5 F-01/02/03/05/06/07/08）+ 一条登记（F-04 跨域到 MinisApp）**：见 `fix-reports/FIX-W1118-data.md`。
+- F-02 三态布尔抽 `optionalBooleanOrNull`（显式 JSON null 保持 null，不塌成 false）；
+- F-03 `updateMessageParts` 刷新尾行摘要：新增 **`ChatDao.sessionIdOf` 列投影**（禁 `dao.getMessage`：整行读会拖 parts_json 过 CursorWindow），尾行判定仍在 Kotlin（可测）；
+- F-05 `KeyRoulette.persistLocked` 复用 `rewriteSanitized`；F-01/F-06/F-07/F-08 见报告。
+
+**第一轮 CI #3213 只红 scan-gate（三条门 ROT），教训三条（都会复发）**
+1. **改 data 层前先反查门的锚点**：`grep -l "<改的文件名>" scripts/scan/*.py` 得到门清单，逐门看它锚的是字面量还是值流。本次撞三处：`parts_json_funnel` R4（锚 `dao.updateMessageParts(id, capPartsJsonForRow(partsJson))` 原文）、`dao_loadmessages` D/ISSUE-08（禁仓库内 `dao.getMessage(`）、`provider_import_id_roundtrip` arm3（锚 `optBoolean("declaresNoEffortTiers")`）。**门锚字面量时，最省的做法是保留原字面量、把新逻辑放到它后面，而不是重排代码。**
+2. **「只读文件」在 root 下不是原子写的判据**（沙箱/CI 都可能以 root 跑）：`f.setWritable(false)` 照样能 `writeText`。可靠判据是 **inode 变不变**（`Files.readAttributes(..., BasicFileAttributes).fileKey()`）：原地 truncate 不换 inode，temp+rename 换。写「原子写」测试别再用权限技巧。
+3. **`ChatDao` 加抽象方法 = 6 个测试 fake 一起改**（`RacingDao`/`RecordingDao`×2/`DaoLoadMessagesConvergenceTest`/`InertChatDao`/`PartsJsonFunnelTest`）；改前先 `grep -rn ": ChatDao {"`。
+
+**本地装置三条**
+- 沙箱独立编译时 **test 与 prod 必须一次性编译**（`internal` 靠 friend-paths，分两次编会 `cannot access 'it is internal'`）。
+- 生成 harness 的切片**不能按大括号配对**：data class 以 `)` 结尾、表达式体函数里还嵌着 lambda 的 `{}`，会切成半截；要按**显式终止行**（缩进 + `)`/`}`）切。
+- `org.json.optBoolean` 对非布尔标量（`1`）返回 **false**（不是 true）——JVM 与 Android 一致，测试期望别拍脑袋。
+
+<!-- 2026-11-17 13:51:15 -->
+## INCR-1118 T5（service/scheduled/browser）修复支完成 —— 2026-11-17 午后
+
+
+**分支** `fix/w1118-service`（worktree `incr1118/wt5`，基线 `c85131ad`）
+代码 `d0e1fa6c`（= CI 验证 sha）+ 报告 `f9e7bb4f`（`fix-reports/FIX-W1118-service.md`，与代码 sha 差异只有该文件）。
+**CI #3222 / run `44025135204` @ `d0e1fa6cd810` 五 job 全 success**：unit-tests 9387 PASSED / 0 真失败（4 条含 ` FAILED` 的行全是测试名子串）、scan-gate `115 passed, 0 failed` + 运行时 `##[notice] scanners moved in this push` + **`ALL 354 CASES PASS`（夹具真跑）**、publish 两发布步 skipped（main 门控）。**未合 main**。
+
+**修了 7 条（5 个 P1 + 3 个 P2 顺路）**
+- R4 F-01 `_suspendedSessions` 残留：入队去重 + 三处移除改 `dropSuspended()`（filter 删全部副本）。基线 3/3 红 → 修后绿。
+- R4 F-02 日志 `cap=` 改用 `controller.maxConcurrent`（运行期改动偏好是**刻意设计**，KDoc 写明需重启；只修日志口径）。
+- R4 F-03 `isAppForeground` 加 `@Volatile`。
+- D7 F-02 `setActive` 补 `_lastToolOutcome.value = ToolOutcome.Unknown`（纯文本轮次没有任何写点 ⇒ 上一轮红 ✗ 污染胶囊）。
+- D7 F-04 导入侧改走 `declaredVersionOf`（`optInt` 会把 1.5 截成 1 放行，与 loadLocked 判 unreadable 冲突）；非法值给专门拒收提示。
+- D7 F-05 `finalizeLocked` catch 里清磁盘 `running` 标记（纯 `ScheduledTaskTransitions.clearRunningMarker` + store 包装；锁序 checkMutex→store.lock 不变；不吞 CE）。
+- D7 F-01/F-03 BrowserTabPool：`savedURLs`→`ConcurrentHashMap`；`evictIdleTabs` 整体 hop Main；`execute()` 单快照；`createTab/acquireTab(入口+轮询)/handleNewWindow/onTrimMemory` 加 dispose 闸门；`ensureTabForUI(): Tab?`（ui 调用点全是语句位置，无需改 ui）。
+
+**登记/跨域**：R4 F-04 只登记（准入缺 EFFECT 回读）；**R2 F-01…F-05 全在 `sandbox/offload/**`（本支禁碰）→ 跨域指针**（其中 F-02/F-04 是任务书点名的「本轮重点」，与 allowlist 冲突，以 allowlist 为准）。另登记：`completeRun` 写失败但不抛（静默路径）同族未修、`finalizeLocked` 吞 CancellationException。
+
+**可复用（三条，都会复发）**
+1. **全文件计数型门会被注释里的同字面量打红**：`BrowserTeardownAndFailureSignalTest` 数全文件 `manager.destroy()`（要求 2 处都在 helper 内），我在 KDoc 里写了一次该字面量 ⇒ 3 处 ⇒ CI 红。处置：**改注释不改门**（门是对的）。写 KDoc 前先想「这段文字会不会被某个全文件计数的断言数进去」。
+2. **把 `private fun x(` 提成 `internal` 会让锚 `private fun x(` 的形状门失明**（`ScheduledTaskDeleteReleaseShapeTest` 直接 `require(not found)`）。锚要落在**决策**上，不落修饰符：改成 `fun declaredVersionOf(`。提可见性时全仓 grep 该签名的形状锚。
+3. **`git add -A` 会把报告草稿带进代码提交**：本次代码 sha 里已含报告初稿，导致「报告完全独立成提交」的字面形态失效（已在报告 §5 如实记录）。下批：**先提交代码，再写/提交报告**。
+
+**装置**：`shared/work/incr1118/t5-jvm/`（`run.sh` 并发域 / `run-scheduled.sh` 调度域 / 形状域 junit 直跑；stub 只有 Log/Context/SharedPreferences/AppLogger/ScheduledTaskRunner.onTasksRemoved，生产逻辑全用真文件）。本地：并发 20/20、调度 66/66、形状 14/14（同批形状臂在基线树 14/14 红）。
+
+<!-- 2026-11-17 14:13:12 -->
+## WAVE-1118 T6（platform）：D11 平台外壳 + D9 F-06/F-07 + R6（2026-11-17 下午）
+
+
+**分支 `fix/w1118-platform`**（worktree `incr1118/wt6`，基线 `c85131ad`）：代码 `29b89684` + 测试修 `524eaa3f`/`9a8f7472` + 报告 `709e37ba`（tip 相对 CI sha 只差报告）。**CI #3228 / run `44027578478` @ `9a8f7472` 五 job 全绿**：unit-tests `9399 PASSED / 0 FAILED`（六个新测试类 40 条全 PASSED）、scan-gate `115 passed` + 夹具 `ALL 354 CASES PASS`、publish 两步 skipped。**未合 main。**
+
+**修 8 条**：D11 F-01（P0 安全模式分享 Provider JSON → `lateinit` 崩溃）、F-02（P1 分享中途销毁不释放 `StagedInFlightFiles`）、F-05（P1 非聊天页分享 30s 静默丢失）、F-09（P2 latent docId 未归一化）、D11 F-06 = R6 F-02（P2 崩溃弹窗失败反噬 burst）、D9 F-06（P2 锁内不重检 `KEY_LAST_HANG_AT`）、D9 F-07（P2 `session=` 死方言）、R6 F-01（P2 服务词表被连接词表遮蔽）、R6 F-03（P1 继承的 hang 计数永久不可自愈）。
+
+**两个新增纯策略文件**（JVM 可测）：`share/ShareHostPolicy.kt`（`mayUseAppRepositories` / `shouldReleaseStagedOnDestroy` / `shareNeedsChatRoute`）、`diagnostics/QuietHealPolicy.kt`（`mayResetOnHealthyTick` / `mayAttemptHeal`）。
+
+**F-02 的关键洞察（报告没提）**：只按 `handedOff + isChangingConfigurations` 在销毁时释放，会删掉 `onSaveInstanceState` 存下、**重建后要重新交接**的同一批文件（R5-A3 C-09① 的恢复路径），把恢复变成幽灵附件。必须加第三条件 `stateSavedForRestore`——依据是 Android 对 **finishing 的 Activity 跳过 onSaveInstanceState**，所以"状态被保存"= 重建在即。
+
+**F-05 的判据**：只有在"当前顶端不是 chat 且不是 chat 上的 dialog（`ChatRoutePresence.isChatKeptAliveOverlay`）"时才导航，否则会把用户从正在读的会话里拽走。
+
+**CI 三轮的三条可复用教训**：
+1. **形状探针的作用域必须切成"调用点所在函数体"**（如 onDestroy 到 helper 定义之前），用"从标记到文件尾"的 contains 会被**函数定义本身**满足 → 探针恒真。第二轮的绿变红就是这么来的。
+2. **镜像脚本会复制盲点**：我在沙箱写的 probe_mirror.py 用同一套字符串逻辑，所以它也没抓到上面的恒真；抓到它的是 JUnit 里的**负控聚合断言**（期望 3 条只红 2 条）。"本地镜像绿"不等于"断言有鉴别力"。
+3. **改共享原语会把先例测试的锚移动**（把 per-file 删除/释放抽进 `releaseStagedFiles()` 后，`ShareStagedRaceWiringTest` 仍要求 discard 体内出现 `f.delete()`）→ 正确动作是按**新决策**改先例（discard 必须委托共享释放路径 + 共享路径必须删除/扣账/释放），不是把代码改回旧形状。
+4. 第一轮是纯粹的 `Unresolved reference` —— 我漏写 `source()` 辅助函数；**新增测试类必须逐个自查"我用到的每个私有 helper 都定义了"**（本地 kotlinc 编不了测试，只有 CI 能证明）。
+
+**跨域指针（未修，交主会话分派）**：D11 F-03（P1 `SpeechRecognitionManager.onReadyForSpeech` 无状态守卫）、F-04（P1 `OAuthCallbackServer` start/stop 竞态泄漏 `ServerSocket`）、F-07（P2 TTS `onInit` 不校验 shutdown）、F-08（P2 `cancelRecording` 不 `resetLevels`）→ 全部在 `speech/**`、`mcp/oauth/**`，本支 allowlist 外。R6 F-04（L2 开环）只登记三件套。
+
+<!-- 2026-11-17 14:16:37 -->
+## WAVE-1118 T4（tools/debug）收口：6 条修复，CI #3229 全绿（2026-11-17 下午）
+
+
+**分支** `fix/w1118-tools`（worktree `incr1118/wt4`，基线 `c85131ad`）：代码 `d258c791`（20 文件 +757/−42）+ 报告 `0b79af78`（仅 `fix-reports/FIX-W1118-tools.md`）。
+**CI #3229 / run `44028251214` @ `0b79af78c5bee6…` 五 job 全 success**（head_sha 与远端 tip 逐字符一致；publish 两步 skipped = main 门控，job conclusion 仍是 success）。unit-tests 9384 PASSED / 0 ` FAILED$`；scan-gate `115 passed, 0 failed` **且夹具真跑**（`scanners moved in this push` → `ALL 354 CASES PASS`）；lint / build-apk success。**未合 main**。
+
+**修的六条**：D8 F-03 参数显式 `null`（新增 `tools/ToolArgsJson.kt`，5 个读取点）/ F-04 `app_guide` 补注册 READ_ONLY / F-06 `SoulStore.writeAtomically` 回退 `.tmp` 清理进 finally；D9 F-01 `retry`/`rerunFromToolBlock`/`compact` 取消传播（新增 `debug/HeadlessTurnWait.kt`）/ F-04 `modelsUpdate` 用 persistedId 取消选择 / F-08 调试截图两处 Bitmap 泄漏（新增 `debug/CaptureReclaim.kt`）。
+
+**判级不修**（报告 15 条里）：F-01 file_edit 护栏仍 P3（`§WRITE-GUARD-1116-REVIEW ②` 已登记，日志无破坏痕迹）；F-02/F-07/D9-F02/F-05/F-09 落 P2 登记；**跨域**：D8 F-05（`AgentExecutionBudget.kt` → provider 支）、D9 F-03（`conversation/CompactOrchestration.kt`）、D9 F-06/F-07（`diagnostics/`）。
+
+**第一轮 CI 三处红全部是「同一个决策有两个锚点，我只改了一个」**（可复用，按此顺序查）：
+1. `SubagentBudgetGateTest` 源码形状锚 `val finished = try {`（prompt 的取消规则）→ 把 prompt 也收编进 helper 就翻红 ⇒ **参考实现不要动，只修漏抄的三份**。
+2. `entry_composite_key_guard_check` 臂 5 要求 `modelsUpdate` 体内有 `repo.updateEntry(updated)` + elvis 右侧 `throw` ⇒ 把「写入+失败即抛」整体搬进 helper 报 `gate ROT`；正解是**失败臂留在调用点的 lambda 里**。
+3. `discarded_return_guard` C-B2 要求 `.compress(` 的 `record-ok:` 在调用行或紧邻连续注释块（**lookback 6 行**）⇒ 塞进 lambda/多写两行注释就红；压缩段保持两文件逐字同形的 `try/finally`。
+4. 附带：lint `SuspiciousIndentation` —— 我用非 raw 的 python 字符串插注释，第二行丢了缩进。
+**下次动手前先问**：这段被谁锚了（测试形状 / 门锚点 / lint 缩进）？
+
+**本地装置**：`shared/work/incr1118/t4jvm/run.sh`（`pre`/`post`/`mutate` 三臂 + `registry_probe.py` 从 `AgentTools.kt` 机械反推工具名 + `selfcheck.py` 括号/语法检查）。各臂：args 9/3红、registry 2/2红、wait 5/2红、capture 3/2红、unselect 4/2红、soul 2/1红。
+
+<!-- 2026-11-17 14:20:02 -->
+## INCR-1118 T2（sandbox）D3 + R3：修 5 / 登记 4 / 反驳 2（2026-11-17 午后）
+
+
+**分支** `fix/w1118-sandbox`（worktree `incr1118/wt2`，基线 `c85131ad`）· 代码 `4fe2c376` + 测试改锚 `b368b1f0` + 报告 ×3（tip `a808f4d9`，**tip 相对绿 sha 只差报告**）。**未合 main**。
+
+**CI #3226 / run `44027322035` @ `eb93e467`（与代码 tip 逐字符一致）五 job 全绿**：unit-tests **9387 PASSED / 0 FAILED**（本批 28 条新用例逐条 PASSED）；scan-gate `115 passed, 0 failed` + 本轮夹具真跑 `✅ ALL 354 CASES PASS`；lint/build-apk success；publish 两步 skipped（main 门控）。
+
+**修的五条**
+- **D3-F02（P1）** 流式 `finally` 裸调 `awaitTerminalAndWorkerExitThenDelete` → 用户「停止」取消后首个 `delay` 就抛异常，`client.ack` 与删目录全跳过，worker 空等 45s。新增 `internalRunCancelCleanup(writeCancel, cleanup)`（`withContext(NonCancellable)`，返回 cleanup 是否成功）。
+- **D3-F03（P1）** `dispatchOnce` 的 `withTimeoutOrNull` 外无 `try/finally` → 取消时连 `writeCancel` 都不写，worker 继续跑并计费，目录两端标记都没有、reaper 无法分类。整段包 `try/finally`，判据 `internalShouldCancelAbandonedRun(pollFinished, workerDied)`；`pollFinished` 在 **poll 结束即置位**（不是 return 前）——否则「结果已到、post-poll 正在 settle 时被取消」会给已答复的 worker 再塞一个 cancel。
+- **D3-F01（P2，修）** `buildSessionBindMounts` 只读 `Entry.resolvedHostPath` 快照（只有 `add()` 写、无回填；旧 JSON 载入即 null），而 `applyMountedFoldersSnapshot` 按需解析进 `PRootKernel.bindMounts` → 终端/fastio/file_read 看得到挂载、agent shell 看不到。补 `internalExternalMountFallbacks(mounts, PRootKernel.bindMounts)`（只补 `/var/minis/mounts/` 前缀且 store 优先）。
+- **R3-F01（P2）** `stop()` 的 reaper 把 `proc.waitFor(2s)` 布尔丢弃、`process` 已置空 → 存活 tracer 在所有可观测面消失。改 `internalAwaitProcessGone(proc, REAP_WAIT_MS)` + 存活时 `Log.e`；`REAP_WAIT_MS = 2_000L` 具名常量（含理由）。
+- **R3-F02（P2）** `cleanupProotTmp` 的 host 段无年龄门控、`isBusy` 看不到 `TerminalSession`/`RootfsManager` 子进程 → proot 刚写的文件下一 tick 就删。改成与 guest 段对称：5 分钟年龄门 + 活跃度探测 + 无跟随删除；guest 段删不掉改为 `Log.w`（原静默）。
+
+**登记不修（三件套已写进报告）**：D3-F04（MemorySpike 配对，要包 110 行）、D3-F06（`file://相对路径`，3 行方案）、D3-F05（P3：`fetchedFileName` 由 `extensionForMimeType` 白名单生成，不可达）、R3-F03（`readBootId` 全仓 0 消费方）、R3-F04（终端 kill 树无 starttime；可复用现成 `internalKillProcessTree`）。**反驳报告**：R3-F05 `floor=120` 对齐 512 是错判——120 是回收目标、512 是准入红线，两把尺。
+
+**可复用（六条，都会复发）**
+1. **取消场景的测试断言必须落在第一个挂起点之后**：我第一版只断言「非挂起的 writeCancel 跑了」，把 helper 的 `NonCancellable` 抽掉（变异 M1）仍然**绿**；改成断言 `delay` 之后的标志 + helper 返回值后才精确翻红。
+2. **既有邻居用例常锚字面量而非决策**：`PersistentShellTreeTerminationTest` 锚 `proc.waitFor(2, TimeUnit.SECONDS)` 这一整行 → 我改实现它就红（CI #3221 抓到）。按改门三件齐处理：改锚到决策（helper + 具名常量）+ 补负向断言（`try { proc.waitFor(` 不得回来）+ 真树重跑。
+3. **Kotlin 块注释会嵌套**：KDoc 里写 `` `/var/minis/mounts/*` `` 或 `/* *\/` 会开一个嵌套注释 → `Unclosed comment` 到文件尾。本轮撞了两次，靠「块注释配平与基线比对」脚本抓出（`/*` 计数 ≠ `*/`）。
+4. **`File.exists()` 跟随符号链接，`setLastModifiedTime` 也跟随**：验「链接本身是否被删」要用 `Files.exists(NOFOLLOW_LINKS)`；给链接本身设 mtime 要用 `BasicFileAttributeView(…, NOFOLLOW_LINKS).setTimes`。假绿来源就在这两处。
+5. **门的 argv 约定要逐个看**：`xproc_boundary_check` 等一批门是 `REPO = sys.argv[1]`（位置参数），传 `--root .` 会让 REPO="--root" → 全部「cannot read …」假红；跑单门前先看 globals。
+6. **429 也会打在 lint job 上**：本轮 `lint` 首轮红是 Maven Central 429 拉 hamcrest，不是代码；`POST /actions/runs/<id>/rerun-failed-jobs` 201 后绿。
+
+**证据装置**：`shared/work/incr1118/t2probe/`（`Probe.kt` pre 臂 / `ProbePost.kt` 生产代码 post 臂 / `ProbeFs.kt` 真文件系统 + 真 fork 进程 / `extract.py` 按符号抽生产纯函数 / `run.sh` 42 条 / `mutate.sh` 10 条变异）。
+
+<!-- 2026-11-17 14:27:58 -->
+## INCR-1118 T1（chat 域）：六条 P1 修复支收口（2026-11-17 下午）
+
+
+**分支** `fix/w1118-chat`（worktree `incr1118/wt1`，基线 `c85131ad`）；代码三次提交
+`1274de37`（六条修复）→ `5b471b4e`（CI 门禁反馈）→ `8704c599`（既有测试反馈），报告 `c284547d`（docs-only）。
+**CI #3230 / run `44029673415` @ `c284547d3b88ccd5ee922ffeb2d3cfacc8b88fd3`（与本地 tip 逐字符一致）五 job success**：
+unit-tests **9388 PASSED / 0 FAILED**（29 条新用例逐条 PASSED）、scan-gate **115 passed 0 failed + ALL 354 CASES PASS**
+（本轮夹具真跑：`scanners moved in this push`）、publish 两步 skipped（main 门控）。**未合 main**（停止节点）。
+
+**修了 6 条 P1**：D1-F02 退出编辑销毁草稿芯片 / D1-F04 拒绝发送丢输入（压缩中、无 provider）/ D1-F05 四入口 Retry·
+Rerun 跳底不同步 FollowState / D1-F06 clearChat 漏清粘贴芯片 / D2-F01 truncateBeforeEdit 漏两处回退清理 /
+D2-F02 Move-to 不迁移 detached 粘贴块。顺路修 D1-F08（五处手写 `coerceAtLeast(0)` → `safeBottomScrollIndex`）。
+**证伪 D1-F01**（`t7BudgetStopReason` 跨 run 残留）：`t7EndRun` 是三条退出路径唯一收尾且最后一句就清零。
+**登记 P2 六条 + 新发现一条**（编辑模式吞掉草稿正文——报告里没有，需产品语义拍板）。
+
+**可复用（四条，本轮真踩到）**
+1. **修「顺序类」bug 前先跑本域的门**：`chat_ui_interaction_check` 的 F4 已经钉住「退出编辑必须**在 cancelEdit 之后**
+   经过清空漏斗」（reach 200/400 字符、途中不许有块边界）。把 `cancelEdit` 与 `clearComposerInput` 顺序反转 ⇒
+   门红。正确修法是**让状态跨过那一步**（peek 快照 → cancelEdit → 漏斗 → 放回），不是颠倒那一步。
+2. **门/既有断言量距离时从 token 起算而非括号起算**：注释或新参数一行就能把距离顶到 400+（实测 406）。
+   把缓冲读取挪进 VM 方法（`viewModel.pastesForMove(text)`）后回到 384。推完改调用点前先量。
+3. **既有 shape 断言是「上一次决定的化石」**：`PasteFoldWiringTest` 钉「ChatScreen 不得出现 `PastedText`/`pastedTexts`/
+   `stashPastedText`」（粘贴缓冲属 composer）⇒ 跨会话搬运必须走 `ComposerCommand` 意图通道，字段名也跟着改名
+   `carriedPastes` 让规则仍可机械检查。只有 pin 明显落后于决策时才改测试（本轮 1 处），且保留原意 + 变异臂守新形态。
+4. **变异臂也会被自己的豁免条件骗**：`no early refusal` 一开始「跳过含 `trimmed.isBlank()` 的窗口」，把隔几句的
+   压缩分支一起豁免了 —— 删掉 `setInputText` 仍绿。豁免条件比断言更容易瞎；空输入守卫的 `return` 与条件同行，
+   本来就进不了扫描循环。
+
+装置：`shared/work/incr1118/t1/{run.sh,extract.py,mutate.py}`（pre 臂把基线源码落到镜像目录 + `-Duser.dir`
+才有意义，否则 shape 测试读的还是工作树）；29 用例 / 13 条变异臂逐条只翻对应断言。
+
+<!-- 2026-11-17 14:50:30 -->
+## WAVE-1118 收口（2026-11-17 傍晚）— 85 条 → main `98c34e6b`，五 job 全绿（含 publish）
+
+
+**结果**：main CI `44032250243` @ `98c34e6b` 五 job success，release APK 更新（14.2 MB, 06:47Z）；八支自身 CI 全绿 + head_sha 逐字符一致 + 各支「自身文件 vs main」逐文件 diff = 0；远端 8 支 204 删除，本地支/worktree 清理，远端只剩 main。
+
+**账面（去重）**：修 ≈ 45（P0 1 / P1 十余 / 其余顺路 P2）、登记 ≈ 34、**证伪 6**、**跨域遗留 15**。
+- 唯一 P0：`ShareReceiverActivity.importProviderJson` 在安全模式/降级模式读未初始化 `lateinit providerRepository` → 冷启动+安全模式+分享 provider JSON = 崩溃。
+- 被证伪且别再重开的 6 条：D6 F-01（watchdog 实测 95ms 返回）、D6 F-02（载体重复）、D9 F-05（`ownerFor` 自己会 resolveKey）、R3 F-05（floor=120 与动态高水一致）、D8 F-01（§WRITE-GUARD-1116-REVIEW 已登记）、D1 F-03（1117B 已修）。
+
+**报告质量（实测口径）**：格式最高一批（INV 清单 + 可证伪条件 + 反证章节，使「先证」成本显著下降）；机制准确但**基线与行号漂一代**（D1 F-03 已修仍被报 ⇒ 查重靠我方 backlog + 当前树，别信报告自觉）；**事实错误率 ~7%**；**严重度通胀 ~3 倍**（High 里相当多实判 P2）；跨报告重复 4 组（D11 F-06=R6 F-02、D6 F-05=R5 F-04、D8 F-05≈R5 F-01、D1 F-03=上批）。
+
+**三条流程结论（下批硬执行）**
+1. **R 类（闭环审计）不派修复支**：R1 七条全是 L1/L2 开环（动作后不回读指标/无二线升级），只在登记层；R 族 17 条里真正变修复的仅 7 条，代价 3 支 CI。
+2. **划支按「修复点」不按「读码域」**：15 条跨域孤儿全因「报告按读码域分、修复点在别处」——R2 五条落在 `sandbox/offload/**`（派给了 service 支）、speech/mcp/offload/conversation/config/ui-sandbox 各若干。要么按修复点切，要么固定一个跨域兜底支。
+3. **P2「顺路修」收紧**：45 条修复里 ~30 条是顺路 P2，是「92% 动手率」的变装。新判据＝同一函数 **且** 已有测试覆盖该路径才允许捎带。
+
+**跨域队列**已落 backlog §WAVE-1118 收口（10 组 15 条，带触发条件/方案/搁置理由），下一轮第一批。
 
 ---
 
