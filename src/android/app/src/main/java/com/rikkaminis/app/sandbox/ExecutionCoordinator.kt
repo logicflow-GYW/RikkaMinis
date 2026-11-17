@@ -989,17 +989,28 @@ object ExecutionCoordinator {
         mounts[logsLinuxPath] = logsDir.absolutePath
         PRootKernel.addBindMount(logsLinuxPath, logsDir.absolutePath)
 
-        // T277: user-mounted external folders (SAF-picked trees). PersistentShell
+        // [T277] user-mounted external folders (SAF-picked trees). PersistentShell
         // uses this map verbatim as PRoot's `-b` argv, so any mount missing here
         // is invisible to the shell — `ls /var/minis/mounts/<name>/` then shows
         // only the empty rootfs placeholder. PRootKernel.bindMounts is kept in
         // sync separately by applyMountedFoldersSnapshot for the resolveHostPath
         // path (debug.ls, file_read, …) but does NOT feed the live PRoot argv.
-        // Skip entries whose SAF tree URI didn't decode to a POSIX path
-        // (cloud providers, unmounted removable storage).
         PRootKernel.mountedFoldersStore?.entries?.value?.forEach { entry ->
             val host = entry.resolvedHostPath ?: return@forEach
             val linuxPath = "/var/minis/mounts/${entry.name}"
+            mounts[linuxPath] = host
+        }
+        // [WAVE-1118 D3-F01] …which is why the store's cache cannot be the only
+        // source here. `Entry.resolvedHostPath` is a SNAPSHOT taken when the
+        // mount was added; it is null for any entry whose JSON predates the
+        // field (loadFromDisk defaults it — no code re-resolves or backfills it),
+        // and `applyMountedFoldersSnapshot` resolves such entries on demand. The
+        // result was a split view: the interactive terminal, `minis-fastio` and
+        // `file_read` all saw the mounted folder while the agent's
+        // `shell_execute` saw the empty rootfs placeholder — the agent then
+        // reports "the folder is empty" with no error anywhere.
+        // Merge what PRootKernel already resolved; explicit entries win.
+        internalExternalMountFallbacks(mounts, PRootKernel.bindMounts).forEach { (linuxPath, host) ->
             mounts[linuxPath] = host
         }
 
@@ -1219,8 +1230,40 @@ object ExecutionCoordinator {
         val tmpDir = PRootKernel.getProotTmpDir(ctx)
         try {
             var removed = 0L
+            // [WAVE-1118 R3-F02] Two gates this loop used to lack, both of which
+            // the guest-side sweep beside it already had:
+            //  - AGE. It deleted whatever it found, so a file proot had just
+            //    written was gone on the next 60 s tick. PROOT_TMP_DIR is proot's
+            //    own scratch space (the embedded-loader fallback writes the ELF
+            //    loader here when PROOT_LOADER is unset — see RootfsManager's
+            //    apk-repair note), and a half-second-old loader deleted under a
+            //    starting proot fails that command with an otherwise impossible
+            //    ENOENT.
+            //  - ACTIVITY. Same write-blindness trap as guest `/tmp`: a
+            //    directory's own mtime never moves when something writes INSIDE
+            //    it, so "old dir with a live child" looked like junk.
+            // The isBusy gate above still covers agent shells; these two make the
+            // sweep safe for the OTHER PROOT_TMP_DIR consumers too (interactive
+            // PTYs, RootfsManager's apk repair subprocess), which a busy-gate
+            // alone cannot see without importing three more module states here.
+            val nowMs = System.currentTimeMillis()
             tmpDir.listFiles()?.forEach { f ->
-                if (f.deleteRecursively()) removed++
+                val path = f.toPath()
+                val symlink = runCatching { java.nio.file.Files.isSymbolicLink(path) }.getOrDefault(false)
+                val stillInUse = guestTmpEntryStillInUse(f, symlink, nowMs, PROOT_TMP_HOST_MAX_AGE_MS)
+                if (!internalProotTmpEntryReapable(internalGuestTmpEntryMtimeMs(path), nowMs, stillInUse)) {
+                    return@forEach
+                }
+                // Never walk through a link (same reason as the guest sweep):
+                // `/tmp/x -> /` reaped as "a directory" would delete its target.
+                val gone = runCatching {
+                    if (symlink) {
+                        java.nio.file.Files.deleteIfExists(path)
+                    } else {
+                        internalGuestTmpDeleteTreeNoFollow(path)
+                    }
+                }.getOrDefault(false)
+                if (gone) removed++
             }
             if (removed > 0) {
                 Log.i(TAG, "cleanupProotTmp: cleared $removed entries from ${tmpDir.name}")
@@ -1314,6 +1357,15 @@ object ExecutionCoordinator {
                 removed++
             } else if (internalGuestTmpShouldDescend(child.isDirectory, symlink)) {
                 removed += sweepGuestTmpDir(child, maxAgeMs)
+            } else {
+                // [WAVE-1118 R3-F02] Do not swallow it. A read-only parent, a
+                // locked entry or an EACCES on the tree used to vanish into a
+                // `false` return, so the sweeper logged nothing and the same
+                // entry silently survived every tick.
+                Log.w(
+                    TAG,
+                    "sweepGuestTmpDir: cannot remove ${child.name} (aged, no subtree to retry) — will retry next sweep",
+                )
             }
         }
         return removed
@@ -1469,6 +1521,42 @@ object ExecutionCoordinator {
         }
         TerminalSession.broadcastProxy(env)
     }
+}
+
+/**
+ * [WAVE-1118 D3-F01] The external-mount entries the agent shell is missing.
+ *
+ * `buildSessionBindMounts` builds PRoot's `-b` argv from the store's
+ * `Entry.resolvedHostPath`, which is a **snapshot** written only by
+ * `MountedFoldersStore.add()`. `applyMountedFoldersSnapshot` (boot + every mount
+ * CRUD) resolves the same tree URIs *on demand* into `PRootKernel.bindMounts`,
+ * so the two views can disagree: an entry whose persisted JSON predates the
+ * cache field loads with `resolvedHostPath = null` (nothing backfills it), and
+ * the agent's shell then sees the empty rootfs placeholder under
+ * `/var/minis/mounts/<name>/` while the terminal, `minis-fastio` and
+ * `file_read` — all of which read `PRootKernel.bindMounts` / resolve on demand —
+ * see the real files. A silent split view: the agent reports "the folder is
+ * empty" and no error exists anywhere.
+ *
+ * Returns only the `/var/minis/mounts/…` keys that are absent from [explicit]
+ * (the store-derived view wins when both know about a name), so this is purely
+ * additive — it can never repoint a mount the store resolved differently, and it
+ * ignores every other key in [global] (`/var/minis/shared`, `/var/minis/logs`,
+ * …) because those are already in `explicit` by construction.
+ */
+internal fun internalExternalMountFallbacks(
+    explicit: Map<String, String>,
+    global: Map<String, String>,
+): Map<String, String> {
+    val prefix = "/var/minis/mounts/"
+    val fallbacks = linkedMapOf<String, String>()
+    for ((linuxPath, hostPath) in global) {
+        if (!linuxPath.startsWith(prefix)) continue
+        if (linuxPath in explicit) continue
+        if (hostPath.isBlank()) continue
+        fallbacks[linuxPath] = hostPath
+    }
+    return fallbacks
 }
 
 /**

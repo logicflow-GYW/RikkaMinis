@@ -141,6 +141,38 @@ internal fun internalGuestTmpLooksLive(newestActivityMs: Long, now: Long, maxAge
     newestActivityMs > 0L && now - newestActivityMs < maxAgeMs
 
 /**
+ * [WAVE-1118 R3-F02] Age gate for the HOST half of the temp sweep
+ * (`<cache>/proot-tmp`, i.e. `PROOT_TMP_DIR`).
+ *
+ * The guest half has been age-gated since `[P2-guest-tmp-reclaim]`; the host
+ * half reaped on sight. That asymmetry was the whole defect: `PROOT_TMP_DIR` is
+ * proot's own scratch directory, shared by three consumers (`PersistentShell`,
+ * `TerminalSession`, `RootfsManager`'s apk-repair subprocess) whose liveness the
+ * sweeper's `isBusy` gate only covers for the first one. An age gate makes the
+ * sweep safe for all three without importing their state here.
+ *
+ * Five minutes: two orders of magnitude longer than a proot launch, so nothing
+ * a live proot is using can be inside the window, and short enough that junk
+ * still leaves on the first sweep after a command rather than after a session.
+ */
+internal const val PROOT_TMP_HOST_MAX_AGE_MS = 5 * 60_000L
+
+/**
+ * [WAVE-1118 R3-F02] True when one host `proot-tmp` entry may be deleted: it is
+ * old enough AND nothing inside it looks live.
+ *
+ * Split out (rather than inlined at the call site) because both halves are
+ * silent-failure shaped: a sweep that drops the age gate and one that drops the
+ * activity probe look identical in production — an empty directory either way —
+ * and only a truth table distinguishes them.
+ */
+internal fun internalProotTmpEntryReapable(
+    mtimeMs: Long,
+    nowMs: Long,
+    stillInUse: Boolean,
+): Boolean = internalGuestTmpIsAged(mtimeMs, nowMs, PROOT_TMP_HOST_MAX_AGE_MS) && !stillInUse
+
+/**
  * [meta1028 D3-F05] The entry's OWN mtime (epoch millis), i.e. `lstat`, not
  * `stat`.
  *

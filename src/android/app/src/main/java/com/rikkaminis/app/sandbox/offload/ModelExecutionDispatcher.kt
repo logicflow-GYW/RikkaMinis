@@ -409,77 +409,114 @@ object ModelExecutionDispatcher {
         // so there is nothing left to wait for — and lets the outer dispatch()
         // re-dispatch promptly instead of burning TERMINAL/REAP waits.
         var workerDied = false
-        val result: String? = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
-            var read: String? = null
-            while (true) {
-                if (resultFile.exists()) {
-                    read = try {
-                        resultFile.readText()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "read result failed: ${e.message}")
-                        null
+        // [WAVE-1118 D3-F03] Set the moment the poll is over, before the
+        // post-poll block decides anything. The poll below is a `delay`-driven
+        // wait, so caller-side cancellation (user stop, session teardown, an
+        // outer withTimeout) unwinds THROUGH here — and used to skip the entire
+        // post-poll block, `writeCancel` included: the worker kept running (and
+        // billing) a request nobody wanted, and left a run dir with neither
+        // `terminal.json` nor `cancel`, which the orphan reaper cannot classify.
+        // The finally below sends the cancel and runs the bounded settle under
+        // NonCancellable instead.
+        // Deliberately NOT set after the post-poll decisions: a cancel that
+        // arrives while THAT block settles a finished run must not shove a
+        // second `cancel` at a worker that already produced its result.
+        var pollFinished = false
+        try {
+            val result: String? = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
+                var read: String? = null
+                while (true) {
+                    if (resultFile.exists()) {
+                        read = try {
+                            resultFile.readText()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "read result failed: ${e.message}")
+                            null
+                        }
+                        break
                     }
-                    break
+                    // [T-stale-apikey-worker-cache] Fast worker-death short-circuit:
+                    // the worker beat at least once (it accepted this request) and
+                    // then went silent WITHOUT ever writing a result — it died
+                    // (e.g. the stale-key abort kills the process before any
+                    // output). Waiting out the full 3-minute timeout would stall
+                    // the caller for nothing; exit the poll immediately so the
+                    // gateway-level retry can re-dispatch onto a fresh process.
+                    if (workerDiedWithoutResult(dir)) {
+                        Log.w(TAG, "worker died without a result (beat stale, no result.json) — ending poll early, dir=${dir.name}")
+                        workerDied = true
+                        break
+                    }
+                    delay(POLL_INTERVAL_MS)
                 }
-                // [T-stale-apikey-worker-cache] Fast worker-death short-circuit:
-                // the worker beat at least once (it accepted this request) and
-                // then went silent WITHOUT ever writing a result — it died
-                // (e.g. the stale-key abort kills the process before any
-                // output). Waiting out the full 3-minute timeout would stall
-                // the caller for nothing; exit the poll immediately so the
-                // gateway-level retry can re-dispatch onto a fresh process.
-                if (workerDiedWithoutResult(dir)) {
-                    Log.w(TAG, "worker died without a result (beat stale, no result.json) — ending poll early, dir=${dir.name}")
-                    workerDied = true
-                    break
-                }
-                delay(POLL_INTERVAL_MS)
+                read
             }
-            read
-        }
+            pollFinished = true
 
-        if (result != null) {
-            // [TF-B ack] Tell the worker we consumed the result so it can
-            // self-reap immediately instead of waiting out its ack timeout.
-            try {
-                ModelExecutionMailbox.writeClientAck(dir)
-            } catch (_: Exception) {}
-        } else if (workerDied) {
-            // [T-stale-apikey-worker-cache] Confirmed dead worker: no cancel
-            // (nobody left to read it) and no cleanup waits (nothing can still
-            // be writing). Leave the dir as an orphan for the reaper and let
-            // the outer dispatch() re-dispatch NOW.
-            Log.w(TAG, "run dir orphaned after confirmed worker death, dir=${dir.name}")
-        } else {
-            Log.w(TAG, "timeout waiting for model-exec result — falling back in-process")
-            // Try to stop the worker (it may be mid-run); it self-reaps on cancel
-            // / shutdown. Then settle briefly before deleting the dir so we never
-            // delete under a worker still writing result.json.
-            try { ModelExecutionMailbox.writeCancel(dir) } catch (_: Exception) {}
-        }
+            if (result != null) {
+                // [TF-B ack] Tell the worker we consumed the result so it can
+                // self-reap immediately instead of waiting out its ack timeout.
+                try {
+                    ModelExecutionMailbox.writeClientAck(dir)
+                } catch (_: Exception) {}
+            } else if (workerDied) {
+                // [T-stale-apikey-worker-cache] Confirmed dead worker: no cancel
+                // (nobody left to read it) and no cleanup waits (nothing can still
+                // be writing). Leave the dir as an orphan for the reaper and let
+                // the outer dispatch() re-dispatch NOW.
+                Log.w(TAG, "run dir orphaned after confirmed worker death, dir=${dir.name}")
+            } else {
+                Log.w(TAG, "timeout waiting for model-exec result — falling back in-process")
+                // Try to stop the worker (it may be mid-run); it self-reaps on cancel
+                // / shutdown. Then settle briefly before deleting the dir so we never
+                // delete under a worker still writing result.json.
+                try { ModelExecutionMailbox.writeCancel(dir) } catch (_: Exception) {}
+            }
 
-        // [TF-F P0-A] Delete the request dir ONLY after BOTH:
-        //   1. the terminal marker exists (worker finished writing run-dir
-        //      files: stream flushed + result committed + final state), AND
-        //   2. the worker's process is confirmed gone for THIS run's pid ref
-        //      (or there never was a valid ref).
-        // The old code deleted on result.json/cancel.ack alone, killing the
-        // worker mid-finishRequest (state.json ENOENT FATAL). Timeout with the
-        // worker still alive/unknown → leave the dir as an ORPHAN (never
-        // delete) and let the orphan reaper reclaim later when the pid is
-        // dead + terminal.
-        val terminalSeen = if (workerDied) false else awaitTerminal(dir, TERMINAL_WAIT_MS)
-        val reaped = if (workerDied) false else waitForWorkerReap(dir, REAP_WAIT_MS)
-        if (!workerDied && terminalSeen && reaped) {
-            try { dir.deleteRecursively() } catch (_: Exception) {}
-        } else if (!workerDied) {
-            Log.w(
-                TAG,
-                "run dir kept as orphan (terminal=$terminalSeen reaped=$reaped dir=${dir.name}) — " +
-                    "pid still alive/unknown or terminal not reached; orphan reaper may reclaim",
-            )
+            // [TF-F P0-A] Delete the request dir ONLY after BOTH:
+            //   1. the terminal marker exists (worker finished writing run-dir
+            //      files: stream flushed + result committed + final state), AND
+            //   2. the worker's process is confirmed gone for THIS run's pid ref
+            //      (or there never was a valid ref).
+            // The old code deleted on result.json/cancel.ack alone, killing the
+            // worker mid-finishRequest (state.json ENOENT FATAL). Timeout with the
+            // worker still alive/unknown → leave the dir as an ORPHAN (never
+            // delete) and let the orphan reaper reclaim later when the pid is
+            // dead + terminal.
+            val terminalSeen = if (workerDied) false else awaitTerminal(dir, TERMINAL_WAIT_MS)
+            val reaped = if (workerDied) false else waitForWorkerReap(dir, REAP_WAIT_MS)
+            if (!workerDied && terminalSeen && reaped) {
+                try { dir.deleteRecursively() } catch (_: Exception) {}
+            } else if (!workerDied) {
+                Log.w(
+                    TAG,
+                    "run dir kept as orphan (terminal=$terminalSeen reaped=$reaped dir=${dir.name}) — " +
+                        "pid still alive/unknown or terminal not reached; orphan reaper may reclaim",
+                )
+            }
+            return DispatchOutcome(result, workerDied)
+        } finally {
+            // [WAVE-1118 D3-F03] Abandoned poll (caller cancelled): the worker
+            // is still holding this request. Tell it to stop, then give it the
+            // same bounded settle the timeout path gets, so a responsive worker
+            // still gets its dir reclaimed instead of waiting out the reaper.
+            // `workerDied` ⇒ nobody is left to read the marker; leave the orphan
+            // for the reaper exactly as the normal path does.
+            if (internalShouldCancelAbandonedRun(pollFinished, workerDied)) {
+                val cleaned = internalRunCancelCleanup(
+                    writeCancel = { ModelExecutionMailbox.writeCancel(dir) },
+                    cleanup = {
+                        if (awaitTerminal(dir, TERMINAL_WAIT_MS) && waitForWorkerReap(dir, REAP_WAIT_MS)) {
+                            runCatching { dir.deleteRecursively() }
+                        }
+                    },
+                )
+                Log.w(
+                    TAG,
+                    "dispatch abandoned mid-poll — cancel sent, settle=${if (cleaned) "ran" else "failed"} dir=${dir.name}",
+                )
+            }
         }
-        return DispatchOutcome(result, workerDied)
     }
 
     /** Outcome of a single [dispatchOnce] attempt. */
@@ -576,3 +613,24 @@ object ModelExecutionDispatcher {
         try { dir.deleteRecursively() } catch (_: Exception) {}
     }
 }
+
+/**
+ * [WAVE-1118 D3-F03] True when an ABANDONED poll loop must send `cancel` and
+ * run the bounded settle.
+ *
+ * Two independent conditions, both load-bearing:
+ *  - the poll did not finish normally ⇒ the caller's coroutine was cancelled
+ *    (or something threw) mid-wait, so the code after [ModelExecutionDispatcher]
+ *    `dispatchOnce` would otherwise never run at all;
+ *  - the worker was NOT confirmed dead ⇒ `cancel` has a reader. Writing it into
+ *    a dead run dir buys nothing, and the dead-worker branch deliberately keeps
+ *    the dir as an orphan for the reaper (same contract as the normal path).
+ *
+ * Pure so the truth table is pinned by a test instead of by a comment: the
+ * defect this replaces was exactly a missing `finally`, i.e. the whole
+ * post-poll block silently skipped on one path.
+ */
+internal fun internalShouldCancelAbandonedRun(
+    completedNormally: Boolean,
+    workerDied: Boolean,
+): Boolean = !completedNormally && !workerDied
