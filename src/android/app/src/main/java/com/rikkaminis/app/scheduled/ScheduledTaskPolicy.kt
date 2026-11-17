@@ -244,6 +244,27 @@ object ScheduledTaskTransitions {
         if (file.running?.taskId == taskId) file.copy(running = null) else file
 
     /**
+     * [WAVE-1118 D7 F-05] Drop the persisted `running` marker for [taskId]
+     * WITHOUT crediting any result.
+     *
+     * The settlement path ([ScheduledTasksStore.completeRun]) both credits the
+     * run and clears the marker in one write; when that write never lands (the
+     * runner's `finalizeLocked` catch block), the marker stayed on disk while
+     * the in-memory single-flight lock was released. The next beat reads a
+     * marker with no matching in-process run and concludes "the process died
+     * mid-run" ([crashFailure]) — one failure the run did not earn, `failStreak`
+     * +1, and enough of those trips the fuse and DISABLES the user's task.
+     * Clearing the marker loses the credit for that run (same shape as any
+     * failed settlement: `lastRunDate` stays empty and the task may retry inside
+     * its window), which is recoverable; a phantom failure is not.
+     *
+     * Identity when the marker names another task (or there is none): the
+     * document is returned unchanged so a caller can detect "nothing to do".
+     */
+    fun clearRunningMarker(file: ScheduledTasksFile, taskId: String): ScheduledTasksFile =
+        clearMarker(file, taskId)
+
+    /**
      * [deep-audit-1046 S-11] Refresh the RUN half of an editor's snapshot.
      *
      * The editor keeps `original` as "the record the save is an edit OF": its

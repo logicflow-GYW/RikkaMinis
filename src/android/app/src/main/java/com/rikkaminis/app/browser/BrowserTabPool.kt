@@ -339,7 +339,25 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
      */
     private var isContextOnlySession: Boolean = false
 
-    private val savedURLs = mutableMapOf<Int, String>()
+    /**
+     * Tab id -> URL of a tab that was destroyed but should come back on the next
+     * restore (evicted / trimmed, not closed by the user).
+     *
+     * [WAVE-1118 D7 F-01] `ConcurrentHashMap`, not `mutableMapOf` (which is a
+     * plain `LinkedHashMap`): this table is touched from THREE threads and had
+     * no lock. `evictIdleTabs()` / `onTrimMemory()` run from the memory hooks in
+     * `MinisApp` (off Main) and write entries; `saveState()` runs from the
+     * agent's IO thread in `runAcquiredAction`'s `finally` and iterates the map
+     * through [mergedTabUrls]; `createTab` / `destroyTab` mutate it on Main.
+     * The iteration could therefore throw `ConcurrentModificationException`
+     * inside `saveState`'s catch — the tab state file was silently NOT written
+     * ("Failed to save tab state") — and concurrent puts could be lost.
+     * A concurrent map gives atomic puts/removes and weakly consistent
+     * iteration, which is exactly the contract this table needs; its key order
+     * is not semantic (the persisted document is a JSON object keyed by id, and
+     * `mergedTabUrls` copies whatever order it is handed).
+     */
+    private val savedURLs = java.util.concurrent.ConcurrentHashMap<Int, String>()
 
     /**
      * Global custom viewport. `0` means "use the UA profile default".
@@ -1010,14 +1028,19 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
                     //    grace-based fan-out so an agent's concurrent navigates
                     //    still open distinct tabs (#595) instead of trampling.
                     val mustFollowSelected = singleTab || !input.action.opensNewPage
-                    if (mustFollowSelected && _tabs.value.isNotEmpty()) {
+                    // [WAVE-1118 D7 F-01] One snapshot for the whole decision:
+                    // `_tabs.value` is republished by eviction/close on other
+                    // threads, so `isNotEmpty()` followed by two more reads could
+                    // see a list that emptied in between and NPE on `!!`.
+                    val followTabs = _tabs.value
+                    if (mustFollowSelected && followTabs.isNotEmpty()) {
                         // Route to the selected tab under its serial lock. If the
                         // selected id was evicted, fall back to the most-recent
                         // existing tab so we still operate on a real page rather
                         // than spawning a blank one.
                         val sel = _selectedTabId.value
-                        val targetId = if (_tabs.value.any { it.id == sel }) sel
-                            else _tabs.value.maxByOrNull { it.lastActivityDate }!!.id
+                        val targetId = if (followTabs.any { it.id == sel }) sel
+                            else followTabs.maxByOrNull { it.lastActivityDate }!!.id
                         executeSerialized(targetId, input)
                     } else {
                         // Empty pool (first call) OR an opens-new-page action in
@@ -1316,6 +1339,11 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
      * lazily created.
      */
     private suspend fun acquireTab(requestedTabId: Int? = null): Tab? = withContext(Dispatchers.Main) {
+        // [WAVE-1118 D7 F-03] The implicit-tab wait below can outlive the pool:
+        // the caller is an agent tool coroutine that `dispose()` cannot cancel,
+        // and its 250 ms poll would otherwise keep building WebViews on a pool
+        // nobody will ever destroy again.
+        if (isDisposed) return@withContext null
         var currentTabs = _tabs.value.toMutableList()
 
         // Find requested tab, falling back to default-or-create when the
@@ -1345,6 +1373,9 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
                 var waited = 0L
                 while (waited < waitDeadline) {
                     delay(IMPLICIT_TAB_WAIT_POLL_MS)
+                    // [WAVE-1118 D7 F-03] Disposal must end the wait, not be
+                    // discovered after the next `createTab`.
+                    if (isDisposed) return@withContext null
                     waited += IMPLICIT_TAB_WAIT_POLL_MS
                     currentTabs = _tabs.value.toMutableList()
                     picked = currentTabs.firstOrNull { !it.isHeld } ?: createTab(currentTabs)
@@ -1392,6 +1423,13 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
     }
 
     private fun createTab(tabs: MutableList<Tab>, url: String? = null, explicitId: Int? = null): Tab? {
+        // [WAVE-1118 D7 F-03] A disposed pool must never allocate another
+        // WebView. `dispose()` is a one-shot finalizer, so a tab created after
+        // it is never destroyed by anyone: a 50–100 MB renderer process plus its
+        // Context leaks until the app dies. Reachable through [acquireTab]'s
+        // implicit-tab wait (its 250 ms poll wakes up AFTER a session was
+        // deleted mid-wait), and through any late UI/agent entry point.
+        if (isDisposed) return null
         if (tabs.size >= MAX_TABS) return null
 
         // [fix/sweep1014-b17a] explicitId: the restore path rebuilds a saved
@@ -1500,6 +1538,10 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
     // -- window.open / close --
 
     private fun handleNewWindow(resultMsg: Message) {
+        // [WAVE-1118 D7 F-03] A page can call window.open() between the last
+        // poll and disposal; this path builds its own WebView, so it needs the
+        // same latch as createTab.
+        if (isDisposed) return
         val currentTabs = _tabs.value.toMutableList()
         if (currentTabs.size >= MAX_TABS) {
             Log.w(TAG, "window.open rejected: max tabs reached")
@@ -1646,7 +1688,7 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
      * Also sets the selected tab id so the sheet's `selectedTab` lookup
      * resolves on first composition, and persists state.
      */
-    fun ensureTabForUI(): Tab {
+    fun ensureTabForUI(): Tab? {
         val currentTabs = _tabs.value.toMutableList()
         val existing = currentTabs.firstOrNull()
         if (existing != null) {
@@ -1656,7 +1698,9 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
             }
             return existing
         }
-        val tab = createTab(currentTabs)!!
+        // [WAVE-1118 D7 F-03] `createTab` is nullable now that disposal can
+        // refuse it; `!!` here was the one call site that assumed otherwise.
+        val tab = createTab(currentTabs) ?: return null
         _selectedTabId.value = tab.id
         saveState()
         return tab
@@ -1961,6 +2005,12 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
      * acquire can restore them, mirroring [evictIdleTabs].
      */
     override fun onTrimMemory(level: Int) {
+        // [WAVE-1118 D7 F-03] A disposed pool owns no tabs, and destroyTab on a
+        // cleared list would only touch bookkeeping for WebViews that are
+        // already gone. (The framework delivers ComponentCallbacks on Main, so
+        // this body shares the tab-list thread with every other writer; only
+        // [evictIdleTabs] is called off Main and hops itself.)
+        if (isDisposed) return
         if (_tabs.value.isEmpty()) return
         val policy = TrimPolicy.browserTabKillPolicy(level)
         val idleTimeoutMs = idleTimeoutMs
@@ -2018,7 +2068,27 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
 
     // -- Idle Eviction (call from a timer) --
 
+    /**
+     * [WAVE-1118 D7 F-01] Evict idle tabs. Safe to call from ANY thread; the
+     * body itself runs on Main.
+     *
+     * The callers are the memory hooks in `MinisApp` (memory-pressure reclaim,
+     * `OffloadRssProbe.governanceHook`, `AppMemoryGovernor`), i.e. off Main —
+     * and this body is a read-modify-write of the tab list plus mutations of
+     * `savedURLs`. Only the manager teardown was hopped to Main (see
+     * [destroyManagerOnMain]); the list bookkeeping was not, so an eviction
+     * racing `createTab`/`closeTab` on Main could publish a stale list (the new
+     * tab vanished from `_tabs` but its WebView stayed alive and unreachable)
+     * or resurrect a just-destroyed one. Hopping the whole pass to Main puts it
+     * in the same thread as every other tab-list writer, which is the rule this
+     * class already follows for UI mutations.
+     */
     fun evictIdleTabs() {
+        if (isDisposed) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { evictIdleTabs() }
+            return
+        }
         val now = System.currentTimeMillis()
         val currentTabs = _tabs.value.toMutableList()
         val timeoutMs = idleTimeoutMs

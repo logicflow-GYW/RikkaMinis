@@ -290,7 +290,16 @@ object SessionActivityTracker {
      * Memory state (flows) always updates regardless of foreground
      * status — the user sees the correct state when they return.
      * Default true (first launch is always in the foreground).
+     *
+     * [WAVE-1118 R4 F-03] `@Volatile`: written from the Main-thread lifecycle
+     * callbacks ([setAppForeground]) and read from whatever thread a stream's
+     * `finally` settles on ([setInactive] → `CompletionLinger.deadlineOnTurnEnd`).
+     * A plain field gives no happens-before edge between the two, so the
+     * background settle could read a stale `true`, decide the user is still
+     * looking at the app, and drop the completion window (the capsule then
+     * vanished 500 ms after the turn ended instead of living out its linger).
      */
+    @Volatile
     private var isAppForeground: Boolean = true
 
     fun setAppForeground(foreground: Boolean) {
@@ -496,6 +505,13 @@ object SessionActivityTracker {
         _lastToolName.value = null
         _lastToolTitle.value = null
         _lastToolStatus.value = null
+        // [WAVE-1118 D7 F-02] The completion capsule renders `lastOutcome`, and
+        // setInactive only ever WRITES it on the error path (`if (wasError)`)
+        // and on a tool finish ([applyToolUpdate]). A text-only turn therefore
+        // inherits whatever the previous run left behind: after one failed run,
+        // the next run's clean reply was stamped with a red ✗ and "Failed".
+        // A new turn starts with no outcome at all — it re-reports its own.
+        _lastToolOutcome.value = ToolOutcome.Unknown
         // [R5-D F-01①] Run-boundary slot reset. A session runs one agent loop
         // at a time, so any tool entry left under THIS session's key belongs to
         // a finished run — most often a start whose finish never arrived (a

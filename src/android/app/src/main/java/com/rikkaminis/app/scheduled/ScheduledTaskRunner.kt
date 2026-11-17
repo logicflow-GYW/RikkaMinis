@@ -473,6 +473,35 @@ object ScheduledTaskRunner {
             )
         } catch (t: Throwable) {
             AppLogger.warning(TAG, "finalize failed task=$taskId: ${t.javaClass.simpleName}")
+            // [WAVE-1118 D7 F-05] The settlement write did not land, so the
+            // persisted `running` marker is still on disk while the in-memory
+            // single-flight lock is about to be released. The next beat reads
+            // exactly that pair as "the process died mid-run" (crashFailure) and
+            // charges the task a failure it did not earn — `failStreak` climbs
+            // and the fuse can DISABLE a healthy task. Drop the marker we can no
+            // longer settle; the lost credit is recoverable (the task may retry
+            // inside its window), a phantom failure is not.
+            //
+            // LOCK ORDER: still `checkMutex` (held by the caller) -> store `lock`;
+            // `clearRunningMarker` takes the store mutex and nothing else, the
+            // same direction every other settlement path uses (see
+            // [ScheduledTasksStore.completeRun]) — no reverse nesting, so no
+            // deadlock with `onTasksRemoved`.
+            try {
+                ScheduledTasksStore.clearRunningMarker(app, taskId)
+            } catch (clearFailure: Throwable) {
+                // A cancelled settle is not a stuck marker: propagate instead of
+                // swallowing the cancellation (this compensation is the only
+                // suspension point added here, so it must not become one more
+                // place that eats CE).
+                if (clearFailure is kotlinx.coroutines.CancellationException) throw clearFailure
+                // Nothing left to try: the next beat will see the marker. Say so
+                // instead of pretending the settlement is clean.
+                AppLogger.warning(
+                    TAG,
+                    "finalize could not drop running marker task=$taskId: ${clearFailure.javaClass.simpleName}",
+                )
+            }
             if (runningTaskId == taskId) runningTaskId = null
             return
         }
