@@ -110,11 +110,27 @@ fastio 侧四条接线探针各带**负控**：删掉 zone 检查、把开关换
 
 ## 5 CI
 
-- 分支 `fix/zone-guard-1118b`，提交 `0707ebcf36c3746fdc56f2f5c0f60ff1eb9128ac`
-- 远端 `refs/heads/fix/zone-guard-1118b` = `0707ebcf36c3746fdc56f2f5c0f60ff1eb9128ac`（逐字符一致）
-- dispatch：run **#3261**（`gh-actions-dispatch --workflow build-apk.yml --ref fix/zone-guard-1118b`）
+- 分支 `fix/zone-guard-1118b`，最终提交 `c7e1ba09eb88e8385b151f9da86df4f4bbce0a42`
+- 远端 `refs/heads/fix/zone-guard-1118b` = `c7e1ba09eb88e8385b151f9da86df4f4bbce0a42`（逐字符一致，run 的 `head_sha` 也是同一个）
+- dispatch：`gh-actions-dispatch --workflow build-apk.yml --ref fix/zone-guard-1118b`
 
-（CI 结论待填）
+**run #3263 / `44324319915` @ `c7e1ba09`：五个 job 全 success**
+
+| job | 结论 | 证据 |
+|---|---|---|
+| unit-tests | success | **9664 PASSED / 0 FAILED**；`ProtectedZoneGuardTest` 23 条、`ZoneDeleteGuardStoreTest` 3 条、`FastioZoneGuardTest` 10 条（含 5 条负控）逐条在列 |
+| scan-gate | success | **115 passed, 0 failed**（`scripts/scan/**` 未改 ⇒ 夹具按机制跳过，本次绿不含夹具证据） |
+| lint | success | 首轮 `0707ebcf` 在这里红过（见下） |
+| build-apk | success | |
+| publish | success，但「Move the rolling tag」/「Publish to Releases」**skipped** | main 门控生效，分支未污染 release |
+
+**首轮 #3261 的 lint 红是真错，不是门抽风**：
+```
+values/strings.xml:1822: Error: "perm_section_zone_delete_guard" is not translated
+in "de", "ru", "ko", "ja" [MissingTranslation]
+```
+lint 把 `MissingTranslation` 当 **error**（不是 i18n 扫描器那种 WARNING），而我只补了 en/zh。修法：四个 key 补进 de/ru/ko/ja/zh-rTW 五个语种（与相邻的 auto-approve 区块一致——那一块是全语种齐的），`i18n_check.py` 复查 `ALL CLEAN`。
+**可复用**：新增 string key 必须一次补全 7 个语种，`i18n_check.py` 的 WARNING 不代表 CI 会放过；两套检查口径不同，别拿前者当后者。
 
 ---
 
