@@ -2279,8 +2279,12 @@ fun ChatScreen(
                     .onSizeChanged { topBarHeightPx = it.height },
             ) {
                 if (composerGlassOn) {
-                    // [fix/topbar-glass-flash-1118] Opaque floor UNDER the glass,
-                    // alpha = 1 - topBarGlassAlpha (see TopBarGlassOcclusion.scrimAlpha).
+                    // [fix/topbar-occlusion-1118c] Opaque floor UNDER the glass,
+                    // alpha = TopBarGlassOcclusion.floorAlpha(...) — always 1f. The
+                    // glass samples the declared hazeSource (the message list), not
+                    // the pixels below it, so the floor can be opaque on its own:
+                    // under SrcOver an opaque floor leaves nothing of the bar raw,
+                    // and the glass still blurs the rows (see TopBarGlassOcclusion).
                     //
                     // Without it the two gates disagree for the first frames of a
                     // chat open: `topBarTail` already lifts the list behind the bar
@@ -2300,7 +2304,7 @@ fun ChatScreen(
                             .matchParentSize()
                             .background(
                                 topBarGlassBase.copy(
-                                    alpha = TopBarGlassOcclusion.scrimAlpha(topBarGlassAlpha),
+                                    alpha = TopBarGlassOcclusion.floorAlpha(topBarGlassAlpha),
                                 ),
                             ),
                     )
