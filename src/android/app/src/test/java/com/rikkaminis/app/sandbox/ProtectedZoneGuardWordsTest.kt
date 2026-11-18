@@ -505,6 +505,7 @@ class ProtectedZoneGuardParentZoneTest {
     fun `wrapper value options are skipped per wrapper`() {
         for (cmd in listOf(
             "stdbuf -i 0 -o L rm -rf /var/minis/shared",
+            "stdbuf -i L rm -rf /var/minis/shared",
             "stdbuf -e L rm -rf /var/minis/shared",
             "sudo -h host -u root rm -rf /var/minis/shared",
             "sudo -p 'pw' -g wheel rm -rf /var/minis/shared",
