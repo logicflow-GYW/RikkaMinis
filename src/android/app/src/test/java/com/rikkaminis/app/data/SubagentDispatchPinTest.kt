@@ -10,7 +10,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -145,7 +144,7 @@ class SubagentDispatchPinTest {
         } catch (t: Throwable) {
             t
         }
-        assertSame("the Room failure reaches the caller", boom, thrown)
+        assertThrown(boom, thrown)
         assertFalse(
             "a window that could not be opened must not leave a count behind",
             SubagentDispatchPin.isDispatching(SID),
@@ -170,7 +169,7 @@ class SubagentDispatchPinTest {
         } catch (t: Throwable) {
             t
         }
-        assertSame("the Room failure reaches the caller", boom, thrown)
+        assertThrown(boom, thrown)
         assertFalse(SubagentDispatchPin.isDispatching(SID))
         assertEquals(0, repo.pinWrites)
 
@@ -194,7 +193,7 @@ class SubagentDispatchPinTest {
         } catch (t: Throwable) {
             t
         }
-        assertSame("the cancellation is rethrown, not swallowed", cancelled, thrown)
+        assertThrown(cancelled, thrown)
         assertFalse("the count is rolled back even for a cancellation", SubagentDispatchPin.isDispatching(SID))
 
         repo.pinThrowsAfterWrite = null
@@ -217,7 +216,7 @@ class SubagentDispatchPinTest {
         } catch (t: Throwable) {
             t
         }
-        assertSame(boom, thrown)
+        assertThrown(boom, thrown)
         assertFalse(SubagentDispatchPin.isDispatching(SID))
         assertEquals("the write landed before it failed", 100L, repo.value(SID))
         assertEquals(1, repo.pinWrites)
@@ -318,6 +317,24 @@ class SubagentDispatchPinTest {
     }
 
     // ---- helpers -----------------------------------------------------------
+
+    /**
+     * The failure that escaped [SubagentDispatchPin.begin] is the SAME KIND with
+     * the SAME message as the one the fake threw.
+     *
+     * Deliberately not `assertSame`: kotlinx.coroutines' stacktrace recovery
+     * COPIES an exception that crosses a suspend boundary (the copy keeps the
+     * class and the message, not the identity), so an identity assertion is
+     * green or red depending on the coroutines version and the debug flag —
+     * which is exactly what happened here: the local harness (coroutines
+     * 1.8.1) kept the instance and CI did not. Identity was never the contract;
+     * "the failure is not swallowed and not wrapped" is.
+     */
+    private fun assertThrown(expected: Throwable, actual: Throwable?) {
+        assertNotNull("the failure must reach the caller, not be swallowed", actual)
+        assertEquals("the failure keeps its class", expected.javaClass, actual!!.javaClass)
+        assertEquals("the failure keeps its message", expected.message, actual.message)
+    }
 
     private suspend fun open(sid: String, repo: FakeRepo): Int =
         SubagentDispatchPin.begin(
