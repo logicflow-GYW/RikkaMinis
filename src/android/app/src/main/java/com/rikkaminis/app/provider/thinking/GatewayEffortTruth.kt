@@ -182,14 +182,22 @@ object GatewayEffortTruth {
      *
      * Degrades DOWNWARD (clampEffort walks to the strongest tier at or below the request,
      * then to the weakest) so asking for a tier the enum lacks never fails the request.
+     *
+     * [host] selects the measured table (and is therefore still the bare host — the
+     * table is keyed by host), [scope] selects WHAT THE LEARNER READS: it is the
+     * endpoint the request goes to (`scheme://host[:port]/path`), so an instance on a
+     * different port or path prefix of the same host cannot inherit another's entry
+     * ([fix/effort-key-1119]). It defaults to [host] so a host-only caller keeps the
+     * legacy key shape.
      */
     fun resolveTier(
         host: String,
         modelId: String,
         level: ThinkingLevel,
         declaredTiers: List<String>?,
+        scope: String = host,
     ): String {
-        val tiers = EffortTierLearner.learned(host, modelId)
+        val tiers = EffortTierLearner.learned(scope, modelId)
             ?: tiersFor(host, modelId)
             ?: declaredTiers?.takeIf { it.isNotEmpty() }
             ?: fallbackTiersFor(host)

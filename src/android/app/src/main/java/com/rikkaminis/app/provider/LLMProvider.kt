@@ -34,15 +34,22 @@ interface LLMProvider {
         model.maxOutputTokens ?: defaultMaxOutputTokens
 
     /**
-     * [fix/thinking-level-ceiling-1118] The HOST this provider actually sends to, or
-     * null when it is not an HTTP endpoint we model (mock / hand-built providers).
+     * [fix/thinking-level-ceiling-1118] The ENDPOINT this provider actually sends to,
+     * normalized as `scheme://host[:port]/path-prefix` (see
+     * [com.rikkaminis.app.provider.thinking.EffortTierLearner.scopeOf]), or null when
+     * it is not an HTTP endpoint we model (mock / hand-built providers).
      *
      * Exists so the UI can read the SAME learned-effort scope the wire clamp uses
-     * (`EffortTierLearner` keys entries by host+model). Re-deriving the base URL in
-     * the UI would duplicate ProviderFactory's per-type default endpoints, and a
+     * (`EffortTierLearner` keys entries by endpoint scope + model). Re-deriving the base
+     * URL in the UI would duplicate ProviderFactory's per-type default endpoints, and a
      * mismatch would silently make the picker disagree with what is sent.
+     *
+     * The scope — not the host — is the unit: two instances on the same host with
+     * different ports or different path prefixes are different gateways with different
+     * effort enums, and sharing one learned entry between them is exactly what
+     * [fix/effort-key-1119] fixes.
      */
-    val requestHost: String? get() = null
+    val requestScope: String? get() = null
 
     /** Provider-level fallback when model.maxOutputTokens is unknown. */
     val defaultMaxOutputTokens: Int get() = 16_384
