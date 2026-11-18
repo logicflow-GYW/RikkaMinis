@@ -119,7 +119,21 @@ ComposerClearResidueWiringTest > the comment masker blanks comment text and keep
 
 ### CI
 
-见 §3.1（报告提交后补最终 tip 的那次 run）。
+**最终 tip `c714347b`（含报告）—— run #3287 / `44369272888`**，五 job 全 `success`，`head_sha = c714347bf730ce40a65cb52adf75677b34206703` 与本地/远端 tip 逐字符一致：
+
+| job | 结论 |
+|---|---|
+| lint | success |
+| build-apk | success |
+| unit-tests | success（**9761 PASSED 行 / 0 FAILED 行**，11 条新用例逐条 `grep -cF` 命中 1） |
+| scan-gate | success |
+| publish | success（日志止于 `download-artifact` / `VC=$((220000000 + GITHUB_RUN_NUMBER))` 等前置步骤，**无 tag / release 步骤组** —— main 门控生效，分支不产出 release） |
+
+**过程中的两次非本支失败，已归因**：
+- run #3280 / `44364886822`（tip `316b6522`）**lint 失败**：`Could not resolve … org.hamcrest:hamcrest-integration:1.3 / com.squareup:javawriter:2.1.1` —— Maven 中央瞬时解析失败，同一 job 在 #3284（`1e863e42`）与 #3287 都是 success，且本支零改动 build 文件。
+- run #3284 / #3286 显示 `cancelled`：后一次 dispatch 让 GitHub 取消了仍在排队的旧 run（同一 workflow + 同一 ref 的 concurrency 行为），不是测试失败。
+
+**报告之外差异为空**：`git diff --name-only c714347b^ c714347b` 只有 `fix-reports/FIX-2D-1119-3-composer.md`；`git diff --stat b82b2963 HEAD` 只有上表四个文件。
 
 ## 4 变异负控（`composer-jvm/mutate.py`，快照 + finally 还原 + sha256）
 
