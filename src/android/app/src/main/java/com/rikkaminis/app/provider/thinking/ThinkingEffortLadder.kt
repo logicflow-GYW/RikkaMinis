@@ -57,6 +57,49 @@ object ThinkingEffortLadder {
         return if (i <= 0) emptyList() else LADDER.subList(0, i).toList()
     }
 
+    /**
+     * [fix/thinking-level-ceiling-1118] The highest client tier a learned tier set
+     * still allows, or null when the set names no reasoning tier at all.
+     *
+     * This is the DISPLAY side of what [clampEffort] does on the wire: the picker may
+     * only offer tiers the gateway has not already refused, so a learned set also
+     * lowers the ceiling the composer shows. `none` / `minimal` carry no
+     * [ThinkingLevel] counterpart (none IS the off state; minimal has no UI entry), so
+     * a set that stops there returns null — the caller keeps the catalog ceiling
+     * rather than rendering an empty picker.
+     */
+    fun highestLevelFor(tiers: List<String>?): ThinkingLevel? {
+        if (tiers.isNullOrEmpty()) return null
+        var best: ThinkingLevel? = null
+        for (tier in tiers) {
+            val level = LEVEL_BY_EFFORT[tier.lowercase()] ?: continue
+            if (best == null || level.rank > best.rank) best = level
+        }
+        return best
+    }
+
+    /**
+     * [fix/thinking-level-ceiling-1118] [catalogMax] lowered to whatever a learned set
+     * still allows. Never raises the ceiling: learning can only take tiers away.
+     *
+     * AUTO returns unchanged — it carries no intensity, and the picker treats it as
+     * exempt from the ceiling (see `availableThinkingLevels`).
+     */
+    fun lowerCeiling(catalogMax: ThinkingLevel, learned: List<String>?): ThinkingLevel {
+        if (catalogMax == ThinkingLevel.AUTO) return catalogMax
+        val learnedMax = highestLevelFor(learned) ?: return catalogMax
+        return if (learnedMax.rank < catalogMax.rank) learnedMax else catalogMax
+    }
+
+    /** Inverse of [wireEffort] for the tiers that have a client counterpart. */
+    private val LEVEL_BY_EFFORT = mapOf(
+        "low" to ThinkingLevel.LOW,
+        "medium" to ThinkingLevel.MEDIUM,
+        "high" to ThinkingLevel.HIGH,
+        "xhigh" to ThinkingLevel.XHIGH,
+        "max" to ThinkingLevel.MAX,
+    )
+
     /** Snap a requested tier onto the model's declared set, walking DOWN then up. */
     fun clampEffort(effort: String, values: List<String>?): String {
         if (values.isNullOrEmpty()) return effort

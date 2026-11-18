@@ -40,6 +40,8 @@ import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.provider.ProviderFactory
 import com.rikkaminis.app.provider.catalogMaxThinkingLevel
 import com.rikkaminis.app.provider.effectiveMaxThinkingLevel
+import com.rikkaminis.app.provider.thinking.EffortTierLearner
+import com.rikkaminis.app.provider.thinking.ThinkingEffortLadder
 import com.rikkaminis.app.sandbox.ExecutionCoordinator
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.tools.AgentTraceRecorder
@@ -2307,7 +2309,7 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.find { it.id == id }
             }
             if (entry != null) {
-                return entry.effectiveMaxThinkingLevel
+                return withLearnedCeiling(entry.effectiveMaxThinkingLevel)
             }
             // [deep-audit-1044 B-04] The no-entry fallback is reached by a
             // group-resolved turn and by any snapshot written before the
@@ -2318,8 +2320,31 @@ class ChatViewModel(
             // through the same live exit as the other readers — it enriches
             // the snapshot exactly like the entry branch does.
             val model = liveEffectiveModel() ?: return ThinkingLevel.XHIGH
-            return model.catalogMaxThinkingLevel
+            return withLearnedCeiling(model.catalogMaxThinkingLevel)
         }
+
+    /**
+     * [fix/thinking-level-ceiling-1118] Lower [declared] to what the gateway has
+     * already ACCEPTED for this host+model, when it has told us anything.
+     *
+     * Why the picker has to see this: the wire clamp lives in the provider, so before
+     * this the composer kept offering XHigh while the request went out as High — a
+     * silent downgrade, and the tier that 400'd survived on screen. Folding the learned
+     * ceiling in here makes the existing "capped" cue do the work: the picker drops to
+     * the reachable tiers and paints the orange up-arrow on the highest one
+     * (`isClampedBy(requested, maxAvailable)`), with no new strings.
+     *
+     * Scoped exactly like the wire: `host + model id` (the learner's key). A model
+     * group therefore degrades ONE member — switching to a member that has not been
+     * refused keeps its own ceiling, and the user's stored choice is never rewritten
+     * (only [com.rikkaminis.app.ui.chat.setThinkingLevel] persists, on an explicit tap).
+     */
+    private fun withLearnedCeiling(declared: ThinkingLevel): ThinkingLevel {
+        val provider = currentProvider ?: return declared
+        val host = provider.requestHost ?: return declared
+        val learned = EffortTierLearner.learned(host, provider.model.id) ?: return declared
+        return ThinkingEffortLadder.lowerCeiling(declared, learned)
+    }
 
     /**
      * [T-android-thinking-level-arch] Levels the chat composer picker should

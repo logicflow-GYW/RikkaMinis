@@ -106,6 +106,11 @@ class OpenAIProvider constructor(
     override val name = "OpenAI"
     override var instanceContext: com.rikkaminis.app.data.model.ProviderInstance? = null
 
+    // [fix/thinking-level-ceiling-1118] Same host the effort learner keys its entries
+    // by (see the record/learned call sites below) — the UI reads it to lower the
+    // picker's ceiling to what the gateway has actually accepted.
+    override val requestHost: String? get() = basePath.toHttpUrlOrNull()?.host
+
     /**
      * [T-android-thinking-rules-phase2] Owning provider-instance id, set by
      * ProviderFactory after construction (mirrors how instanceContext is a
@@ -2956,6 +2961,11 @@ class OpenAIProvider constructor(
                 "officialDeepSeek=$isOfficialDeepSeek " +
                 "supportsReasoning=${model.supportsReasoning} " +
                 "declared=${model.reasoningEffortValues?.joinToString("|") ?: "null"} " +
+                // [fix/thinking-level-ceiling-1118] What the gateway has actually
+                // accepted for this host+model, when it ever refused a tier. Printed
+                // next to the declaration on purpose: when they disagree, this is the
+                // line that explains why the wire value is lower than the catalog's.
+                "learned=${EffortTierLearner.learned(host, model.id)?.joinToString("|") ?: "null"} " +
                 "declaresNoEffort=${model.declaresNoEffortTiers == true} " +
                 "offEffort=${explicitOffEffort() ?: "null"} maxTokens=$maxTokens",
         )
