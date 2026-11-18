@@ -398,6 +398,27 @@ class ComposerClearResidueWiringTest {
     }
 
     /**
+     * [W1119-2D F-05] The guard wipe must NOT drop the cleared-body stamp either.
+     * The stamp is what recognises the replay fragments that keep arriving after the
+     * wipe (a char-by-char replay lands one commit per event); dropping it here would
+     * make the NEXT fragment look like the user's first keystroke, and the rest of the
+     * message would walk back into the box. `shouldRestampClearedBody` already keeps
+     * the stamp when the clear is a guard unwind — this arm pins that the branch does
+     * not defeat it by clearing the field directly.
+     */
+    @Test
+    fun `the guard wipe keeps the cleared body stamp`() {
+        val branch = code.indexOf("if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR)")
+        assertTrue("the DROP_AND_CLEAR branch is gone", branch >= 0)
+        val branchBody = blockAt(code, branch)
+        assertFalse(
+            "the guard wipe drops the stamp, so the fragments that follow look like the " +
+                "user's own typing (branch body: ${branchBody.replace("\n", " ").take(200)})",
+            branchBody.contains("lastClearedText = null") || branchBody.contains("lastClearedAtMs = 0"),
+        )
+    }
+
+    /**
      * [W1119-2D F-07] Every anchor and body check in this class reads the comment-
      * masked view, and that view is itself pinned here — otherwise a change to
      * [maskComments] could silently turn every other arm into a scan of nothing.

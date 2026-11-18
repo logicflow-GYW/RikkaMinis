@@ -603,6 +603,36 @@ class ComposerClearResiduePolicyTest {
         assertEquals(ComposerResidueVerdict.NONE, verdict(incoming = "hello world", clearedText = ""))
     }
 
+    /**
+     * [W1119-2D F-05] The fingerprint drop clears `lastClearedText` and leaves
+     * `lastClearedAtMs` alone. That is inert, and this arm is the proof rather than
+     * the assertion: with NO stamp, every reader of the timestamp is behind a null
+     * check — the verdict returns early on a null body, and `shouldRestampClearedBody`
+     * requires `previousStamp != null` before it looks at the delta. So a leftover
+     * timestamp can only be read as "0 ms since a clear that has no body", which must
+     * never drop anything.
+     */
+    @Test
+    fun `a dropped stamp is never a residue even when its timestamp is still fresh`() {
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = body, clearedText = null, fieldText = "", vmText = "", msSinceClear = 1L),
+        )
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = body, clearedText = "", fieldText = body, vmText = "", msSinceClear = 1L),
+        )
+        // ...and a stale stamp cannot protect itself: no stamp means every clear restamps.
+        assertTrue(
+            shouldRestampClearedBody(
+                clearedBody = "hello",
+                previousStamp = null,
+                msSinceStamp = 1L,
+                guardClear = true,
+            ),
+        )
+    }
+
     @Test
     fun `an empty incoming edit is not a residue`() {
         assertEquals(ComposerResidueVerdict.NONE, verdict(incoming = ""))
