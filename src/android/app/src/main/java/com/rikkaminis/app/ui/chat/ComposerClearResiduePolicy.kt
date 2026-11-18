@@ -29,6 +29,41 @@ internal const val COMPOSER_CLEAR_RESIDUE_WINDOW_MS = 1_500L
 internal const val COMPOSER_CLEAR_RESIDUE_MIN_REPLAY_CHARS = 4
 
 /**
+ * [W1118-COMPOSER C-A F-02] How long after a send the composer still treats an
+ * IME commit as post-send residue (the T217-2 window).
+ *
+ * `clearFocus()` makes the IME `finishComposingText()`, which third-party IMEs
+ * answer by replaying their composing region — always with a non-null
+ * composition, which is what makes this window usable. The window is armed by
+ * the SEND path only, and that is the whole of the defect this constant's
+ * helper exists for: a refused send hands the text back through
+ * `commitComposerBody`, and if the window is still armed the user's first
+ * Pinyin / Japanese / Korean word (composition != null) is thrown away.
+ */
+internal const val COMPOSER_POST_SEND_IME_WINDOW_MS = 500L
+
+/**
+ * [W1118-COMPOSER C-A F-02] Should this `onValueChange` edit be dropped as a
+ * post-send IME residue commit?
+ *
+ * Pure so the "window is disarmed after a composer commit" half is pinnable on
+ * the JVM: the composer resets the send time to `0L`, which makes the elapsed
+ * delta the device uptime — far past the window — and this returns false.
+ * `msSinceSend < window` is kept exactly as the inline condition was, including
+ * its behaviour on a backwards clock, because `elapsedRealtime` is monotonic and
+ * a rewrite of that edge would be a silent behaviour change.
+ */
+internal fun isPostSendImeResidue(
+    hasComposingRegion: Boolean,
+    msSinceSend: Long,
+    incomingEmpty: Boolean,
+): Boolean {
+    if (!hasComposingRegion) return false
+    if (incomingEmpty) return false
+    return msSinceSend < COMPOSER_POST_SEND_IME_WINDOW_MS
+}
+
+/**
  * [W1118-COMPOSER A1] Fastest rate at which a human can plausibly TYPE into the
  * composer, in characters per second.
  *
@@ -59,6 +94,46 @@ internal const val COMPOSER_REPLAY_MAX_TYPEABLE_CHARS_PER_SEC = 12
  * how fast the device delivered the commit.
  */
 internal const val COMPOSER_SINGLE_EDIT_PHRASE_CHARS = 12
+
+/**
+ * [W1118-COMPOSER C-A F-01] Share of the cleared body a SINGLE edit must carry
+ * before arm A's rate test is allowed to call it a replay, in percent.
+ *
+ * The rate test alone is meaningless for one edit, because a suggestion chip, a
+ * glide swipe and a short dictation all deliver a whole WORD in one instant —
+ * `onValueChange` cannot tell a 5-character chip tap at 350 ms (14 chars/s) from
+ * an IME replaying 5 characters. What it CAN measure is how much of the body the
+ * edit represents: a replay restores the message (all of it, or the tail it
+ * buffered), while a chip gives the user one word out of it. Half is the line —
+ * at 45 % ("hello" out of "hello world") the edit is still just a word, and a
+ * quarter or an eighth would have fixed nothing.
+ *
+ * The trade this buys and its cost are stated at [composerResidueVerdict]: a
+ * SHORT fragment of a LONG body (4 characters out of 42) is no longer dropped by
+ * arm A. That fragment is not lost work — arm B wipes the box the moment the
+ * replay converges on the whole body — so the residue costs a visible few
+ * characters inside a 1.5 s window instead of a swallowed chip tap. Phrases
+ * (12+ characters) do not need this test at all: no input method commits a
+ * phrase in one edit.
+ */
+internal const val COMPOSER_SINGLE_EDIT_MIN_COVERAGE_PERCENT = 50
+
+/**
+ * [W1118-COMPOSER C-A F-01] Does [incoming] carry at least
+ * [COMPOSER_SINGLE_EDIT_MIN_COVERAGE_PERCENT] of [clearedText]?
+ *
+ * Lengths are compared AFTER [stripImeTrailingNoise], so the IME's own trailing
+ * space or full stop does not make the body look longer than what the edit can
+ * possibly restore. Integer arithmetic only, and `>=` on the boundary: exactly
+ * half counts as covering, i.e. the guard errs towards "this could be a replay".
+ */
+internal fun coversEnoughOfClearedBody(incoming: String, clearedText: String): Boolean {
+    if (incoming.isEmpty() || clearedText.isEmpty()) return false
+    val incomingNorm = stripImeTrailingNoise(incoming)
+    val clearedNorm = stripImeTrailingNoise(clearedText)
+    if (incomingNorm.isEmpty() || clearedNorm.isEmpty()) return false
+    return incomingNorm.length * 100 >= clearedNorm.length * COMPOSER_SINGLE_EDIT_MIN_COVERAGE_PERCENT
+}
 
 /**
  * [W1118-COMPOSER A1] Could a human have produced [chars] characters in
@@ -99,6 +174,13 @@ internal fun isSuperhumanTypingRate(chars: Int, msSinceClear: Long): Boolean {
  * appear", and a human retyping N characters needs at least N/12 seconds, which
  * is why a long body is always implausible inside the 1.5 s window while a short
  * one is only implausible if it lands immediately.
+ *
+ * [W1118-COMPOSER C-A F-01] Arm A's coverage test
+ * ([coversEnoughOfClearedBody]) is a different question and does not contradict
+ * this one: it never substitutes "most of the body" for "the whole body" on a
+ * box that grew over several edits — it only decides which SINGLE edits are
+ * large enough to be the body at all, so that one chip tap is not called a
+ * replay. Convergence here still requires every character.
  *
  * Consequence, and the intended one: a character-by-character IME replay leaves
  * a growing prefix in the box (harmless, bounded by the window) and is wiped the
@@ -371,17 +453,22 @@ internal fun composerResidueVerdict(
     // ...but "four characters at once" is not by itself impossible input: a glide
     // swipe, a suggestion chip and a short dictation all land as one edit of four
     // or more characters, and dropping one of those silently is the same class of
-    // data loss arm B used to cause. Two independent tests settle it, either of
-    // which is enough:
+    // data loss arm B used to cause. Three tests settle it — the first is enough
+    // on its own:
     //  * the edit carries a PHRASE (12+ characters) — no input method commits a
     //    phrase in one edit, only a replay from the IME's own buffer does;
-    //  * the edit is longer than a human could have typed since the clear, which
+    //  * [W1118-COMPOSER C-A F-01] otherwise the edit must COVER at least half the
+    //    cleared body, because one edit is one delivery: a chip tap and a replay
+    //    of the same length arrive at the same instant, so speed cannot separate
+    //    them but coverage can (a chip gives a word, a replay gives the message);
+    //  * ...and only then does the rate test get a vote, which is what still
     //    catches a short body replayed in one frame.
     if (boxEmpty) {
         val longEnough = incoming.length >= minReplayChars
         val phrase = incoming.length >= COMPOSER_SINGLE_EDIT_PHRASE_CHARS
+        val covers = coversEnoughOfClearedBody(incoming, clearedText)
         return if (longEnough &&
-            (phrase || isSuperhumanTypingRate(incoming.length, msSinceClear))
+            (phrase || (covers && isSuperhumanTypingRate(incoming.length, msSinceClear)))
         ) {
             ComposerResidueVerdict.DROP
         } else {

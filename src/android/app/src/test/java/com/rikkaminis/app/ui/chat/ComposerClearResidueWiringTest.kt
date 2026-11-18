@@ -249,6 +249,43 @@ class ComposerClearResidueWiringTest {
         assertTrue("the stamp must be dropped before the text is written", drop < write)
     }
 
+    /**
+     * [W1118-COMPOSER C-A F-02] The same funnel must also DISARM the T217-2
+     * post-send window. That window drops every edit carrying a composing region
+     * for 500 ms after a send, and only the send path arms it — so after a refusal
+     * handed the body back, the user's first Pinyin / Japanese / Korean word was
+     * thrown away. The write here is the user's own text, so the window goes with
+     * the stamp.
+     *
+     * Pure half of the contract (the predicate standing down) is pinned in
+     * ComposerClearResiduePolicyTest; this arm pins that the composer really
+     * resets the value the predicate reads.
+     */
+    @Test
+    fun `a composer commit disarms the post-send IME window`() {
+        val decl = source.indexOf("val commitComposerBody: (String, Int?) -> Unit = {")
+        assertTrue("the commit funnel is gone", decl >= 0)
+        val body = blockAt(source, decl)
+        val reset = body.indexOf("lastSendTimeMs = 0L")
+        val write = body.indexOf("viewModel.setInputText(text)")
+        assertTrue(
+            "the commit funnel must disarm the post-send IME window: `lastSendTimeMs` " +
+                "is still armed from the send that was refused, and the composer drops " +
+                "every composing edit for 500 ms",
+            reset >= 0,
+        )
+        assertTrue("the window must be disarmed before the text is written", reset < write)
+
+        val guard = source.indexOf("isPostSendImeResidue(", source.indexOf("onValueChange = { tfv ->"))
+        assertTrue("the post-send window must go through the pure predicate", guard >= 0)
+        val args = source.substring(guard, minOf(source.length, guard + 400))
+        assertTrue(
+            "the predicate must be given the live composing region and the armed send time",
+            args.contains("hasComposingRegion = tfv.composition != null") &&
+                args.contains("msSinceSend = now - lastSendTimeMs"),
+        )
+    }
+
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
