@@ -191,6 +191,8 @@ def local_run_refused(allow_local, environ):
         return False
     return not (environ.get("GITHUB_ACTIONS") or environ.get("CI"))
 
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(HERE)))
     ap.add_argument("--jobs", default=os.environ.get("MINIS_SCAN_JOBS", "auto"))

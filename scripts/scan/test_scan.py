@@ -22,6 +22,7 @@ import contextlib
 import io
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -3078,6 +3079,20 @@ def test_scan_parallel_local_refusal():
     check("the refusal names the single-gate alternative",
           "scripts/scan/<gate>.py" in msg and "test_scan.py" in msg)
     check("the refusal names the opt-out", "--allow-local" in msg)
+
+    # [LOCAL_REFUSAL] The refusal must not REPLACE main(). This arm exists
+    # because the first version of this change deleted `def main`'s signature
+    # line while inserting the predicate: the module still parsed, the refusal
+    # still answered (it runs before main is reached), and the breakage only
+    # appeared in CI as `NameError: name 'main' is not defined` at the
+    # `sys.exit(main())` call. A guard that hides the function it guards is not
+    # a guard — so the entry point is pinned by name AND by callability.
+    check("the driver still defines main()",
+          callable(getattr(scan_parallel, "main", None)),
+          "scan_parallel.main is %r" % (getattr(scan_parallel, "main", None),))
+    check("main() is reachable from __main__'s sys.exit(main())",
+          "sys.exit(main())" in pathlib.Path(SCRIPT_DIR, "scan_parallel.py").read_text(),
+          "the __main__ block no longer calls main()")
 
 
 def test_scan_parallel_block_numbering():
