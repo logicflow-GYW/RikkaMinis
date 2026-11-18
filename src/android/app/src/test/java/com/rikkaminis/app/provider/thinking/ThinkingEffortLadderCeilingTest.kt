@@ -120,7 +120,7 @@ class ThinkingEffortLadderCeilingTest {
         val code = code(CHAT_VM)
         val at = code.indexOf("private fun withLearnedCeiling(")
         assertTrue("withLearnedCeiling not found in $CHAT_VM", at >= 0)
-        val block = code.substring(at, minOf(code.length, at + 900))
+        val block = code.substring(at, minOf(code.length, at + 1600))
         assertTrue(
             "the picker ceiling no longer consults the gateway's own answer — a learned " +
                 "downgrade would again be invisible in the composer while the wire clamps",
@@ -137,11 +137,11 @@ class ThinkingEffortLadderCeilingTest {
         val getter = code.substring(getterAt, minOf(code.length, getterAt + 1600))
         assertTrue(
             "the active-entry ceiling must be folded",
-            "withLearnedCeiling(entry.effectiveMaxThinkingLevel)" in getter,
+            "withLearnedCeiling(entry.effectiveMaxThinkingLevel" in getter,
         )
         assertTrue(
             "the no-entry fallback ceiling must be folded too",
-            "withLearnedCeiling(model.catalogMaxThinkingLevel)" in getter,
+            "withLearnedCeiling(model.catalogMaxThinkingLevel" in getter,
         )
     }
 
@@ -180,6 +180,62 @@ class ThinkingEffortLadderCeilingTest {
         assertTrue(
             "the ceiling fold must key on the model the provider will send, not the snapshot",
             "provider.model.id" in vm,
+        )
+    }
+
+    @Test
+    fun `the level flow refreshes at turn boundaries`() {
+        // The badge reads this StateFlow, not the getter. Learning happens in the
+        // worker after a failed request, so without a source that emits when the turn
+        // ends the cached value survives the whole session: the picker listed High
+        // while the navbar kept rendering XHigh.
+        val code = code(CHAT_VM)
+        val at = code.indexOf("val thinkingLevel: StateFlow<ThinkingLevel> = combine(")
+        assertTrue("thinkingLevel StateFlow not found", at >= 0)
+        val block = code.substring(at, minOf(code.length, at + 700))
+        assertTrue(
+            "the cached level flow must re-derive after a turn — otherwise a learned " +
+                "ceiling updates the picker but not the badge",
+            "isStreaming" in block,
+        )
+    }
+
+    @Test
+    fun `the level flow re-derives when the provider is swapped`() {
+        // The switch paths assign `_activeEntryId` and then `currentProvider`. On
+        // Dispatchers.Main.immediate the entry emission can recompute the flow while the
+        // provider is still the previous member — and because `currentProvider` was a
+        // plain var, the second assignment emitted nothing, so the badge kept the OLD
+        // member's learned ceiling for the rest of the session. That is the reported
+        // "one model downgraded, every other member followed".
+        val code = code(CHAT_VM)
+        val flowAt = code.indexOf("val thinkingLevel: StateFlow<ThinkingLevel> = combine(")
+        assertTrue("thinkingLevel StateFlow not found", flowAt >= 0)
+        val flowBlock = code.substring(flowAt, minOf(code.length, flowAt + 900))
+        assertTrue(
+            "the level flow must observe the provider's own generation, otherwise the " +
+                "second half of a model switch never reaches it",
+            "_providerGeneration" in flowBlock,
+        )
+        val genAt = code.indexOf("private val _providerGeneration")
+        assertTrue("_providerGeneration not found", genAt >= 0)
+        val setter = code.substring(genAt, minOf(code.length, genAt + 900))
+        assertTrue(
+            "currentProvider must bump the generation on every assignment",
+            "set(value)" in setter && "_providerGeneration.value = _providerGeneration.value + 1" in setter,
+        )
+    }
+
+    @Test
+    fun `a provider that has not caught up never lends its ceiling`() {
+        val code = code(CHAT_VM)
+        val at = code.indexOf("private fun withLearnedCeiling(")
+        assertTrue("withLearnedCeiling not found", at >= 0)
+        val block = code.substring(at, minOf(code.length, at + 1600))
+        assertTrue(
+            "while the provider still fronts the previous member, its learned ceiling " +
+                "must not be applied to the newly selected model",
+            "provider.model.id != expectedModelId" in block,
         )
     }
 

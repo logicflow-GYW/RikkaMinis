@@ -1554,7 +1554,25 @@ class ChatViewModel(
     // launch streamJob directly from other scopes.
     @Volatile
     internal var sendShellJob: Job? = null
+    /**
+     * [fix/thinking-level-ceiling-1118] Bumped on every replacement of
+     * [currentProvider]. `currentProvider` is a plain var, so nothing downstream
+     * re-derived when the model behind it changed — and `currentModelMaxThinkingLevel`
+     * reads the provider's host. The switch paths set `_activeEntryId` BEFORE the
+     * provider (ChatModelRouting:202/205, ChatSessionLifecycle:1570/1571, …), and on
+     * `Dispatchers.Main.immediate` the entry emission can recompute the level flow
+     * synchronously, i.e. while the provider is still the OLD member. Adding the
+     * provider's own generation to the flow's sources makes the second half of the
+     * switch land deterministically instead of leaving the badge on the previous
+     * member's ceiling for the rest of the session.
+     */
+    private val _providerGeneration = MutableStateFlow(0)
+
     internal var currentProvider: LLMProvider? = null
+        set(value) {
+            field = value
+            _providerGeneration.value = _providerGeneration.value + 1
+        }
     internal var currentModel: LLMModel? = null
 
     /** Structured agent history for the agent loop (contentParts-based). */
@@ -2028,7 +2046,17 @@ class ChatViewModel(
         _thinkingLevel,
         _activeEntryId,
         providerRepository.config,
-    ) { _, _, _ -> effectiveThinkingLevel }
+        // [fix/thinking-level-ceiling-1118] 回合边界刷新：学到的上限是**另一个进程**
+        // （worker 里的 provider）在请求失败后写进文件的，它不在上面三个源的任何
+        // 一个里。缺了这条，一次 400 学到 High 之后，选择器（读 getter）已经变了，
+        // 而这块缓存流仍停在旧值——导航栏上的档位标签继续写着 XHigh。
+        // 流状态翻转恰好就是"这一轮结束了"的信号，读一次新文件即可。
+        isStreaming,
+        // 切换模型时 `_activeEntryId` 先动、`currentProvider` 后动（见该字段的注释）。
+        // 少了这一路，第二次赋值不会触发任何重算，标签就停在**上一个成员**的实测上限上
+        // ——表现的正是"一个模型降了，组里其他模型跟着降"。
+        _providerGeneration,
+    ) { _, _, _, _, _ -> effectiveThinkingLevel }
         .stateIn(viewModelScope, SharingStarted.Eagerly, ThinkingLevel.OFF)
 
     /**
@@ -2309,7 +2337,7 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.find { it.id == id }
             }
             if (entry != null) {
-                return withLearnedCeiling(entry.effectiveMaxThinkingLevel)
+                return withLearnedCeiling(entry.effectiveMaxThinkingLevel, expectedModelId = entry.model.id)
             }
             // [deep-audit-1044 B-04] The no-entry fallback is reached by a
             // group-resolved turn and by any snapshot written before the
@@ -2320,7 +2348,7 @@ class ChatViewModel(
             // through the same live exit as the other readers — it enriches
             // the snapshot exactly like the entry branch does.
             val model = liveEffectiveModel() ?: return ThinkingLevel.XHIGH
-            return withLearnedCeiling(model.catalogMaxThinkingLevel)
+            return withLearnedCeiling(model.catalogMaxThinkingLevel, expectedModelId = model.id)
         }
 
     /**
@@ -2339,10 +2367,17 @@ class ChatViewModel(
      * refused keeps its own ceiling, and the user's stored choice is never rewritten
      * (only [com.rikkaminis.app.ui.chat.setThinkingLevel] persists, on an explicit tap).
      */
-    private fun withLearnedCeiling(declared: ThinkingLevel): ThinkingLevel {
+    private fun withLearnedCeiling(declared: ThinkingLevel, expectedModelId: String?): ThinkingLevel {
         val provider = currentProvider ?: return declared
+        // The switch paths set `_activeEntryId` before `currentProvider`; until the
+        // second assignment lands, this provider still fronts the PREVIOUS member.
+        // Lending its learned ceiling to the newly selected model is exactly how one
+        // member's downgrade appeared on every other member — so while the two disagree,
+        // report the catalog ceiling and let `_providerGeneration` re-derive right after.
+        if (expectedModelId != null && provider.model.id != expectedModelId) return declared
         val host = provider.requestHost ?: return declared
-        val learned = EffortTierLearner.learned(host, provider.model.id) ?: return declared
+        val learned = EffortTierLearner.learned(host, expectedModelId ?: provider.model.id)
+            ?: return declared
         return ThinkingEffortLadder.lowerCeiling(declared, learned)
     }
 

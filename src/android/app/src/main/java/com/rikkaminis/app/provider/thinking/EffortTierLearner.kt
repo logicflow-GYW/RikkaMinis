@@ -77,8 +77,19 @@ object EffortTierLearner {
     /** 学到的集合多久后过期，愿意再赌一次。 */
     private const val TTL_MS = 30L * 24 * 60 * 60 * 1000L
 
-    /** 进程内缓存寿命：避免每次请求都读文件，同时让另一进程的写入较快生效。 */
-    private const val CACHE_TTL_MS = 10_000L
+    /**
+     * 进程内缓存的失效依据：文件的 (mtime, size) 指纹。
+     *
+     * 原来是一个 10 秒的盲窗（`now - cachedAt < 10s`），它带来的不只是"多读几
+     * 次文件"——**另一个进程写入后，本进程最多 10 秒仍读到旧值**。学到的上限是
+     * 在 worker 里写、在 UI 里读的（chat 流的 provider 跑在 `:modelservice`），
+     * 于是"网关已经拒了 xhigh"与"写作栏还显示 XHigh"之间必然有一段窗口。
+     * 指纹法把这段窗口压到 0：一次 stat 换一次可能的解析，代价可以忽略。
+     *
+     * 同一毫秒内、且文件大小恰好不变的两次写入会漏掉一次（指纹相同）——概率极低，
+     * 且本进程自己的写入会直接置空缓存，所以只可能是"另一进程在同一毫秒写了两版"。
+     */
+    private fun stampOf(file: File): Long = file.lastModified() * 1_000_003L + file.length()
 
     /** 从 "one of" 往后扫多少个字符找档位词，足够覆盖一条错误文案。 */
     private const val SCAN_WINDOW = 400
@@ -315,12 +326,14 @@ object EffortTierLearner {
     fun learned(host: String, modelId: String): List<String>? {
         if (host.isBlank() || modelId.isBlank()) return null
         val now = System.currentTimeMillis()
+        val file = target ?: return null
+        val stamp = stampOf(file)
         val snap = snapshot
-        if (snap != null && now - snap.first < CACHE_TTL_MS) {
+        if (snap != null && snap.first == stamp) {
             return tiersOf(snap.second[key(host, modelId)], now)
         }
-        val loaded = load(target ?: return null) ?: return null
-        snapshot = now to loaded
+        val loaded = load(file) ?: return null
+        snapshot = stamp to loaded
         return tiersOf(loaded[key(host, modelId)], now)
     }
 

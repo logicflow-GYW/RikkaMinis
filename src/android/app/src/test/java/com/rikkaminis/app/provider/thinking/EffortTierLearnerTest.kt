@@ -239,6 +239,24 @@ class EffortTierLearnerTest {
         assertEquals(listOf("low", "high"), EffortTierLearner.learned("127.0.0.1", model))
     }
 
+    @Test
+    fun `a write from the other process is visible immediately`() {
+        EffortTierLearner.record(host, """{"model":"$model"}""",
+            """{"error":"effort should be one of: low"}""")
+        assertEquals(listOf("low"), EffortTierLearner.learned(host, model))
+
+        // [fix/thinking-level-ceiling-1118] The chat provider runs in :modelservice, so
+        // the 400 that teaches a ceiling is learned THERE and read HERE. A blind
+        // time-based cache made this process keep serving the old set — which is how
+        // the composer's picker could update while the navbar badge still said XHigh.
+        // The payload is longer on purpose: the fingerprint is (mtime, size), so this
+        // holds even when both writes land in the same millisecond.
+        File(dir, "gateway_efforts.json").writeText(
+            """{"entries":{"$host/$model":{"tiers":["low","medium","high"],"at":${System.currentTimeMillis()}}}}""",
+        )
+        assertEquals(listOf("low", "medium", "high"), EffortTierLearner.learned(host, model))
+    }
+
     // ── modelIdFrom ──────────────────────────────────────────────────────────────
 
     @Test
