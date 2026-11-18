@@ -213,13 +213,14 @@ internal fun hasReplayConverged(
  *    the replay the box is already partly filled. Dropping only the newest edit
  *    would stop the growth and still leave the user staring at half of the
  *    message he just sent — which is the exact symptom being fixed;
- *  * [DROP_AND_CLEAR] therefore also wipes what accumulated, and it is only
- *    reachable when the box holds a contiguous piece of the body that a clear
- *    just removed (never when the user typed something new) AND the whole body
- *    is back faster than a human could have typed it (see
- *    [hasReplayConverged]). The speed test is what keeps a user who starts
- *    typing again after a send from being wiped: content alone cannot tell his
- *    keystrokes from a replay.
+ *  * [DROP_AND_CLEAR] therefore also wipes what accumulated. Arm B reaches it only
+ *    when the box holds a contiguous piece of the body that a clear just removed
+ *    (never when the user typed something new) AND the whole body is back faster
+ *    than a human could have typed it (see [hasReplayConverged]); arm A reaches it
+ *    when the single edit is a residue AND the ViewModel copy still holds the body
+ *    the clear removed. The speed test is what keeps a user who starts typing
+ *    again after a send from being wiped: content alone cannot tell his keystrokes
+ *    from a replay.
  */
 internal enum class ComposerResidueVerdict {
     /** Not a residue — handle the edit normally. */
@@ -228,7 +229,13 @@ internal enum class ComposerResidueVerdict {
     /** Residue, and the box was empty: ignore this edit, nothing to undo. */
     DROP,
 
-    /** Residue, and the box already holds earlier fragments: ignore it and wipe them. */
+    /**
+     * Residue, and something outside this edit holds it too: ignore the edit and
+     * wipe it. Either the box already accumulated earlier fragments, or (W1119-2D
+     * F-04) the edit landed in an empty field while the ViewModel copy still holds
+     * the body the clear removed — that stale copy is what the mirror and the
+     * persisted draft slot read, so it is the copy that would refill the box.
+     */
     DROP_AND_CLEAR,
 }
 
@@ -391,8 +398,8 @@ internal fun shouldKeepClearedStamp(incoming: String, clearedText: String?): Boo
  *
  *  **Arm A — the box is still EMPTY**: nothing has landed in the FIELD, and the
  *  ViewModel copy is blank or still only the body the clear removed (a lagging
- *  copy is not evidence of a landed replay — see the [boxEmpty] derivation
- *  below). A fragment of at least [minReplayChars] is the replay: a fresh
+ *  copy is not evidence of a landed replay — the derivation is at `boxEmpty` in
+ *  the body below). A fragment of at least [minReplayChars] is the replay: a fresh
  *  keystroke into an empty box cannot be four characters at once.
  *
  *  **Arm B — the box already holds earlier fragments** ([fieldText] is itself a
