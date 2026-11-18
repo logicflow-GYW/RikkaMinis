@@ -196,7 +196,30 @@ FaultAttributionTest（12 例，+5）
 
 ### 4.3 云端 CI
 
-run id 与逐 job 结论见 §4.4（报告提交后再 dispatch 一次，取最终 tip 的 run）。
+代码/测试提交 `b2252554` 与含本报告的提交 `06de9d0f` 都跑了全量 CI（分支 push 不触发，两次都是手动 dispatch）：
+
+| run | 测试的提交 | 结论 |
+|---|---|---|
+| **#3293** / `44373325007` | `06de9d0f8d33bac837cb5724c605c637799cf170`（含本报告全文） | **五 job 全 success** |
+| #3292 / `44373120997` | `b2252554e60327bc69911745f0082911ceee598e` | 同分支并发被 #3293 取代（`cancelled`，无失败 job） |
+
+`head_sha` = `06de9d0f…cf170`，与本地 HEAD 及 `git ls-remote origin fix/hang-attribution-1119` **逐字符一致**。
+
+五个 job：`scan-gate` / `build-apk` / `unit-tests` / `lint` / `publish` 全 `success`；publish 的 `Move the rolling tag android-latest` 与 `Publish to Releases` 两步 **skipped**（main 门控，符合预期）。
+
+单测：**9757 行 PASSED，0 真失败**（6 行含 `FAILED` 字样的全是 PASSED 的用例名，如 `slot denied produces FAILED without calling provider PASSED`）。本支 7 条新用例逐条 `grep -cF` **各 1 命中**：
+
+| 用例 | 命中 |
+|---|---|
+| `the quiet clock restarts when a counted hang episode ends` | 1 |
+| `the recovery-stamp probe rejects a source without a working recovery stamp` | 1 |
+| `a millisecond count is not read as an http status code` | 1 |
+| `the status-code boundary holds on both sides of the digits` | 1 |
+| `real http status codes are still attributed to the service` | 1 |
+| `the token rule rejects the pre-fix substring vocabulary` | 1 |
+| `status codes are matched by the token pattern, not by a substring` | 1 |
+
+scan-gate：`Summary: 115 passed, 0 failed`。日志同时有 `scripts/scan/** untouched in this push — skipping the fixture self-test (~121s)` —— 本支未动门脚本，夹具按机制跳过，**这次的绿不含夹具跑过的证据**（与既往口径一致）。
 
 ## 5 变异负控表
 
@@ -258,4 +281,6 @@ sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-runs \
 
 ## 9 CI 结论
 
-见下方「CI 复核」段（报告提交后对最终 tip 再 dispatch 一次，核对 `head_sha` 逐字符一致）。
+**停止节点达成**：run #3293 / `44373325007` @ `06de9d0f8d33bac837cb5724c605c637799cf170` 五 job 全 success，`head_sha` 与分支 tip 逐字符一致，publish 两步 skipped（main 门控）。**未合 main。**
+
+一处流程注记：本报告是在代码提交之后才写完的，因此「代码提交那次 run」的 `head_sha`（`b2252554`）自然不等于最终 tip。按既有口径，对最终 tip 再 dispatch 一次（#3293）而不是把报告塞进代码提交。两次 run 都已记录在 §4.3。
