@@ -106,10 +106,16 @@ class OpenAIProvider constructor(
     override val name = "OpenAI"
     override var instanceContext: com.rikkaminis.app.data.model.ProviderInstance? = null
 
-    // [fix/thinking-level-ceiling-1118] Same host the effort learner keys its entries
-    // by (see the record/learned call sites below) — the UI reads it to lower the
-    // picker's ceiling to what the gateway has actually accepted.
-    override val requestHost: String? get() = basePath.toHttpUrlOrNull()?.host
+    // [fix/effort-key-1119] The normalized endpoint (`scheme://host[:port]/path`) the
+    // effort learner keys its entries by (see the record/learned call sites below) —
+    // the UI reads it to lower the picker's ceiling to what the gateway has actually
+    // accepted. Derived from basePath ONCE, so record/learned on the wire and the read
+    // in the picker ask the same question; deriving it from `HttpUrl.host` would drop
+    // the port and the path prefix and let two endpoints of one host share one entry.
+    override val requestScope: String? get() = effortScope ?: basePath.toHttpUrlOrNull()?.host
+
+    /** Normalized endpoint scope of [basePath], or null when it is not a URL we model. */
+    private val effortScope: String? get() = EffortTierLearner.scopeOf(basePath)
 
     /**
      * [T-android-thinking-rules-phase2] Owning provider-instance id, set by
@@ -829,7 +835,11 @@ class OpenAIProvider constructor(
             // No probe request, and a gateway changing its enum does not need a release
             // from us to be absorbed. Learning nothing is not an error: record() returns
             // null and throws nothing.
-            EffortTierLearner.record(request.url.host, bodyStr, errorBody)
+            // [fix/effort-key-1119] Keyed on the normalized ENDPOINT (scheme + host +
+            // port + path prefix), not on `request.url.host`: the host alone is what
+            // let two gateways on one host share one learned ceiling. Fall back to the
+            // request's host only when basePath is not a URL we could parse.
+            EffortTierLearner.record(effortScope ?: request.url.host, bodyStr, errorBody)
             throw mapHttpError(
                 response.code,
                 errorBody,
@@ -1340,7 +1350,7 @@ class OpenAIProvider constructor(
                         // [T-android-effort-self-learn] Same hook as the HTTP-400 path:
                         // some relays report the identical error inside a 200 stream, so
                         // the enum lands in the event instead of the status body.
-                        EffortTierLearner.record(request.url.host, bodyStr, event.toString())
+                        EffortTierLearner.record(effortScope ?: request.url.host, bodyStr, event.toString())
                         val err = mapHttpError(
                             openAiStreamErrorStatus(
                                 inlineError.optString("code", ""),
@@ -2798,6 +2808,11 @@ class OpenAIProvider constructor(
         // ceiling by LLMProvider.streamMessage/sendMessage — do NOT re-clamp.
         val lid = model.id.lowercase()
         val host = basePath.toHttpUrlOrNull()?.host ?: ""
+        // [fix/effort-key-1119] The learner's scope for THIS request. `host` above stays
+        // the bare host because the measured-gateway table is keyed by host; the effort
+        // learner needs the whole endpoint, or two instances on one host (different
+        // port / path prefix) would read each other's ceiling.
+        val scope = effortScope ?: host
 
         // [T-relay-host-adaptation] Host-precise adaptation table, absorbed from
         // RikkaHub's ChatCompletionsAPI `when(host)` switch. A relay is
@@ -2828,8 +2843,16 @@ class OpenAIProvider constructor(
             // the only source that ever updates itself. With nothing learned the
             // expression is byte-identical to `model.reasoningEffortValues`, so a host we
             // have never heard a complaint from keeps today's behaviour exactly.
-            declaredEffortValues = EffortTierLearner.learned(host, model.id)
-                ?: model.reasoningEffortValues,
+            //
+            // [fix/effort-key-1119] The ceiling is read through the endpoint scope, and
+            // then NARROWED by the model's own declaration: a `THINKING_LEVEL_*` complaint
+            // only says "everything weaker is still legal", so on its own it can put a
+            // tier back on the wire that this model never declared. When the catalog
+            // declares a set, the learnable set is the subset of it.
+            declaredEffortValues = ThinkingEffortLadder.learnedWithinDeclared(
+                EffortTierLearner.learned(scope, model.id),
+                model.reasoningEffortValues,
+            ),
             declaresNoEffortTiers = model.declaresNoEffortTiers == true,
             level = level,
             maxTokens = maxTokens,
@@ -2882,7 +2905,10 @@ class OpenAIProvider constructor(
             // then whatever the catalog declared, then that gateway's own fallback).
             body.put(
                 "reasoning_effort",
-                GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues),
+                // [fix/effort-key-1119] `host` still selects the measured table; the
+                // learner is read through the endpoint scope so it cannot inherit a
+                // ceiling written by another endpoint of the same host.
+                GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues, scope),
             )
             return echo
         }
@@ -2965,7 +2991,7 @@ class OpenAIProvider constructor(
                 // accepted for this host+model, when it ever refused a tier. Printed
                 // next to the declaration on purpose: when they disagree, this is the
                 // line that explains why the wire value is lower than the catalog's.
-                "learned=${EffortTierLearner.learned(host, model.id)?.joinToString("|") ?: "null"} " +
+                "learned=${EffortTierLearner.learned(scope, model.id)?.joinToString("|") ?: "null"} " +
                 "declaresNoEffort=${model.declaresNoEffortTiers == true} " +
                 "offEffort=${explicitOffEffort() ?: "null"} maxTokens=$maxTokens",
         )
@@ -3214,8 +3240,12 @@ class OpenAIProvider constructor(
             clampResponsesEffort(
                 effort = mapThinkingLevelToResponsesEffort(thinkingLevel),
                 modelId = model.id,
+                // [fix/effort-key-1119] Same scope the record sites write with: the
+                // normalized endpoint, falling back to the same bare host they fall
+                // back to — a read that asked for a different spelling than the write
+                // stored would silently throw the learning away.
                 learnedEffortValues = EffortTierLearner.learned(
-                    basePath.toHttpUrlOrNull()?.host ?: "", model.id,
+                    effortScope ?: basePath.toHttpUrlOrNull()?.host ?: "", model.id,
                 ),
                 declaredEffortValues = model.reasoningEffortValues,
             )
@@ -3917,7 +3947,7 @@ internal fun chatCompletionsDeltaThinkingBlocks(delta: JSONObject?): List<String
  * [r3-b08 F-08] Tier resolution for the Responses API `reasoning.effort` field.
  *
  * The Chat-Completions builder resolves an effort string through
- * `EffortTierLearner.learned(host, model)` (a gateway's own enum, learned from a
+ * `EffortTierLearner.learned(scope, model)` (a gateway's own enum, learned from a
  * 400 body) and `model.reasoningEffortValues` (the catalog's declaration), then
  * snaps the requested tier with [ThinkingEffortLadder.clampEffort]. The
  * Responses builder did none of that: it applied only the MiMo/Agnes family
@@ -3930,7 +3960,11 @@ internal fun chatCompletionsDeltaThinkingBlocks(delta: JSONObject?): List<String
  * the two paths drifted apart in the first place.
  *
  * `learned` outranks `declared`: a measured enum is one-hand truth, and with
- * nothing learned the expression is exactly `declared`.
+ * nothing learned the expression is exactly `declared`. [fix/effort-key-1119] The
+ * two are not simply swapped for each other any more — a ceiling learned from a
+ * `THINKING_LEVEL_*` rejection is a ladder PREFIX and can name a tier the model never
+ * declared, so the learnable set is the intersection of the two (see
+ * [ThinkingEffortLadder.learnedWithinDeclared]); the declaration can only narrow it.
  *
  * Pure + top-level for direct JVM testing (see ResponsesEffortClampTest).
  */
@@ -3942,7 +3976,10 @@ internal fun clampResponsesEffort(
 ): String? {
     if (effort == null) return null
     val familyClamped = ThinkingEffortLadder.clampEffortForModel(effort, modelId.lowercase())
-    return ThinkingEffortLadder.clampEffort(familyClamped, learnedEffortValues ?: declaredEffortValues)
+    return ThinkingEffortLadder.clampEffort(
+        familyClamped,
+        ThinkingEffortLadder.learnedWithinDeclared(learnedEffortValues, declaredEffortValues),
+    )
 }
 
 /**

@@ -91,6 +91,55 @@ object ThinkingEffortLadder {
         return if (learnedMax.rank < catalogMax.rank) learnedMax else catalogMax
     }
 
+    /**
+     * [fix/effort-key-1119] The learned set narrowed by what the MODEL declares.
+     *
+     * A ceiling parsed from a `THINKING_LEVEL_XHIGH` rejection is a ladder PREFIX — it
+     * says "everything strictly weaker than xhigh is still legal" and nothing about
+     * which of those tiers THIS model's endpoint actually accepts. Fed to [clampEffort]
+     * on its own it can reintroduce a tier the catalog never declared (e.g. `medium` on
+     * a model that declares only `low` / `high`), which the gateway then rejects with
+     * the very 400 this entry was learned from.
+     *
+     * So when the model declares a set, the usable set is the INTERSECTION of "the
+     * gateway has not refused it" and "the model declares it". Three readings:
+     *
+     *  - `declared` empty/null → [learned] unchanged: a model that declares nothing
+     *    still gets the full weight of the gateway's own answer.
+     *  - [learned] empty/null → [declared] unchanged: nothing was learned, the catalog
+     *    keeps its say (identical to pre-fix behaviour).
+     *  - the intersection is EMPTY (the two sources name disjoint tiers) → the weakest
+     *    DECLARED tier. Deliberately not [learned]: the harm this function exists to
+     *    remove is sending a tier the model never declared, and falling back to a
+     *    learned tier here would reintroduce exactly that. One tier, not the whole
+     *    declaration, so the request still sits as low as the model allows — the
+     *    contradiction is a guess either way, and the next 400 teaches us again.
+     *
+     * Ordered by [LADDER] so the result is deterministic regardless of input order.
+     */
+    fun learnedWithinDeclared(learned: List<String>?, declared: List<String>?): List<String>? {
+        if (declared.isNullOrEmpty()) return learned
+        if (learned.isNullOrEmpty()) return declared
+        val declaredTiers = declared.map { it.lowercase() }.toSet()
+        val both = learned.map { it.lowercase() }
+            .filter { it in declaredTiers }
+            .distinct()
+            .sortedBy { LADDER.indexOf(it) }
+        return both.ifEmpty { listOf(weakestDeclared(declared)) }
+    }
+
+    /**
+     * The weakest tier of [declared] by [LADDER] order. A word off the ladder sorts
+     * LAST (i.e. treated as the strongest), so an unrecognised declaration cannot win
+     * this pick — [clampEffort] ignores such words entirely, and returning only unknown
+     * words would leave the request unclamped.
+     */
+    private fun weakestDeclared(declared: List<String>): String {
+        val ranked = declared.map { it.lowercase() }
+            .minByOrNull { tier -> LADDER.indexOf(tier).let { if (it < 0) Int.MAX_VALUE else it } }
+        return ranked ?: declared.first().lowercase()
+    }
+
     /** Inverse of [wireEffort] for the tiers that have a client counterpart. */
     private val LEVEL_BY_EFFORT = mapOf(
         "low" to ThinkingLevel.LOW,

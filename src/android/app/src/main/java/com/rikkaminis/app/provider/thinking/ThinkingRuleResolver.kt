@@ -26,9 +26,12 @@ data class ThinkingResolveContext(
     /**
      * [OpenMinis#163] The catalog affirmatively declares this model has NO effort
      * tiers (it reasons, but takes no `reasoning_effort`). Distinct from
-     * `declaredEffortValues == null`, which also means "the catalog never heard
-     * of it" — only the affirmative case suppresses the field. Defaults false so
-     * every existing construction site keeps its current behaviour.
+     * `declaredEffortValues == null`, which means "no usable tier set": the catalog
+     * never heard of it **and** the gateway has never told us its own. [fix/effort-key-1119]
+     * the provider passes the learned ceiling narrowed by the catalog's declaration
+     * ([ThinkingEffortLadder.learnedWithinDeclared]), so null really does mean "neither
+     * source has an opinion" rather than "the catalog did not hear of it". Defaults
+     * false so every existing construction site keeps its current behaviour.
      *
      * Only consulted together with [isXAI] — see the skip in the reasoningEffort
      * branch.

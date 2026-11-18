@@ -30,8 +30,20 @@ import java.io.File
  * 这是**唯一的一手真相**——比 catalog 准，比厂商文档准（sensenova 文档写 `max` 是原生档，
  * 实测 400），而且不需要我们事先知道答案。这个类就是那句错误信息的学习器：
  *
- * 400 → 解析出枚举 → 按 `host/model` 落盘 → 下一次请求 clamp 时优先于声明。
+ * 400 → 解析出枚举 → 按 **endpoint scope + model** 落盘 → 下一次请求 clamp 时优先于声明。
  * 第一次仍然失败，第二次就对。
+ *
+ * ## 条目的 key 是 endpoint scope，不是 host
+ *
+ * 早期版本用 `host + model`（[key]），而 `HttpUrl.host` 只保留主机名——它把端口号
+ * 与路径前缀都丢掉了。于是同一台网关的 `127.0.0.1:8790/v1` 与 `127.0.0.1:8791/v1`、
+ * 或 `/v1` 与 `/openai/v1` 两个路径前缀，在模型 ID 相同时命中**同一个条目**：A 端点
+ * 学到的上限会被 B 端点当成自己的真相使用。学习结果本来就是"这个网关会接受哪些档位"，
+ * 而"哪个网关"必须由 scheme + host + port + path 前缀共同界定。用 [scopeOf] 规范化，
+ * [key] 在读写两侧都走同一个规范化函数，调用方传原始 base URL 也一致。
+ *
+ * 旧 key（裸 host）下的条目在升级后不再被命中，学习结果会重新学一次；条目本身仍留在
+ * 文件里，由 [write] 的 3×TTL 清扫统一清掉——文件是 KB 级，不值得为它写迁移。
  *
  * ## 第二种拒绝形状：只点名被拒档位
  *
@@ -299,7 +311,41 @@ object EffortTierLearner {
         return null
     }
 
-    /** 从一次请求体里取 model 字段（学的是 host+model 维度的事实）。 */
+    /**
+     * [fix/effort-key-1119] 把一个 endpoint 字符串规范化成学习结果的 key 前缀：
+     * `scheme://host[:port]/path-prefix`（scheme 与 host 小写、query/fragment 丢弃、
+     * 路径尾部斜杠裁掉）。
+     *
+     * 传入裸主机名时原样返回（裁掉尾部斜杠、小写）——legacy key 因此保持逐字相同，
+     * 已落盘的旧条目还能被按主机名读取的调用方读到。传入完整 base URL 时，端口与
+     * 路径前缀得以保留，这是 `HttpUrl.host` 丢掉的部分。
+     *
+     * 返回 null 表示这一串不构成一个 endpoint（空串、只有 scheme、没有主机名）——
+     * 宁可学不到，也不学出一个错的 scope。
+     */
+    fun scopeOf(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        val withoutQuery = trimmed.substringBefore('?').substringBefore('#')
+        val schemeAt = withoutQuery.indexOf("://")
+        return if (schemeAt <= 0) {
+            // 裸主机名（或没有 scheme 的旧式输入）：legacy 形态，不做更多解释。
+            withoutQuery.trimEnd('/').lowercase().takeIf { it.isNotEmpty() }
+        } else {
+            val scheme = withoutQuery.substring(0, schemeAt).lowercase().takeIf { it.isNotEmpty() }
+                ?: return null
+            val rest = withoutQuery.substring(schemeAt + 3)
+            val slashAt = rest.indexOf('/')
+            val authority = (if (slashAt < 0) rest else rest.substring(0, slashAt))
+                .trimEnd('/')
+                .lowercase()
+            if (authority.isEmpty()) return null
+            val path = if (slashAt < 0) "" else rest.substring(slashAt).trimEnd('/')
+            "$scheme://$authority$path"
+        }
+    }
+
+    /** 从一次请求体里取 model 字段（学的是 endpoint scope + model 维度的事实）。 */
     fun modelIdFrom(requestBody: String): String? = try {
         JSONObject(requestBody).optString(KEY_MODEL).takeIf { it.isNotEmpty() && it.length <= 200 }
     } catch (_: JSONException) {
@@ -311,30 +357,36 @@ object EffortTierLearner {
     /**
      * 从一次失败请求里学。**返回学到了什么**（null = 这次没有可学的信息）；
      * 学到时的日志在 [write] 内打出，调用方不必（也不）用返回值判断。
+     *
+     * [scope] 是发起这次请求的 endpoint（见 [scopeOf]）——传原始 base URL 即可，
+     * 内部会规范化成 key 前缀。传裸主机名则退化成旧的 `host` key。
      */
-    fun record(host: String, requestBody: String, errorBody: String): List<String>? {
+    fun record(scope: String, requestBody: String, errorBody: String): List<String>? {
         // 两种形状：说全了枚举的（[enumFromText]），和只点名被拒档位的
         // （[ceilingFromText]，Gemini 系 `THINKING_LEVEL_*`）。前者信息更全，先问它。
         val tiers = enumFromText(errorBody) ?: ceilingFromText(errorBody) ?: return null
         val model = modelIdFrom(requestBody) ?: return null
-        if (host.isBlank() || model.isBlank()) return null
-        write(key(host, model), tiers)
+        if (scope.isBlank() || model.isBlank()) return null
+        write(key(scope, model), tiers)
         return tiers
     }
 
-    /** 当前有效的 learned 集合；没学到、已过期或尚未 init → null。 */
-    fun learned(host: String, modelId: String): List<String>? {
-        if (host.isBlank() || modelId.isBlank()) return null
+    /**
+     * 当前有效的 learned 集合；没学到、已过期或尚未 init → null。
+     * [scope] 的口径必须与 [record] 一致（见 [scopeOf]），否则读不到自己写过的条目。
+     */
+    fun learned(scope: String, modelId: String): List<String>? {
+        if (scope.isBlank() || modelId.isBlank()) return null
         val now = System.currentTimeMillis()
         val file = target ?: return null
         val stamp = stampOf(file)
         val snap = snapshot
         if (snap != null && snap.first == stamp) {
-            return tiersOf(snap.second[key(host, modelId)], now)
+            return tiersOf(snap.second[key(scope, modelId)], now)
         }
         val loaded = load(file) ?: return null
         snapshot = stamp to loaded
-        return tiersOf(loaded[key(host, modelId)], now)
+        return tiersOf(loaded[key(scope, modelId)], now)
     }
 
     /** 已学习条目的 key 集合（诊断用；含过期的）。 */
@@ -344,7 +396,8 @@ object EffortTierLearner {
         return load(t)?.keys?.sorted() ?: emptyList()
     }
 
-    private fun key(host: String, model: String) = host.trimEnd('/') + "/" + model
+    private fun key(scope: String, model: String): String =
+        (scopeOf(scope) ?: scope.trimEnd('/')) + "/" + model
 
     private fun tiersOf(entry: JSONObject?, now: Long): List<String>? {
         if (entry == null) return null
