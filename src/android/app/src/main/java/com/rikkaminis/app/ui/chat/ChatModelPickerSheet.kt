@@ -243,8 +243,15 @@ internal fun ModelPickerSheet(
     val allInstancesWithEntries = remember(config.revision, searchText) {
         val t0 = System.nanoTime()
         var totalCount = 0
-        val result = config.instances
-            .filter { it.isEnabled }
+        // [fix/provider-order-1118] One derivation for every surface (see
+        // ProviderOrder.kt): Favorites first, then one block per provider type in
+        // first-appearance order. Walking the flat list here made this sheet disagree
+        // with Settings → AI providers whenever the user had more than one type.
+        val result = com.rikkaminis.app.ui.components.providerDisplayOrder(
+            config.instances.filter { it.isEnabled },
+            pinned = { it.pinned },
+            typeKey = { it.providerType.name },
+        )
             .map { instance ->
                 val pt = System.nanoTime()
                 val entries = config.modelEntries.filter {

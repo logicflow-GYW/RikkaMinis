@@ -205,7 +205,18 @@ fun LazyListScope.modelEntryPickerItems(
         ?.takeIf { it.isNotEmpty() }
         ?.let { SystemVoiceEntries.syntheticInstance(systemProviderLabel) to it }
 
-    val instanceWithEntries = listOfNotNull(systemPair) + instances
+    // [fix/provider-order-1118] Same ordering the settings screen renders (Favorites
+    // first, then one block per provider type in first-appearance order). This surface
+    // used to walk the flat list, so a provider the user reordered inside the Favorites
+    // block showed up at its raw position here — "the order I set is ignored on this
+    // screen". Derived once, from the shared function, so the two can never drift.
+    val orderedInstances = providerDisplayOrder(
+        instances,
+        pinned = { it.pinned },
+        typeKey = { it.providerType.name },
+    )
+
+    val instanceWithEntries = listOfNotNull(systemPair) + orderedInstances
         .filter { it.isEnabled && !SystemVoiceEntries.isSystemEntryId(it.id) }
         .mapNotNull { instance ->
             val entries = availableEntries.filter { entry ->

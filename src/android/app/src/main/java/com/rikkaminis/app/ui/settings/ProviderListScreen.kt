@@ -60,6 +60,7 @@ import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.theme.ChatColors
 import com.rikkaminis.app.ui.components.SectionDesign
+import com.rikkaminis.app.ui.components.providerBlocks
 import com.rikkaminis.app.ui.components.SectionHeader
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -134,8 +135,17 @@ fun ProviderListScreen(
     // instances: providerRows recomputes when modelEntries changes too, and
     // keying on instances alone kept this derived list stale with it.
     val reorderableRows = remember(providerRows) { providerRows.distinctBy { it.instance.id } }
-    val pinnedRows = reorderableRows.filter { it.instance.pinned }
-    val groupedRows = reorderableRows.filter { !it.instance.pinned }.groupBy { it.instance.providerType }
+    // [fix/provider-order-1118] ONE derivation per screen, shared with every picker
+    // (see ProviderOrder.kt): Favorites first, then one block per provider type in
+    // first-appearance order. The pickers used to walk the flat instance list, so a
+    // provider reordered inside Favorites showed up at its raw position there.
+    val providerSections = remember(reorderableRows) {
+        providerBlocks(
+            reorderableRows,
+            pinned = { it.instance.pinned },
+            typeKey = { it.instance.providerType },
+        )
+    }
 
     val reorderState = rememberReorderableLazyListState(lazyListState) { from, to ->
         val fromKey = from.key as? String ?: return@rememberReorderableLazyListState
@@ -329,12 +339,19 @@ fun ProviderListScreen(
                 // a row within its own section (see the same-section guard in
                 // reorderState): the screen buckets by providerType, so a
                 // cross-section move would snap straight back.
-                if (pinnedRows.isNotEmpty()) {
-                    item("fav_header") {
-                        SectionHeader(text = stringResource(R.string.provider_list_favorites))
+                providerSections.forEach { section ->
+                    // The block key IS the enum value — no name round-trip, so this
+                    // screen cannot disagree with the ordering about a provider type,
+                    // and a stale/unknown name can never throw here.
+                    val sectionKey = section.typeKey?.name ?: "favorites"
+                    item("header_$sectionKey") {
+                        SectionHeader(
+                            text = section.typeKey?.displayName
+                                ?: stringResource(R.string.provider_list_favorites),
+                        )
                     }
                     itemsIndexed(
-                        items = pinnedRows,
+                        items = section.items,
                         key = { _, row -> "inst:${row.instance.id}" },
                     ) { index, row ->
                         ReorderableItem(state = reorderState, key = "inst:${row.instance.id}") { _ ->
@@ -343,41 +360,7 @@ fun ProviderListScreen(
                                 Box(
                                     modifier = Modifier.cardRow(
                                         isFirst = index == 0,
-                                        isLast = index == pinnedRows.lastIndex,
-                                    ),
-                                ) {
-                                    ProviderInstanceRow(
-                                        instance = row.instance,
-                                        modelCount = row.modelCount,
-                                        apiKey = row.apiKey,
-                                        isConfigured = row.isConfigured,
-                                        pinned = row.instance.pinned,
-                                        onTogglePinned = remember(row.instance.id, row.instance.pinned) {
-                                            { providerRepository.setInstancePinned(row.instance.id, !row.instance.pinned) }
-                                        },
-                                        onClick = remember(row.instance.id) { { onProviderClick(row.instance.id) } },
-                                        dragHandleModifier = with(this@ReorderableItem) { Modifier.draggableHandle() },
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                groupedRows.forEach { (providerType, typeRows) ->
-                    item("type_header_${providerType.name}") {
-                        SectionHeader(text = providerType.displayName)
-                    }
-                    itemsIndexed(
-                        items = typeRows,
-                        key = { _, row -> "inst:${row.instance.id}" },
-                    ) { index, row ->
-                        ReorderableItem(state = reorderState, key = "inst:${row.instance.id}") { _ ->
-                            Column {
-                                if (index != 0) SectionDividerInsetCard()
-                                Box(
-                                    modifier = Modifier.cardRow(
-                                        isFirst = index == 0,
-                                        isLast = index == typeRows.lastIndex,
+                                        isLast = index == section.items.lastIndex,
                                     ),
                                 ) {
                                     ProviderInstanceRow(
