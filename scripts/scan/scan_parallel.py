@@ -14,7 +14,8 @@ slowest check, so a bounded pool collapses the whole phase.
 Contract kept identical to the old serial scan.sh:
   * banner and summary box text,
   * per-check `━━━ [N/D] title ━━━` header lines,
-  * exit 0 = all checks green, 1 = at least one red.
+  * exit 0 = all checks green, 1 = at least one red, 3 = refused to run
+    outside CI (see [LOCAL_REFUSAL]; `--allow-local` opts out).
 
 A block's verdict is its RC variable (the block's failure branch sets RC=1).
 Because each block runs in its own shell, one failing check can no longer abort
@@ -70,9 +71,11 @@ BLOCKS = os.path.join(HERE, "scan_blocks.sh")
 # A gate cannot be forgotten.
 #
 # What the local session SHOULD do instead, and what this refusal names:
-#   * one gate, directly — `python3 scripts/scan/<gate>.py --root .` — when a
-#     single judgement is genuinely in doubt (that is a 1-5 s answer);
-#   * the fixture for one gate — `python3 scripts/scan/test_scan.py <name>`;
+#   * the fixture for one gate — `python3 scripts/scan/test_scan.py --single
+#     <name>` — when a single judgement is genuinely in doubt (a few seconds);
+#   * one gate, directly — `python3 scripts/scan/<gate>.py` — leaving the
+#     flags to the gate: the positional-arg gates read sys.argv[1] as the repo
+#     root, so a blanket `--root .` crashes them;
 #   * everything else: push the branch and read the `scan-gate` job.
 #
 # `--allow-local` exists because this script also has to be runnable by hand
@@ -88,8 +91,8 @@ gate's syscalls to the app's own process group (parallel workers also die on
 `Errno 38` / `Function not implemented`, which reads like a red gate).
 
 Run one judgement locally instead:
-  python3 scripts/scan/<gate>.py --root .        # a single gate, seconds
-  python3 scripts/scan/test_scan.py <case_name>  # a single fixture
+  python3 scripts/scan/test_scan.py --single <case_name>   # one fixture
+  python3 scripts/scan/<gate>.py                            # one gate (its own flags)
 
 ...and read the rest from the `scan-gate` job of the branch's CI run.
 Override (real checkout, no CI): add --allow-local
