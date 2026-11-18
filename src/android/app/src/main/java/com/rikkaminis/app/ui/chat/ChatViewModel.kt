@@ -4146,6 +4146,30 @@ class ChatViewModel(
     // AgentLoopHost.kt (the engine returns/consumes it); the VM keeps its own
     // alias-free references. The old private nested data class is gone.
 
+    /**
+     * [W1118-COMPOSER F-06] Hand the user's text back after a send is REFUSED.
+     *
+     * The send contract is "ChatInputArea clears the composer first, then calls
+     * sendMessage", so every refusal owes the text back. A bare `setInputText`
+     * restores only the ViewModel string and leaves the FIELD and the caret
+     * alone: the mirror then put the text back with the caret at index 0, and
+     * did nothing at all while an IME was dictating (the mirror is suppressed
+     * then), leaving the user with an empty box over a ViewModel that still held
+     * the message. Routing it through the composer's intent channel writes both
+     * copies AND lands the caret where it was when he sent.
+     *
+     * One shared function, not three copies: the three refusal branches are
+     * exactly the "multi-entry, one contract" surface that drifts, and the shape
+     * test that guards them measures a bounded window — a 15-line rationale at
+     * each call site pushes the statement out of that window and the arm fails
+     * for the wrong reason.
+     */
+    private fun restoreComposerAfterRefusal(text: String) {
+        requestComposerCommand(
+            ComposerCommand.ReplaceText(text = text, caretOverride = text.length),
+        )
+    }
+
     fun sendMessage(rawText: String, pasteStartIndex: Int? = null) {
         // [feat/paste-fold-marker] Folded pastes come back BEFORE anything else
         // reads the text: this function is the single funnel for the UI (send
@@ -4220,7 +4244,7 @@ class ChatViewModel(
                     text = context.getString(R.string.sysmsg_edit_wait_stream),
                     iconKind = "info",
                 )
-                setInputText(text)
+                restoreComposerAfterRefusal(text)
                 return
             }
             enqueuePrompt(text)
@@ -4261,7 +4285,7 @@ class ChatViewModel(
             // path). This branch returned bare, so a wall of text the user just
             // typed (or a paste it had already expanded) was dropped in
             // exchange for an inline "wait for compaction" notice.
-            setInputText(text)
+            restoreComposerAfterRefusal(text)
             return
         }
         // Context pressure check — warns at the needsCompact threshold but
@@ -4338,9 +4362,10 @@ class ChatViewModel(
         val initialProvider = currentProvider
         if (initialProvider == null) {
             _error.value = "No provider configured"
-            // [incr1118 D1-F04] Same contract as the compaction branch above:
-            // the composer was cleared by the caller, so the text goes back.
-            setInputText(text)
+            // [D1-F04 + W1118-COMPOSER F-06] The caller cleared the composer, so
+            // a refusal owes the text back — through the intent channel, so the
+            // FIELD and the caret come back too.
+            restoreComposerAfterRefusal(text)
             return
         }
         // [incr1118 D1-F04] Spent ONLY by a send that actually starts. It used

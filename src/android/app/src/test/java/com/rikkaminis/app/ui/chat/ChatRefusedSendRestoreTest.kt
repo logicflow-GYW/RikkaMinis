@@ -64,9 +64,21 @@ class ChatRefusedSendRestoreTest {
         return src.substring(funAt, claimAt).lines()
     }
 
-    /** Statements that put the user's text back somewhere they can reach it. */
+    /**
+     * Statements that put the user's text back somewhere they can reach it.
+     *
+     * [W1118-COMPOSER F-06] `restoreComposerAfterRefusal(text)` joined this list:
+     * a bare `setInputText` restores only the ViewModel string, leaving the FIELD
+     * and the caret alone (the mirror put the caret at index 0, and did nothing
+     * at all while an IME was dictating). The contract is unchanged — the refusal
+     * must hand the text back — so the list grows by the one implementation that
+     * now satisfies it. Both the helper's name and its body are accepted, so the
+     * arm keeps measuring the contract if the helper is ever inlined back.
+     */
     private val handBack = listOf(
         "setInputText(text)",
+        "restoreComposerAfterRefusal(text)",
+        "ComposerCommand.ReplaceText(text = text",
         "enqueuePrompt(",
         "pendingExhaustedText =",
     )
@@ -105,8 +117,8 @@ class ChatRefusedSendRestoreTest {
         assertTrue("compaction gate not found", at >= 0)
         val gate = body.substring(at, minOf(body.length, at + 900))
         assertTrue(
-            "the compaction branch must call setInputText(text) before returning",
-            gate.contains("setInputText(text)"),
+            "the compaction branch must hand the text back before returning",
+            handBack.any { gate.contains(it) },
         )
     }
 
@@ -118,7 +130,7 @@ class ChatRefusedSendRestoreTest {
         val gate = body.substring(at, minOf(body.length, at + 400))
         assertTrue(
             "a send refused for lack of a provider must hand the text back",
-            gate.contains("setInputText(text)"),
+            handBack.any { gate.contains(it) },
         )
     }
 
