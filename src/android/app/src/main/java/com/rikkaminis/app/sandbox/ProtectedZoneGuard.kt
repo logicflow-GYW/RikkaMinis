@@ -105,24 +105,51 @@ internal object ProtectedZoneGuard {
 
     /** Verbs that delete their last argument or a `-r` tree. */
     private val DESTRUCTIVE = setOf("rm", "rmdir", "unlink", "shred")
-    private val STATEMENT_SEPARATORS = Regex("""[;&|\n]+""")
 
     /**
      * Prefixes that do not change which verb runs.
      *
      * `busybox` is here because the rootfs ships one and `busybox rm -rf <zone>`
      * is a natural way to spell the same delete — it used to be read as a verb
-     * called `busybox` and fell straight through.
+     * called `busybox` and fell straight through. The process-control entries
+     * (`nice`, `timeout`, `setsid`, …) are here for the same reason one level
+     * up: each takes its own argument and then runs the rest of the line, so
+     * `timeout 5 rm -rf <zone>` is the same delete as the bare form.
+     *
+     * Enumerating names is NOT the judgement — the lexer is. Spraying
+     * `\timeout`, `"timeout"`, `/usr/bin/timeout` at the old string compare is
+     * what made the last round of this bug: the word arriving here has already
+     * had its quotes and backslashes resolved, so a plain set membership is a
+     * decision about the program's name and nothing else.
      */
-    private val WRAPPERS = setOf("sudo", "env", "time", "nohup", "command", "exec", "busybox")
+    private val WRAPPERS = setOf(
+        "sudo", "doas", "env", "time", "nohup", "command", "exec", "busybox",
+        "nice", "ionice", "timeout", "setsid", "stdbuf", "taskset", "chrt",
+    )
 
     /**
      * Wrapper options that take a value, so the value is not mistaken for the
-     * verb: `env -u FOO rm -rf x`, `sudo -u root rm -rf x`.
+     * verb: `env -u FOO rm -rf x`, `sudo -u root rm -rf x`, `taskset -c 0-3 rm`.
+     *
+     * Only options that really consume the NEXT word belong here — a missing
+     * entry costs one wrapper form, an entry that is actually a boolean flag
+     * eats the verb and hands back a bypass (`env -i rm …` was exactly that
+     * shape, so `-i` is deliberately absent).
      */
     private val WRAPPER_VALUE_FLAGS = setOf(
         "-u", "--unset", "-C", "--chdir", "-S", "--split-string",
+        "-n", "--adjustment", "-c", "--cpu-list", "-p", "--pid",
+        "-k", "--kill-after", "-s", "--signal",
     )
+
+    /** `FOO=1` / `_x=2` — an assignment, never the verb, at any position. */
+    private val ASSIGNMENT = Regex("""[A-Za-z_][A-Za-z0-9_]*=.*""")
+
+    /** A wrapper's own numeric argument: `timeout 5`, `chrt 50`, `taskset 0x3`. */
+    private val WRAPPER_NUMBER = Regex("""[0-9][0-9A-Za-z.,:_+-]*""")
+
+    /** Sentinel word standing in for a redirection operator inside a statement. */
+    private const val REDIRECT = "\u0000redir"
 
     /**
      * Flags that make `rm`/`mv` act on a whole tree.
@@ -142,6 +169,257 @@ internal object ProtectedZoneGuard {
     private fun isRecursive(verb: String, flags: List<String>): Boolean =
         verb == "mv" || verb == "rmdir" || verb == "shred" || flags.any { isRecursiveFlag(it) }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // Reading a command as words: the lexical pass.
+    //
+    // The first version of this guard split on `\s+` and compared the raw
+    // token against `rm`. That is not a shell. Quoting, backslash escapes,
+    // redirections and assignment prefixes were all invisible to it, and each
+    // of them was a hole: `\rm`, `"rm"`, `nice -n 10 rm`, `FOO=1 rm`,
+    // `rm -rf "/var/minis/shared/my folder"` — all the same delete, none of
+    // them recognised. They are now one pass that produces the literal words
+    // the shell would hand to exec, so every later judgement is a comparison of
+    // program names and path strings, not a reading of raw text.
+
+    /**
+     * A command split into statements of words, with quoting resolved.
+     *
+     * [parseOk] is false when a quote never closes. Then [statements] is a
+     * prefix of the real command and nothing after the stray quote can be
+     * trusted, so the caller must fail closed rather than read the words.
+     */
+    internal data class ShellLex(val statements: List<List<String>>, val parseOk: Boolean)
+
+    /**
+     * [F-03] [F-04] The lexical pass over one command line.
+     *
+     * Handles what `split(Regex("\\s+"))` could not: `'…'` and `"…"` (whitespace
+     * inside a quote does not split, and the quote itself is dropped from the
+     * word it wraps), backslash escaping outside quotes (`\r` → `r`, `\ ` →
+     * space), and `<`/`>` redirection (the operator and its target are removed,
+     * so `2>&1` or `> x` never become arguments). Words keep their escape
+     * results — `\rm` and `"rm"` and `/bin/rm` all arrive as `rm`.
+     */
+    internal fun shellLex(command: String): ShellLex {
+        val statements = ArrayList<List<String>>()
+        var words = ArrayList<String>()
+        var word = StringBuilder()
+        var wordStarted = false
+        var quote: Char? = null
+        var i = 0
+
+        fun endWord() {
+            if (wordStarted) {
+                words.add(word.toString())
+                word = StringBuilder()
+                wordStarted = false
+            }
+        }
+
+        fun endStatement(): Unit {
+            endWord()
+            if (words.isNotEmpty()) {
+                statements.add(stripRedirections(words))
+                words = ArrayList()
+            }
+        }
+
+        while (i < command.length) {
+            val c = command[i]
+            when {
+                quote != null -> {
+                    if (c == quote) {
+                        quote = null
+                        wordStarted = true
+                    } else if (c == '\\' && quote == '"' && i + 1 < command.length) {
+                        i++
+                        word.append(command[i])
+                        wordStarted = true
+                    } else {
+                        word.append(c)
+                        wordStarted = true
+                    }
+                }
+                c == '\'' || c == '"' -> {
+                    quote = c
+                    wordStarted = true
+                }
+                c == '\\' -> {
+                    if (i + 1 < command.length) {
+                        i++
+                        word.append(command[i])
+                    } else {
+                        word.append(c)
+                    }
+                    wordStarted = true
+                }
+                c == '<' || c == '>' -> {
+                    // `2>` — the file-descriptor digits are not an argument.
+                    if (wordStarted && word.isNotEmpty() && word.all { it.isDigit() }) {
+                        word = StringBuilder()
+                        wordStarted = false
+                    }
+                    endWord()
+                    while (i + 1 < command.length && command[i + 1] in "<>&") i++
+                    words.add(REDIRECT)
+                }
+                c == ' ' || c == '\t' || c == '\r' -> endWord()
+                c == '\n' || c == ';' || c == '&' || c == '|' -> endStatement()
+                else -> {
+                    word.append(c)
+                    wordStarted = true
+                }
+            }
+            i++
+        }
+        if (quote != null) {
+            endStatement()
+            return ShellLex(statements, parseOk = false)
+        }
+        endStatement()
+        return ShellLex(statements, parseOk = true)
+    }
+
+    /** Drops redirection operators and the words they target (see [shellLex]). */
+    private fun stripRedirections(words: List<String>): List<String> {
+        if (words.none { it == REDIRECT }) return words
+        val kept = ArrayList<String>(words.size)
+        var i = 0
+        while (i < words.size) {
+            if (words[i] == REDIRECT) {
+                i += 2 // the operator and what it names
+                continue
+            }
+            kept.add(words[i])
+            i++
+        }
+        return kept
+    }
+
+    /**
+     * The index of the verb that runs the statement, or -1 when the statement
+     * opens with wrappers/assignments that never reach a verb.
+     *
+     * Assignment tokens are skipped wherever they appear (`FOO=1 rm …`,
+     * `env -i FOO=1 rm …`), and a wrapper word is followed by its own
+     * arguments — options (value-taking ones consume their value), numbers and
+     * more assignments — before the next verb is looked for.
+     */
+    private fun verbIndex(words: List<String>): Int {
+        var i = 0
+        while (i < words.size) {
+            if (ASSIGNMENT.matches(words[i])) {
+                i++
+                continue
+            }
+            val name = words[i].substringAfterLast('/')
+            if (name in WRAPPERS) {
+                i = skipWrapperArgs(words, i + 1)
+                continue
+            }
+            return i
+        }
+        return -1
+    }
+
+    /** Skips everything after a wrapper that belongs to the wrapper, not the verb. */
+    private fun skipWrapperArgs(words: List<String>, from: Int): Int {
+        var i = from
+        while (i < words.size) {
+            val w = words[i]
+            when {
+                ASSIGNMENT.matches(w) -> i++
+                w.startsWith("-") -> i += if (w.contains('=')) 1 else if (w in WRAPPER_VALUE_FLAGS) 2 else 1
+                WRAPPER_NUMBER.matches(w) -> i++
+                else -> return i
+            }
+        }
+        return i
+    }
+
+    /**
+     * [F-01] The source arguments of an `mv`.
+     *
+     * `mv` destroys its sources, so every source is a target for the guard —
+     * not just the first one. `mv -t DIR a b` puts DIR first and makes **all**
+     * of `a b` sources, and `mv a b c` has two sources and one destination, so
+     * with no `-t` the LAST positional is the destination.
+     *
+     * Flags are consumed first (long options with `=`, short options with an
+     * attached value), and a bare `--` passes the rest through untouched.
+     */
+    internal fun mvSources(args: List<String>): List<String> {
+        val positionals = ArrayList<String>()
+        var targetForm = false
+        var i = 0
+        while (i < args.size) {
+            val a = args[i]
+            when {
+                a == "-t" || a == "--target-directory" -> {
+                    targetForm = true
+                    i += 2
+                }
+                a.startsWith("--target-directory=") -> {
+                    targetForm = true
+                    i++
+                }
+                a.startsWith("-t") && !a.startsWith("--") -> {
+                    // `-tDIR`, `-t DIR`'s attached form; `-T` is the opposite.
+                    targetForm = true
+                    i++
+                }
+                a == "--" -> i++
+                a.startsWith("-") && a.length > 1 -> i++
+                else -> {
+                    positionals.add(a)
+                    i++
+                }
+            }
+        }
+        return if (targetForm) positionals else positionals.dropLast(1)
+    }
+
+    /**
+     * The fail-closed answer for a command whose quotes do not balance.
+     *
+     * The words of such a command cannot be trusted, so no per-argument
+     * reasoning applies. The guard refuses only when BOTH of those hold: a
+     * zone literal that resolves to a **wide** target (the zone root or a whole
+     * immediate child, read straight out of the raw text) and a word in
+     * [DESTRUCTIVE] or `mv` somewhere in the line. Narrow targets still fall
+     * through, which keeps `rm -rf … && echo Don't` — an unbalanced apostrophe
+     * in ordinary text — from being refused for what it merely mentions.
+     */
+    private fun unbalancedFallback(command: String): WideDeleteHit? {
+        val wide = ZONES.firstOrNull { zone ->
+            command.contains(zone) && zoneWideLiteral(command, zone) != null
+        } ?: return null
+        val verbSeen = command.split(Regex("""[\s;&|\n]+""")).any { token ->
+            val word = token.trim('"', '\'', '\\')
+            val name = word.substringAfterLast('/')
+            name in DESTRUCTIVE || name == "mv"
+        }
+        return if (verbSeen) WideDeleteHit(zoneWideLiteral(command, wide)!!, cwdKnown = true) else null
+    }
+
+    /** The wide path written immediately after [zone] in the raw text, or null. */
+    private fun zoneWideLiteral(command: String, zone: String): String? {
+        val start = command.indexOf(zone)
+        var end = command.length
+        for (i in start + zone.length until command.length) {
+            val c = command[i]
+            if (c == ' ' || c == '\t' || c == '\n' || c == ';' || c == '|' || c == '&' ||
+                c == '"' || c == '\'' || c == '\\'
+            ) {
+                end = i
+                break
+            }
+        }
+        return absoluteGuestPath(command.substring(start, end), null)?.let { guest ->
+            if (isWideTarget(guest)) guest else null
+        }
+    }
+
     /**
      * One wide delete the scan found, plus whether the path came out of a
      * resolution that needed no guess.
@@ -156,6 +434,12 @@ internal object ProtectedZoneGuard {
      * The first wide target this command would delete inside a protected zone,
      * or null. Single source for both the refusal and the audit line — the two
      * must never disagree about what counts as a wide delete.
+     *
+     * The command is read by [shellLex] first: quoting, backslash escapes,
+     * redirections and assignment prefixes are resolved into literal words
+     * before anything is judged. A command whose quotes do not balance cannot
+     * be read that way; that case fails closed through [unbalancedFallback]
+     * rather than being waved through as "unknown".
      *
      * `cd` statements are tracked: `cd /var/minis/shared && rm -rf work` is the
      * same delete as the absolute form (the first version of this guard missed
@@ -173,42 +457,28 @@ internal object ProtectedZoneGuard {
      * refusal can ask for an absolute path instead of guessing.
      */
     internal fun wideDeleteHit(command: String, cwd: String? = null): WideDeleteHit? {
+        val lex = shellLex(command)
+        if (!lex.parseOk) return unbalancedFallback(command)
         var current: String? = cwd
-        for (statement in command.split(STATEMENT_SEPARATORS)) {
-            val tokens = statement.trim().split(Regex("""\s+""")).filter { it.isNotEmpty() }
-            if (tokens.isEmpty()) continue
-            var i = 0
-            while (i < tokens.size) {
-                // `/usr/bin/busybox rm …` is the same wrapper as the bare name.
-                if (tokens[i].substringAfterLast('/') in WRAPPERS) {
-                    i++
-                    // `env -i rm …` / `sudo -u root rm …`: wrapper options are
-                    // not the verb. Value-taking ones consume their value too.
-                    while (i < tokens.size && tokens[i].startsWith("-")) {
-                        if (tokens[i] in WRAPPER_VALUE_FLAGS) i++
-                        i++
-                    }
-                    continue
-                }
-                break
-            }
-            if (i >= tokens.size) continue
-            val verb = tokens[i].substringAfterLast('/')
+        for (words in lex.statements) {
+            if (words.isEmpty()) continue
+            val i = verbIndex(words)
+            if (i < 0) continue
+            val verb = words[i].substringAfterLast('/')
             if (verb == "cd" || verb == "pushd") {
-                current = tokens.getOrNull(i + 1)?.let { absoluteGuestPath(it, current) }
+                current = words.getOrNull(i + 1)?.let { absoluteGuestPath(it, current) }
                 continue
             }
             if (verb !in DESTRUCTIVE && verb != "mv") continue
-            val args = tokens.drop(i + 1)
+            val args = words.drop(i + 1)
             // A non-recursive delete names files, so an immediate child of a
             // zone (a README, a log) is ordinary work. Recursion is what turns
             // the same path into "remove everything under here".
-            if (!isRecursive(verb, args.filter { it.startsWith("-") })) continue
+            if (!isRecursive(verb, args.filter { it.startsWith("-") && it != "--" })) continue
             // `mv a b` destroys a; b is where a LANDS (`mv x /var/minis/shared`
-            // moves x INTO shared, which is not a delete of shared). Only the
-            // first positional is a target.
-            val targets = if (verb == "mv") args.filterNot { it.startsWith("-") }.take(1)
-            else args
+            // moves x INTO shared, which is not a delete of shared). [mvSources]
+            // decides which of the positionals destroys and which is land.
+            val targets = if (verb == "mv") mvSources(args) else args
             for (arg in targets) {
                 if (arg.startsWith("-")) continue
                 // Quotes are peeled before deciding whether the token is
