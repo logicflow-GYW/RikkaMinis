@@ -97,6 +97,21 @@ class EffortScopeDeclaredSetTest {
     }
 
     @Test
+    fun `the stored key is the normalized endpoint, not the raw argument`() {
+        // The two "two ports" / "two prefixes" cases above only prove that different
+        // scopes do not collide — they pass even when key() does NO normalization,
+        // because the write and the read then agree on the same raw string. This pins
+        // the key SHAPE itself, which is what actually keeps `HttpUrl.host` from
+        // creeping back in.
+        val model = "gemini-4-hydrogen-sonar"
+        EffortTierLearner.record("HTTP://127.0.0.1:8790/v1/?x=1", """{"model":"$model"}""", thinkingLevel400)
+        assertEquals(
+            listOf("http://127.0.0.1:8790/v1/$model"),
+            EffortTierLearner.learnedKeys(),
+        )
+    }
+
+    @Test
     fun `two ports of one host are two scopes`() {
         assertNotEquals(
             EffortTierLearner.scopeOf("http://127.0.0.1:8790/v1"),
@@ -188,10 +203,15 @@ class EffortScopeDeclaredSetTest {
 
     @Test
     fun `the wire value for an undeclared request degrades downward, not upward`() {
-        val narrowed = ThinkingEffortLadder.learnedWithinDeclared(ceiling, listOf("low", "high"))
-        // `xhigh` was the tier the gateway refused: with the raw ladder prefix it would
-        // go out verbatim; narrowed it must land on the strongest LEGAL tier, not on
-        // the one the model never declared and not on the refused one.
+        // End-to-end through the real storage path: the ceiling is learned from an
+        // actual 400 body, narrowed by the declaration, then clamped. `medium` is in
+        // the learned prefix but NOT declared, so it must land on `low`; with the raw
+        // prefix it would go out verbatim (that is F-02).
+        val scope = "https://gw.example/v1"
+        EffortTierLearner.record(scope, """{"model":"m5"}""", thinkingLevel400)
+        val narrowed = EffortTierLearner.learnedWithin(scope, "m5", listOf("low", "high"))
+        assertEquals(listOf("low", "high"), narrowed)
+        assertEquals("low", ThinkingEffortLadder.clampEffort("medium", narrowed))
         assertEquals("high", ThinkingEffortLadder.clampEffort("xhigh", narrowed))
         assertEquals("high", ThinkingEffortLadder.clampEffort("high", narrowed))
     }
