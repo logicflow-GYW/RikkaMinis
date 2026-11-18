@@ -2816,7 +2816,13 @@ def test_gate_body_external_fixtures():
     mod = _gate_module("truncated_call_guard_check")
     paths = [mod.POLICY, mod.ENGINE, mod.OPENAI, mod.ANTHROPIC,
              mod.TOOL_EXECUTORS, mod.GEMINI, mod.SIGNALS, mod.ANTHROPIC_SIGNALS]
-    clean_files = {rel: _read_repo_file(rel) for rel in paths}
+    try:
+        clean_files = {rel: _read_repo_file(rel) for rel in paths}
+    except OSError as exc:
+        check("truncated_call_guard_check fixture sources readable", False,
+              "%s — this fixture is built from the real tree, so it needs a real "
+              "repo root (pass the checkout, not a temp dir)" % (exc,))
+        return
     root = make_tree(clean_files)
     rc, out = run_scanner("truncated_call_guard_check.py", root)
     check("truncated_call_guard_check external clean tree green", rc == 0, out[-280:])

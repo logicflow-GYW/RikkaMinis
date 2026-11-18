@@ -141,7 +141,10 @@ BRANCH_ENDS_WITH_CONT = ("?:", "=", "&&", "||", "+", "-", "*", "/", ".", ",",
 # branch. Split by length and test each with the slice length it has.
 BRANCH_STARTS_WITH_CONT_SINGLE = (".", "+", "-", "*", "/", ",")
 BRANCH_STARTS_WITH_CONT_DOUBLE = ("?:", "&&", "||", "->")
-BRANCH_STARTS_WITH_CONT = BRANCH_STARTS_WITH_CONT_SINGLE + BRANCH_STARTS_WITH_CONT_DOUBLE
+# There is deliberately NO combined tuple: the union of a 1-char and a 2-char
+# marker set is what made the old `text[j:j + 2] in …` test look correct while
+# being unable to match half its members. Two sets, two slice lengths, no
+# constant that invites the same mistake back.
 
 
 def _line_col(text, idx):
