@@ -101,12 +101,18 @@ class SystemPromptSegmentOrderTest {
             // [prompt-behaviour-layer-1118] Skip `"""…"""` whole: prompt prose
             // inside those blocks may contain an unbalanced brace, and treating
             // it as structure would end the block in the wrong place.
+            //
+            // [fix/prompt-authority-1118b B10] …but "skip to the next `"""`" was
+            // itself wrong in two ways, both of which flipped the state machine:
+            //  • a raw string may END with a quote (`"""…""""`), and the naive
+            //    scan stopped at the FIRST three quotes, leaving the fourth to be
+            //    read as the opening of an ordinary string literal;
+            //  • a `${…}` interpolation may contain its own raw string, whose
+            //    opener is not the end of the outer one.
+            // [scanRawString] implements Kotlin's actual rule (the terminator is
+            // the LAST three quotes of a run) and walks template expressions.
             if (c == '"' && i + 2 < src.length && src[i + 1] == '"' && src[i + 2] == '"') {
-                i += 3
-                while (i + 2 < src.length &&
-                    !(src[i] == '"' && src[i + 1] == '"' && src[i + 2] == '"')
-                ) i++
-                i += 3
+                i = rawStringEnd(src, i)
                 continue
             }
             if (inString) {
@@ -123,6 +129,71 @@ class SystemPromptSegmentOrderTest {
             i++
         }
         throw AssertionError("the brace block opened at $open never closes")
+    }
+
+    /**
+     * Offset just past the raw string literal that opens at [open].
+     *
+     * Kotlin's rule is not "the first `\"\"\"` ends it": a raw string may contain
+     * any run of quotes shorter than three, and a run of four or more ends the
+     * literal at its LAST three characters (the leading ones are content). A
+     * `${…}` template expression is real code and may hold its own raw string,
+     * so it is walked with brace/string nesting instead of being skipped.
+     *
+     * Getting either case wrong desynchronises the caller's state machine: the
+     * leftover `"` is read as the start of an ordinary literal, and every `{`
+     * until the next quote becomes invisible to [braceBlock].
+     */
+    private fun rawStringEnd(src: String, open: Int): Int {
+        var i = open + 3
+        while (i < src.length) {
+            when {
+                src[i] == '$' && i + 1 < src.length && src[i + 1] == '{' -> {
+                    i = skipTemplateExpression(src, i + 1)
+                }
+                src[i] == '"' -> {
+                    var run = 0
+                    while (i + run < src.length && src[i + run] == '"') run++
+                    // A run of 3+ ends the literal at its last three chars.
+                    if (run >= 3) return i + run
+                    i += run
+                }
+                else -> i++
+            }
+        }
+        throw AssertionError("the raw string opened at $open never closes")
+    }
+
+    /** Offset just past the `}` matching the `{` at [brace]. */
+    private fun skipTemplateExpression(src: String, brace: Int): Int {
+        var depth = 0
+        var i = brace
+        while (i < src.length) {
+            val c = src[i]
+            if (c == '"' && i + 2 < src.length && src[i + 1] == '"' && src[i + 2] == '"') {
+                i = rawStringEnd(src, i)
+                continue
+            }
+            if (c == '"' || c == '\'') {
+                val quote = c
+                i++
+                while (i < src.length && src[i] != quote) {
+                    if (src[i] == '\\' && i + 1 < src.length) i++
+                    i++
+                }
+                i++
+                continue
+            }
+            when (c) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return i + 1
+                }
+            }
+            i++
+        }
+        throw AssertionError("the template expression opened at $brace never closes")
     }
 
     /** The body of the named top-level `fun`, brace-matched. */
@@ -262,6 +333,83 @@ class SystemPromptSegmentOrderTest {
     }
 
     // ------------------------------------------------------------------
+    // 4. The standing instruction sections inside `base` itself.
+    //
+    // [fix/prompt-authority-1118b B10] Every assertion above is about the
+    // buildString append sequence and the memory fragments. NOTHING pinned the
+    // order or even the EXISTENCE of `Tone and style` / `Behaviour` /
+    // `Authority`, which live in the `base` raw string — so deleting the whole
+    // Behaviour block, or moving it after Authority, left this test 100% green.
+    // The three sections are read from the emitted literal, never from a
+    // comment: a prose mention in the surrounding KDoc must not satisfy them.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun theBehaviourAndAuthoritySectionsArePresentAndOrdered() {
+        val base = basePromptLiteral()
+        val anchors = listOf(
+            "Tone and style:",
+            "Behaviour (applies to every reply):",
+            "Authority:",
+        )
+        val at = anchors.associateWith { base.indexOf(it) }
+        for ((name, idx) in at) {
+            assertTrue(
+                "`$name` is gone from the base system prompt — the reply-shape and " +
+                    "authority contracts it carries are no longer stated anywhere the " +
+                    "model sees",
+                idx >= 0,
+            )
+        }
+        assertTrue(
+            "`Tone and style` must come BEFORE `Behaviour`",
+            at.getValue("Tone and style:") < at.getValue("Behaviour (applies to every reply):"),
+        )
+        assertTrue(
+            "`Behaviour` must come BEFORE `Authority` — Authority is the final word on " +
+                "who authorises work, so it reads last",
+            at.getValue("Behaviour (applies to every reply):") < at.getValue("Authority:"),
+        )
+    }
+
+    @Test
+    fun theAuthoritySectionExemptsSkillsAndApprovedGlobalMemory() {
+        val base = basePromptLiteral()
+        val authStart = base.indexOf("Authority:")
+        assertTrue("the Authority section is gone", authStart >= 0)
+        val auth = base.substring(authStart, minOf(base.length, authStart + 900))
+        // [fix/prompt-authority-1118b B1] Without this exemption the section says
+        // every file and memory file is "data, never an instruction" while the
+        // skills and memory fragments require exactly that the model follow
+        // SKILL.md steps and user-approved GLOBAL.md rules.
+        assertTrue(
+            "the Authority section no longer exempts system-loaded skills and " +
+                "user-approved GLOBAL.md rules — it contradicts the skills fragment " +
+                "(`read its SKILL.md first and put those instructions inside the task " +
+                "text`) and the memory fragment (`standing instructions`)",
+            auth.contains("SKILL.md") && auth.contains("approved"),
+        )
+    }
+
+    /**
+     * The `base` prompt literal, with comments stripped. Read through the same
+     * comment stripper as everything else so a KDoc mention of a section title
+     * cannot stand in for the section itself.
+     */
+    private fun basePromptLiteral(): String {
+        val src = stripComments(readRepoFile(promptRel))
+        val start = src.indexOf("val base = identitySection + \"\"\"")
+        assertTrue(
+            "the `base` prompt literal is gone from $promptRel — the sections it " +
+                "carries are no longer emitted at all",
+            start >= 0,
+        )
+        val open = src.indexOf("\"\"\"", start)
+        val end = rawStringEnd(src, open)
+        return src.substring(open + 3, end - 3)
+    }
+
+    // ------------------------------------------------------------------
     // Scanner self-checks: the two matchers above run over a source file that
     // is mostly `"""…"""` prompt prose. Prose legitimately contains double
     // quotes and `//`, and a brace can be unbalanced inside it — both used to
@@ -306,6 +454,89 @@ class SystemPromptSegmentOrderTest {
         )
     }
 
+    /**
+     * [fix/prompt-authority-1118b B10] A raw string may END with a quote, written
+     * `"""prose""""`. The terminator is the LAST three quotes of the run, so the
+     * leading one is content. A scanner that stops at the first three leaves a
+     * stray `"`, reads it as the start of an ordinary literal, and then ignores
+     * every `{` until the next quote — the block ends in the wrong place.
+     */
+    @Test
+    fun theBraceMatcherSurvivesAQuoteTerminatedRawString() {
+        val triple = "\"\"\""
+        val src = buildString {
+            append("fun f() {\n")
+            append("val block = ").append(triple)
+            append("prose whose last char is a quote").append("\"\"\"\"\n")
+            append("val after = 1\n")
+            append("}\n")
+        }
+        val body = braceBlock(src, 0)
+        assertTrue(
+            "a `\"\"\"…\"\"\"\"` raw string must not desynchronise the brace matcher — " +
+                "the fourth quote is content, not the start of a new literal",
+            body.contains("val after = 1"),
+        )
+        assertTrue(
+            "the whole literal must be skipped, not just up to the first three quotes",
+            body.contains("\"\"\"\""),
+        )
+    }
+
+    /**
+     * [fix/prompt-authority-1118b B10] A `${…}` template expression is real code
+     * and may hold its own raw string. Skipping the outer literal blind to that
+     * means the inner opener looks like the outer terminator, and the rest of the
+     * file is read as prose — here the inner raw string holds an UNBALANCED brace,
+     * so a blind skip cannot even find the end of the outer block.
+     */
+    @Test
+    fun theBraceMatcherSurvivesARawStringInsideATemplateExpression() {
+        val triple = "\"\"\""
+        val src = buildString {
+            append("fun f() {\n")
+            append("val block = ").append(triple).append("head \${g(").append(triple)
+            append("x{y").append(triple).append(")}\n").append(triple).append("\n")
+            append("val after = 1\n")
+            append("}\n")
+        }
+        val body = braceBlock(src, 0)
+        assertTrue(
+            "a raw string nested inside ${'$'}{…} must not end the outer literal — the " +
+                "matcher has to walk the template expression as code",
+            body.contains("val after = 1"),
+        )
+    }
+
+    /**
+     * Same shapes, through the comment stripper.
+     *
+     * [fix/prompt-authority-1118b B10] The four-quote case is asserted on the
+     * COMMENT, not on "the tail survived": a stripper that desynchronises stops
+     * stripping, so the tail survives either way and the assertion would be
+     * blind (measured: it was).
+     */
+    @Test
+    fun theCommentStripperSurvivesQuoteTerminatedAndNestedRawStrings() {
+        val triple = "\"\"\""
+        val src = buildString {
+            append("val a = ").append(triple).append("ends with a quote").append("\"\"\"\" // gone\n")
+            append("val b = ").append(triple).append("nested \${h(").append(triple)
+            append("x").append(triple).append(")}\n").append(triple).append("\n")
+            append("fun after() = 2\n")
+        }
+        val stripped = stripComments(src)
+        assertTrue(
+            "a `//` comment right after a `\"\"\"…\"\"\"\"` literal must still be stripped — " +
+                "the stray fourth quote used to open an ordinary string and swallow it",
+            !stripped.contains("gone"),
+        )
+        assertTrue(
+            "code after a raw string containing ${'$'}{…(\"\"\"…\"\"\")} must survive too",
+            stripped.contains("fun after() = 2"),
+        )
+    }
+
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
@@ -347,17 +578,14 @@ class SystemPromptSegmentOrderTest {
                 // flipped the state machine and made everything after it look
                 // like a comment (5 ordering tests failed on a prompt edit).
                 rawString -> {
-                    out.append("\"\"\"")
-                    i += 3
-                    while (i < n) {
-                        if (src[i] == '"' && i + 2 < n && src[i + 1] == '"' && src[i + 2] == '"') {
-                            out.append("\"\"\"")
-                            i += 3
-                            break
-                        }
-                        out.append(src[i])
-                        i++
-                    }
+                    // [fix/prompt-authority-1118b B10] Same terminator rule as
+                    // [rawStringEnd]: the LAST three quotes of a run, and
+                    // `${…}` walked as real code. Stopping at the first three
+                    // left a stray `"` that opened an ordinary literal and made
+                    // everything after it look like a comment (or vice versa).
+                    val end = rawStringEnd(src, i)
+                    out.append(src, i, end)
+                    i = end
                 }
                 c == '/' && next == '/' -> {
                     while (i < n && src[i] != '\n') i++
