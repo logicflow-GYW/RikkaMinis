@@ -139,6 +139,124 @@ class EffortTierLearnerTest {
         assertEquals(listOf("low", "high"), EffortTierLearner.enumFromText(body))
     }
 
+    // ── ceilingFromText (thinking-level-unsupported) ─────────────────────────────
+
+    /**
+     * The exact body the local gateway returned on 2026-11-18 for
+     * `antigravity/gemini-4-hydrogen-sonar` — see
+     * `logs/minis-2026-11-18.log` [T321] ← HTTP 400.
+     */
+    private val thinkingLevel400 =
+        """{"error":{"message":"Thinking level is unsupported: THINKING_LEVEL_XHIGH","type":"api_error"}}"""
+
+    @Test
+    fun `reads the rejected tier out of the thinking-level-unsupported shape`() {
+        assertEquals(
+            listOf("none", "minimal", "low", "medium", "high"),
+            EffortTierLearner.ceilingFromText(thinkingLevel400),
+        )
+    }
+
+    @Test
+    fun `the learned ceiling is what makes the retry clamp instead of 400 again`() {
+        val host = "127.0.0.1"
+        val model = "gemini-4-hydrogen-sonar"
+        val learned = EffortTierLearner.record(host, """{"model":"$model"}""", thinkingLevel400)
+
+        assertEquals(listOf("none", "minimal", "low", "medium", "high"), learned)
+        assertEquals(listOf("none", "minimal", "low", "medium", "high"),
+            EffortTierLearner.learned(host, model))
+        // The pinned outcome: the tier that 400'd comes back as the strongest legal one
+        // below it. Without the ceiling parse this assertion fails with "xhigh" — i.e.
+        // exactly the request the retry used to re-send verbatim.
+        assertEquals("high", ThinkingEffortLadder.clampEffort("xhigh", learned))
+        assertEquals(
+            "high",
+            ThinkingEffortLadder.clampEffort(ThinkingEffortLadder.wireEffort(ThinkingLevel.XHIGH), learned),
+        )
+    }
+
+    @Test
+    fun `a rejected middle tier keeps every weaker tier legal`() {
+        val body = """{"error":"Thinking level is unsupported: THINKING_LEVEL_MEDIUM"}"""
+        assertEquals(listOf("none", "minimal", "low"), EffortTierLearner.ceilingFromText(body))
+    }
+
+    @Test
+    fun `accepts the camelCase and spaced spellings`() {
+        assertEquals(listOf("none", "minimal", "low"),
+            EffortTierLearner.ceilingFromText("""{"error":"thinkingLevel: medium is unsupported"}"""))
+        assertEquals(listOf("none", "minimal", "low"),
+            EffortTierLearner.ceilingFromText("thinking level: medium is not supported"))
+        assertEquals(listOf("none", "minimal", "low"),
+            EffortTierLearner.ceilingFromText("invalid thinking_level value: MEDIUM"))
+        // The tier can also sit behind a connector ("level of HIGH"): the scan skips
+        // filler words, so the anchor still lands on the tier instead of on "of".
+        assertEquals(listOf("none", "minimal", "low", "medium"),
+            EffortTierLearner.ceilingFromText("Thinking level of HIGH is not supported"))
+    }
+
+    @Test
+    fun `a thinking-level complaint that names no tier teaches nothing`() {
+        // Both are real shapes: Gemini answers this when the model has no reasoning at
+        // all. There is no answer in the sentence, so nothing may be learned — a guess
+        // here would pin the model to a ceiling nobody measured.
+        assertNull(EffortTierLearner.ceilingFromText("""{"error":"Thinking level is not supported for this model"}"""))
+        assertNull(EffortTierLearner.ceilingFromText("""{"error":"thinking_level is unsupported"}"""))
+    }
+
+    @Test
+    fun `ignores an unsupported complaint about another field`() {
+        // "high" / "max" are ordinary English words again: the domain word gate is what
+        // keeps a temperature complaint from being learned as an effort ceiling.
+        assertNull(EffortTierLearner.ceilingFromText("""{"error":"temperature high is unsupported for this model"}"""))
+        assertNull(EffortTierLearner.ceilingFromText("""{"error":"max_tokens 64000 is unsupported on level cheap"}"""))
+        // This one has every ingredient except the domain word: a marker, a `level`
+        // anchor and a real tier right behind it. Only the thinking/effort/reasoning
+        // gate keeps it from becoming a ceiled entry for the model.
+        assertNull(EffortTierLearner.ceilingFromText("""{"error":"compression level high is unsupported"}"""))
+    }
+
+    @Test
+    fun `ignores a body with no rejection marker`() {
+        // Mentions the tier and the word "level" but never says the tier was refused.
+        assertNull(EffortTierLearner.ceilingFromText("""{"error":"Thinking level XHIGH requested"}"""))
+    }
+
+    @Test
+    fun `an unknown tier name teaches nothing`() {
+        assertNull(EffortTierLearner.ceilingFromText("""{"error":"Thinking level is unsupported: THINKING_LEVEL_DEFAULT"}"""))
+        // "none" is the weakest tier: nothing is strictly below it, so no ceiling exists.
+        assertNull(EffortTierLearner.ceilingFromText("""{"error":"Thinking level is unsupported: THINKING_LEVEL_NONE"}"""))
+    }
+
+    @Test
+    fun `a later enum replaces the learned ceiling`() {
+        EffortTierLearner.record("127.0.0.1", """{"model":"$model"}""", thinkingLevel400)
+        EffortTierLearner.record("127.0.0.1", """{"model":"$model"}""",
+            """{"error":"field ReasoningEffort invalid, should be one of: low, high"}""")
+        // The fuller truth wins — the ceiling was only a guess at the legal set.
+        assertEquals(listOf("low", "high"), EffortTierLearner.learned("127.0.0.1", model))
+    }
+
+    @Test
+    fun `a write from the other process is visible immediately`() {
+        EffortTierLearner.record(host, """{"model":"$model"}""",
+            """{"error":"effort should be one of: low"}""")
+        assertEquals(listOf("low"), EffortTierLearner.learned(host, model))
+
+        // [fix/thinking-level-ceiling-1118] The chat provider runs in :modelservice, so
+        // the 400 that teaches a ceiling is learned THERE and read HERE. A blind
+        // time-based cache made this process keep serving the old set — which is how
+        // the composer's picker could update while the navbar badge still said XHigh.
+        // The payload is longer on purpose: the fingerprint is (mtime, size), so this
+        // holds even when both writes land in the same millisecond.
+        File(dir, "gateway_efforts.json").writeText(
+            """{"entries":{"$host/$model":{"tiers":["low","medium","high"],"at":${System.currentTimeMillis()}}}}""",
+        )
+        assertEquals(listOf("low", "medium", "high"), EffortTierLearner.learned(host, model))
+    }
+
     // ── modelIdFrom ──────────────────────────────────────────────────────────────
 
     @Test

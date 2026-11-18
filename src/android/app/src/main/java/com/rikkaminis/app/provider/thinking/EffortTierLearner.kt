@@ -33,6 +33,14 @@ import java.io.File
  * 400 → 解析出枚举 → 按 `host/model` 落盘 → 下一次请求 clamp 时优先于声明。
  * 第一次仍然失败，第二次就对。
  *
+ * ## 第二种拒绝形状：只点名被拒档位
+ *
+ * 不是每个网关都说全枚举。把 `reasoning_effort` 翻成 Gemini `thinking_level` 的中转
+ * 只回一条：`Thinking level is unsupported: THINKING_LEVEL_XHIGH`（2026-11-18 实测）。
+ * 那句话同样是一手真相，只是信息更少——只有"这一档不行"。这种情况学到的是一条
+ * **上限**（严格弱于被拒档位的那一串），见 [ceilingFromText]。少了这一条，那个 400
+ * 什么也学不着，重试会把同一个非法档位原样再发一次。
+ *
  * ## 学到的值意味着什么（以及为什么不给它设永久）
  *
  * 学到的是**已知安全集的下限**，不是能力上限。厂商之后放宽枚举，我们不会知道——
@@ -69,8 +77,19 @@ object EffortTierLearner {
     /** 学到的集合多久后过期，愿意再赌一次。 */
     private const val TTL_MS = 30L * 24 * 60 * 60 * 1000L
 
-    /** 进程内缓存寿命：避免每次请求都读文件，同时让另一进程的写入较快生效。 */
-    private const val CACHE_TTL_MS = 10_000L
+    /**
+     * 进程内缓存的失效依据：文件的 (mtime, size) 指纹。
+     *
+     * 原来是一个 10 秒的盲窗（`now - cachedAt < 10s`），它带来的不只是"多读几
+     * 次文件"——**另一个进程写入后，本进程最多 10 秒仍读到旧值**。学到的上限是
+     * 在 worker 里写、在 UI 里读的（chat 流的 provider 跑在 `:modelservice`），
+     * 于是"网关已经拒了 xhigh"与"写作栏还显示 XHigh"之间必然有一段窗口。
+     * 指纹法把这段窗口压到 0：一次 stat 换一次可能的解析，代价可以忽略。
+     *
+     * 同一毫秒内、且文件大小恰好不变的两次写入会漏掉一次（指纹相同）——概率极低，
+     * 且本进程自己的写入会直接置空缓存，所以只可能是"另一进程在同一毫秒写了两版"。
+     */
+    private fun stampOf(file: File): Long = file.lastModified() * 1_000_003L + file.length()
 
     /** 从 "one of" 往后扫多少个字符找档位词，足够覆盖一条错误文案。 */
     private const val SCAN_WINDOW = 400
@@ -83,6 +102,28 @@ object EffortTierLearner {
      * （"the following: low, medium" 里还有 "the"、"following"）。
      */
     val KNOWN_TIERS = setOf("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto")
+
+    // ── 第二种形状：只点名被拒档位（见 ceilingFromText）──────────────────────────
+
+    /** `THINKING_LEVEL_XHIGH` / `thinkingLevel` / `thinking level` 共有的锚点词。 */
+    private const val LEVEL = "level"
+
+    /** `level` 之后找档位词的最大跨度，够覆盖 `level is unsupported: THINKING_LEVEL_x`。 */
+    private const val LEVEL_WINDOW = 80
+
+    /**
+     * 「不支持」类措辞。文案里必须有其中一种，否则不当作拒绝信号——
+     * `Thinking is a strong selling point of this model` 里的档位词不该被学成上限。
+     */
+    private val UNSUPPORTED_MARKERS = listOf(
+        "unsupported", "not supported", "invalid", "unknown", "unrecognized", "illegal",
+    )
+
+    /** `level` 与档位词之间可能夹着的功能词（`level is unsupported: ...`）。 */
+    private val LEVEL_FILLERS = setOf(
+        "is", "was", "the", "a", "an", "of", "for", "this", "that", "model", "value",
+        "level", "levels", "set", "to", "as", "with", "not",
+    )
 
     /**
      * 锚点与列表之间可能夹着的连接词（`one of the following values: ...`）。
@@ -119,7 +160,7 @@ object EffortTierLearner {
     // ── 纯函数 ──────────────────────────────────────────────────────────────────
 
     /**
-     * 从一段错误文案里抽出档位集合。
+     * 从一段错误文案里抽出档位集合：网关把合法枚举说全了的形状。
      *
      * 三道前置条件，任一不满足就返回 null（宁可没学到，不可学错）：
      *  1. 文案里提到 `effort` 或 `reasoning`——把 "must be one of" 用在别的字段上
@@ -184,6 +225,80 @@ object EffortTierLearner {
         return out
     }
 
+    /**
+     * [fix/thinking-level-ceiling-1118] 第二种一手真相的形状：网关只点名被拒的那一档，
+     * 不枚举合法集合。
+     *
+     * ```
+     * {"error":{"message":"Thinking level is unsupported: THINKING_LEVEL_XHIGH"}}
+     * ```
+     *
+     * 这是把 `reasoning_effort` 翻成 Gemini `thinking_level` 的中转回来的话（实测
+     * `127.0.0.1:8790` → `antigravity/gemini-4-hydrogen-sonar`，2026-11-18）。它和
+     * [enumFromText] 的信息量不同：那边是完整枚举，这边只知道**这一档不被接受**。
+     * 于是学到的是一条**上限**——"严格弱于被拒档位的那一串"（[ThinkingEffortLadder.tiersBelow]），
+     * 落盘结构与枚举完全相同，由 [ThinkingEffortLadder.clampEffort] 在最靠近请求的
+     * 位置落档。
+     *
+     * 为什么这条值得单独解析：没有它时，[record] 从这次 400 里什么都学不到，下一次
+     * 请求（包括用户点重试）依然原样发出 `xhigh`，撞同一堵墙；而**重试路径复用的是
+     * 原模型的配置**，所以"自动切到别的模型"并不能救它。
+     *
+     * 被拒一次学一档：若下一档也被拒，会再学一次。每次学习都发生在真失败之后，
+     * 不预探测、不额外消耗 token。
+     *
+     * 三道前置，任一不满足就返回 null（宁可没学到，不可学错）：
+     *  1. 文案里有「不支持」类措辞（[UNSUPPORTED_MARKERS]）——否则 `Thinking is a
+     *     strong selling point` 这类正常文案也会被当成拒绝；
+     *  2. 文案谈的是 thinking / effort / reasoning 之一——把「temperature 太高不支持」
+     *     这类别的字段排除在外；
+     *  3. 有一个 `level` 锚点，其后（允许夹 [LEVEL_FILLERS]）紧跟白名单档位词：
+     *     `THINKING_LEVEL_XHIGH` 的 `level_xhigh`、`"thinkingLevel": "xhigh"`、
+     *     `thinking level: xhigh` 都命中。锚点后跟的不是档位词
+     *     （`thinking level is not supported for this model` 里的 `is`）时继续找下一个
+     *     锚点，全找不到就学不到——那句文案本来就没说答案。
+     */
+    fun ceilingFromText(text: String): List<String>? {
+        val lower = text.lowercase()
+        if (UNSUPPORTED_MARKERS.none { lower.contains(it) }) return null
+        val aboutEffort = lower.indexOf("thinking") >= 0 || lower.indexOf("effort") >= 0 ||
+            lower.indexOf("reasoning") >= 0
+        if (!aboutEffort) return null
+        val rejected = rejectedTierAfterLevel(lower) ?: return null
+        return ThinkingEffortLadder.tiersBelow(rejected).takeIf { it.isNotEmpty() }
+    }
+
+    /** 逐个 `level` 锚点找第一个紧跟白名单档位词的；找不到返回 null。 */
+    private fun rejectedTierAfterLevel(lower: String): String? {
+        var from = 0
+        while (true) {
+            val idx = lower.indexOf(LEVEL, from)
+            if (idx < 0) return null
+            val start = idx + LEVEL.length
+            val end = minOf(lower.length, start + LEVEL_WINDOW)
+            val word = firstWordAfter(lower, start, end)
+            if (word != null && word in KNOWN_TIERS) return word
+            from = start
+        }
+    }
+
+    /** 跳过非字母与 [LEVEL_FILLERS]，取 [start] 之后第一个实词（上限 [end]）。 */
+    private fun firstWordAfter(lower: String, start: Int, end: Int): String? {
+        var i = start
+        while (i < end) {
+            if (lower[i] !in 'a'..'z') {
+                i++
+                continue
+            }
+            var j = i
+            while (j < end && lower[j] in 'a'..'z') j++
+            val word = lower.substring(i, j)
+            if (word !in LEVEL_FILLERS) return word
+            i = j
+        }
+        return null
+    }
+
     /** 从一次请求体里取 model 字段（学的是 host+model 维度的事实）。 */
     fun modelIdFrom(requestBody: String): String? = try {
         JSONObject(requestBody).optString(KEY_MODEL).takeIf { it.isNotEmpty() && it.length <= 200 }
@@ -198,7 +313,9 @@ object EffortTierLearner {
      * 学到时的日志在 [write] 内打出，调用方不必（也不）用返回值判断。
      */
     fun record(host: String, requestBody: String, errorBody: String): List<String>? {
-        val tiers = enumFromText(errorBody) ?: return null
+        // 两种形状：说全了枚举的（[enumFromText]），和只点名被拒档位的
+        // （[ceilingFromText]，Gemini 系 `THINKING_LEVEL_*`）。前者信息更全，先问它。
+        val tiers = enumFromText(errorBody) ?: ceilingFromText(errorBody) ?: return null
         val model = modelIdFrom(requestBody) ?: return null
         if (host.isBlank() || model.isBlank()) return null
         write(key(host, model), tiers)
@@ -209,12 +326,14 @@ object EffortTierLearner {
     fun learned(host: String, modelId: String): List<String>? {
         if (host.isBlank() || modelId.isBlank()) return null
         val now = System.currentTimeMillis()
+        val file = target ?: return null
+        val stamp = stampOf(file)
         val snap = snapshot
-        if (snap != null && now - snap.first < CACHE_TTL_MS) {
+        if (snap != null && snap.first == stamp) {
             return tiersOf(snap.second[key(host, modelId)], now)
         }
-        val loaded = load(target ?: return null) ?: return null
-        snapshot = now to loaded
+        val loaded = load(file) ?: return null
+        snapshot = stamp to loaded
         return tiersOf(loaded[key(host, modelId)], now)
     }
 
