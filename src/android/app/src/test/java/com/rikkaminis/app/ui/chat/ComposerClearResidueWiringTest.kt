@@ -86,33 +86,34 @@ class ComposerClearResidueWiringTest {
     }
 
     /**
-     * [W1118-COMPOSER F-01] The wipe of an already-landed replay must NOT go
-     * through `clearComposerInput()`. That funnel calls `stampClearedBody()`,
-     * which reads whatever is in the box — on this path a FRAGMENT of the sent
-     * message — and overwrites the stamp for the whole message with it. One
-     * frame later the IME continues with a fragment that no longer matches the
-     * truncated stamp, the guard returns NONE, and the rest of the message walks
-     * back into the box. That is the regression the shipped c2a09fe9 carried.
+     * [W1118-COMPOSER F-01] The stamp decision must be the pure helper's ANSWER,
+     * not a re-derivation. A shape test cannot prove a computed flag is actually
+     * used — only that the helper is called — so this arm pins the call site and
+     * ComposerClearResiduePolicyTest pins the answer.
      */
     @Test
-    fun `the landed-replay wipe keeps the original stamp`() {
-        val wipeDecl = source.indexOf("val wipeLandedReplay: () -> Unit = {")
-        assertTrue("the non-stamping wipe path is gone", wipeDecl >= 0)
-        val wipeBody = source.substring(wipeDecl, source.indexOf("val clearComposerInput", wipeDecl))
+    fun `the clear funnel does not re-stamp an un-winding replay`() {
+        val stamp = source.indexOf("val stampClearedBody: () -> Unit = {")
+        assertTrue("the stamp lambda is gone", stamp >= 0)
+        val body = source.substring(stamp, source.indexOf("val clearComposerInput", stamp))
         assertTrue(
-            "the landed-replay wipe must not re-stamp: it would record the fragment",
-            !wipeBody.contains("stampClearedBody()"),
-        )
-        val branch = source.indexOf("ComposerResidueVerdict.DROP_AND_CLEAR")
-        assertTrue("the verdict is never branched on", branch >= 0)
-        val after = source.substring(branch, minOf(source.length, branch + 600))
-        assertTrue(
-            "the DROP_AND_CLEAR branch must use the non-stamping wipe",
-            after.contains("wipeLandedReplay()"),
+            "the stamp decision must come from shouldRestampClearedBody",
+            body.contains("shouldRestampClearedBody("),
         )
         assertTrue(
-            "the DROP_AND_CLEAR branch must NOT call the stamping funnel",
-            !after.contains("clearComposerInput()"),
+            "the stamp body must not re-implement the rule inline",
+            !body.contains("COMPOSER_CLEAR_RESIDUE_WINDOW_MS"),
+        )
+        // One funnel only: a second clear definition is what the two shape gates
+        // (B3RenderInputShapeTest, chat_ui_interaction_check) exist to prevent.
+        // Count CALLS, not the string: the funnel's own KDoc quotes the write.
+        val clearWrites = source.lines().count { line ->
+            val t = line.trim()
+            !t.startsWith("//") && !t.startsWith("*") && t.contains("viewModel.setInputText(\"\")")
+        }
+        assertTrue(
+            "there must be exactly ONE composer-clear funnel, found $clearWrites",
+            clearWrites == 1,
         )
     }
 

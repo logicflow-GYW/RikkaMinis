@@ -80,6 +80,44 @@ internal fun stripImeTrailingNoise(text: String): String =
     text.trimEnd { it in IME_TRAILING_NOISE_CHARS }
 
 /**
+ * [W1118-COMPOSER F-01] Should a composer clear (re)stamp the body it removed?
+ *
+ * `clearComposerInput` is the ONE funnel every clear entrance uses — including
+ * the one the replay guard calls when it decides the box is replay-filled. On
+ * that path the box holds a FRAGMENT of the message ("hel"), and a blind stamp
+ * records the fragment as "the body this clear removed", forgetting the full
+ * body. One frame later the IME continues with "hello", which is no longer a
+ * fragment of "hel", the guard returns NONE, and the rest of the sent message
+ * walks back into the box, the ViewModel and the persisted draft slot. That is
+ * the regression the shipped c2a69fe9 carried.
+ *
+ * So a clear that is really UNWINDING A REPLAY must keep the previous stamp and
+ * its timestamp. Two conditions make that state recognizable:
+ *  * the previous stamp is still inside its own window, and
+ *  * what sits in the box is a contiguous piece of that stamp.
+ *
+ * Outside the window the old stamp is dead anyway, so a real clear must (and
+ * does) overwrite it — without the window bound, a user who sends "hello world"
+ * and then "hello" ten seconds later would leave the DEAD "hello world" stamp in
+ * place, and "hello"'s own replay would never be caught.
+ *
+ * Pure and Android-free so the decision is pinned on the JVM: a shape test can
+ * only prove the helper is CALLED, never that its answer is used.
+ */
+internal fun shouldRestampClearedBody(
+    clearedBody: String,
+    previousStamp: String?,
+    msSinceStamp: Long,
+    windowMs: Long = COMPOSER_CLEAR_RESIDUE_WINDOW_MS,
+): Boolean {
+    if (clearedBody.isEmpty()) return false
+    val unwindingReplay = previousStamp != null &&
+        msSinceStamp in 0L until windowMs &&
+        isFragmentOfClearedBody(clearedBody, previousStamp)
+    return !unwindingReplay
+}
+
+/**
  * [fix/composer-post-send-residue-2] Is [incoming] a contiguous piece of
  * [clearedText]?
  *

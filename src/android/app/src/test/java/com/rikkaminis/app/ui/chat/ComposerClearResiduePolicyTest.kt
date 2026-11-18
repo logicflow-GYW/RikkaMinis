@@ -286,4 +286,72 @@ class ComposerClearResiduePolicyTest {
         assertFalse(isFragmentOfClearedBody("hello world, the message", body))
         assertFalse(isFragmentOfClearedBody("", body))
     }
+
+    // ── [W1118-COMPOSER F-01] restamping rule ────────────────────────────────
+
+    /**
+     * A clear that is unwinding a landed replay must NOT restamp: the box holds a
+     * fragment, and recording it as "the body this clear removed" forgets the
+     * full message, so the rest of the replay is no longer recognizable.
+     */
+    @Test
+    fun `a clear that unwinds a landed replay keeps the previous stamp`() {
+        assertFalse(
+            shouldRestampClearedBody(
+                clearedBody = "hel",
+                previousStamp = body,
+                msSinceStamp = 120L,
+            ),
+        )
+    }
+
+    @Test
+    fun `a clear of genuinely new text restamps`() {
+        assertTrue(
+            shouldRestampClearedBody(
+                clearedBody = "completely different words",
+                previousStamp = body,
+                msSinceStamp = 120L,
+            ),
+        )
+    }
+
+    /**
+     * The window bound is load-bearing, not decoration: ten seconds later the old
+     * stamp is dead, so a real clear MUST overwrite it — otherwise the next
+     * message's own replay would never be recognised.
+     */
+    @Test
+    fun `a prefix cleared after the window restamps`() {
+        assertTrue(
+            shouldRestampClearedBody(
+                clearedBody = "hello",
+                previousStamp = body,
+                msSinceStamp = 1500L,
+            ),
+        )
+    }
+
+    @Test
+    fun `an empty clear never restamps`() {
+        assertFalse(shouldRestampClearedBody(clearedBody = "", previousStamp = body, msSinceStamp = 10L))
+    }
+
+    @Test
+    fun `the first clear has no previous stamp and always restamps`() {
+        assertTrue(
+            shouldRestampClearedBody(clearedBody = "hello", previousStamp = null, msSinceStamp = 10L),
+        )
+    }
+
+    @Test
+    fun `a backwards clock does not protect a stale stamp`() {
+        assertTrue(
+            shouldRestampClearedBody(
+                clearedBody = "hel",
+                previousStamp = body,
+                msSinceStamp = -1L,
+            ),
+        )
+    }
 }
