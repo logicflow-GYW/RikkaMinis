@@ -200,8 +200,9 @@ FaultAttributionTest（12 例，+5）
 
 | run | 测试的提交 | 结论 |
 |---|---|---|
-| **#3300** / `44377159360` | `3841af9db2a5b4044ae7f5b793f04799fa2e86bb` | **五 job 全 success** |
-| #3293 / `44373325007` | `06de9d0f8d33bac837cb5724c605c637799cf170`（含本报告 §4.3 初版） | 五 job 全 success |
+| **#3303** / `44380970578` | `29ba43e3a7f67e6a3de3a964abe416b1af449aaa` | **五 job 全 success** ← 停止节点 |
+| #3300 / `44377159360` | `3841af9db2a5b4044ae7f5b793f04799fa2e86bb` | 五 job 全 success |
+| #3293 / `44373325007` | `06de9d0f8d33bac837cb5724c605c637799cf170` | 五 job 全 success |
 | #3292 / `44373120997` | `b2252554e60327bc69911745f0082911ceee598e`（代码 + 测试） | 被 #3293 取代（同分支并发，`cancelled`，无失败 job） |
 
 三次 run 的 `head_sha` 都与当时的远端 tip 逐字符一致。**本文件之后若再有仅改本文件的补全提交，判定口径是「报告之外差异为空」**：`git diff --name-only <绿过的提交> HEAD` 只应列出本文件，非报告 diff 为零 —— 这与「`head_sha` == tip」在证据强度上等价（源码树逐字节相同），差别只是报告文本。
@@ -282,8 +283,8 @@ sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-runs \
 
 ## 9 CI 结论
 
-**停止节点达成**：run **#3300 / `44377159360` @ `3841af9db2a5b4044ae7f5b793f04799fa2e86bb`** 五 job 全 success（scan-gate / build-apk / unit-tests / lint / publish），`head_sha` 与分支 tip 逐字符一致，publish 两步 skipped（main 门控）。**未合 main。**
+**停止节点达成**：run **#3303 / `44380970578` @ `29ba43e3a7f67e6a3de3a964abe416b1af449aaa`** 五 job 全 success（scan-gate / build-apk / unit-tests / lint / publish），`head_sha` 与分支 tip 逐字符一致，publish 的 `Move the rolling tag` 与 `Publish to Releases` 两步 skipped（main 门控）。**未合 main。**
 
-单测 9757 PASSED / 0 真失败，scan-gate `115 passed, 0 failed` —— 这两项数据取自 #3293（`06de9d0f`），而 #3300 与它的差异只有本报告，源码树逐字节相同。
+单测 9757 PASSED / 0 真失败、scan-gate `115 passed, 0 failed` 这两项数据取自 #3293（`06de9d0f`）；#3300 与 #3303 相对它的差异只有本报告，源码树逐字节相同（`git diff --name-only 06de9d0f HEAD` 只列出本文件）。
 
-一处流程注记：本报告是在代码提交之后才写完的，因此「代码提交那次 run」的 `head_sha`（`b2252554`）自然不等于最终 tip。按既有口径，对每个前进后的 tip 各 dispatch 一次（#3293、#3300），而不是把报告塞进代码提交。三次 run 都记录在 §4.3。
+一处流程注记：本报告在代码提交之后才写完，因此「代码提交那次 run」的 `head_sha`（`b2252554`）自然不等于最终 tip。按既有口径，对每个前进后的 tip 各 dispatch 一次（#3293 / #3300 / #3303），而不是把报告塞进代码提交。四次 run 都记录在 §4.3。
