@@ -284,10 +284,19 @@ sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-runs \
 
 ## 9 CI 结论
 
-**停止节点达成**：run **#3305 / `44383474429` @ `ca6bb45ee2f3064ce6a29226baecc7ad6ecea6c5`** 五 job 全 success（scan-gate / build-apk / unit-tests / lint / publish），`head_sha` 与分支 tip 逐字符一致，publish 的 `Move the rolling tag` 与 `Publish to Releases` 两步 skipped（main 门控）。**未合 main。**
+**停止节点达成**：run **#3305 / `44383474429` @ `ca6bb45ee2f3064ce6a29226baecc7ad6ecea6c5`** 五 job 全 success（scan-gate / build-apk / unit-tests / lint / publish），publish 的 `Move the rolling tag` 与 `Publish to Releases` 两步 skipped（main 门控）。**未合 main。**
 
-单测 9757 PASSED / 0 真失败、scan-gate `115 passed, 0 failed` 这两项数据取自 #3293（`06de9d0f`）；其后每一次 run 相对它的差异都只有本报告，源码树逐字节相同（`git diff --name-only 06de9d0f <tip>` 只列出本文件）。
+判据用的是「**存在一个绿 run 的提交，从它到分支 tip 的非报告 diff 为零**」：
 
-一处流程注记：本报告在代码提交之后才写完，因此「代码提交那次 run」的 `head_sha`（`b2252554`）自然不等于最终 tip。按既有口径，对每个前进后的 tip 各 dispatch 一次（#3293 / #3300 / #3303 / #3305），而不是把报告塞进代码提交。五次 run 都记录在 §4.3。
+```
+$ git diff ca6bb45e HEAD -- . ':!fix-reports' | wc -l
+0
+$ git diff --name-only ca6bb45e HEAD
+fix-reports/FIX-2D-1119-7-diag.md
+```
 
-**这条口径本身值得记**：报告是「证据的一部分」，它每改一次 tip 就前进一次，于是「head_sha == tip」这个判据会把作者推入「改报告 → 再 dispatch → 报告里的 run id 又过期」的循环。可行的停止条件只有两个：① 报告只写「哪次 run 绿了」而不写「当前 tip 是哪次 run」，改完不再 dispatch；② 认可「报告之外差异为空」与 `head_sha == tip` 等价（源码树逐字节相同），以它为停止节点。本次用的是 ②，因为 ① 会让报告里留下一个不指向最终 tip 的 run id。
+源码树与 #3305 逐字节相同，差别只有本报告的措辞。单测 9757 PASSED / 0 真失败、scan-gate `115 passed, 0 failed` 两项数据取自 #3293（`06de9d0f`），同样只差报告。
+
+**为什么不用「`head_sha` == tip」作停止节点**：报告是证据的一部分，它每改一次 tip 就前进一次，于是「head_sha == tip」会把作者推进「改报告 → 再 dispatch → 报告里的 run id 又过期」的循环（本支实际跑了 #3293 / #3300 / #3303 / #3305 四次，每次都是因为报告又改了）。可行的停止条件只有两个：① 报告只写「哪次 run 绿了」而不写「当前 tip 是哪次 run」，改完不再 dispatch；② 认可「非报告 diff 为空」与 `head_sha == tip` 等价（源码树逐字节相同）。本次用 ② —— ① 会让报告里留下一个不指向最终 tip 的 run id，读者核对时反而要自己补一步。
+
+五次 run 全部记录在 §4.3。
