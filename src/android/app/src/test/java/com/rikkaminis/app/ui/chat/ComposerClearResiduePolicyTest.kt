@@ -395,11 +395,100 @@ class ComposerClearResiduePolicyTest {
 
     @Test
     fun `a replay is caught when only the view model holds the earlier fragments`() {
-        // The 150 ms burst flush writes the ViewModel a step ahead of the field;
-        // either copy holding replay text means the box is replay-filled.
+        // The 150 ms burst flush writes the ViewModel a step ahead of the field; the
+        // field is empty here, so the ViewModel copy is the only replay evidence — and
+        // it is also the copy that would refill the box, which is why the verdict is
+        // the wiping one (see the [W1119-2D F-04] cases above for the arm that must
+        // NOT be chosen when the box is genuinely empty and the copy is blank).
         assertEquals(
             ComposerResidueVerdict.DROP_AND_CLEAR,
             verdict(incoming = body, vmText = "hello world, this is", msSinceClear = 100L),
+        )
+    }
+
+    /**
+     * The ViewModel copy is written one dispatch behind the field: `clearComposerInput`
+     * empties `inputFieldValue` synchronously, but its `setInputText("")` only reaches
+     * the `collectAsState()` copy read by the composer on a later frame. Everything
+     * below is that lagging copy's shape, and it must not veto arm A.
+     *
+     * [W1119-2D F-04] Before the fix the pair `(fieldText = "", vmText = body)`
+     * reached arm B, whose only drop is the full-body convergence test — so a phrase
+     * replayed in one frame was allowed through and landed in the box.
+     */
+    @Test
+    fun `a stale view model copy does not route a phrase replay into the non-wiping arm`() {
+        // A 20-character phrase is 20 of the 44 cleared characters: phrase-length, so
+        // arm A's "no input method commits a phrase in one edit" rule decides it.
+        assertEquals(
+            ComposerResidueVerdict.DROP_AND_CLEAR,
+            verdict(
+                incoming = "hello world, this is",
+                fieldText = "",
+                vmText = body,
+                msSinceClear = 400L,
+            ),
+        )
+    }
+
+    @Test
+    fun `a lagging prefix copy does not route a phrase replay into the non-wiping arm`() {
+        // The ViewModel copy lagging a burst behind is a PREFIX of the body, not the
+        // body itself — still the clear's own lag, so still arm A.
+        assertEquals(
+            ComposerResidueVerdict.DROP_AND_CLEAR,
+            verdict(
+                incoming = "hello world, this is",
+                fieldText = "",
+                vmText = "hello world, this is",
+                msSinceClear = 400L,
+            ),
+        )
+    }
+
+    @Test
+    fun `a whole body replayed against a stale view model copy is still wiped`() {
+        assertEquals(
+            ComposerResidueVerdict.DROP_AND_CLEAR,
+            verdict(incoming = body, fieldText = "", vmText = body, msSinceClear = 100L),
+        )
+    }
+
+    @Test
+    fun `a stale view model copy never makes a chip word look like a replay`() {
+        // "moment" is 6 characters — below the phrase floor and well under half the
+        // body. The stale copy is not evidence that the box is replay-filled, so arm
+        // A's coverage test still has to fail it.
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = "moment", fieldText = "", vmText = body, msSinceClear = 400L),
+        )
+    }
+
+    @Test
+    fun `an unrelated view model copy still keeps the box out of arm A`() {
+        // The mirror ran at some point and the ViewModel holds text that is NOT the
+        // cleared body: that is a real, non-empty box, and arm A must not touch it.
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(
+                incoming = body,
+                fieldText = "",
+                vmText = "totally different words",
+                msSinceClear = 100L,
+            ),
+        )
+    }
+
+    /**
+     * [W1119-2D F-04] The drop half of arm A is unchanged when the ViewModel copy is
+     * already blank — the lag described above is the only reason a DROP escalates.
+     */
+    @Test
+    fun `an empty view model copy drops the phrase without escalating to a wipe`() {
+        assertEquals(
+            ComposerResidueVerdict.DROP,
+            verdict(incoming = "hello world, this is", fieldText = "", vmText = "", msSinceClear = 400L),
         )
     }
 
@@ -512,6 +601,36 @@ class ComposerClearResiduePolicyTest {
     fun `a replay with nothing to compare against is not a residue`() {
         assertEquals(ComposerResidueVerdict.NONE, verdict(incoming = "hello world", clearedText = null))
         assertEquals(ComposerResidueVerdict.NONE, verdict(incoming = "hello world", clearedText = ""))
+    }
+
+    /**
+     * [W1119-2D F-05] The fingerprint drop clears `lastClearedText` and leaves
+     * `lastClearedAtMs` alone. That is inert, and this arm is the proof rather than
+     * the assertion: with NO stamp, every reader of the timestamp is behind a null
+     * check — the verdict returns early on a null body, and `shouldRestampClearedBody`
+     * requires `previousStamp != null` before it looks at the delta. So a leftover
+     * timestamp can only be read as "0 ms since a clear that has no body", which must
+     * never drop anything.
+     */
+    @Test
+    fun `a dropped stamp is never a residue even when its timestamp is still fresh`() {
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = body, clearedText = null, fieldText = "", vmText = "", msSinceClear = 1L),
+        )
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = body, clearedText = "", fieldText = body, vmText = "", msSinceClear = 1L),
+        )
+        // ...and a stale stamp cannot protect itself: no stamp means every clear restamps.
+        assertTrue(
+            shouldRestampClearedBody(
+                clearedBody = "hello",
+                previousStamp = null,
+                msSinceStamp = 1L,
+                guardClear = true,
+            ),
+        )
     }
 
     @Test
