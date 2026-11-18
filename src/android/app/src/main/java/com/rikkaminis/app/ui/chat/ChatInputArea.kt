@@ -420,10 +420,20 @@ internal fun ChatInputArea(
     // guards this funnel measures a bounded window from its declaration, and a
     // block of prose inside pushes the drain below out of range (the same
     // distance-window lesson that bit `stampClearedBody` twice).
+    //
+    // [W1118-COMPOSER C-A F-02] The same reasoning retires the T217-2 send
+    // window here. `lastSendTimeMs` is armed by the send path only, so after a
+    // refusal handed the body back it still says "a send just happened" for
+    // another 500 ms — and `onValueChange` drops every edit that carries a
+    // composing region in that window. The user's first Pinyin / Japanese /
+    // Korean word typed into the restored body would vanish. What this funnel
+    // writes is the user's own text, not an IME residue commit, so the window is
+    // cleared with the stamp.
     val commitComposerBody: (String, Int?) -> Unit = { text, caret ->
         cancelPendingImeBurst()
         lastClearedText = null
         lastClearedAtMs = 0L
+        lastSendTimeMs = 0L
         val at = composerFunnelCaret(
             caret = caret,
             pendingCaret = viewModel.consumePendingCaret(),
@@ -1885,7 +1895,16 @@ internal fun ChatInputArea(
                             // is mid-composition — fast typing right after a send
                             // is never dropped.
                             val now = SystemClock.elapsedRealtime()
-                            if (tfv.composition != null && now - lastSendTimeMs < 500L && tfv.text.isNotEmpty()) {
+                            // [W1118-COMPOSER C-A F-02] The predicate is a pure
+                            // function: whether this window is even ARMED is a
+                            // decision `commitComposerBody` makes, so it must be
+                            // pinned on the JVM rather than inferred here.
+                            if (isPostSendImeResidue(
+                                    hasComposingRegion = tfv.composition != null,
+                                    msSinceSend = now - lastSendTimeMs,
+                                    incomingEmpty = tfv.text.isEmpty(),
+                                )
+                            ) {
                                 return@BasicTextField
                             }
                             // [fix/composer-post-send-residue] Second guard,

@@ -22,6 +22,7 @@ import contextlib
 import io
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -3037,6 +3038,63 @@ GATEWAY_CONTEXT_GATES = [
 ]
 
 
+def test_scan_parallel_local_refusal():
+    """[LOCAL_REFUSAL] The full gate suite must refuse to run outside CI.
+
+    This is a MECHANISM, not a reminder, because the same mistake was made
+    twice and cost two working sessions: all 115 gates were run locally inside
+    the PRoot sandbox. The reasons are recorded at
+    `scan_parallel.LOCAL_REFUSAL`; what matters here is that the rule cannot
+    be forgotten, compacted away, or outweighed by "I'll just verify locally".
+
+    Pinned through the PURE predicate, never by starting the suite — a test
+    that proved the refusal by running the gates would be the same mistake in
+    a new place (this test's first version did exactly that and had to be
+    killed by hand). Three properties:
+
+      1. no CI markers -> refused;
+      2. `--allow-local` opts out (a real checkout with no CI must still run);
+      3. `GITHUB_ACTIONS` and `CI` each pass — a refusal that fired in CI would
+         take the whole `scan-gate` job down, a worse failure than the one it
+         prevents.
+    """
+    print("\u2501\u2501\u2501 scan_parallel local refusal (the suite is a cloud job) \u2501\u2501\u2501")
+    sys.path.insert(0, SCRIPT_DIR)
+    import scan_parallel  # noqa: E402
+
+    refused = scan_parallel.local_run_refused
+    check("a plain shell is refused", refused(False, {}) is True)
+    check("an unrelated env var does not arm the opt-out",
+          refused(False, {"SOMETHING": "1"}) is True)
+    check("--allow-local opts out", refused(True, {}) is False)
+    for marker in ("GITHUB_ACTIONS", "CI"):
+        check("%s is accepted as CI" % marker, refused(False, {marker: "true"}) is False)
+    check("--allow-local is unnecessary but harmless in CI",
+          refused(True, {"GITHUB_ACTIONS": "true"}) is False)
+
+    # The refusal must also say where the work belongs: a message that only
+    # says "no" leaves the next session guessing.
+    msg = scan_parallel.LOCAL_REFUSAL.format(total=115)
+    check("the refusal names the cloud job", "scan-gate" in msg)
+    check("the refusal names the single-gate alternative",
+          "scripts/scan/<gate>.py" in msg and "test_scan.py" in msg)
+    check("the refusal names the opt-out", "--allow-local" in msg)
+
+    # [LOCAL_REFUSAL] The refusal must not REPLACE main(). This arm exists
+    # because the first version of this change deleted `def main`'s signature
+    # line while inserting the predicate: the module still parsed, the refusal
+    # still answered (it runs before main is reached), and the breakage only
+    # appeared in CI as `NameError: name 'main' is not defined` at the
+    # `sys.exit(main())` call. A guard that hides the function it guards is not
+    # a guard — so the entry point is pinned by name AND by callability.
+    check("the driver still defines main()",
+          callable(getattr(scan_parallel, "main", None)),
+          "scan_parallel.main is %r" % (getattr(scan_parallel, "main", None),))
+    check("main() is reachable from __main__'s sys.exit(main())",
+          "sys.exit(main())" in pathlib.Path(SCRIPT_DIR, "scan_parallel.py").read_text(),
+          "the __main__ block no longer calls main()")
+
+
 def test_scan_parallel_block_numbering():
     """[gateway-context-1112] The block-numbering contract of the driver.
 
@@ -3475,6 +3533,7 @@ TEST_ORDER = (
     "test_dv16_chat_ui_interaction",
     "test_da1017_external_fixtures",
     "test_real_repo",
+    "test_scan_parallel_local_refusal",
 )
 
 RESULT_TAG = "@@TEST_RESULT@@"

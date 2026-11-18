@@ -96,7 +96,38 @@ class ComposerClearResiduePolicyTest {
         assertTrue(isSuperhumanTypingRate(chars = body.length, msSinceClear = -5L))
     }
 
+    // ── [W1118-COMPOSER C-A F-02] the post-send IME window ────────────────────
+
+    /**
+     * The T217-2 window drops an IME commit that still carries a composing region.
+     * It is armed by the SEND path only, so the question this pins is what happens
+     * once a refusal has handed the text back: `commitComposerBody` resets the send
+     * time to 0, the delta becomes the device uptime, and the window stands down —
+     * otherwise the user's first Pinyin / Japanese / Korean word into the restored
+     * body would vanish.
+     */
+    @Test
+    fun `a restored body does not arm the post-send IME window`() {
+        assertEquals(500L, COMPOSER_POST_SEND_IME_WINDOW_MS)
+        // lastSendTimeMs = 0 after a composer commit: the delta is uptime-scale.
+        assertFalse(
+            isPostSendImeResidue(
+                hasComposingRegion = true,
+                msSinceSend = 42_000L,
+                incomingEmpty = false,
+            ),
+        )
+        // A genuinely armed window still drops the commit, boundary included.
+        assertTrue(isPostSendImeResidue(hasComposingRegion = true, msSinceSend = 0L, incomingEmpty = false))
+        assertTrue(isPostSendImeResidue(hasComposingRegion = true, msSinceSend = 499L, incomingEmpty = false))
+        assertFalse(isPostSendImeResidue(hasComposingRegion = true, msSinceSend = 500L, incomingEmpty = false))
+        // ...and the two conditions that were never about timing are unchanged.
+        assertFalse(isPostSendImeResidue(hasComposingRegion = false, msSinceSend = 100L, incomingEmpty = false))
+        assertFalse(isPostSendImeResidue(hasComposingRegion = true, msSinceSend = 100L, incomingEmpty = true))
+    }
+
     // ── arm A: the box is still empty ────────────────────────────────────────
+
 
     @Test
     fun `the whole cleared body replayed into the emptied composer is a residue`() {
@@ -115,11 +146,79 @@ class ComposerClearResiduePolicyTest {
         assertEquals(ComposerResidueVerdict.DROP, verdict(incoming = "the message I just sent"))
     }
 
+    /**
+     * [W1118-COMPOSER C-A F-01] The rate test cannot stand alone for a SINGLE
+     * edit: `onValueChange` cannot tell five characters delivered by a suggestion
+     * chip at 350 ms from five characters replayed by the IME — both are "14
+     * chars/s". Coverage can: a chip hands over one word, a replay hands over the
+     * message. So a short fragment of a long body is no longer dropped by arm A;
+     * arm B wipes the box once the replay converges, which is what keeps the
+     * original symptom fixed.
+     */
     @Test
-    fun `a four character prefix is still a residue`() {
-        // The documented floor: four matching characters arriving with the clock
-        // still at zero is a fragment, not a keystroke.
-        assertEquals(ComposerResidueVerdict.DROP, verdict(incoming = "hell"))
+    fun `a four character prefix of a long body is no longer dropped`() {
+        // 4 of 42 characters is a word the user might tap, not the body.
+        assertEquals(ComposerResidueVerdict.NONE, verdict(incoming = "hell"))
+    }
+
+    /**
+     * [W1118-COMPOSER C-A F-01] The reported false positive, verbatim: send
+     * "hello world", tap the suggestion chip / glide the word "hello" 350 ms
+     * later. 5 characters in 350 ms is 14 chars/s — "superhuman" by the rate rule
+     * — so the shipped guard swallowed the word.
+     */
+    @Test
+    fun `a chip word covering under half the body is not a residue`() {
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = "hello", clearedText = "hello world", msSinceClear = 350L),
+        )
+    }
+
+    /** [W1118-COMPOSER C-A F-01] ...while the replay of that same body still is. */
+    @Test
+    fun `the whole body replayed at the same delay is still a residue`() {
+        assertEquals(
+            ComposerResidueVerdict.DROP,
+            verdict(incoming = "hello world", clearedText = "hello world", msSinceClear = 350L),
+        )
+    }
+
+    /**
+     * [W1118-COMPOSER C-A F-01] The documented cost of the coverage rule, pinned
+     * so nobody "fixes" it back into a swallowed chip tap: a 5-character body
+     * replayed whole inside the first few hundred milliseconds is STILL dropped.
+     * Here the edit covers 100 % of the body, so coverage cannot save it and the
+     * rate rule decides — which is the intended answer for a short body: the user
+     * who genuinely retypes it needs ~700 ms, and past that the rate test stands
+     * down on its own.
+     */
+    @Test
+    fun `a short body replayed whole is still dropped`() {
+        assertEquals(
+            ComposerResidueVerdict.DROP,
+            verdict(incoming = "hello", clearedText = "hello", msSinceClear = 350L),
+        )
+    }
+
+    /**
+     * [W1118-COMPOSER C-A F-01] Coverage on the boundary: exactly half the body
+     * counts, one character less does not. The denominator ignores the IME's own
+     * trailing punctuation, otherwise "hello worl。" would measure 12 characters
+     * and demand 6, instead of measuring 10 and accepting 5.
+     */
+    @Test
+    fun `the coverage floor is half the body ignoring IME trailing noise`() {
+        assertEquals(50, COMPOSER_SINGLE_EDIT_MIN_COVERAGE_PERCENT)
+        // The reported case: 5 of 11 characters is a word out of the message.
+        assertFalse(coversEnoughOfClearedBody("hello", "hello world"))         // 5 / 11
+        assertTrue(coversEnoughOfClearedBody("hello wor", "hello world"))      // 9 / 11
+        assertFalse(coversEnoughOfClearedBody("hell", "hello world"))          // 4 / 11
+        assertTrue(coversEnoughOfClearedBody("hello", "hello worl。"))         // 5 / 10, not 5 / 11
+        assertFalse(coversEnoughOfClearedBody("moment", "moment please"))      // 6 / 13
+        assertFalse(coversEnoughOfClearedBody("hello", body))                  // 5 / 42
+        assertFalse(coversEnoughOfClearedBody("", body))
+        assertFalse(coversEnoughOfClearedBody("hello", ""))
     }
 
     @Test
@@ -434,7 +533,13 @@ class ComposerClearResiduePolicyTest {
     @Test
     fun `the boolean facade agrees with the verdict`() {
         assertFalse(drop(incoming = "hel"))
-        assertTrue(drop(incoming = "hell"))
+        // [W1118-COMPOSER C-A F-01] "hell" is 4 characters of a 42-character
+        // body — a word, not the body, so arm A leaves it alone (see
+        // `a four character prefix of a long body is no longer dropped`).
+        assertFalse(drop(incoming = "hell"))
+        // The whole body is still dropped, on either arm.
+        assertTrue(drop(incoming = body))
+        assertTrue(drop(incoming = body, clearedText = body, msSinceClear = 350L))
         // [W1118-COMPOSER A1] The fragment-in-box case is allowed now; the
         // converged case is not.
         assertFalse(drop(incoming = "he", fieldText = "h", clearedText = "hello world"))

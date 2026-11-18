@@ -23,7 +23,11 @@ the remaining ones — strictly more information than `set -e` serial execution.
 Usage:
   python3 scripts/scan/scan_parallel.py [--root DIR] [--jobs N|auto]
                                         [--timings] [--block-timeout SEC]
+                                        [--allow-local]
   MINIS_SCAN_JOBS=1 forces serial (byte-comparable with the old scan.sh).
+
+**This suite does not run on a developer machine by default.** See
+[LOCAL_REFUSAL] for the reason and the two ways past it.
 """
 from __future__ import annotations
 
@@ -39,6 +43,57 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BLOCKS = os.path.join(HERE, "scan_blocks.sh")
+
+# ── [LOCAL_REFUSAL] the full gate suite is a CLOUD job ──────────────────────
+#
+# Twice now the same mistake has cost a working session: a full local run of
+# all 115 gates inside the PRoot sandbox. It is the wrong place for this work
+# on two independent counts, and neither is a matter of taste:
+#
+#   1. it is already being done. `.github/workflows/build-apk.yml` runs
+#      `sh scripts/scan/scan.sh` in the `scan-gate` job on every branch push
+#      that touches the tree. A local run is a SECOND execution of the same
+#      suite over the same commit — duplicated work, zero added information.
+#   2. the sandbox cannot afford it. Each gate is a python process walking the
+#      tree; under PRoot every syscall pays a translation tax, and the whole
+#      sandbox runs inside the app's own process group, so the cost is charged
+#      to the app and can get it recycled mid-run (measured 2026-09-15: 23
+#      silent kills during a 5-hour rebuild + full-tree grep + pushes; the
+#      same work re-shaped to be smaller survived 8 hours). Parallel workers
+#      additionally die on `OSError [Errno 38] Function not implemented` —
+#      fork/semaphore exhaustion, an environment failure that reads exactly
+#      like a red gate.
+#
+# So the refusal is MECHANICAL rather than a line in a prompt. A prompt rule
+# is what failed the previous two times: it is advisory, it is dropped by
+# compaction, and it competes with a very natural "I'll just verify locally".
+# A gate cannot be forgotten.
+#
+# What the local session SHOULD do instead, and what this refusal names:
+#   * one gate, directly — `python3 scripts/scan/<gate>.py --root .` — when a
+#     single judgement is genuinely in doubt (that is a 1-5 s answer);
+#   * the fixture for one gate — `python3 scripts/scan/test_scan.py <name>`;
+#   * everything else: push the branch and read the `scan-gate` job.
+#
+# `--allow-local` exists because this script also has to be runnable by hand
+# in a real checkout (a maintainer without CI, a future non-PRoot machine). It
+# is an explicit, visible opt-in — not an environment variable that some
+# wrapper script can set without anyone noticing.
+LOCAL_REFUSAL = """\
+refusing to run all {total} gates on this machine.
+
+This suite is a CLOUD job: `.github/workflows/build-apk.yml` already runs it
+in the `scan-gate` job on every branch push, and the sandbox here charges every
+gate's syscalls to the app's own process group (parallel workers also die on
+`Errno 38` / `Function not implemented`, which reads like a red gate).
+
+Run one judgement locally instead:
+  python3 scripts/scan/<gate>.py --root .        # a single gate, seconds
+  python3 scripts/scan/test_scan.py <case_name>  # a single fixture
+
+...and read the rest from the `scan-gate` job of the branch's CI run.
+Override (real checkout, no CI): add --allow-local
+"""
 
 # The denominator in the block headers is NOT matched literally.
 #
@@ -117,17 +172,51 @@ def run_block(root, num, title, snippet, block_timeout):
     return num, rc, out, time.time() - started
 
 
+def local_run_refused(allow_local, environ):
+    """[LOCAL_REFUSAL] Should this invocation be refused because it is local?
+
+    Pure on purpose. The rule has to be *checkable* without running the suite
+    it guards — a test that proved "a local run is refused" by actually
+    starting the run would be the same mistake the rule exists to prevent
+    (measured twice: two sessions lost to a full local suite inside PRoot).
+
+    `allow_local` is the explicit `--allow-local` opt-in; `environ` is passed
+    in rather than read from `os.environ` so the caller's environment cannot
+    leak into the answer. CI sets `GITHUB_ACTIONS` (and `CI`) in the runner,
+    which is what keeps the `scan-gate` job alive — a refusal that fired in CI
+    would take the whole gate job down, a worse failure than the one it
+    prevents.
+    """
+    if allow_local:
+        return False
+    return not (environ.get("GITHUB_ACTIONS") or environ.get("CI"))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(HERE)))
     ap.add_argument("--jobs", default=os.environ.get("MINIS_SCAN_JOBS", "auto"))
     ap.add_argument("--timings", action="store_true", help="print a slowest-first timing table")
     ap.add_argument("--block-timeout", type=int, default=900)
+    ap.add_argument("--allow-local", action="store_true",
+                    help="run the whole suite here anyway (see LOCAL_REFUSAL)")
     args = ap.parse_args(argv)
 
     root = os.path.abspath(args.root)
     if not os.path.isdir(os.path.join(root, "src", "android", "app", "src")):
         sys.exit(f"scan_parallel: {root} does not look like the repo root (fail closed)")
+
+    blocks = parse_blocks()
+    total = len(blocks)
+
+    # [LOCAL_REFUSAL] The suite is a cloud job. CI sets GITHUB_ACTIONS (and CI)
+    # in the runner environment, so the gate job passes without an argument;
+    # an interactive shell does not, and gets refused. The decision itself is
+    # `local_run_refused` (pure, pinned by test_scan) so it can be verified
+    # without starting a single gate.
+    if local_run_refused(args.allow_local, os.environ):
+        sys.stderr.write(LOCAL_REFUSAL.format(total=total))
+        return 3
 
     jobs = args.jobs
     if jobs == "auto":
@@ -141,7 +230,6 @@ def main(argv=None):
     # header lines. The count guard stays, but it compares the block numbers
     # against the count of blocks (parse_blocks already enforces 1..N
     # contiguity), so it can only fire if the file itself is malformed.
-    total = len(blocks)
     print(BANNER, flush=True)
     if jobs > 1:
         print(f"running {len(blocks)} checks with {jobs} workers", flush=True)

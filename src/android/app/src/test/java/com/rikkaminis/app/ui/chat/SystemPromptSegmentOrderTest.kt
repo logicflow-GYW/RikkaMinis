@@ -389,6 +389,83 @@ class SystemPromptSegmentOrderTest {
                 "text`) and the memory fragment (`standing instructions`)",
             auth.contains("SKILL.md") && auth.contains("approved"),
         )
+        // [fix/prompt-truth-1118c B F-01] The exemption must be PATH-anchored. A bare
+        // `SKILL.md` name also matches a file read in from an external repo or a
+        // mounted folder, which the user never installed as a skill — that file is
+        // ordinary data and must not authorise work.
+        assertTrue(
+            "the exemption is not path-anchored — a `SKILL.md` copied in from an " +
+                "external repo or a mount matches the bare name and would be followed " +
+                "as if the user had installed it",
+            auth.contains("/var/minis/skills/"),
+        )
+    }
+
+    /**
+     * [fix/prompt-truth-1118c B F-03] The prompt states the GLOBAL.md write path in
+     * the memory section ("propose it, apply it after the user approves") and used to
+     * call the same file "read-only, user-maintained via Settings" in the filesystem
+     * section — both in the same request. A model that reads the second sentence
+     * refuses the edit and tells the user to go change Settings, which kills the
+     * propose-then-apply feature.
+     */
+    @Test
+    fun theGlobalMemoryLineIsNotCalledReadOnly() {
+        val base = basePromptLiteral()
+        val at = base.indexOf("/var/minis/memory/GLOBAL.md")
+        assertTrue("the GLOBAL.md filesystem line is gone from the base prompt", at >= 0)
+        val lineStart = base.lastIndexOf('\n', at).let { if (it < 0) 0 else it + 1 }
+        val lineEnd = base.indexOf('\n', at).let { if (it < 0) base.length else it }
+        val line = base.substring(lineStart, lineEnd)
+        assertTrue(
+            "the GLOBAL.md line still calls itself read-only — `$line` — while the memory " +
+                "section in the SAME prompt requires the model to edit it once the user " +
+                "approves a proposal",
+            !line.contains("read-only"),
+        )
+        assertTrue(
+            "the GLOBAL.md line lost the approval requirement — `$line` — so the file " +
+                "reads as freely writable state instead of user-owned",
+            line.contains("approv", ignoreCase = true),
+        )
+    }
+
+    /**
+     * [fix/prompt-truth-1118c B F-03] …and the write path itself must stay. Deleting
+     * the contradiction by deleting the permission is the other way to make the two
+     * statements agree, and it would silently drop the feature the memory section
+     * was added for.
+     */
+    @Test
+    fun theGlobalMemoryWritePathIsStillStated() {
+        val sec = rawLiteralAfter("val memorySystemSection = if (memoryOn) {")
+        assertTrue(
+            "the memory section no longer says how to update GLOBAL.md (file_read then " +
+                "file_edit) — the propose-then-apply flow has no write path left",
+            sec.contains("To update it, use file_read first then file_edit"),
+        )
+    }
+
+    /**
+     * [fix/prompt-truth-1118c B F-02] The admission criteria live only in
+     * `memory-hygiene/SKILL.md`, which is loaded on demand. A pointer that says "run
+     * the idea past the criteria" without telling the model to READ the skill leaves
+     * an unread skill and a proposal that was never checked against the four tests.
+     */
+    @Test
+    fun theMemoryAdmissionCriteriaLineAsksForAnActualRead() {
+        val sec = rawLiteralAfter("val memorySystemSection = if (memoryOn) {")
+        val at = sec.indexOf("admission criteria")
+        assertTrue("the admission-criteria line is gone from the memory section", at >= 0)
+        val lineStart = sec.lastIndexOf('\n', at).let { if (it < 0) 0 else it + 1 }
+        val lineEnd = sec.indexOf('\n', at).let { if (it < 0) sec.length else it }
+        val line = sec.substring(lineStart, lineEnd)
+        assertTrue(
+            "the admission-criteria line does not ask the model to READ the skill — " +
+                "`$line` — the criteria are in an on-demand SKILL.md, so a bare " +
+                "reference leaves them unread in the very turn that needs them",
+            line.contains("read skill", ignoreCase = true),
+        )
     }
 
     /**
@@ -535,6 +612,29 @@ class SystemPromptSegmentOrderTest {
             "code after a raw string containing ${'$'}{…(\"\"\"…\"\"\")} must survive too",
             stripped.contains("fun after() = 2"),
         )
+    }
+
+    /**
+     * The first `"""…"""` literal that opens after [anchor], with comments stripped.
+     *
+     * Same fail-closed shape as [basePromptLiteral]: read through the comment stripper
+     * so a KDoc mention cannot stand in for the emitted text, and reject a suspiciously
+     * short slice so a stale anchor surfaces as a failure instead of an empty string.
+     */
+    private fun rawLiteralAfter(anchor: String): String {
+        val src = stripComments(readRepoFile(promptRel))
+        val start = src.indexOf(anchor)
+        assertTrue("`$anchor` not found in $promptRel", start >= 0)
+        val open = src.indexOf("\"\"\"", start)
+        assertTrue("no raw string literal opens after `$anchor`", open >= 0)
+        val end = rawStringEnd(src, open)
+        val body = src.substring(open + 3, end - 3)
+        assertTrue(
+            "the literal after `$anchor` is only ${body.length} chars — the anchor or " +
+                "the matcher drifted, so assertions on it would be vacuous",
+            body.length > 500,
+        )
+        return body
     }
 
     private fun readRepoFile(relative: String): String {
