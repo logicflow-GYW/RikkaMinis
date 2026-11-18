@@ -143,7 +143,7 @@ fun ProviderListScreen(
         providerBlocks(
             reorderableRows,
             pinned = { it.instance.pinned },
-            typeKey = { it.instance.providerType.name },
+            typeKey = { it.instance.providerType },
         )
     }
 
@@ -340,15 +340,14 @@ fun ProviderListScreen(
                 // reorderState): the screen buckets by providerType, so a
                 // cross-section move would snap straight back.
                 providerSections.forEach { section ->
-                    val sectionKey = section.typeKey ?: "favorites"
+                    // The block key IS the enum value — no name round-trip, so this
+                    // screen cannot disagree with the ordering about a provider type,
+                    // and a stale/unknown name can never throw here.
+                    val sectionKey = section.typeKey?.name ?: "favorites"
                     item("header_$sectionKey") {
                         SectionHeader(
-                            text = if (section.typeKey == null) {
-                                stringResource(R.string.provider_list_favorites)
-                            } else {
-                                com.rikkaminis.app.data.model.ProviderType
-                                    .valueOf(section.typeKey).displayName
-                            },
+                            text = section.typeKey?.displayName
+                                ?: stringResource(R.string.provider_list_favorites),
                         )
                     }
                     itemsIndexed(

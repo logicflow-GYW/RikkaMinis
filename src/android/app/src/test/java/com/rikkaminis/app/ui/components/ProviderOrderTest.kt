@@ -23,7 +23,7 @@ class ProviderOrderTest {
     private fun order(rows: List<Row>): List<String> =
         providerDisplayOrder(rows, pinned = { it.pinned }, typeKey = { it.type }).map { it.id }
 
-    private fun blocks(rows: List<Row>): List<ProviderBlock<Row>> =
+    private fun blocks(rows: List<Row>): List<ProviderBlock<Row, String>> =
         providerBlocks(rows, pinned = { it.pinned }, typeKey = { it.type })
 
     private val flat = listOf(

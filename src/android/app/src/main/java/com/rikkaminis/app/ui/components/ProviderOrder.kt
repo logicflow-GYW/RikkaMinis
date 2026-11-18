@@ -31,25 +31,25 @@ package com.rikkaminis.app.ui.components
  * kotlinx.serialization into the compile unit, while this decision is pure list algebra
  * and must be testable on the JVM.
  */
-internal data class ProviderBlock<T>(
-    /** `null` = the Favorites block; otherwise the provider type's key. */
-    val typeKey: String?,
+internal data class ProviderBlock<T, K>(
+    /** `null` = the Favorites block; otherwise the provider type itself. */
+    val typeKey: K?,
     val items: List<T>,
 )
 
-internal fun <T> providerBlocks(
+internal fun <T, K> providerBlocks(
     items: List<T>,
     pinned: (T) -> Boolean,
-    typeKey: (T) -> String,
-): List<ProviderBlock<T>> {
+    typeKey: (T) -> K,
+): List<ProviderBlock<T, K>> {
     val favorites = items.filter(pinned)
     val rest = items.filter { !pinned(it) }
-    val blocks = ArrayList<ProviderBlock<T>>(4)
+    val blocks = ArrayList<ProviderBlock<T, K>>(4)
     // An empty Favorites block would render as a header with nothing under it.
     if (favorites.isNotEmpty()) blocks.add(ProviderBlock(typeKey = null, items = favorites))
     // LinkedHashSet, not sorted(): the type order is "the order the user's list first
     // mentions it", which is what the settings screen has always shown.
-    val typeOrder = LinkedHashSet<String>()
+    val typeOrder = LinkedHashSet<K>()
     rest.forEach { typeOrder.add(typeKey(it)) }
     typeOrder.forEach { key ->
         blocks.add(ProviderBlock(typeKey = key, items = rest.filter { typeKey(it) == key }))
@@ -57,8 +57,8 @@ internal fun <T> providerBlocks(
     return blocks
 }
 
-internal fun <T> providerDisplayOrder(
+internal fun <T, K> providerDisplayOrder(
     items: List<T>,
     pinned: (T) -> Boolean,
-    typeKey: (T) -> String,
+    typeKey: (T) -> K,
 ): List<T> = providerBlocks(items, pinned, typeKey).flatMap { it.items }
