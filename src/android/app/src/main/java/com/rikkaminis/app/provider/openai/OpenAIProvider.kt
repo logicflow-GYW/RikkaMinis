@@ -2845,13 +2845,14 @@ class OpenAIProvider constructor(
             // have never heard a complaint from keeps today's behaviour exactly.
             //
             // [fix/effort-key-1119] The ceiling is read through the endpoint scope, and
-            // then NARROWED by the model's own declaration: a `THINKING_LEVEL_*` complaint
-            // only says "everything weaker is still legal", so on its own it can put a
-            // tier back on the wire that this model never declared. When the catalog
-            // declares a set, the learnable set is the subset of it.
-            declaredEffortValues = ThinkingEffortLadder.learnedWithinDeclared(
-                EffortTierLearner.learned(scope, model.id),
-                model.reasoningEffortValues,
+            // a CEILING-shaped answer (a `THINKING_LEVEL_*` rejection, i.e. a ladder
+            // PREFIX) is NARROWED by the model's own declaration — on its own it can
+            // put a tier back on the wire that this model never declared. An ENUM-shaped
+            // answer (the gateway spelling out its legal set) is one-hand truth and is
+            // NOT narrowed: it being wider than the catalog is the whole reason the
+            // learner exists.
+            declaredEffortValues = EffortTierLearner.learnedWithin(
+                scope, model.id, model.reasoningEffortValues,
             ),
             declaresNoEffortTiers = model.declaresNoEffortTiers == true,
             level = level,
@@ -3243,9 +3244,12 @@ class OpenAIProvider constructor(
                 // [fix/effort-key-1119] Same scope the record sites write with: the
                 // normalized endpoint, falling back to the same bare host they fall
                 // back to — a read that asked for a different spelling than the write
-                // stored would silently throw the learning away.
-                learnedEffortValues = EffortTierLearner.learned(
+                // stored would silently throw the learning away. `learnedWithin` applies
+                // the F-02 narrowing (CEILING only) inside, so both wire paths share one
+                // rule instead of each deciding what to do with the two sets.
+                learnedEffortValues = EffortTierLearner.learnedWithin(
                     effortScope ?: basePath.toHttpUrlOrNull()?.host ?: "", model.id,
+                    model.reasoningEffortValues,
                 ),
                 declaredEffortValues = model.reasoningEffortValues,
             )
@@ -3960,11 +3964,14 @@ internal fun chatCompletionsDeltaThinkingBlocks(delta: JSONObject?): List<String
  * the two paths drifted apart in the first place.
  *
  * `learned` outranks `declared`: a measured enum is one-hand truth, and with
- * nothing learned the expression is exactly `declared`. [fix/effort-key-1119] The
- * two are not simply swapped for each other any more — a ceiling learned from a
- * `THINKING_LEVEL_*` rejection is a ladder PREFIX and can name a tier the model never
- * declared, so the learnable set is the intersection of the two (see
- * [ThinkingEffortLadder.learnedWithinDeclared]); the declaration can only narrow it.
+ * nothing learned the expression is exactly `declared`.
+ *
+ * [fix/effort-key-1119] F-02's narrowing does NOT happen here: it depends on WHICH
+ * SHAPE was learned (a `THINKING_LEVEL_*` ceiling must be narrowed by the model's
+ * declaration; an enumerated `one of: …` set must not be), and only the caller holds
+ * that bit. `EffortTierLearner.learnedWithin` applies it, so the value arriving here
+ * is already the set that may go on the wire — narrowing it again would either be a
+ * no-op or, for an enumerated set, silently throw away the one-hand truth.
  *
  * Pure + top-level for direct JVM testing (see ResponsesEffortClampTest).
  */
@@ -3976,10 +3983,7 @@ internal fun clampResponsesEffort(
 ): String? {
     if (effort == null) return null
     val familyClamped = ThinkingEffortLadder.clampEffortForModel(effort, modelId.lowercase())
-    return ThinkingEffortLadder.clampEffort(
-        familyClamped,
-        ThinkingEffortLadder.learnedWithinDeclared(learnedEffortValues, declaredEffortValues),
-    )
+    return ThinkingEffortLadder.clampEffort(familyClamped, learnedEffortValues ?: declaredEffortValues)
 }
 
 /**

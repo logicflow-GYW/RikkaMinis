@@ -252,6 +252,102 @@ class EffortScopeDeclaredSetTest {
         )
     }
 
+    // ── F-02: learnedWithin — only a CEILING is narrowed ───────────────────────
+
+    private fun learnedFile(entries: String): File {
+        file.parentFile?.mkdirs()
+        file.writeText("""{"entries":{$entries}}""")
+        EffortTierLearner.reset()
+        EffortTierLearner.initFile(file)
+        return file
+    }
+
+    @Test
+    fun `a ceiling-shaped answer is narrowed by the declaration`() {
+        // Written by a THINKING_LEVEL_XHIGH rejection: the ladder prefix below xhigh.
+        EffortTierLearner.record("https://gw.example/v1", """{"model":"m1"}""", thinkingLevel400)
+        assertEquals(
+            listOf("low", "high"),
+            EffortTierLearner.learnedWithin("https://gw.example/v1", "m1", listOf("low", "high")),
+        )
+        // Without a declaration the ceiling is used as-is.
+        assertEquals(
+            ceiling,
+            EffortTierLearner.learnedWithin("https://gw.example/v1", "m1", null),
+        )
+    }
+
+    @Test
+    fun `an enumerated answer is NOT narrowed - it is wider than the catalog on purpose`() {
+        // The reason this class exists: sensenova under-declares. The gateway said
+        // `one of: low, high, xhigh`; the catalog only knows `low`. Narrowing would
+        // throw away the one-hand truth and re-400 on the very tier it taught us.
+        EffortTierLearner.record(
+            "https://gw.example/v1", """{"model":"m2"}""",
+            """{"error":{"message":"field ReasoningEffort invalid, should be one of: low, high, xhigh"}}""",
+        )
+        assertEquals(
+            listOf("low", "high", "xhigh"),
+            EffortTierLearner.learnedWithin("https://gw.example/v1", "m2", listOf("low")),
+        )
+    }
+
+    @Test
+    fun `nothing learned returns the declaration untouched`() {
+        assertEquals(
+            listOf("low", "high"),
+            EffortTierLearner.learnedWithin("https://gw.example/v1", "never-seen", listOf("low", "high")),
+        )
+        assertNull(EffortTierLearner.learnedWithin("https://gw.example/v1", "never-seen", null))
+    }
+
+    @Test
+    fun `an entry written before the shape field existed is treated as an enum`() {
+        // Upgrade path: the old file has no `shape`. Treating it as a CEILING would
+        // start narrowing sets that were never narrowed, silently dropping tiers on
+        // every device that upgrades. ENUM = "behaviour identical to pre-fix".
+        val model = "legacy-shape"
+        learnedFile(
+            """"https://gw.example/v1/$model":{"tiers":["low","high","xhigh"],"at":${System.currentTimeMillis()}}""",
+        )
+        assertEquals(
+            listOf("low", "high", "xhigh"),
+            EffortTierLearner.learnedWithin("https://gw.example/v1", model, listOf("low")),
+        )
+    }
+
+    @Test
+    fun `a later enum replaces a learned ceiling and stops being narrowed`() {
+        // The fuller truth wins: once the gateway spells out the set, the narrowing
+        // (which exists only because a ceiling is a guess) must stop applying.
+        val scope = "https://gw.example/v1"
+        EffortTierLearner.record(scope, """{"model":"m3"}""", thinkingLevel400)
+        assertEquals(
+            listOf("low", "high"),
+            EffortTierLearner.learnedWithin(scope, "m3", listOf("low", "high")),
+        )
+        EffortTierLearner.record(
+            scope, """{"model":"m3"}""",
+            """{"error":"field ReasoningEffort invalid, should be one of: low, medium, high, xhigh"}""",
+        )
+        assertEquals(
+            listOf("low", "medium", "high", "xhigh"),
+            EffortTierLearner.learnedWithin(scope, "m3", listOf("low", "high")),
+        )
+    }
+
+    @Test
+    fun `the shape survives a restart`() {
+        val scope = "https://gw.example/v1"
+        EffortTierLearner.record(scope, """{"model":"m4"}""", thinkingLevel400)
+        EffortTierLearner.reset()
+        EffortTierLearner.initFile(file)
+        assertEquals(
+            listOf("low", "high"),
+            EffortTierLearner.learnedWithin(scope, "m4", listOf("low", "high")),
+        )
+    }
+
     // ── wiring: both wire paths key on the scope and narrow by the declaration ──
     //
     // The pure functions above can be correct while the call sites still pass a bare
@@ -324,25 +420,40 @@ class EffortScopeDeclaredSetTest {
     }
 
     @Test
-    fun `both wire paths feed the learner's ceiling through the declaration`() {
+    fun `both wire paths read the learner through the shape-aware narrowing`() {
         val openai = code(OPENAI)
-        // ctx's declaredEffortValues (Chat Completions) and clampResponsesEffort's
-        // learned set (Responses) — one narrowing call per wire path, no third copy.
+        // Chat Completions (ctx.declaredEffortValues) and Responses
+        // (learnedEffortValues) both ask the learner for a set that is already
+        // narrowed when — and only when — the learned answer was a CEILING.
         assertEquals(
-            "expected exactly the two wire paths to narrow the learned set",
+            "expected exactly the two wire paths to read the learner",
             2,
-            Regex("learnedWithinDeclared\\(").findAll(openai).count(),
+            Regex("EffortTierLearner\\.learnedWithin\\(").findAll(openai).count(),
+        )
+        assertFalse(
+            "the Chat Completions path still feeds the raw learned set to the resolver",
+            "declaredEffortValues = EffortTierLearner.learned(" in openai,
+        )
+        assertFalse(
+            "the Responses path still feeds the raw learned set to the clamp",
+            "learnedEffortValues = EffortTierLearner.learned(" in openai,
+        )
+        // Both must hand over the model's declaration: without it the narrowing has
+        // nothing to narrow against.
+        assertTrue(
+            "the Chat Completions read must pass the declaration",
+            "scope, model.id, model.reasoningEffortValues," in openai,
         )
         assertTrue(
-            "the Responses clamp must not swap the learned set in for the declaration",
-            "learnedWithinDeclared(learnedEffortValues, declaredEffortValues)" in openai,
+            "the Responses read must pass the declaration",
+            "model.reasoningEffortValues,\n                )," in openai,
         )
     }
 
     @Test
     fun `the learner is read through the endpoint scope on every call site`() {
         val openai = code(OPENAI)
-        // The two record sites (HTTP 400 and the inline SSE error) and the reads.
+        // The two record sites (HTTP 400 and the inline SSE error).
         assertEquals(
             "both record sites must key on the endpoint scope, not on request.url.host",
             2,
@@ -355,6 +466,10 @@ class EffortScopeDeclaredSetTest {
         assertTrue(
             "the Responses path must read the learner by scope",
             "effortScope ?: basePath.toHttpUrlOrNull()?.host ?: \"\"" in openai,
+        )
+        assertTrue(
+            "the Chat Completions path must read the learner by scope",
+            "EffortTierLearner.learnedWithin(\n                scope, model.id," in openai,
         )
     }
 

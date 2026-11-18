@@ -312,6 +312,18 @@ object EffortTierLearner {
     }
 
     /**
+     * [fix/effort-key-1119] 一条学习结果是**哪种形状**，决定它能不能被 catalog 收窄。
+     *
+     *  - [ENUM] 网关把合法枚举说全了（`should be one of: low, high`）。这是一手真相，
+     *    而且**比 catalog 更宽是常态**——sensenova 一行 7 个模型全部少声明档位，
+     *    这正是这个类存在的理由。拿 catalog 去跟它取交集，等于把学到的东西又丢掉。
+     *  - [CEILING] 网关只点名被拒的那一档（`THINKING_LEVEL_XHIGH`）。它说的是一条
+     *    **上限**，落到盘上却是整条阶梯前缀，其中可能包含模型根本没声明的档位
+     *    （[fix/effort-key-1119] F-02）——所以它必须被 catalog 收窄。
+     */
+    enum class Shape { ENUM, CEILING }
+
+    /**
      * [fix/effort-key-1119] 把一个 endpoint 字符串规范化成学习结果的 key 前缀：
      * `scheme://host[:port]/path-prefix`（scheme 与 host 小写、query/fragment 丢弃、
      * 路径尾部斜杠裁掉）。
@@ -364,10 +376,13 @@ object EffortTierLearner {
     fun record(scope: String, requestBody: String, errorBody: String): List<String>? {
         // 两种形状：说全了枚举的（[enumFromText]），和只点名被拒档位的
         // （[ceilingFromText]，Gemini 系 `THINKING_LEVEL_*`）。前者信息更全，先问它。
-        val tiers = enumFromText(errorBody) ?: ceilingFromText(errorBody) ?: return null
+        // 形状本身也落盘（[Shape]）：只有 CEILING 需要被 catalog 收窄，ENUM 不许。
+        val enumerated = enumFromText(errorBody)
+        val shape = if (enumerated != null) Shape.ENUM else Shape.CEILING
+        val tiers = enumerated ?: ceilingFromText(errorBody) ?: return null
         val model = modelIdFrom(requestBody) ?: return null
         if (scope.isBlank() || model.isBlank()) return null
-        write(key(scope, model), tiers)
+        write(key(scope, model), tiers, shape)
         return tiers
     }
 
@@ -375,18 +390,56 @@ object EffortTierLearner {
      * 当前有效的 learned 集合；没学到、已过期或尚未 init → null。
      * [scope] 的口径必须与 [record] 一致（见 [scopeOf]），否则读不到自己写过的条目。
      */
-    fun learned(scope: String, modelId: String): List<String>? {
+    fun learned(scope: String, modelId: String): List<String>? =
+        entryFor(scope, modelId)?.let { tiersOf(it, System.currentTimeMillis()) }
+
+    /**
+     * [fix/effort-key-1119] F-02 的落点：**只有 CEILING 形状**的学习结果才被 catalog
+     * 收窄，ENUM 形状原样放行。
+     *
+     * 为什么必须分开：一条 CEILING（`THINKING_LEVEL_XHIGH` 被拒）落到盘上是整条阶梯
+     * 前缀，里面可能有这个模型根本没声明的档位（发出去就是同一个 400）。而一条 ENUM
+     * （`should be one of: low, high`）是网关把合法集合说全了——它**比 catalog 更宽是
+     * 常态**，拿 catalog 去跟它取交集等于把学到的一手真相又扔掉，那是这个类存在的
+     * 全部理由（sensenova 一行 7 个模型全部少声明档位）。
+     *
+     * 三个返回口径：
+     *  - 没学到（或过期）→ [declared] 原样返回，与修前 `learned ?: declared` 逐字节相同；
+     *  - 学到且 ENUM → 学到的集合（一手真相优先，catalog 无权收窄）；
+     *  - 学到且 CEILING → [ThinkingEffortLadder.learnedWithinDeclared] 的收窄结果。
+     *
+     * 升级前的条目没有 `shape` 字段：按 ENUM 处理（不放宽也不收窄，行为等于修前），
+     * 下一次 400 会用带 shape 的新记录覆盖它——自愈，不需要迁移。
+     */
+    fun learnedWithin(scope: String, modelId: String, declared: List<String>?): List<String>? {
+        val entry = entryFor(scope, modelId) ?: return declared
+        val tiers = tiersOf(entry, System.currentTimeMillis()) ?: return declared
+        val shape = shapeOf(entry)
+        return if (shape == Shape.CEILING) {
+            ThinkingEffortLadder.learnedWithinDeclared(tiers, declared)
+        } else {
+            tiers
+        }
+    }
+
+    /** [record] 写下的形状；没有该字段（升级前的条目）→ [Shape.ENUM]。 */
+    private fun shapeOf(entry: JSONObject): Shape =
+        if (entry.optString("shape").equals("ceiling", ignoreCase = true)) Shape.CEILING else Shape.ENUM
+
+    private fun entryFor(scope: String, modelId: String): JSONObject? {
         if (scope.isBlank() || modelId.isBlank()) return null
-        val now = System.currentTimeMillis()
         val file = target ?: return null
         val stamp = stampOf(file)
         val snap = snapshot
-        if (snap != null && snap.first == stamp) {
-            return tiersOf(snap.second[key(scope, modelId)], now)
+        val loaded = if (snap != null && snap.first == stamp) {
+            snap.second
+        } else {
+            // 缓存未命中：重新解析并记下指纹（另一进程写入后本进程立刻看到，见 stampOf）。
+            val fresh = load(file) ?: return null
+            snapshot = stamp to fresh
+            fresh
         }
-        val loaded = load(file) ?: return null
-        snapshot = stamp to loaded
-        return tiersOf(loaded[key(scope, modelId)], now)
+        return loaded[key(scope, modelId)]
     }
 
     /** 已学习条目的 key 集合（诊断用；含过期的）。 */
@@ -434,12 +487,13 @@ object EffortTierLearner {
      * host 里的手工重试也会），rename 保证读到的永远是完整文件。
      */
     @Synchronized
-    private fun write(k: String, tiers: List<String>) {
+    private fun write(k: String, tiers: List<String>, shape: Shape) {
         val f = target ?: return
         val now = System.currentTimeMillis()
         val existing = load(f) ?: HashMap()
         val entry = JSONObject()
             .put("tiers", JSONArray(tiers))
+            .put("shape", if (shape == Shape.CEILING) "ceiling" else "enum")
             .put("at", now)
         val entries = JSONObject()
         for ((oldKey, oldEntry) in existing) {
