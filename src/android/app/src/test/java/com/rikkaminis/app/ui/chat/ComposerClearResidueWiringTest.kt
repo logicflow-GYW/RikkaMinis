@@ -1,5 +1,6 @@
 package com.rikkaminis.app.ui.chat
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -22,19 +23,101 @@ import org.junit.Test
  * Read from the repository (walk-up, so both Gradle's module `user.dir` and the
  * repo root work) rather than from a copy: the point is to fail when someone
  * moves the call away from the funnel.
+ *
+ * [W1119-2D F-07] Every anchor and body check reads the COMMENT-MASKED copy of
+ * the file ([code]), and each arm additionally pins that its subject is a direct
+ * statement of the block it names. The class-level reason: a raw `indexOf`/
+ * `contains` over the file is also satisfied by a comment above the code — a
+ * KDoc that quotes the call, or a commented-out copy of it — so the previous
+ * version could be turned green by deleting the call and leaving a line of prose
+ * in its place. Comments are the third way an arm measures nothing.
  */
 class ComposerClearResidueWiringTest {
 
     private val source: String get() = readRepoFile(CHAT_INPUT_AREA)
 
+    /**
+     * [W1119-2D F-07] `source` with comments blanked out, SAME LENGTH, so every
+     * offset in `code` is also an offset in `source` and vice versa.
+     *
+     * Every anchor in this class used to be a raw `source.indexOf(...)`, and every
+     * body check a raw `contains`, so a comment containing the anchor text — or a
+     * commented-out copy of the call the arm is looking for — satisfied the arm
+     * without the code being there at all. All anchors and body checks read this
+     * copy instead; [maskComments] is pinned by its own arm so that the guard the
+     * other arms depend on is itself tested (the M12 lesson: a gate that can be
+     * satisfied without its subject is not a gate).
+     */
+    private val code: String get() = maskComments(source)
+
+    /** Blank out line and block comments, keeping every offset and newline. */
+    private fun maskComments(text: String): String {
+        val out = StringBuilder(text.length)
+        var i = 0
+        while (i < text.length) {
+            when {
+                text.startsWith("\"\"\"", i) -> {
+                    val end = skipRawString(text, i)
+                    out.append(text, i, end)
+                    i = end
+                }
+                text[i] == '"' -> {
+                    val end = skipStringLiteral(text, i)
+                    out.append(text, i, end)
+                    i = end
+                }
+                text.startsWith("//", i) -> {
+                    val nl = text.indexOf('\n', i)
+                    val end = if (nl < 0) text.length else nl
+                    while (i < end) {
+                        out.append(' ')
+                        i++
+                    }
+                }
+                text.startsWith("/*", i) -> {
+                    val close = text.indexOf("*/", i)
+                    val end = if (close < 0) text.length else close + 2
+                    while (i < end) {
+                        out.append(if (text[i] == '\n') '\n' else ' ')
+                        i++
+                    }
+                }
+                else -> {
+                    out.append(text[i])
+                    i++
+                }
+            }
+        }
+        return out.toString()
+    }
+
+    private fun skipRawString(text: String, open: Int): Int {
+        val end = text.indexOf("\"\"\"", open + 3)
+        return if (end < 0) text.length else end + 3
+    }
+
+    private fun skipStringLiteral(text: String, open: Int): Int {
+        var j = open + 1
+        while (j < text.length) {
+            if (text[j] == '\\') {
+                j += 2
+                continue
+            }
+            if (text[j] == '"') return j + 1
+            if (text.startsWith("\"\"\"", j)) return skipRawString(text, j)
+            j++
+        }
+        return text.length
+    }
+
     @Test
     fun `the clear funnel records the cleared body before emptying the field`() {
-        val stampDecl = source.indexOf("val stampClearedBody: () -> Unit = {")
-        val funnelStart = source.indexOf("val clearComposerInput: () -> Unit = {")
-        val stampBody = blockAt(source, stampDecl)
+        val stampDecl = code.indexOf("val stampClearedBody: () -> Unit = {")
+        val funnelStart = code.indexOf("val clearComposerInput: () -> Unit = {")
+        val stampBody = blockAt(code, stampDecl)
         val readBody = stampBody.indexOf("val clearedBody = inputFieldValue.text")
         val record = stampBody.indexOf("lastClearedText = clearedBody")
-        val funnelBody = blockAt(source, funnelStart)
+        val funnelBody = blockAt(code, funnelStart)
         val callStamp = funnelBody.indexOf("stampClearedBody()")
         val fieldReset = funnelBody.indexOf(
             "inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(\"\")",
@@ -53,9 +136,9 @@ class ComposerClearResidueWiringTest {
 
     @Test
     fun `on value change consults the replay guard with the recorded stamp`() {
-        val call = source.indexOf("composerResidueVerdict(")
+        val call = code.indexOf("composerResidueVerdict(")
         assertTrue("the composer never consults the replay guard", call >= 0)
-        val args = source.substring(call, minOf(source.length, call + 700))
+        val args = code.substring(call, minOf(code.length, call + 700))
         assertTrue(
             "the guard is called without the recorded stamp (a constant would never fire)",
             args.contains("clearedText = lastClearedText"),
@@ -84,11 +167,11 @@ class ComposerClearResidueWiringTest {
      */
     @Test
     fun `an accumulated replay is wiped through the clear funnel`() {
-        val verdictCall = source.indexOf("composerResidueVerdict(")
-        val branch = source.indexOf("if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR)")
+        val verdictCall = code.indexOf("composerResidueVerdict(")
+        val branch = code.indexOf("if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR)")
         assertTrue("the verdict enum is never branched on", branch >= 0)
         assertTrue("the DROP_AND_CLEAR branch sits before the guard is even reached", branch > verdictCall)
-        val branchBody = blockAt(source, branch)
+        val branchBody = blockAt(code, branch)
         assertTrue(
             "an accumulated replay must be cleared through the funnel, not just skipped " +
                 "(branch body: ${branchBody.replace("\n", " ").take(200)})",
@@ -104,16 +187,16 @@ class ComposerClearResidueWiringTest {
      */
     @Test
     fun `the replay wipe tells the funnel why it is clearing`() {
-        val branch = source.indexOf("if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR)")
+        val branch = code.indexOf("if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR)")
         assertTrue("the DROP_AND_CLEAR branch is gone", branch >= 0)
-        val branchBody = blockAt(source, branch)
+        val branchBody = blockAt(code, branch)
         val mark = branchBody.indexOf("guardUnwindClear = true")
         val clear = branchBody.indexOf("clearComposerInput()")
         assertTrue("the guard never marks its clear as a replay unwind", mark >= 0)
         assertTrue("the guard must mark BEFORE it clears", mark < clear)
 
-        val stampDecl = source.indexOf("val stampClearedBody: () -> Unit = {")
-        val stampBody = blockAt(source, stampDecl)
+        val stampDecl = code.indexOf("val stampClearedBody: () -> Unit = {")
+        val stampBody = blockAt(code, stampDecl)
         assertTrue(
             "the stamp must consume the flag and hand it to the decision",
             stampBody.contains("guardClear = guardClear"),
@@ -133,9 +216,9 @@ class ComposerClearResidueWiringTest {
      */
     @Test
     fun `the clear funnel does not re-stamp an un-winding replay`() {
-        val stampDecl = source.indexOf("val stampClearedBody: () -> Unit = {")
+        val stampDecl = code.indexOf("val stampClearedBody: () -> Unit = {")
         assertTrue("the stamp lambda is gone", stampDecl >= 0)
-        val body = blockAt(source, stampDecl)
+        val body = blockAt(code, stampDecl)
         val ifAt = body.indexOf("if (shouldRestampClearedBody(")
         assertTrue(
             "the stamp decision must BE the if condition, not a discarded call",
@@ -171,10 +254,10 @@ class ComposerClearResidueWiringTest {
         )
         // One funnel only: a second clear definition is what the two shape gates
         // (B3RenderInputShapeTest, chat_ui_interaction_check) exist to prevent.
-        // Count CALLS, not the string: the funnel's own KDoc quotes the write.
-        val clearWrites = source.lines().count { line ->
-            val t = line.trim()
-            !t.startsWith("//") && !t.startsWith("*") && t.contains("viewModel.setInputText(\"\")")
+        // Comments are already blanked out by `code`, so a KDoc line that quotes
+        // the write no longer counts as one — the count is of real statements.
+        val clearWrites = code.lines().count { line ->
+            line.contains("viewModel.setInputText(\"\")")
         }
         assertTrue(
             "there must be exactly ONE composer-clear funnel, found $clearWrites",
@@ -198,29 +281,29 @@ class ComposerClearResidueWiringTest {
      */
     @Test
     fun `the stamp survives an edit that is still a piece of the cleared body`() {
-        val onValueChange = source.indexOf("onValueChange = { tfv ->")
+        val onValueChange = code.indexOf("onValueChange = { tfv ->")
         assertTrue("the composer's onValueChange is gone", onValueChange >= 0)
-        val guard = source.indexOf("shouldKeepClearedStamp(", onValueChange)
+        val guard = code.indexOf("shouldKeepClearedStamp(", onValueChange)
         assertTrue(
             "the stamp is dropped without asking whether the edit is still a piece of " +
                 "the cleared body, so the first replay fragment disarms the guard",
             guard > onValueChange,
         )
-        val args = source.substring(guard, minOf(source.length, guard + 200))
+        val args = code.substring(guard, minOf(code.length, guard + 200))
         assertTrue(
             "the decision must be given the arriving text and the recorded stamp",
             args.contains("tfv.text") && args.contains("lastClearedText"),
         )
-        val drop = source.indexOf("lastClearedText = null", guard)
+        val drop = code.indexOf("lastClearedText = null", guard)
         assertTrue("the stamp is never dropped at all", drop > guard)
     }
 
     @Test
     fun `the guard runs before the field is written and before the paste fold`() {
-        val onValueChange = source.indexOf("onValueChange = { tfv ->")
-        val call = source.indexOf("composerResidueVerdict(", onValueChange)
-        val write = source.indexOf("inputFieldValue = tfv", onValueChange)
-        val fold = source.indexOf("foldLongPasteIfNeeded(", onValueChange)
+        val onValueChange = code.indexOf("onValueChange = { tfv ->")
+        val call = code.indexOf("composerResidueVerdict(", onValueChange)
+        val write = code.indexOf("inputFieldValue = tfv", onValueChange)
+        val fold = code.indexOf("foldLongPasteIfNeeded(", onValueChange)
         assertTrue("the guard call moved out of onValueChange", call > onValueChange)
         assertTrue("the field write anchor moved", write > onValueChange)
         assertTrue("the paste fold anchor moved", fold > onValueChange)
@@ -236,9 +319,9 @@ class ComposerClearResidueWiringTest {
      */
     @Test
     fun `a composer commit clears the replay fingerprint`() {
-        val decl = source.indexOf("val commitComposerBody: (String, Int?) -> Unit = {")
+        val decl = code.indexOf("val commitComposerBody: (String, Int?) -> Unit = {")
         assertTrue("the commit funnel is gone", decl >= 0)
-        val body = blockAt(source, decl)
+        val body = blockAt(code, decl)
         val drop = body.indexOf("lastClearedText = null")
         val write = body.indexOf("viewModel.setInputText(text)")
         assertTrue(
@@ -263,9 +346,9 @@ class ComposerClearResidueWiringTest {
      */
     @Test
     fun `a composer commit disarms the post-send IME window`() {
-        val decl = source.indexOf("val commitComposerBody: (String, Int?) -> Unit = {")
+        val decl = code.indexOf("val commitComposerBody: (String, Int?) -> Unit = {")
         assertTrue("the commit funnel is gone", decl >= 0)
-        val body = blockAt(source, decl)
+        val body = blockAt(code, decl)
         val reset = body.indexOf("lastSendTimeMs = 0L")
         val write = body.indexOf("viewModel.setInputText(text)")
         assertTrue(
@@ -276,14 +359,91 @@ class ComposerClearResidueWiringTest {
         )
         assertTrue("the window must be disarmed before the text is written", reset < write)
 
-        val guard = source.indexOf("isPostSendImeResidue(", source.indexOf("onValueChange = { tfv ->"))
+        val guard = code.indexOf("isPostSendImeResidue(", code.indexOf("onValueChange = { tfv ->"))
         assertTrue("the post-send window must go through the pure predicate", guard >= 0)
-        val args = source.substring(guard, minOf(source.length, guard + 400))
+        val args = code.substring(guard, minOf(code.length, guard + 400))
         assertTrue(
             "the predicate must be given the live composing region and the armed send time",
             args.contains("hasComposingRegion = tfv.composition != null") &&
                 args.contains("msSinceSend = now - lastSendTimeMs"),
         )
+    }
+
+    /**
+     * [W1119-2D F-07] The guard wipe must leave focus and the keyboard alone.
+     *
+     * `focusManager.clearFocus()` is what makes the IME settle its composing
+     * region (`finishComposingText`) — that is the mechanism that PRODUCES the
+     * replay this branch is wiping, so asking for focus here re-arms the very thing
+     * it just cleared. It would also dismiss the keyboard on the clear paths that
+     * deliberately keep the box focused for the user's next message (a slash
+     * command or a clear-chat clear). The stamp is kept on purpose too: it is what
+     * recognises the replay fragments that follow.
+     */
+    @Test
+    fun `the guard wipe changes neither focus nor the keyboard`() {
+        val branch = code.indexOf("if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR)")
+        assertTrue("the DROP_AND_CLEAR branch is gone", branch >= 0)
+        val branchBody = blockAt(code, branch)
+        assertFalse(
+            "the guard wipe drops focus, which makes the IME finish its composing " +
+                "region and replay the body it just cleared (branch body: " +
+                "${branchBody.replace("\n", " ").take(200)})",
+            branchBody.contains("clearFocus"),
+        )
+        assertFalse(
+            "the guard wipe hides the keyboard on a clear the user may still be typing in",
+            branchBody.contains("keyboardController"),
+        )
+    }
+
+    /**
+     * [W1119-2D F-07] Every anchor and body check in this class reads the comment-
+     * masked view, and that view is itself pinned here — otherwise a change to
+     * [maskComments] could silently turn every other arm into a scan of nothing.
+     */
+    @Test
+    fun `the comment masker blanks comment text and keeps every offset`() {
+        val sample = "val a = 1 // note: val b = 2\n/* block: val c = 3 */ val d = \"// not a comment\""
+        val masked = maskComments(sample)
+        assertEquals("the masker must be length preserving", sample.length, masked.length)
+        assertFalse("a line comment survived the masking", masked.contains("note:"))
+        assertFalse("a block comment survived the masking", masked.contains("block:"))
+        assertTrue(
+            "a slash inside a string literal was treated as a comment",
+            masked.contains("\"// not a comment\""),
+        )
+        assertEquals("the anchor offsets moved", sample.indexOf("val d"), masked.indexOf("val d"))
+        assertTrue(
+            "the masker swallowed real code: a string literal must be copied verbatim " +
+                "(masked: ${masked.replace("\n", "\\n")})",
+            masked.contains("val a = 1") && masked.contains("val d"),
+        )
+    }
+
+    /**
+     * [W1119-2D F-07] The arm that the report proved blind: `clearComposerInput()`
+     * wrapped in `if (false) { … }` (or commented out, which the masked view now
+     * rules out) satisfies `contains` without the branch doing anything. A direct
+     * statement of the branch body is at brace depth ONE; anything nested deeper is
+     * conditional or dead.
+     */
+    @Test
+    fun `the replay wipe is a direct statement of the branch body`() {
+        val branch = code.indexOf("if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR)")
+        assertTrue("the DROP_AND_CLEAR branch is gone", branch >= 0)
+        val branchBody = blockAt(code, branch)
+        val clear = branchBody.indexOf("clearComposerInput()")
+        val mark = branchBody.indexOf("guardUnwindClear = true")
+        assertTrue("the wipe call is gone", clear >= 0)
+        assertTrue("the mark is gone", mark >= 0)
+        assertEquals(
+            "the wipe is nested inside another block, so the branch is not what clears " +
+                "(branch body: ${branchBody.replace("\n", " ").take(200)})",
+            1,
+            depthAt(branchBody, clear),
+        )
+        assertEquals("the mark is nested, so a dead branch would still satisfy the arm", 1, depthAt(branchBody, mark))
     }
 
     private fun readRepoFile(relative: String): String {
@@ -333,12 +493,10 @@ class ComposerClearResidueWiringTest {
                     continue
                 }
                 text[i] == '"' -> {
-                    var j = i + 1
-                    while (j < text.length && text[j] != '"') {
-                        if (text[j] == '\\') j++
-                        j++
-                    }
-                    i = j + 1
+                    // [W1119-2D F-07] Raw strings too, or a `"""…"""` block (KDoc is
+                    // the usual one) desynchronises the counter.
+                    i = if (text.startsWith("\"\"\"", i)) skipRawString(text, i)
+                    else skipStringLiteral(text, i)
                     continue
                 }
                 text[i] == '{' -> depth++
@@ -350,6 +508,30 @@ class ComposerClearResidueWiringTest {
             i++
         }
         throw AssertionError("unbalanced block at $anchor")
+    }
+
+    /**
+     * Brace depth at [index]: how many `{` are still open before that point, with
+     * string literals and raw strings skipped so a brace inside a message or a KDoc
+     * does not desynchronise the count.
+     *
+     * [W1119-2D F-07] This is what separates "the statement is in the branch" from
+     * "the statement is in a nested block inside the branch" — the latter is
+     * unreachable or dead and was enough to keep the previous arm green.
+     */
+    private fun depthAt(text: String, index: Int): Int {
+        var depth = 0
+        var i = 0
+        while (i < index && i < text.length) {
+            when {
+                text.startsWith("\"\"\"", i) -> i = skipRawString(text, i)
+                text[i] == '"' -> i = skipStringLiteral(text, i)
+                text[i] == '{' -> { depth++; i++ }
+                text[i] == '}' -> { depth--; i++ }
+                else -> i++
+            }
+        }
+        return depth
     }
 
     /**
@@ -380,12 +562,10 @@ class ComposerClearResidueWiringTest {
                     continue
                 }
                 text[i] == '"' -> {
-                    var j = i + 1
-                    while (j < text.length && text[j] != '"') {
-                        if (text[j] == '\\') j++
-                        j++
-                    }
-                    i = j + 1
+                    // [W1119-2D F-07] Raw strings too, or a `"""…"""` block (KDoc is
+                    // the usual one) desynchronises the counter.
+                    i = if (text.startsWith("\"\"\"", i)) skipRawString(text, i)
+                    else skipStringLiteral(text, i)
                     continue
                 }
                 text[i] == '(' -> depth++

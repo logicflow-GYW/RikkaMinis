@@ -389,9 +389,11 @@ internal fun shouldKeepClearedStamp(incoming: String, clearedText: String?): Boo
  *
  * Two arms, keyed on whether anything has landed yet:
  *
- *  **Arm A — the box is still EMPTY** ([fieldText] and [vmText] both blank).
- *  A fragment of at least [minReplayChars] is the replay: a fresh keystroke into
- *  an empty box cannot be four characters at once.
+ *  **Arm A — the box is still EMPTY**: nothing has landed in the FIELD, and the
+ *  ViewModel copy is blank or still only the body the clear removed (a lagging
+ *  copy is not evidence of a landed replay — see the [boxEmpty] derivation
+ *  below). A fragment of at least [minReplayChars] is the replay: a fresh
+ *  keystroke into an empty box cannot be four characters at once.
  *
  *  **Arm B — the box already holds earlier fragments** ([fieldText] is itself a
  *  contiguous piece of the cleared body). This is the arm the first fix was
@@ -428,7 +430,24 @@ internal fun composerResidueVerdict(
     // A negative delta means the clock moved backwards — refuse rather than drop.
     if (msSinceClear < 0L || msSinceClear >= windowMs) return ComposerResidueVerdict.NONE
 
-    val boxEmpty = fieldText.isEmpty() && vmText.isEmpty()
+    // [W1119-2D F-04] `vmText` is the ViewModel copy as the composition read it.
+    // `clearComposerInput` empties the FIELD synchronously (`inputFieldValue` is a
+    // `mutableStateOf`, so the write is visible to this same callback), but the
+    // `viewModel.setInputText("")` it performs only updates a `StateFlow`: the
+    // `collectAsState()` copy read here is refreshed on a LATER dispatch, so for the
+    // rest of the frame it still holds the body the clear removed. Two
+    // `onValueChange` callbacks can land inside that window — the 150 ms
+    // IME-burst debounce exists precisely because dictation commits arrive several
+    // events per frame — so a stale copy is a real input, not a corner case.
+    //
+    // A copy that is blank or still a piece of the body it is being compared
+    // against is NOT evidence that anything has landed: it is the lag this
+    // function already tolerates in arm B (`vmIsReplay`), so it must not veto arm
+    // A. Only a copy holding something unrelated to the cleared body says "the
+    // composer is not empty" — and then arm B is the right arm.
+    val vmContradictsEmptyBox =
+        vmText.isNotEmpty() && !isFragmentOfClearedBody(vmText, clearedText)
+    val boxEmpty = fieldText.isEmpty() && !vmContradictsEmptyBox
     // [W1118-COMPOSER A3] The middle-fragment rule is only available to arm B,
     // where the box already proves a replay is in progress. With the box EMPTY a
     // four-character `contains` hit is far more likely to be the user's own word
@@ -467,9 +486,16 @@ internal fun composerResidueVerdict(
         val longEnough = incoming.length >= minReplayChars
         val phrase = incoming.length >= COMPOSER_SINGLE_EDIT_PHRASE_CHARS
         val covers = coversEnoughOfClearedBody(incoming, clearedText)
-        return if (longEnough &&
+        val drop = longEnough &&
             (phrase || (covers && isSuperhumanTypingRate(incoming.length, msSinceClear)))
-        ) {
+        // [W1119-2D F-04] Dropping the edit is not enough while the stale ViewModel
+        // copy still holds the body: that copy is what the 150 ms mirror and the
+        // persisted draft slot read, so it is the copy that refills the box after
+        // the drop. Nothing in the FIELD needs wiping, so the verdict escalates to
+        // DROP_AND_CLEAR, which runs the same clear funnel as a send.
+        return if (drop && vmText.isNotEmpty()) {
+            ComposerResidueVerdict.DROP_AND_CLEAR
+        } else if (drop) {
             ComposerResidueVerdict.DROP
         } else {
             ComposerResidueVerdict.NONE
