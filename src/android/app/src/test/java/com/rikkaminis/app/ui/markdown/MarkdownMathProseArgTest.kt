@@ -24,9 +24,13 @@ import org.junit.Test
  *     commas and nested calls included — is ONE structural unit: it is not a
  *     word and cannot produce the long word (fixes B5);
  *  2. prose has an independent signal: an English function word
- *     (`the/for/of/and/or/...`) anywhere in the span means a sentence,
+ *     (`the/for/of/and/or/...`) OUTSIDE the call groups means a sentence,
  *     whatever the word count (fixes B4). The three-word + long-word gate
  *     stays as the safety net for `velocity + acceleration` style spans.
+ *     [2D-1119 / F-03] The arguments inside a call are not prose evidence —
+ *     that is the same rule read from the other side: net 1 now scans the text
+ *     outside the call groups, so `P(at = 0)` is a formula while
+ *     `x + sin(the angle) of a circle` is a sentence.
  *
  * Every expectation is a literal — never derived from the constants under test,
  * so a mutated constant cannot move its own expectation.
@@ -98,11 +102,13 @@ class MarkdownMathProseArgTest {
     }
 
     @Test
-    fun `a function word inside the parentheses is still prose evidence`() {
-        // The call group must NOT hide prose: if the group swallowed its own
-        // content for the function-word test, `the` would vanish and this
-        // sentence would fall through to the `+` scan and render as KaTeX.
-        text("x + sin(the angle) + 3")
+    fun `a function word inside the parentheses is no longer prose evidence`() {
+        // [2D-1119 / F-03] The old form of the net read the call group's own
+        // content as prose evidence, and that was the bug: a call's arguments are
+        // formula structure, never prose (`P(at = 0)` was rejected this way).
+        // The arm is re-pinned to the corrected model, and the sentence that
+        // still has to be rejected on the outside of its call stays pinned too.
+        math("x + sin(the angle) + 3")
         // Same sentence as the [incr1117-B F-06] negative control, kept here so
         // both paths (inside the group, outside it) are pinned.
         text("x + sin(the angle) of a circle")
