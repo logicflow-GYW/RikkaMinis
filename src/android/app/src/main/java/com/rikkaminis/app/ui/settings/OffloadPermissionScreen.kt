@@ -42,6 +42,7 @@ import com.rikkaminis.app.offload.OffloadPermissionManager
 import com.rikkaminis.app.offload.RuntimePermissionBatch
 import com.rikkaminis.app.offload.ShizukuManager
 import com.rikkaminis.app.power.PowerOptimizationManager
+import com.rikkaminis.app.sandbox.ZoneDeleteGuardStore
 import com.rikkaminis.app.ui.components.MinisMenu
 import com.rikkaminis.app.ui.components.MinisTextButton
 import kotlinx.coroutines.delay
@@ -78,6 +79,9 @@ fun OffloadPermissionScreen(
     // user can't infer from a toggle, so it goes through an explicit dialog
     // that lists what stops being asked. Turning it OFF is one tap.
     var showAutoApproveConfirm by remember { mutableStateOf(false) }
+
+    // [C7] Separate switch for the protected-zone delete guard (default ON).
+    val zoneDeleteGuardEnabled by ZoneDeleteGuardStore.enabled.collectAsState()
 
     val context = LocalContext.current
 
@@ -187,6 +191,26 @@ fun OffloadPermissionScreen(
                     showDivider = false,
                 )
             }
+        }
+
+        // [C7] The protected-zone delete guard has its OWN switch, and it sits
+        // right next to auto-approve precisely so the independence is visible:
+        // turning auto-approve on does not weaken it, and turning it off is a
+        // separate, explicit act. Default ON — protection is the default state,
+        // not something the user has to opt into. The flag is UI-only (never
+        // registered in ConfigRegistry), so an agent that was just refused
+        // cannot reach `minis-config` and switch its own guard off.
+        SettingsSection(
+            header = stringResource(R.string.perm_section_zone_delete_guard),
+            footer = stringResource(R.string.perm_zone_delete_guard_footer),
+        ) {
+            SettingsSwitchRow(
+                title = stringResource(R.string.perm_zone_delete_guard_title),
+                subtitle = stringResource(R.string.perm_zone_delete_guard_desc),
+                checked = zoneDeleteGuardEnabled,
+                onCheckedChange = { ZoneDeleteGuardStore.setEnabled(it) },
+                showDivider = false,
+            )
         }
 
         // [auto-approve] Platform-level counterpart: Android cannot be told
