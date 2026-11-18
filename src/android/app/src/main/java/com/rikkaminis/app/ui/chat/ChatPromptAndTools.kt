@@ -1277,13 +1277,14 @@ internal fun ChatViewModel.buildSystemPrompt(): String? {
         """
 
 Memory system (currently ENABLED):
-- memory_write writes to today's daily log (YYYY-MM-DD.md) — use it for session notes, key facts, project context, things learned, and action items.
+- memory_write writes to today's daily log (YYYY-MM-DD.md) — use it for session notes, key facts, project context, things learned, and action items. The daily log is the default home for everything you learn; write there freely.
 - memory_rollup: Distill stable rules from the previous day's daily log into MEMORY-ROLLUP.md. Call this when daily logs are growing large — it surfaces reusable knowledge concisely. Idempotent; skips dates already rolled up.
-- GLOBAL.md (/var/minis/memory/GLOBAL.md) stores persistent preferences, settings, and general-purpose conventions. To read it, use file_read (NOT memory_get). To update it, use file_read first then file_edit. If GLOBAL.md does not exist yet, use file_write to create it directly.
-- IMPORTANT: Only write to GLOBAL.md when the user explicitly asks (e.g. 'remember this globally', 'save to global memory'). Before editing, deduplicate and clean up — avoid ambiguity, repetition, or daily-log-style entries. GLOBAL.md should contain only concise, reusable knowledge (preferences, settings, conventions), NOT session logs or transient context.
+- GLOBAL.md (/var/minis/memory/GLOBAL.md) stores durable, user-owned facts: preferences, standing instructions, account or environment facts, and corrections about how you should behave. It is injected into EVERY request on every device, so each line costs tokens forever and must earn its place. To read it, use file_read (NOT memory_get). To update it, use file_read first then file_edit. If GLOBAL.md does not exist yet, use file_write to create it directly.
+- GLOBAL.md is proposed by you, approved by the user — do not write it silently, and do not wait for the user to initiate it either. When you notice something durable and user-owned (a preference, a standing rule, a repeated correction, an account or environment fact), say in ONE line what you would add and ask whether to save it to global memory; add it (deduplicated, merged with anything similar already there) only if they agree. One proposal at a time. If they decline, drop it for the rest of the session and do not ask again. If they explicitly say 'remember this globally' / 'save to global memory', write it directly without asking.
+- Before proposing, keep only what passes all four: it holds across sessions; it is about the user, not about this repo or this product; the user would recognise it as their own words or decision; the file stays within its size budget. Anything else stays in the daily log. Full criteria, eviction rules and the size budget: skill `memory-hygiene`.
 - Use memory_get to recall past knowledge before starting tasks — check if there are relevant memories that can help.
 - Proactively save memories (via memory_write to daily log) when you discover user preferences or important patterns — don't wait to be asked.
-- When the user says 'remember this' or similar, use memory_write to persist to the daily log. Only write to GLOBAL.md if the user specifically asks for global/persistent storage.
+- When the user says 'remember this' or similar, persist it to the daily log; promote it to GLOBAL.md only through the proposal above (or immediately when they explicitly ask for global/persistent storage).
 - What NOT to remember: passwords, API keys, tokens, secrets, or any sensitive credentials. Warn the user about the risk first; only proceed if they explicitly confirm.
 - Keep memories concise, factual, and general-purpose — avoid noise that won't be useful later."""
     } else {
