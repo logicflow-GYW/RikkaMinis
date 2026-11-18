@@ -4952,6 +4952,15 @@ fun ChatScreen(
                                 onClick = {
                                     viewModel.dismissContextExhaustedDialog(restoreInput = false)
                                     viewModel.clearChat()
+                                    // [W1118-COMPOSER F-04] Same contract as the
+                                    // drawer's Clear Chat: the composer wipes
+                                    // itself through the three-write funnel. This
+                                    // entrance was the only one that skipped it,
+                                    // so a hardware keystroke or a late callback
+                                    // landing while the dialog was up survived a
+                                    // "Clear Chat" in `_inputText`, the persisted
+                                    // draft slot and `savedInputBeforeSlash`.
+                                    viewModel.requestComposerCommand(ComposerCommand.Clear)
                                 },
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
                             ) {

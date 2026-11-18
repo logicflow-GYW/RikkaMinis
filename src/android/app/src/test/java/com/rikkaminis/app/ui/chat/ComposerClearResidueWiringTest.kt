@@ -33,12 +33,20 @@ class ComposerClearResidueWiringTest {
         val funnelStart = source.indexOf("val clearComposerInput: () -> Unit = {")
         val readBody = source.indexOf("val clearedBody = inputFieldValue.text")
         val record = source.indexOf("lastClearedText = clearedBody")
-        val callStamp = source.indexOf("stampClearedBody()")
-        val fieldReset = source.indexOf("inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(\"\")")
+        // [W1118-COMPOSER F-01] Both anchors must be resolved INSIDE the funnel:
+        // the landed-replay wipe contains the same two statements on purpose
+        // (it clears the field without stamping), so a top-of-file indexOf finds
+        // that copy and the arm fails for the wrong reason.
+        val callStamp = source.indexOf("stampClearedBody()", funnelStart)
+        val fieldReset = source.indexOf(
+            "inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(\"\")",
+            funnelStart,
+        )
         assertTrue("the stamp lambda is gone", stampDecl >= 0)
         assertTrue("the stamp must be declared before the funnel that calls it", stampDecl < funnelStart)
         assertTrue("the cleared body is never read from the field", readBody > stampDecl)
         assertTrue("the cleared body is never recorded", record > readBody)
+        assertTrue("the funnel never stamps at all", callStamp > funnelStart)
         assertTrue(
             "the funnel must stamp the body before it empties the field (after the " +
                 "reset the stamp would be empty forever and the guard would be dead)",
@@ -48,7 +56,7 @@ class ComposerClearResidueWiringTest {
 
     @Test
     fun `on value change consults the replay guard with the recorded stamp`() {
-        val call = source.indexOf("isComposerClearResidue(")
+        val call = source.indexOf("composerResidueVerdict(")
         val stampArg = source.indexOf("clearedText = lastClearedText")
         assertTrue("the composer never consults the replay guard", call >= 0)
         assertTrue(
@@ -57,9 +65,80 @@ class ComposerClearResidueWiringTest {
         )
     }
 
+    /**
+     * [fix/composer-post-send-residue-2] Refusing to grow a replay is not enough:
+     * a char-by-char IME replay lands its first fragments before the guard can
+     * recognise it, so the box is already partly filled. If the composer only
+     * drops the newest edit, the user keeps staring at half of the message he
+     * just sent — the exact reported symptom.
+     */
+    @Test
+    fun `an accumulated replay is wiped through the clear funnel`() {
+        val verdictCall = source.indexOf("composerResidueVerdict(")
+        val dropAndClear = source.indexOf("ComposerResidueVerdict.DROP_AND_CLEAR")
+        assertTrue("the verdict enum is never branched on", dropAndClear >= 0)
+        assertTrue("the DROP_AND_CLEAR branch sits before the guard is even reached", dropAndClear > verdictCall)
+        val after = source.substring(dropAndClear)
+        assertTrue(
+            "an accumulated replay must be cleared through the funnel, not just skipped",
+            after.contains("clearComposerInput()"),
+        )
+    }
+
+    /**
+     * [W1118-COMPOSER F-01] The stamp decision must be the pure helper's ANSWER,
+     * not a re-derivation. A shape test cannot prove a computed flag is actually
+     * used — only that the helper is called — so this arm pins the call site and
+     * ComposerClearResiduePolicyTest pins the answer.
+     */
+    @Test
+    fun `the clear funnel does not re-stamp an un-winding replay`() {
+        val stamp = source.indexOf("val stampClearedBody: () -> Unit = {")
+        assertTrue("the stamp lambda is gone", stamp >= 0)
+        val body = source.substring(stamp, source.indexOf("val clearComposerInput", stamp))
+        assertTrue(
+            "the stamp decision must come from shouldRestampClearedBody",
+            body.contains("shouldRestampClearedBody("),
+        )
+        assertTrue(
+            "the stamp body must not re-implement the rule inline",
+            !body.contains("COMPOSER_CLEAR_RESIDUE_WINDOW_MS"),
+        )
+        // One funnel only: a second clear definition is what the two shape gates
+        // (B3RenderInputShapeTest, chat_ui_interaction_check) exist to prevent.
+        // Count CALLS, not the string: the funnel's own KDoc quotes the write.
+        val clearWrites = source.lines().count { line ->
+            val t = line.trim()
+            !t.startsWith("//") && !t.startsWith("*") && t.contains("viewModel.setInputText(\"\")")
+        }
+        assertTrue(
+            "there must be exactly ONE composer-clear funnel, found $clearWrites",
+            clearWrites == 1,
+        )
+    }
+
+    /**
+     * The stamp must survive a legitimate short fragment. A char-by-char replay
+     * starts with 1-3 characters, which arm A lets through BY DESIGN; the old
+     * `if (tfv.text.isNotEmpty()) lastClearedText = null` treated that as the
+     * user reclaiming the composer and destroyed the fingerprint, after which
+     * nothing could ever be caught again.
+     */
+    @Test
+    fun `the stamp survives an edit that is still a piece of the cleared body`() {
+        val drop = source.indexOf("lastClearedText = null")
+        assertTrue("the stamp is never dropped", drop >= 0)
+        val guard = source.indexOf("isFragmentOfClearedBody(", maxOf(0, drop - 400))
+        assertTrue(
+            "the stamp is dropped on ANY non-empty edit, so the first replay fragment " +
+                "disarms the guard for the rest of the window",
+            guard in 0 until drop,
+        )
+    }
+
     @Test
     fun `the guard runs before the field is written and before the paste fold`() {
-        val call = source.indexOf("isComposerClearResidue(")
+        val call = source.indexOf("composerResidueVerdict(")
         val fold = source.indexOf("foldLongPasteIfNeeded(")
         assertTrue("the paste fold anchors moved", fold >= 0)
         assertTrue("the replay guard runs after the paste fold", call < fold)

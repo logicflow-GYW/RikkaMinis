@@ -98,6 +98,17 @@ class SystemPromptSegmentOrderTest {
         var inString = false
         while (i < src.length) {
             val c = src[i]
+            // [prompt-behaviour-layer-1118] Skip `"""…"""` whole: prompt prose
+            // inside those blocks may contain an unbalanced brace, and treating
+            // it as structure would end the block in the wrong place.
+            if (c == '"' && i + 2 < src.length && src[i + 1] == '"' && src[i + 2] == '"') {
+                i += 3
+                while (i + 2 < src.length &&
+                    !(src[i] == '"' && src[i + 1] == '"' && src[i + 2] == '"')
+                ) i++
+                i += 3
+                continue
+            }
             if (inString) {
                 if (c == '\\' && i + 1 < src.length) { i += 2; continue }
                 if (c == '"') inString = false
@@ -232,8 +243,7 @@ class SystemPromptSegmentOrderTest {
     }
 
     @Test
-    fun theVolatileTailKeepsItsRelativeOrder() {
-        val body = buildStringBody()
+    fun theVolatileTailKeepsItsRelativeOrder() {        val body = buildStringBody()
         // [incr1113 F-07] Same reasoning one region over: "both are below the
         // anchor" does not pin which comes first, and the daily fragment is the
         // one that moves on every memory_write — it must stay LAST so the hint's
@@ -252,6 +262,49 @@ class SystemPromptSegmentOrderTest {
     }
 
     // ------------------------------------------------------------------
+    // Scanner self-checks: the two matchers above run over a source file that
+    // is mostly `"""…"""` prompt prose. Prose legitimately contains double
+    // quotes and `//`, and a brace can be unbalanced inside it — both used to
+    // derail the matchers, which showed up as five ordering tests failing on a
+    // prompt-only edit (2026-11-18).
+
+    @Test
+    fun theCommentStripperLeavesRawPromptProseIntact() {
+        val triple = "\"\"\""
+        val src = buildString {
+            append("val before = 1\n")
+            append("val block = ").append(triple).append("\n")
+            append("prompt text with \"quoted words\" and // not a comment\n")
+            append("also /* not a block comment */ here\n")
+            append(triple).append("\n")
+            append("fun after() = 2\n")
+        }
+        val stripped = stripComments(src)
+        assertTrue(
+            "a `\"` inside a raw string must not end the string and swallow the rest of the file",
+            stripped.contains("fun after() = 2"),
+        )
+        assertTrue("text after `//` inside a raw string is prose, not a comment", stripped.contains("not a comment"))
+        assertTrue("a `/*` inside a raw string is prose", stripped.contains("not a block comment"))
+    }
+
+    @Test
+    fun theBraceMatcherIgnoresBracesInsideRawPromptProse() {
+        val triple = "\"\"\""
+        val src = buildString {
+            append("fun f() {\n")
+            append("val block = ").append(triple).append("\n")
+            append("prose with an unmatched { brace\n")
+            append(triple).append("\n")
+            append("val after = 1\n")
+            append("}\n")
+        }
+        val body = braceBlock(src, 0)
+        assertTrue(
+            "an unbalanced `{` inside prompt prose must not end the block early",
+            body.contains("val after = 1"),
+        )
+    }
 
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))
@@ -285,7 +338,27 @@ class SystemPromptSegmentOrderTest {
         while (i < n) {
             val c = src[i]
             val next = if (i + 1 < n) src[i + 1] else '\u0000'
+            val rawString = c == '"' && i + 2 < n && src[i + 1] == '"' && src[i + 2] == '"'
             when {
+                // [prompt-behaviour-layer-1118] Raw strings FIRST: the prompt
+                // blocks are `"""…"""` and their prose legitimately contains
+                // `"quoted words"` and `//`-looking text. The single-quote
+                // branch below used to end the "string" at the next `"`, which
+                // flipped the state machine and made everything after it look
+                // like a comment (5 ordering tests failed on a prompt edit).
+                rawString -> {
+                    out.append("\"\"\"")
+                    i += 3
+                    while (i < n) {
+                        if (src[i] == '"' && i + 2 < n && src[i + 1] == '"' && src[i + 2] == '"') {
+                            out.append("\"\"\"")
+                            i += 3
+                            break
+                        }
+                        out.append(src[i])
+                        i++
+                    }
+                }
                 c == '/' && next == '/' -> {
                     while (i < n && src[i] != '\n') i++
                 }

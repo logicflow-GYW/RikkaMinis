@@ -252,9 +252,29 @@ private fun LazyListScope.agentLoopModelsSectionItems(
                 state = reorderState,
                 key = "agent_entry:${entry.id}",
             ) { _ ->
-                val instanceLabel = config.instances
+                val instance = config.instances
                     .find { it.id == entry.providerInstanceId }
-                    ?.label
+                // [agentloop-member-id] This list is the drag-reorder surface for
+                // the agent-loop usable set, so each row has to name the exact
+                // model being moved — the same `provider · model id` line the
+                // model-group detail page and the chat picker show. Without the
+                // id, two entries that share a display name under one provider
+                // are indistinguishable while reordering.
+                //
+                // Same single source as ModelGroupDetailScreen:
+                // SystemVoiceEntries.isSystemEntryId + memberSubtitle resolves
+                // "a System voice entry's provider is the device", and
+                // ModelGroupMemberRowText owns the degrade rules (missing
+                // provider / missing id / both). No new decision logic here.
+                val instanceLabel = SystemVoiceMemberPresentation.memberSubtitle(
+                    instanceLabel = instance?.label,
+                    isSystemEntry = SystemVoiceEntries.isSystemEntryId(entry.id),
+                    systemLabel = stringResource(R.string.voice_provider_system),
+                )
+                val secondaryLine = ModelGroupMemberRowText.secondaryLine(
+                    providerLabel = instanceLabel,
+                    modelId = entry.model.id,
+                )
                 val absIndex = pinnedGroups.size + index
                 Column {
                     if (absIndex != 0) SectionDividerInsetCard()
@@ -266,7 +286,7 @@ private fun LazyListScope.agentLoopModelsSectionItems(
                     ) {
                         AgentLoopRow(
                             title = entry.model.displayName,
-                            subtitle = instanceLabel,
+                            subtitle = secondaryLine,
                             badge = null,
                             onRemove = { providerRepository.removeAgentLoopEntry(entry.id) },
                             dragHandleModifier = Modifier.then(
@@ -364,10 +384,19 @@ private fun AgentLoopRow(
                 }
             }
             if (!subtitle.isNullOrEmpty()) {
+                // [agentloop-member-id] The secondary line now carries
+                // `provider · model id`, and provider ids are long
+                // (`custom_model_tokenpony_deepseek_v4_1_flash`). One line with
+                // an ellipsis keeps every row the same height — the row is a
+                // drag target, so a two-line wrap would make the list jump
+                // around while reordering. Same treatment as
+                // ModelGroupDetailScreen's member row.
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
             }
         }
