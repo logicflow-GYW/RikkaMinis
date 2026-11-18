@@ -469,6 +469,136 @@ class SystemPromptSegmentOrderTest {
     }
 
     /**
+     * [fix/prompt-memory-truth-1119 F-01] The system prompt was fixed on 11-18
+     * (`theGlobalMemoryLineIsNotCalledReadOnly`), but the SAME request also carries
+     * tool definitions, and both of them still ended with
+     * `GLOBAL.md is read-only (user-maintained via Settings).` — confirmed in the
+     * shipped dex of 1.0.0+3275. A model that trusts the tool schema over the prose
+     * refuses the edit and tells the user to go change Settings, which is exactly
+     * the feature the memory section was added for.
+     *
+     * Scoped to the memory_write DESCRIPTION literal, not to the file: AgentTools.kt
+     * legitimately mentions `read-only` in the browser and file tool descriptions.
+     */
+    @Test
+    fun theMemoryWriteToolDescriptionsDoNotCallGlobalMemoryReadOnly() {
+        val memoryTools = stripComments(
+            readRepoFile("src/main/java/com/rikkaminis/app/tools/MemoryTools.kt"),
+        )
+        val anthropic = quotedStringAfter(
+            memoryTools, "put(\"name\", \"memory_write\")", "put(\"description\", \"",
+        )
+        assertTrue(
+            "the memory_write tool description still calls GLOBAL.md read-only — " +
+                "`$anthropic` — while the system prompt in the SAME request tells the " +
+                "model to propose an edit and apply it once the user approves",
+            !anthropic.contains("read-only"),
+        )
+        assertTrue(
+            "the memory_write description lost the approval requirement — `$anthropic` — " +
+                "so GLOBAL.md reads as freely writable state instead of user-owned",
+            anthropic.contains("approve", ignoreCase = true),
+        )
+
+        val agentTools = stripComments(
+            readRepoFile("src/main/java/com/rikkaminis/app/tools/AgentTools.kt"),
+        )
+        val gemini = regionAfter(
+            agentTools, "private fun memoryWriteDefinition()", "parameters = mapOf(",
+        )
+        assertTrue(
+            "the Gemini-side memory_write description still calls GLOBAL.md read-only — " +
+                "`$gemini` — the two tool-definition formats drift apart and the " +
+                "contradiction comes back on whichever path ships",
+            !gemini.contains("read-only"),
+        )
+        assertTrue(
+            "the Gemini-side memory_write description lost the approval requirement — " +
+                "`$gemini`",
+            gemini.contains("approve", ignoreCase = true),
+        )
+
+        // Nothing in either file may keep the old sentence anywhere: the OpenAI
+        // variant reuses the Anthropic description, so a copy left behind in a
+        // third helper would ship on a path neither literal check above covers.
+        for (rel in listOf(
+            "src/main/java/com/rikkaminis/app/tools/MemoryTools.kt",
+            "src/main/java/com/rikkaminis/app/tools/AgentTools.kt",
+        )) {
+            val src = stripComments(readRepoFile(rel))
+            assertTrue(
+                "$rel still contains `GLOBAL.md is read-only` — every request that " +
+                    "enables memory carries it next to the propose-then-apply prompt",
+                !src.contains("GLOBAL.md is read-only"),
+            )
+        }
+    }
+
+    /**
+     * [fix/prompt-memory-truth-1119 F-01] The third shipped copy is not the prompt
+     * and not a tool description: it is the header `MemoryRepository` prepends to
+     * GLOBAL.md whenever the file is injected. Every request that carries the memory
+     * therefore opens with `read-only, user-maintained` — the strongest of the three
+     * signals, because it sits directly above the rules the model is asked to treat
+     * as standing instructions.
+     */
+    @Test
+    fun theGlobalMemoryInjectionHeaderDoesNotCallItReadOnly() {
+        val repo = stripComments(
+            readRepoFile("src/main/java/com/rikkaminis/app/data/repository/MemoryRepository.kt"),
+        )
+        val header = quotedStringAfter(
+            repo, "fun loadGlobalMemoryFragment()", "return \"",
+        )
+        assertTrue(
+            "the injected GLOBAL.md header still calls itself read-only — `$header` — " +
+                "while the memory section tells the model to propose an edit to this " +
+                "very file and apply it once the user approves",
+            !header.contains("read-only"),
+        )
+        assertTrue(
+            "the injected GLOBAL.md header lost the approval requirement — `$header`",
+            header.contains("approval", ignoreCase = true) ||
+                header.contains("approve", ignoreCase = true),
+        )
+    }
+
+    /**
+     * [fix/prompt-memory-truth-1119 F-02] `memory-hygiene/SKILL.md` is exempted from
+     * the Authority section (`under /var/minis/skills/`), so what it says the agent
+     * may do without asking is followed. Its 淘汰 section used to say
+     * 「我主动做，不必等用户」and「从 GLOBAL 删掉」— a documented licence to silently
+     * delete the user's global memory, contradicting the same file's own rule that
+     * GLOBAL.md is 提议、不擅写 and the prompt's `apply it only after the user approves`.
+     */
+    @Test
+    fun theMemoryHygieneSkillCallsPruningAProposal() {
+        val skill = readRepoFile("src/main/assets/skills/memory-hygiene/SKILL.md")
+        val at = skill.indexOf("## 淘汰")
+        assertTrue(
+            "the 淘汰 section is gone from memory-hygiene/SKILL.md — the pruning rule " +
+                "the model is expected to follow has no home",
+            at >= 0,
+        )
+        val end = skill.indexOf("\n## ", at + 1).let { if (it < 0) skill.length else it }
+        val section = skill.substring(at, end)
+        assertTrue(
+            "the 淘汰 section no longer asks the agent to make a PROPOSAL — `$section`",
+            section.contains("提议"),
+        )
+        assertTrue(
+            "the 淘汰 section does not require the user's approval before GLOBAL.md is " +
+                "edited — `$section` — this file is Authority-exempt, so an unqualified " +
+                "delete instruction is a licence to rewrite user memory silently",
+            section.contains("批准"),
+        )
+        assertTrue(
+            "the 淘汰 section still tells the agent to prune `不必等用户` — `$section`",
+            !section.contains("不必等用户"),
+        )
+    }
+
+    /**
      * The `base` prompt literal, with comments stripped. Read through the same
      * comment stripper as everything else so a KDoc mention of a section title
      * cannot stand in for the section itself.
@@ -633,6 +763,51 @@ class SystemPromptSegmentOrderTest {
             "the literal after `$anchor` is only ${body.length} chars — the anchor or " +
                 "the matcher drifted, so assertions on it would be vacuous",
             body.length > 500,
+        )
+        return body
+    }
+
+    /**
+     * [fix/prompt-memory-truth-1119] The content of the first `"…"` literal that
+     * opens right after `marker`, with `anchor` locating the region first. Comments
+     * are stripped by the caller so a KDoc copy of the sentence cannot satisfy an
+     * assertion. Fails closed when the anchor/delimiter is missing or the literal is
+     * implausibly short — a drifted anchor must surface as a failure, never as an
+     * empty string that trivially passes a `!contains(...)` check.
+     */
+    private fun quotedStringAfter(src: String, anchor: String, marker: String): String {
+        val at = src.indexOf(anchor)
+        assertTrue("`$anchor` not found — the tool/repository definition moved", at >= 0)
+        val m = src.indexOf(marker, at)
+        assertTrue("`$marker` not found after `$anchor`", m >= 0)
+        var i = m + marker.length
+        val sb = StringBuilder()
+        while (i < src.length && src[i] != '"') {
+            if (src[i] == '\\' && i + 1 < src.length) {
+                sb.append(src[i]); i++
+            }
+            sb.append(src[i]); i++
+        }
+        assertTrue("the literal after `$anchor` is unterminated", i < src.length)
+        assertTrue(
+            "the literal after `$anchor` is only ${sb.length} chars — the anchor or " +
+                "the delimiter drifted, so assertions on it would be vacuous",
+            sb.length > 80,
+        )
+        return sb.toString()
+    }
+
+    /** The source between [anchor] and the next [end] occurrence, fail-closed. */
+    private fun regionAfter(src: String, anchor: String, end: String): String {
+        val at = src.indexOf(anchor)
+        assertTrue("`$anchor` not found — the definition moved", at >= 0)
+        val e = src.indexOf(end, at)
+        assertTrue("`$end` not found after `$anchor`", e >= 0)
+        val body = src.substring(at, e)
+        assertTrue(
+            "the region after `$anchor` is only ${body.length} chars — the anchor or " +
+                "the terminator drifted, so assertions on it would be vacuous",
+            body.length > 200,
         )
         return body
     }
