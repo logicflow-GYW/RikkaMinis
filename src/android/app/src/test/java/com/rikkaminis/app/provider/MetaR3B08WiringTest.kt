@@ -81,8 +81,16 @@ class MetaR3B08WiringTest {
         assertTrue(
             "the Responses path must read the learned/declared tier set, not just "
                 + "the family clamp",
-            "EffortTierLearner.learned(" in code.substring(
-                code.indexOf("val effort = if (thinkingLevel.isEnabled)"),
+            // [fix/effort-key-1119] Anchored on the DECISION (this path reads the
+            // learner for the tier it is about to send), not on one spelling of the
+            // call: the reader is now `learnedWithin`, which narrows a CEILING-shaped
+            // answer by the model's declaration. A bare `learned(` here would be the
+            // F-02 regression, so the wider name is the correct anchor — and the
+            // narrowing itself is pinned by EffortScopeDeclaredSetTest.
+            Regex("EffortTierLearner\\.learned(Within)?\\(").containsMatchIn(
+                code.substring(
+                    code.indexOf("val effort = if (thinkingLevel.isEnabled)"),
+                ),
             ),
         )
     }

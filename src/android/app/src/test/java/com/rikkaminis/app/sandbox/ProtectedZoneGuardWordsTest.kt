@@ -337,3 +337,274 @@ class ProtectedZoneGuardWordsTest {
         }
     }
 }
+
+/**
+ * [FIX-2D-1119-1] The six shapes the 1118C lexical layer still let through —
+ * five bypasses and one P0.
+ *
+ * Every expectation is a literal path. The zone list is the thing under test,
+ * so deriving an expectation from it (or from any other list the guard is
+ * built from) would make a regression in that list invisible here.
+ *
+ * The negative-control block at the bottom is not optional: a guard that
+ * refuses ordinary cleanup teaches the model to work around it, which is the
+ * same failure as a bypass.
+ */
+class ProtectedZoneGuardParentZoneTest {
+
+    // ── F-01 (P0): the parent of every zone was in no list ───────────────────
+
+    /**
+     * [F-01] `rm -rf /var/minis` deletes all five zones in one command. It was
+     * the single most destructive spelling in the language and the only one
+     * that fell through every arm.
+     */
+    @Test
+    fun `deleting the parent of every zone is refused`() {
+        for (cmd in listOf(
+            "rm -rf /var/minis",
+            "rm -rf /var/minis/",
+            "rm -rf //var//minis//",
+            "mv /var/minis /tmp/",
+            "rm -rf /var",
+        )) {
+            assertNotNull("should refuse: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+        val hit = ProtectedZoneGuard.wideDeleteHit("rm -rf /var/minis")
+        assertEquals("/var/minis", hit?.path)
+        // An absolute path needs no cwd, so the verdict is fully determined and
+        // must not tell the agent to "retry with an absolute path".
+        assertEquals(true, hit?.cwdKnown)
+    }
+
+    /**
+     * [F-01] The parent is protected as a WHOLE only. `/var/minis/logs` is the
+     * user's log directory (and `/var/tmp` the rootfs scratch): refusing those
+     * would be over-protection, and the guard stays useful only while ordinary
+     * cleanup still works.
+     */
+    @Test
+    fun `a child of the parent is still ordinary cleanup`() {
+        for (cmd in listOf(
+            "rm -rf /var/minis/logs",
+            "rm -rf /var/minis/logs/x",
+            "rm -rf /var/minis/attachments",
+            "rm -rf /var/minis/attachments/tmp",
+            "rm -rf /var/minis/workspace",
+            "rm -rf /var/tmp",
+            "rm -rf /var/cache/apk",
+        )) {
+            assertNull("should allow: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+    }
+
+    /** [F-01] The five zones themselves are unchanged by the new parent rule. */
+    @Test
+    fun `the zones themselves still refuse next to their parent`() {
+        for (cmd in listOf(
+            "rm -rf /var/minis/shared",
+            "rm -rf /var/minis/memory",
+            "rm -rf /var/minis/skills",
+            "rm -rf /var/minis/mcp-servers",
+            "rm -rf /var/minis/mounts",
+        )) {
+            assertNotNull("should refuse: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+    }
+
+    // ── F-02: `-ft` is `-f` plus the target-directory flag ──────────────────
+
+    /** [F-02] A short cluster containing `t` makes every positional a source. */
+    @Test
+    fun `mv with a clustered target flag flags the zone as a source`() {
+        for (cmd in listOf(
+            "mv -ft /tmp /var/minis/shared",
+            "mv -vt /tmp /var/minis/shared",
+            "mv -tf /tmp /var/minis/shared",
+            "mv -vtf /tmp /var/minis/shared",
+            "mv -t/tmp /var/minis/shared",
+        )) {
+            assertNotNull("should refuse: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+        assertEquals(
+            listOf("/var/minis/shared"),
+            ProtectedZoneGuard.mvSources(listOf("-ft", "/tmp", "/var/minis/shared")),
+        )
+    }
+
+    /**
+     * [F-02] `-T` is `--no-target-directory`, the OPPOSITE flag: the last
+     * positional is still the destination, and moving INTO a zone deletes
+     * nothing there.
+     */
+    @Test
+    fun `mv uppercase T is not the target flag`() {
+        assertNull(ProtectedZoneGuard.refuseReason("mv -T /tmp/report.md /var/minis/shared"))
+        assertNull(ProtectedZoneGuard.refuseReason("mv -fT /tmp/report.md /var/minis/shared"))
+        assertEquals(
+            listOf("/tmp/report.md"),
+            ProtectedZoneGuard.mvSources(listOf("-T", "/tmp/report.md", "/var/minis/shared")),
+        )
+        // A plain `-f` cluster is not the target form either.
+        assertEquals(
+            listOf("/var/minis/shared"),
+            ProtectedZoneGuard.mvSources(listOf("-vf", "/var/minis/shared", "/tmp/dst")),
+        )
+    }
+
+    // ── F-03: parentheses and grouping braces are separators ─────────────────
+
+    /** [F-03] `(rm …)` / `{ rm …; }` are statements, and the verb is `rm`. */
+    @Test
+    fun `subshell and group separators do not hide the verb`() {
+        for (cmd in listOf(
+            "(rm -rf /var/minis/shared)",
+            "{ rm -rf /var/minis/shared; }",
+            "(cd /var/minis/shared && rm -rf work)",
+            "echo \$(rm -rf /var/minis/shared)",
+            "true && (rm -rf /var/minis/shared) && true",
+        )) {
+            assertNotNull("should refuse: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+        assertEquals(
+            listOf("rm", "-rf", "/var/minis/shared"),
+            ProtectedZoneGuard.shellLex("(rm -rf /var/minis/shared)").statements[0],
+        )
+        assertEquals(
+            listOf("rm", "-rf", "/var/minis/shared"),
+            ProtectedZoneGuard.shellLex("{ rm -rf /var/minis/shared; }").statements[0],
+        )
+        // `$(` is a substitution marker, not an argument: `echo` keeps no `$`.
+        assertEquals(
+            listOf(listOf("echo"), listOf("rm", "-rf", "/var/minis/shared")),
+            ProtectedZoneGuard.shellLex("echo \$(rm -rf /var/minis/shared)").statements,
+        )
+    }
+
+    /**
+     * [F-03] A brace INSIDE a word is brace expansion, not grouping: its value
+     * cannot be read, and splitting it would invent paths nobody wrote. This is
+     * the documented ceiling, and it must stay a pass-through rather than
+     * become a half-read path.
+     */
+    @Test
+    fun `brace expansion stays a documented ceiling`() {
+        for (cmd in listOf(
+            "rm -rf /var/minis/{shared,memory}",
+            "rm -rf /var/minis/shared/{a,b}",
+            "find /var/minis/shared -name '*.md' -exec rm -rf {} +",
+        )) {
+            assertNull("documented ceiling: not recognised ($cmd)", ProtectedZoneGuard.refuseReason(cmd))
+        }
+    }
+
+    // ── F-04: the wrapper value flags, by wrapper ───────────────────────────
+
+    /** [F-04] Each wrapper's own value-taking options, in the spelling that used to slip. */
+    @Test
+    fun `wrapper value options are skipped per wrapper`() {
+        for (cmd in listOf(
+            "stdbuf -i 0 -o L rm -rf /var/minis/shared",
+            "stdbuf -i L rm -rf /var/minis/shared",
+            "stdbuf -e L rm -rf /var/minis/shared",
+            "sudo -h host -u root rm -rf /var/minis/shared",
+            "sudo -p 'pw' -g wheel rm -rf /var/minis/shared",
+            "exec -a name rm -rf /var/minis/shared",
+            "ionice -c 2 -p 1234 rm -rf /var/minis/shared",
+            "chrt -p 50 rm -rf /var/minis/shared",
+            "env -C /tmp -u HOME rm -rf /var/minis/shared",
+            "taskset -c 0-3 rm -rf /var/minis/shared",
+        )) {
+            assertNotNull("should refuse: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+    }
+
+    /**
+     * [F-04] `eval` runs the rest of the line as a command, so the first word
+     * after it IS the verb. `env -i` must stay a boolean flag (it eats no
+     * word) — that is why the flags are keyed by wrapper instead of one set.
+     */
+    @Test
+    fun `eval peels to the verb and env dash i stays boolean`() {
+        assertNotNull(ProtectedZoneGuard.refuseReason("eval rm -rf /var/minis/shared"))
+        assertNotNull(ProtectedZoneGuard.refuseReason("eval env -i rm -rf /var/minis/shared"))
+        assertNotNull(ProtectedZoneGuard.refuseReason("env -i rm -rf /var/minis/shared"))
+        assertNull(ProtectedZoneGuard.refuseReason("env -i ls /var/minis/shared"))
+        // Quoting the whole command into one word is the new ceiling: the verb
+        // word is the entire text, and reading it would mean parsing nested shell.
+        assertNull(ProtectedZoneGuard.refuseReason("eval \"rm -rf /var/minis/shared\""))
+    }
+
+    // ── F-05: `popd` returns to the directory the stack remembers ───────────
+
+    /**
+     * [F-05] `pushd`/`popd` is `cd` with a stack: after the `popd` the shell
+     * stands in the zone again, and `rm -rf work` is the zone's whole child.
+     */
+    @Test
+    fun `popd restores the directory the next delete runs in`() {
+        assertNotNull(
+            ProtectedZoneGuard.refuseReason(
+                "pushd /var/minis/shared && pushd /tmp && popd && rm -rf work",
+            ),
+        )
+        assertNotNull(
+            ProtectedZoneGuard.refuseReason("pushd /var/minis/shared && popd && rm -rf work"),
+        )
+        // Swapping back out of the zone is ordinary work again.
+        assertNull(
+            ProtectedZoneGuard.refuseReason(
+                "pushd /var/minis/shared && pushd /tmp && popd && rm -rf /tmp/build",
+            ),
+        )
+        // Nothing on the stack: `popd` leaves the cwd alone, so a deep relative
+        // target is still ordinary work.
+        assertNull(ProtectedZoneGuard.refuseReason("popd && rm -rf work/batch"))
+    }
+
+    // ── F-06: the fail-closed scan reads every occurrence ───────────────────
+
+    /**
+     * [F-06] An unreadable command that names a deep zone path first and a wide
+     * one later used to be let through: the raw-text scan stopped at the first
+     * occurrence. Every occurrence is now read.
+     */
+    @Test
+    fun `an unreadable command is refused when any occurrence is wide`() {
+        val cmd = "ls /var/minis/shared/a/b && rm -rf /var/minis/shared '"
+        assertNotNull(ProtectedZoneGuard.refuseReason(cmd))
+        assertEquals("/var/minis/shared", ProtectedZoneGuard.wideDeleteHit(cmd)?.path)
+        assertEquals(true, ProtectedZoneGuard.wideDeleteHit(cmd)?.cwdKnown)
+        // Only deep occurrences: still ordinary work.
+        assertNull(
+            ProtectedZoneGuard.refuseReason(
+                "ls /var/minis/shared/a/b && rm -rf /var/minis/shared/work/batch '",
+            ),
+        )
+        // The same rule for the parent zone.
+        assertNotNull(ProtectedZoneGuard.refuseReason("ls /var/minis/logs && rm -rf /var/minis '"))
+    }
+
+    // ── the negative control set: eight ordinary commands ───────────────────
+
+    /**
+     * The eight commands from the task book, verbatim. All six fixes widen the
+     * refusal surface, so this set is what keeps the guard from turning into
+     * "any mention of a zone".
+     */
+    @Test
+    fun `the eight ordinary commands still pass`() {
+        for (cmd in listOf(
+            "rm /var/minis/shared/README.md",
+            "rm -rf /var/minis/shared/work/one-batch-dir",
+            "rm -rf /var/minis/logs/x",
+            "rm -rf /var/minis/attachments/tmp",
+            "mv /tmp/report.md /var/minis/shared/",
+            "mv /var/minis/shared/work/a.md /tmp/",
+            "grep -rn 'rm -rf' /var/minis/shared",
+            "nice -n 10 ls /var/minis/shared",
+        )) {
+            assertNull("must still allow: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+    }
+}

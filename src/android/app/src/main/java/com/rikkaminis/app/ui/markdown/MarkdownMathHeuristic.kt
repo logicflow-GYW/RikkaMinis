@@ -71,10 +71,22 @@ internal object MarkdownMathHeuristic {
      * as backlog §CD F-11 (`10 min - 20 max or`).
      *
      * A formula, however, never writes an English function word as a standalone
-     * token — not as an argument name either, which is why this net reads the
-     * WHOLE content and not just the text outside the call groups (`x +
-     * sin(the angle)` must stay prose). Prose almost always writes one, and one
-     * is enough, whatever the word count is.
+     * token — and it never writes one as an ARGUMENT name either: everything
+     * behind the `(` of a call is structure, not prose. So this net reads the
+     * text OUTSIDE the call groups ([contentOutsideCallGroups]) and ignores what
+     * the arguments say. Prose keeps its function word outside its calls
+     * (`100 + min(fee) total `, `x + sin(the angle) of a circle`), which is the
+     * shape this net was written for, and one such word is enough, whatever the
+     * word count is.
+     *
+     * [2D-1119 / F-03, P1] The first form of this net read the WHOLE content,
+     * arguments included: `P(at = 0)`, `Q(x) = 1 - P(not x)` and
+     * `sum(x for x in S) > 0` were all called sentences, lost their glyph scan
+     * and rendered as raw `$ … $`. An argument is an argument, so reading it
+     * as prose was the bug. The scope has a price, recorded here on purpose:
+     * `x + sin(the angle) + 3` now reads as math — the words inside the call
+     * are no longer evidence against the formula, and a sentence that wants to
+     * be rejected has to put its prose outside the call.
      *
      * Deliberately closed and short. `to` is NOT in it on purpose:
      * `lim n to inf` is a documented formula shape (see
@@ -244,6 +256,14 @@ internal object MarkdownMathHeuristic {
      *    KaTeX. That is what [PROSE_FUNCTION_WORDS] is for — see the top of the
      *    function body.
      *
+     *    [2D-1119 / F-03, P1] That second net was first written over the RAW
+     *    content, so the arguments inside the call groups were read as prose
+     *    evidence as well, and a formula whose ARGUMENT is named `at` / `not` /
+     *    `for` / `in` was rejected as a sentence and rendered as raw `$ … $`.
+     *    The scope of net 1 is now exactly the exemption's own: the call groups.
+     *    Neither net can read prose evidence out of an argument, and nothing
+     *    outside a call group is exempt.
+     *
      * The rules together keep `$x - y$`, `$x+y$`, `$1+1=2$`, `$x^2$` and
      * `$\frac{1}{2}$` classified as math (they fail the word-count or the
      * long-word test) while every multi-word English/Chinese-free sentence is
@@ -253,10 +273,14 @@ internal object MarkdownMathHeuristic {
      */
     private fun looksLikeNaturalLanguage(content: String): Boolean {
         if (content.indexOf('\\') >= 0) return false
-        // [incr1117-B F-11] Net 1 — function words, count-independent. Read over
-        // the WHOLE content on purpose: a call group must not hide prose
-        // (`x + sin(the angle) + 3`), so this scan does not skip anything.
-        if (containsProseFunctionWord(content)) return true
+        // [incr1117-B F-11] Net 1 — function words, count-independent.
+        // [2D-1119 / F-03] It scans the text OUTSIDE the call groups: a call is
+        // `name` + its balanced `( … )` list, and everything behind the `(` is an
+        // ARGUMENT. An argument is never prose evidence — the same reason Net 2
+        // already skips those groups — so `P(at = 0)` stays a formula while a
+        // sentence still has to put its function word outside its call
+        // (`100 + min(fee) total `, `x + sin(the angle) of a circle`).
+        if (containsProseFunctionWord(contentOutsideCallGroups(content))) return true
         // Net 2 — the original count gate, now blind to whole call groups.
         var words = 0
         var hasLongWord = false
@@ -296,10 +320,52 @@ internal object MarkdownMathHeuristic {
     }
 
     /**
+     * [2D-1119 / F-03, P1] The content with every CALL GROUP replaced by a
+     * single blank, i.e. the text the prose function-word net may read.
+     *
+     * A call group is `name` followed (whitespace allowed) by a BALANCED
+     * `( … )` list, exactly the unit Net 2 already treats as one structural
+     * piece of a formula ([callGroupEnd], [incr1117-B F-06] / [F-11]). The
+     * head name is KEPT — it is still a token of the content — and only the
+     * arguments behind the `(` are removed: arguments are formula structure,
+     * never prose evidence. Unbalanced input yields no group, so a half-typed
+     * stream (`sin(x and`) is not exempt: fail-safe, the same way
+     * [callGroupEnd] reports `-1` for it.
+     *
+     * One walk, one notion of "call group", shared by both nets: the prose net
+     * cannot exempt a region the word count still reads, or read one the count
+     * does not.
+     */
+    private fun contentOutsideCallGroups(content: String): String {
+        var out = StringBuilder()
+        var i = 0
+        while (i < content.length) {
+            if (!content[i].isAsciiLetter()) {
+                out.append(content[i])
+                i++
+                continue
+            }
+            var j = i
+            while (j < content.length && content[j].isAsciiLetter()) j++
+            val groupEnd = callGroupEnd(content, j)
+            if (groupEnd > 0) {
+                out.append(content.substring(i, j))
+                out.append(' ')
+                i = groupEnd
+                continue
+            }
+            out.append(content.substring(i, j))
+            i = j
+        }
+        return out.toString()
+    }
+
+    /**
      * [incr1117-B F-11] "There is an English function word in here."
      *
-     * Exact token match, case-insensitive, over the raw content — the call
-     * groups included (see [PROSE_FUNCTION_WORDS] for why that matters).
+     * Exact token match, case-insensitive, over the text it is handed —
+     * [looksLikeNaturalLanguage] passes the content with its call groups
+     * blanked (see [PROSE_FUNCTION_WORDS] for the scope and its price).
      */
     private fun containsProseFunctionWord(content: String): Boolean {
         var i = 0

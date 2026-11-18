@@ -31,7 +31,8 @@ import kotlinx.coroutines.withContext
  * around it, serialized per session by a [Mutex]:
  *
  *  - [begin]: count up, and — on the first window — read `pinned_at`,
- *    write the pin and record the written value;
+ *    write the pin and record the written value; if either Room call fails,
+ *    give the count back and rethrow (the window was never opened);
  *  - [end]: count down, and — on the last window — read `pinned_at`,
  *    undo the pin when it is still ours, and forget the record.
  *
@@ -51,8 +52,9 @@ import kotlinx.coroutines.withContext
  * its continuation made `runCatching` swallow the CancellationException, so
  * `noteWrittenPin` never ran and the restore had nothing to undo — the parent
  * stayed pinned for good. Here the pin write and its bookkeeping cannot be
- * separated by a cancellation, and no CancellationException is caught: if the
- * window cannot be opened at all, nothing has been written either.
+ * separated by a cancellation, and nothing is swallowed: a caught failure only
+ * undoes the count taken for the window that could not be opened, and is then
+ * rethrown ([F-01]).
  *
  * The pin VALUE that was written lives here too, not in a local at the call
  * site: which dispatch pins and which one finishes last are different
@@ -103,9 +105,12 @@ object SubagentDispatchPin {
      * (`getSession(id)?.pinnedAt` / `pinSession(id, true)`), injected so the
      * decision logic is plain JVM code.
      *
-     * Never throws on cancellation: the caller's `try { … } finally { [end] } }`
-     * opens AFTER this returns, so a cancellation escape here would leak both
-     * the count and the pin.
+     * Can throw: if the Room calls cannot be completed (a Room failure, or a
+     * cancellation escaping a suspend call), the window is NOT opened and the
+     * count taken for it is given back before the failure is rethrown. The
+     * caller's `try { … } finally { [end] } }` opens AFTER this returns, so a
+     * throw here is not a leak — but it does mean `end` never runs for a window
+     * that never opened, which is why the rollback is not optional.
      *
      * ponytail: the lock is held only across the two Room statements, not
      * across the child turn, so the uncancellable wait is bounded by one local
@@ -122,8 +127,18 @@ object SubagentDispatchPin {
             val depth = depths.merge(sessionId, 1, Int::plus) ?: 1
             // Only the first window pins, and only when nobody has pinned this
             // session already — a user pin must not be adopted as ours.
-            if (depth == 1 && readPinnedAt(sessionId) == null) {
-                pin(sessionId)?.let { writtenPins[sessionId] = it }
+            try {
+                if (depth == 1 && readPinnedAt(sessionId) == null) {
+                    pin(sessionId)?.let { writtenPins[sessionId] = it }
+                }
+            } catch (t: Throwable) {
+                // [F-01] The count was taken before the Room calls, so a window
+                // that could not be opened has to give it back: otherwise every
+                // later dispatch for this session reads "a window is in flight"
+                // and waits on, or refuses to take, a pin that will never close.
+                depths.merge(sessionId, -1, Int::plus)
+                if (depths[sessionId] == 0) depths.remove(sessionId)
+                throw t
             }
             depth
         }

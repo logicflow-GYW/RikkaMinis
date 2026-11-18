@@ -131,8 +131,20 @@ SB_TERMINAL_RE = re.compile(r"\breturn\b(?!\s*@)|\bthrow\b")
 # wrapped `?:` chain is not cut in half).
 BRANCH_ENDS_WITH_CONT = ("?:", "=", "&&", "||", "+", "-", "*", "/", ".", ",",
                          "(", "[", "->")
-BRANCH_STARTS_WITH_CONT = (".", "?:", "&&", "||", "+", "-", "*", "/", ",",
-                           "->")
+# [F-02] These markers are matched against a SLICE of the text, so a
+# one-character marker can never be matched by a two-character slice: the old
+# `text[j:j + 2] in BRANCH_STARTS_WITH_CONT` compared a 2-char slice against a
+# tuple that mixed 1-char (`.` `+` `-` `*` `/` `,`) and 2-char (`?:` `&&` `||`
+# `->`) members, so every single-char continuation was silently dropped and a
+# chained branch body (`reportError(x)\n.also { return }`) was cut in half —
+# the `return` landed outside the body and the gate went red on a terminating
+# branch. Split by length and test each with the slice length it has.
+BRANCH_STARTS_WITH_CONT_SINGLE = (".", "+", "-", "*", "/", ",")
+BRANCH_STARTS_WITH_CONT_DOUBLE = ("?:", "&&", "||", "->")
+# There is deliberately NO combined tuple: the union of a 1-char and a 2-char
+# marker set is what made the old `text[j:j + 2] in …` test look correct while
+# being unable to match half its members. Two sets, two slice lengths, no
+# constant that invites the same mistake back.
 
 
 def _line_col(text, idx):
@@ -179,7 +191,8 @@ def _branch_body_end(text, start, arrow_col):
             if text[j] == "\n":
                 i += 1
                 continue
-            cont_next = text[j:j + 2] in BRANCH_STARTS_WITH_CONT
+            cont_next = (text[j] in BRANCH_STARTS_WITH_CONT_SINGLE
+                         or text[j:j + 2] in BRANCH_STARTS_WITH_CONT_DOUBLE)
             m = re.match(r"(else|catch|finally)\b\s*", text[j:j + 16])
             if m is not None:
                 # `else ->` is a SIBLING branch of the same `when`, not a
@@ -1314,6 +1327,24 @@ GOOD_SB_THROW = _mutate(
             throw IllegalStateException(result.reason)
 """)
 
+# [F-02] A terminating chained expression whose continuation line starts with a
+# ONE-character continuation marker (`.`), aligned at the arrow's column. The
+# old reader tested `text[j:j + 2] in BRANCH_STARTS_WITH_CONT` — a 2-char slice
+# can never equal a 1-char member — so the `.` continuation was dropped, the
+# body was cut before `.also { return }`, and a terminating branch read as
+# "no return" (false red on correct code). This shape must stay GREEN.
+GOOD_SB_CHAINED_CONT = _mutate(
+    GOOD_SB,
+    """        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+""",
+    """        is SkillRepository.UpdateResult.Failure ->
+            reportError(result.reason)
+        .also { return }
+""")
+
 # C3.2 — two `Failure` branches in one file: "the first occurrence" is no
 # longer THE refresh path, so the gate must fail closed instead of judging
 # whichever one comes first.
@@ -1436,6 +1467,7 @@ def selftest():
     for label, sb_t in [
         ("Failure branch returns via `if (…) { … }`", GOOD_SB_MULTILINE_IF),
         ("Failure branch throws", GOOD_SB_THROW),
+        ("Failure branch chains on a 1-char continuation", GOOD_SB_CHAINED_CONT),
     ]:
         f = run(GOOD_SR, GOOD_SM, sb_t)
         print("selftest clean shape %-28s: %s %s"

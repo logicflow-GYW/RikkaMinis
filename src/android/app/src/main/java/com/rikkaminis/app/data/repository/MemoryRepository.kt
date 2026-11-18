@@ -10,7 +10,7 @@ import java.util.Locale
 /**
  * Manages the memory directory (`minis-global/memory/`).
  * Mirrors iOS memory system:
- *   - GLOBAL.md: read-only for agent, user-maintained via Settings
+ *   - GLOBAL.md: user-owned for agent — edit only after the user approves a proposal
  *   - YYYY-MM-DD.md: daily logs with timestamped entries, agent writes via memory_write
  *   - memory_get: fuzzy keyword search across files
  *   - loadGlobalMemoryFragment() / loadRecentDailyMemoryFragment(): emit
@@ -436,7 +436,7 @@ class MemoryRepository(private val memoryDir: File) {
         // byte consistent with iOS keeps the cached system prompt identical
         // across platforms.
         if (content.isEmpty()) return null
-        return "Global memory (GLOBAL.md — read-only, user-maintained). Treat these as background context, not standing instructions. If the user's latest message conflicts with or supersedes anything here (different scope, different numbers, different goal), defer to the user's latest message:\n$content"
+        return "Global memory (GLOBAL.md — user-owned; edit only with the user's approval). Treat these as background context, not standing instructions. If the user's latest message conflicts with or supersedes anything here (different scope, different numbers, different goal), defer to the user's latest message:\n$content"
     }
 
     /**

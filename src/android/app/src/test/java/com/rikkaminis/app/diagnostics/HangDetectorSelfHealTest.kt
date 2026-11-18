@@ -1,6 +1,7 @@
 package com.rikkaminis.app.diagnostics
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -166,6 +167,71 @@ class HangDetectorSelfHealTest {
         )
     }
 
+    // ── F-01: the quiet clock restarts when the episode ends ────────────────
+
+    private val postRecoverySample = "writeStallSample(\"post-recovery\""
+    private val recoveryStampCall = "stampHangRecovery(now)"
+    private val recoveryStampDef = "private fun stampHangRecovery(nowMs: Long)"
+    private val wasHangOpen = "if (wasHang) {"
+    private val episodeEndedMarker = "hang episode ENDED"
+
+    /**
+     * [F-01] A counted hang episode must restart the quiet-period clock when it
+     * CLOSES, not when it was first counted.
+     *
+     * `recordHang` writes `last_hang_at_ms` once, at the threshold crossing, and
+     * nothing refreshed it while the episode ran or when it ended. So the quiet
+     * window `markHealthyTick` demands was measured from the hang's START: the
+     * longer the hang, the more "quiet time" it had already banked, and a
+     * ≥ 13 s hang reset its own counter — and cleared the render breaker — on
+     * the very first healthy tick after the main thread came back. The hang's
+     * own duration was being counted as the quiet period it was supposed to be
+     * waiting out.
+     *
+     * The probe checks the VALUE FLOW, not a token's presence: the stamp call
+     * has to sit inside the `wasHang` close-out, after the post-recovery sample
+     * and before the "episode ENDED" line — i.e. on the path that only runs when
+     * a counted hang actually ended, and before the heal that consumes the
+     * clock. The helper it calls has to write `KEY_LAST_HANG_AT` under the
+     * counter lock and must not touch the count.
+     */
+    private fun assertRecoveryStampsTheQuietClock(body: String) {
+        val sampleAt = body.indexOf(postRecoverySample)
+        assertTrue("the post-recovery sample marker is gone:\n$body", sampleAt >= 0)
+        val wasHangAt = body.indexOf(wasHangOpen)
+        assertTrue("the wasHang close-out is gone:\n$body", wasHangAt >= 0)
+        val endedAt = body.indexOf(episodeEndedMarker, sampleAt)
+        assertTrue(
+            "the episode-end line must follow the post-recovery sample:\n$body",
+            endedAt > sampleAt,
+        )
+        val stampAt = body.indexOf(recoveryStampCall, sampleAt)
+        assertTrue(
+            "the recovery stamp must be written inside the wasHang close-out — after the " +
+                "post-recovery sample and before the episode-end line " +
+                "(sample@$sampleAt, wasHang@$wasHangAt, stamp@$stampAt, ended@$endedAt)",
+            stampAt > wasHangAt && stampAt > sampleAt && stampAt < endedAt,
+        )
+
+        val defAt = body.indexOf(recoveryStampDef)
+        assertTrue("the recovery-stamp helper is gone:\n$body", defAt >= 0)
+        val helperEnd = blockEnd(body, body.indexOf('{', defAt))
+        assertTrue("the recovery-stamp helper has no closing brace", helperEnd > defAt)
+        val helper = body.substring(defAt, helperEnd)
+        val lockAt = helper.indexOf(counterLock)
+        val writeAt = helper.indexOf("putLong(KEY_LAST_HANG_AT")
+        assertTrue("the stamp must take the counter lock (lock@$lockAt):\n$helper", lockAt >= 0)
+        assertTrue(
+            "the stamp must write the hang timestamp inside that lock " +
+                "(lock@$lockAt, write@$writeAt)",
+            writeAt > lockAt,
+        )
+        assertFalse(
+            "the stamp must not touch the count — the reset still has to earn the quiet window:\n$helper",
+            helper.contains("KEY_HANG_COUNT"),
+        )
+    }
+
     // ── the wire ─────────────────────────────────────────────────────────────
 
     @Test
@@ -181,6 +247,11 @@ class HangDetectorSelfHealTest {
     @Test
     fun `the process-local flag flips together with the counter under the lock`() {
         assertFlagSetUnderTheCounterLock(source())
+    }
+
+    @Test
+    fun `the quiet clock restarts when a counted hang episode ends`() {
+        assertRecoveryStampsTheQuietClock(source())
     }
 
     // ── the verdict, with the count going 1 → 0 ──────────────────────────────
@@ -280,6 +351,57 @@ class HangDetectorSelfHealTest {
         assertEquals(
             "each mutation must be rejected by its own check",
             "wired, reset, flag",
+            rejected.joinToString(", "),
+        )
+    }
+
+    /**
+     * Proves the F-01 probe can actually fail. Arm 1 is the pre-fix shape (no
+     * stamp at all); arm 2 moves the stamp after the heal, where the clock
+     * restarts one quiet window too late and the first post-recovery tick still
+     * resets; arm 3 makes the helper zero the counter instead of only restarting
+     * the clock. Each arm must be rejected by the probe, and each arm's edit
+     * must really change the text — an arm that silently did nothing would read
+     * as a control that passes.
+     */
+    @Test
+    fun `the recovery-stamp probe rejects a source without a working recovery stamp`() {
+        val real = source()
+
+        val noStamp = real.replaceFirst(
+            "\n                        stampHangRecovery(now)\n",
+            "\n",
+        )
+        assertTrue(
+            "the mutation must really remove the call — otherwise this control proves nothing",
+            noStamp != real && !noStamp.contains(recoveryStampCall),
+        )
+
+        val lateStamp = real.replaceFirst(
+            "\n                        stampHangRecovery(now)\n",
+            "\n",
+        ).replaceFirst(
+            "\n                healQuietHang()\n",
+            "\n                stampHangRecovery(now)\n                healQuietHang()\n",
+        )
+        assertTrue("the mutation must really move the call", lateStamp != real)
+
+        val stampsCount = real.replace(
+            "prefs.edit().putLong(KEY_LAST_HANG_AT, nowMs).apply()",
+            "prefs.edit().putInt(KEY_HANG_COUNT, 0).putLong(KEY_LAST_HANG_AT, nowMs).apply()",
+        )
+        assertTrue("the mutation must really touch the count", stampsCount != real)
+
+        val rejected = mutableListOf<String>()
+        runCatching { assertRecoveryStampsTheQuietClock(noStamp) }
+            .onFailure { rejected += "no-stamp" }
+        runCatching { assertRecoveryStampsTheQuietClock(lateStamp) }
+            .onFailure { rejected += "late-stamp" }
+        runCatching { assertRecoveryStampsTheQuietClock(stampsCount) }
+            .onFailure { rejected += "stamps-count" }
+        assertEquals(
+            "each mutation must be rejected by its own probe",
+            "no-stamp, late-stamp, stamps-count",
             rejected.joinToString(", "),
         )
     }

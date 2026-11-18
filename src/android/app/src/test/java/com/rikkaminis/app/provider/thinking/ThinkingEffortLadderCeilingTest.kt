@@ -16,7 +16,7 @@ import java.io.FileNotFoundException
  * High — a silent downgrade. These tests pin (a) the pure fold that lowers a catalog
  * ceiling to what was actually accepted, and (b) the wiring that carries it from the
  * learner into the picker (`ChatViewModel.withLearnedCeiling`) and takes the host from
- * the provider itself (`LLMProvider.requestHost`), so the two can never disagree about
+ * the provider itself (`LLMProvider.requestScope`), so the two can never disagree about
  * which scope they are reading.
  *
  * The wiring half is source-shape based on purpose: every assertion below is written so
@@ -159,23 +159,34 @@ class ThinkingEffortLadderCeilingTest {
     }
 
     @Test
-    fun `the learned scope host comes from the provider, not from customBaseURL`() {
+    fun `the learned scope endpoint comes from the provider, not from customBaseURL`() {
         // Reading instance.customBaseURL would return null for every built-in endpoint
         // (it is the OVERRIDE, not the effective base), silently disabling the fold.
+        //
+        // [fix/effort-key-1119] the surface is `requestScope`, not `requestHost`: a
+        // bare host drops the port and the path prefix, which is exactly how two
+        // gateways on one host came to share one learned ceiling. These assertions
+        // pin the NEW shape — the pre-fix tree fails them on the spelling alone.
         val iface = code(LLM_PROVIDER)
         assertTrue(
-            "LLMProvider must expose the host it actually sends to",
-            "val requestHost: String? get() = null" in iface,
+            "LLMProvider must expose the endpoint scope it actually sends to",
+            "val requestScope: String? get() = null" in iface,
         )
         val openai = code(OPENAI)
         assertTrue(
-            "OpenAIProvider must answer requestHost from its own basePath",
-            "override val requestHost: String? get() = basePath.toHttpUrlOrNull()?.host" in openai,
+            "OpenAIProvider must answer requestScope from its own normalized basePath",
+            "override val requestScope: String? get() = effortScope ?: basePath.toHttpUrlOrNull()?.host" in openai,
+        )
+        // The scope is normalized INSIDE the learner, so the provider only has to hand
+        // it the raw base URL: `scopeOf` is what keeps ports and path prefixes in.
+        assertTrue(
+            "the scope must be produced by EffortTierLearner.scopeOf, not a bare host",
+            "EffortTierLearner.scopeOf(basePath)" in openai,
         )
         val vm = code(CHAT_VM)
         assertTrue(
-            "the ceiling fold must take the host from the provider",
-            "provider.requestHost" in vm,
+            "the ceiling fold must take the endpoint scope from the provider",
+            "provider.requestScope" in vm,
         )
         assertTrue(
             "the ceiling fold must key on the model the provider will send, not the snapshot",

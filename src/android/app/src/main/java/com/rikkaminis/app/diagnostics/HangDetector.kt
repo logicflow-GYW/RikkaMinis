@@ -447,6 +447,13 @@ object HangDetector {
                         // expectedly idle; it documents WHEN the thread came
                         // back and the episode's peak gap).
                         writeStallSample("post-recovery", episodePeakSinceMs, escalation)
+                        // [F-01] The quiet-period clock restarts HERE, not at the
+                        // moment the hang was first counted — see
+                        // stampHangRecovery. Without this a ≥ 13 s hang had
+                        // already "been quiet" for the whole of its own duration
+                        // the instant the main thread came back, so the first
+                        // healthy tick reset the counter and cleared the breaker.
+                        stampHangRecovery(now)
                         println(
                             "[T-HANG-DIAG] hang episode ENDED peak=${episodePeakSinceMs}ms midHangSamples=${escalation + 1}",
                         )
@@ -571,6 +578,35 @@ object HangDetector {
             val msg = "[T-HANG-DIAG] FAILED to write stall log: ${t.javaClass.simpleName}: ${t.message}"
             println(msg)
             Log.w(TAG, msg)
+        }
+    }
+
+    /**
+     * [F-01] Restart the quiet-period clock when a hang EPISODE ends.
+     *
+     * [recordHang] stamps [KEY_LAST_HANG_AT] exactly once — the moment the
+     * heartbeat gap first crosses [HANG_THRESHOLD_MS] — and nothing refreshed
+     * it while the episode ran or when it closed. So the "quiet period" that
+     * [markHealthyTick] demands was measured from the hang's START: a 14 s
+     * foreground block left `now - lastHangAt` at ~11 s the instant the main
+     * thread came back, and the first healthy tick after recovery reset the
+     * counter and cleared the render breaker. The hang's own duration had been
+     * counted as quiet time — the longer the hang, the faster it "healed"
+     * itself, which is the opposite of what the counter exists for.
+     *
+     * Stamping the recovery instant means the count can only settle after a
+     * full [RESET_AFTER_QUIET_MS] with a genuinely responsive main thread,
+     * which is what the counter's own contract ("quiet period after which the
+     * count resets") says it should mean. Only the timestamp is written — the
+     * count and the breaker still have to earn their reset — and the write goes
+     * under [hangCounterLock] so it cannot interleave with [recordHang]'s
+     * read-modify-write or with a concurrent reset.
+     */
+    private fun stampHangRecovery(nowMs: Long) {
+        val ctx = appContext ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        synchronized(hangCounterLock) {
+            prefs.edit().putLong(KEY_LAST_HANG_AT, nowMs).apply()
         }
     }
 

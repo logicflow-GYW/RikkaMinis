@@ -2362,10 +2362,13 @@ class ChatViewModel(
      * the reachable tiers and paints the orange up-arrow on the highest one
      * (`isClampedBy(requested, maxAvailable)`), with no new strings.
      *
-     * Scoped exactly like the wire: `host + model id` (the learner's key). A model
-     * group therefore degrades ONE member — switching to a member that has not been
-     * refused keeps its own ceiling, and the user's stored choice is never rewritten
-     * (only [com.rikkaminis.app.ui.chat.setThinkingLevel] persists, on an explicit tap).
+     * Scoped exactly like the wire: the endpoint scope + model id (the learner's key).
+     * A model group therefore degrades ONE member — switching to a member that has not
+     * been refused keeps its own ceiling, and the user's stored choice is never
+     * rewritten (only [com.rikkaminis.app.ui.chat.setThinkingLevel] persists, on an
+     * explicit tap). The scope — not the bare host — is what keeps two instances of
+     * one gateway on different ports / path prefixes from sharing a ceiling
+     * ([fix/effort-key-1119]).
      */
     private fun withLearnedCeiling(declared: ThinkingLevel, expectedModelId: String?): ThinkingLevel {
         val provider = currentProvider ?: return declared
@@ -2375,8 +2378,8 @@ class ChatViewModel(
         // member's downgrade appeared on every other member — so while the two disagree,
         // report the catalog ceiling and let `_providerGeneration` re-derive right after.
         if (expectedModelId != null && provider.model.id != expectedModelId) return declared
-        val host = provider.requestHost ?: return declared
-        val learned = EffortTierLearner.learned(host, expectedModelId ?: provider.model.id)
+        val scope = provider.requestScope ?: return declared
+        val learned = EffortTierLearner.learned(scope, expectedModelId ?: provider.model.id)
             ?: return declared
         return ThinkingEffortLadder.lowerCeiling(declared, learned)
     }
