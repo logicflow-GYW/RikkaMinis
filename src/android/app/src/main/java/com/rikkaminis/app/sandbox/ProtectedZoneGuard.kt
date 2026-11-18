@@ -27,6 +27,11 @@ package com.rikkaminis.app.sandbox
  *  - a glob is **never** refused (`rm -rf /var/minis/shared/<star>` falls
  *    through — see the ceiling below);
  *  - a deep directory is never refused (`rm -rf /var/minis/shared/work/batch`).
+ *  - the PARENT of the zones is refused only as the whole thing: `rm -rf
+ *    /var/minis` is one command that removes all five zones, so it is
+ *    refused, while `rm -rf /var/minis/logs` and
+ *    `rm -rf /var/minis/attachments` stay ordinary cleanup (equality-only
+ *    matching — see [ROOT_ONLY_ZONES]).
  *
  * So this guard does **not** stop the delete that motivated it (one file). It
  * stops the shape that cannot be undone in one step: "remove the whole thing".
@@ -45,12 +50,15 @@ package com.rikkaminis.app.sandbox
  * path-resolved fastio path ([com.rikkaminis.app.sandbox.offload.FastioOffloadHandler])
  * read this same flag, so the two can never disagree about policy.
  *
- * ## The ceiling (unchanged, and it is lexical)
+ * ## The ceiling (lexical, and stated rather than hidden)
  *
- * `rm -rf $X`, `find … -delete`, `xargs rm`, interpreter one-liners and globs
- * are not recognised — see [refuseReason]'s doc. Guessing at them would refuse
- * work that is actually fine. The path-resolved check in the fastio handler is
- * the one that cannot be spelled around.
+ * `rm -rf $X`, `find … -delete`, `xargs rm`, interpreter one-liners, globs and
+ * brace expansion (`<zone>/{a,b}`) are not recognised — see [refuseReason]'s
+ * doc. Guessing at them would refuse work that is actually fine. `eval rm -rf
+ * <zone>` IS recognised (the first word after `eval` is the verb), but `eval
+ * "rm -rf <zone>"` is not: the whole command arrives as one word, and seeing
+ * through it would mean parsing nested shell. The path-resolved check in the
+ * fastio handler is the one that cannot be spelled around.
  */
 internal object ProtectedZoneGuard {
 
@@ -68,19 +76,59 @@ internal object ProtectedZoneGuard {
         "/var/minis/mounts",
     )
 
-    /** The zone a guest path belongs to (longest prefix wins), or null. */
+    /**
+     * [F-01] Containers that are only themselves protected, never their
+     * children.
+     *
+     * `rm -rf /var/minis` removes **all five** zones in one command, and it
+     * used to fall straight through: the parent of every zone was in no list,
+     * and [isWideTarget] only looked at paths *under* a zone. It is the single
+     * most destructive spelling the guard exists for.
+     *
+     * Adding `/var/minis` to [ZONES] would be the wrong fix: [ZONES] means
+     * "the root, or any immediate child, is a container", so it would also
+     * refuse `/var/minis/logs` and `/var/minis/attachments` — the user's own
+     * logs and attachments, which are ordinary cleanup (and the model is told
+     * to delete them). So these match by EQUALITY only.
+     *
+     * `/var` is included for the same reason one level further up: `rm -rf
+     * /var` takes the zones with it (plus the rootfs's `apk` database), while
+     * equality-only matching leaves `rm -rf /var/tmp` and `rm -rf
+     * /var/cache/apk` alone.
+     */
+    private val ROOT_ONLY_ZONES: List<String> = listOf("/var/minis", "/var")
+
+    /**
+     * Every literal a raw-text scan must look for: the containers in [ZONES]
+     * plus their parents. Order is irrelevant — the path is re-read from the
+     * text at each occurrence — but the parents are appended so a zone literal
+     * is found by the shorter spelling too.
+     */
+    private val ALL_ZONES: List<String> = ZONES + ROOT_ONLY_ZONES
+
+    /**
+     * The zone a guest path belongs to (longest prefix wins), or null.
+     *
+     * Deliberately knows nothing about [ROOT_ONLY_ZONES]: those match only
+     * themselves, so reporting them as "the zone this path belongs to" would
+     * make `/var/minis/logs` look like a container.
+     */
     fun zoneOf(guestPath: String): String? =
         ZONES.filter { guestPath == it || guestPath.startsWith("$it/") }
             .maxByOrNull { it.length }
 
     /**
      * True for the shapes whose removal cannot be described as "these files":
-     * the zone root itself, or one of its immediate children (a container such
-     * as `shared/work`). Deeper targets are ordinary work and are allowed.
+     * the zone root itself, one of its immediate children (a container such as
+     * `shared/work`), or a [ROOT_ONLY_ZONES] entry itself. Deeper targets are
+     * ordinary work and are allowed.
      */
     fun isWideTarget(guestPath: String): Boolean {
-        val zone = zoneOf(guestPath) ?: return false
-        val rest = guestPath.removePrefix(zone).trim('/')
+        val path = if (guestPath.length > 1) guestPath.trimEnd('/') else guestPath
+        // [F-01] `/var/minis` and `/var`: the whole thing, and nothing below it.
+        if (path in ROOT_ONLY_ZONES) return true
+        val zone = zoneOf(path) ?: return false
+        val rest = path.removePrefix(zone).trim('/')
         return rest.isEmpty() || !rest.contains('/')
     }
 
@@ -125,21 +173,44 @@ internal object ProtectedZoneGuard {
     private val WRAPPERS = setOf(
         "sudo", "doas", "env", "time", "nohup", "command", "exec", "busybox",
         "nice", "ionice", "timeout", "setsid", "stdbuf", "taskset", "chrt",
+        // [F-04] `eval rm -rf <zone>` — after `eval` the first word IS the verb,
+        // so peeling it is enough to see the delete. `eval "rm -rf <zone>"`
+        // (the whole command quoted into one word) stays a ceiling: the verb
+        // word is then the entire command text, and seeing through it would
+        // mean parsing nested shell.
+        "eval",
     )
 
     /**
      * Wrapper options that take a value, so the value is not mistaken for the
-     * verb: `env -u FOO rm -rf x`, `sudo -u root rm -rf x`, `taskset -c 0-3 rm`.
+     * verb: `env -u FOO rm -rf x`, `sudo -u root rm -rf x`, `stdbuf -oL rm`.
      *
-     * Only options that really consume the NEXT word belong here — a missing
-     * entry costs one wrapper form, an entry that is actually a boolean flag
-     * eats the verb and hands back a bypass (`env -i rm …` was exactly that
-     * shape, so `-i` is deliberately absent).
+     * Keyed BY WRAPPER, not one flat set: `-i` means "ignore the environment"
+     * (a boolean) for `env` but "input buffer size" (takes a value) for
+     * `stdbuf`. A flat set cannot hold both, and getting "does this option eat
+     * a word" wrong in either direction creates a hole — `env -i` eating the
+     * verb is exactly that shape, which is why it is absent from `env`'s row.
+     *
+     * Only options that really consume the NEXT word belong in a row; attached
+     * forms (`-oL`, `-c2`, `--signal=KILL`) are handled by the caller.
      */
-    private val WRAPPER_VALUE_FLAGS = setOf(
-        "-u", "--unset", "-C", "--chdir", "-S", "--split-string",
-        "-n", "--adjustment", "-c", "--cpu-list", "-p", "--pid",
-        "-k", "--kill-after", "-s", "--signal",
+    private val WRAPPER_VALUE_FLAGS: Map<String, Set<String>> = mapOf(
+        "env" to setOf("-u", "--unset", "-C", "--chdir", "-S", "--split-string"),
+        "sudo" to setOf(
+            "-u", "--user", "-g", "--group", "-p", "--prompt", "-C", "--close-from",
+            "-h", "--host", "-r", "--role", "-t", "--type", "-U", "--other-user",
+            "-T", "--command-timeout", "-D", "--chdir", "-R", "--chroot",
+            "-c", "--login-class", "-a", "--auth-type",
+        ),
+        "doas" to setOf("-u", "-C"),
+        "stdbuf" to setOf("-i", "-o", "-e"),
+        "exec" to setOf("-a"),
+        "ionice" to setOf("-c", "-n", "-p"),
+        "chrt" to setOf("-p", "--pid"),
+        "nice" to setOf("-n", "--adjustment"),
+        "time" to setOf("-o", "--output", "-f", "--format"),
+        "taskset" to setOf("-c", "--cpu-list", "-p", "--pid"),
+        "timeout" to setOf("-k", "--kill-after", "-s", "--signal"),
     )
 
     /** `FOO=1` / `_x=2` — an assignment, never the verb, at any position. */
@@ -265,6 +336,27 @@ internal object ProtectedZoneGuard {
                 }
                 c == ' ' || c == '\t' || c == '\r' -> endWord()
                 c == '\n' || c == ';' || c == '&' || c == '|' -> endStatement()
+                // [F-03] Shell SYNTAX braces and parentheses are separators,
+                // not parts of words. `(rm -rf <zone>)` used to arrive as the
+                // word `(rm` (not a verb), and `{ rm …; }` opened with a `{`
+                // that was read as the verb, so both spellings fell through.
+                //
+                // `$(` is the command-substitution marker: the `$` is not an
+                // argument (`echo $(rm -rf …)`), so it is dropped rather than
+                // handed on as a one-character word.
+                c == '(' || c == ')' -> {
+                    if (wordStarted && word.length == 1 && word[0] == '$') {
+                        word = StringBuilder()
+                        wordStarted = false
+                    }
+                    endWord()
+                    endStatement()
+                }
+                // A brace INSIDE a word is brace expansion (`<zone>/{a,b}`),
+                // whose value the guard cannot see — that is the documented
+                // ceiling, and splitting it would invent paths nobody wrote.
+                // Only a brace that starts a word is the grouping form.
+                c == '{' || c == '}' -> if (wordStarted) word.append(c) else endStatement()
                 else -> {
                     word.append(c)
                     wordStarted = true
@@ -314,7 +406,7 @@ internal object ProtectedZoneGuard {
             }
             val name = words[i].substringAfterLast('/')
             if (name in WRAPPERS) {
-                i = skipWrapperArgs(words, i + 1)
+                i = skipWrapperArgs(words, i + 1, name)
                 continue
             }
             return i
@@ -323,13 +415,14 @@ internal object ProtectedZoneGuard {
     }
 
     /** Skips everything after a wrapper that belongs to the wrapper, not the verb. */
-    private fun skipWrapperArgs(words: List<String>, from: Int): Int {
+    private fun skipWrapperArgs(words: List<String>, from: Int, wrapper: String): Int {
+        val valueFlags = WRAPPER_VALUE_FLAGS[wrapper].orEmpty()
         var i = from
         while (i < words.size) {
             val w = words[i]
             when {
                 ASSIGNMENT.matches(w) -> i++
-                w.startsWith("-") -> i += if (w.contains('=')) 1 else if (w in WRAPPER_VALUE_FLAGS) 2 else 1
+                w.startsWith("-") -> i += if (w.contains('=')) 1 else if (w in valueFlags) 2 else 1
                 WRAPPER_NUMBER.matches(w) -> i++
                 else -> return i
             }
@@ -355,21 +448,21 @@ internal object ProtectedZoneGuard {
         while (i < args.size) {
             val a = args[i]
             when {
-                a == "-t" || a == "--target-directory" -> {
-                    targetForm = true
-                    i += 2
-                }
-                a.startsWith("--target-directory=") -> {
-                    targetForm = true
-                    i++
-                }
-                a.startsWith("-t") && !a.startsWith("--") -> {
-                    // `-tDIR`, `-t DIR`'s attached form; `-T` is the opposite.
-                    targetForm = true
-                    i++
-                }
                 a == "--" -> i++
-                a.startsWith("-") && a.length > 1 -> i++
+                a.startsWith("--target-directory") -> {
+                    targetForm = true
+                    i += if (a.contains('=')) 1 else 2
+                }
+                a.startsWith("-") && a.length > 1 -> {
+                    // [F-02] `-ft` / `-vtf` / `-tf`: a short option CLUSTER that
+                    // contains `t` is the target-directory form too. The old
+                    // check only knew the word `-t` / the `-tDIR` prefix, so
+                    // `-ft` took the generic branch, `targetForm` stayed false
+                    // and the real source was dropped as the destination.
+                    val (isTarget, valueIsNextWord) = mvShortCluster(a.substring(1))
+                    if (isTarget) targetForm = true
+                    i += if (valueIsNextWord) 2 else 1
+                }
                 else -> {
                     positionals.add(a)
                     i++
@@ -377,6 +470,28 @@ internal object ProtectedZoneGuard {
             }
         }
         return if (targetForm) positionals else positionals.dropLast(1)
+    }
+
+    /**
+     * [F-02] What one short option cluster (`-ft`, `-t/tmp`, `-S.bak`, `-T`)
+     * means for `mv`: (is the target-directory form, does it eat the next word).
+     *
+     * `t` takes a directory — the rest of the cluster is that directory when
+     * something follows it (`-t/tmp`), otherwise it is the next word
+     * (`-ft /tmp …`). `T` is `--no-target-directory`, the OPPOSITE flag, and a
+     * cluster that reaches an `T` before a `t` is not the target form. `S`
+     * takes a suffix, and everything after it belongs to the suffix, so no
+     * later letter in the same word can be the target flag.
+     */
+    private fun mvShortCluster(cluster: String): Pair<Boolean, Boolean> {
+        for (index in cluster.indices) {
+            when (cluster[index]) {
+                'T' -> return Pair(false, false)
+                't' -> return Pair(true, index == cluster.lastIndex)
+                'S' -> return Pair(false, false)
+            }
+        }
+        return Pair(false, false)
     }
 
     /**
@@ -391,7 +506,7 @@ internal object ProtectedZoneGuard {
      * in ordinary text — from being refused for what it merely mentions.
      */
     private fun unbalancedFallback(command: String): WideDeleteHit? {
-        val wide = ZONES.firstOrNull { zone ->
+        val wide = ALL_ZONES.firstOrNull { zone ->
             command.contains(zone) && zoneWideLiteral(command, zone) != null
         } ?: return null
         val verbSeen = command.split(Regex("""[\s;&|\n]+""")).any { token ->
@@ -402,22 +517,34 @@ internal object ProtectedZoneGuard {
         return if (verbSeen) WideDeleteHit(zoneWideLiteral(command, wide)!!, cwdKnown = true) else null
     }
 
-    /** The wide path written immediately after [zone] in the raw text, or null. */
+    /**
+     * The wide path named at ANY occurrence of [zone] in the raw text, or null.
+     *
+     * [F-06] Every occurrence is read, not just the first. A command can name
+     * a deep path early and delete a wide one later — `ls <zone>/a/b && rm -rf
+     * <zone> '` is one stray quote away from being unreadable — and stopping at
+     * the first mention reported "nothing wide here" for exactly that shape.
+     * The scan advances one character per step, so a zone that repeats cannot
+     * make this loop.
+     */
     private fun zoneWideLiteral(command: String, zone: String): String? {
-        val start = command.indexOf(zone)
-        var end = command.length
-        for (i in start + zone.length until command.length) {
-            val c = command[i]
-            if (c == ' ' || c == '\t' || c == '\n' || c == ';' || c == '|' || c == '&' ||
-                c == '"' || c == '\'' || c == '\\'
-            ) {
-                end = i
-                break
+        var start = command.indexOf(zone)
+        while (start >= 0) {
+            var end = command.length
+            for (i in start + zone.length until command.length) {
+                val c = command[i]
+                if (c == ' ' || c == '\t' || c == '\n' || c == ';' || c == '|' || c == '&' ||
+                    c == '"' || c == '\'' || c == '\\'
+                ) {
+                    end = i
+                    break
+                }
             }
+            val guest = absoluteGuestPath(command.substring(start, end), null)
+            if (guest != null && isWideTarget(guest)) return guest
+            start = command.indexOf(zone, start + 1)
         }
-        return absoluteGuestPath(command.substring(start, end), null)?.let { guest ->
-            if (isWideTarget(guest)) guest else null
-        }
+        return null
     }
 
     /**
@@ -452,20 +579,47 @@ internal object ProtectedZoneGuard {
      * `/root` and silently judged `rm -rf work` as `/root/work` — a false
      * negative whenever the shell actually stood in a zone. Unknown is handled
      * as unknown: an absolute target is still decided, a relative one is
-     * checked against every base that could make it wide (the zones and
-     * `/var/minis`), and a hit is reported with `cwdKnown = false` so the
-     * refusal can ask for an absolute path instead of guessing.
+     * checked against every base that could make it wide ([ALL_ZONES], which
+     * includes the zones' parents), and a hit is reported with `cwdKnown =
+     * false` so the refusal can ask for an absolute path instead of guessing.
      */
     internal fun wideDeleteHit(command: String, cwd: String? = null): WideDeleteHit? {
         val lex = shellLex(command)
         if (!lex.parseOk) return unbalancedFallback(command)
         var current: String? = cwd
+        // [F-05] `pushd`/`popd` are `cd` with a stack, and the stack is what
+        // `popd` returns to: `pushd <zone> && pushd /tmp && popd && rm -rf work`
+        // stands back in the zone, which the old code read as "pushd sets cwd,
+        // nothing else exists".
+        val dirStack = ArrayList<String?>()
         for (words in lex.statements) {
             if (words.isEmpty()) continue
             val i = verbIndex(words)
             if (i < 0) continue
             val verb = words[i].substringAfterLast('/')
-            if (verb == "cd" || verb == "pushd") {
+            if (verb == "pushd") {
+                val operand = words.getOrNull(i + 1)
+                if (operand == null) {
+                    // `pushd` with no operand swaps the current directory with
+                    // the top of the stack; with an empty stack it does nothing.
+                    if (dirStack.isNotEmpty()) {
+                        val top = dirStack.removeAt(dirStack.size - 1)
+                        dirStack.add(current)
+                        current = top
+                    }
+                } else {
+                    dirStack.add(current)
+                    current = absoluteGuestPath(operand, current)
+                }
+                continue
+            }
+            if (verb == "popd") {
+                // An empty stack leaves the cwd alone (the shell errors out and
+                // stays put), so this must not clear `current`.
+                if (dirStack.isNotEmpty()) current = dirStack.removeAt(dirStack.size - 1)
+                continue
+            }
+            if (verb == "cd") {
                 current = words.getOrNull(i + 1)?.let { absoluteGuestPath(it, current) }
                 continue
             }
@@ -513,7 +667,7 @@ internal object ProtectedZoneGuard {
      * delete with its own `cd`, or spelling the absolute path, resolves it.
      */
     private fun candidateWideTarget(token: String): String? {
-        for (base in ZONES + "/var/minis") {
+        for (base in ALL_ZONES) {
             val guest = absoluteGuestPath(token, base) ?: continue
             if (isWideTarget(guest)) return guest
         }
