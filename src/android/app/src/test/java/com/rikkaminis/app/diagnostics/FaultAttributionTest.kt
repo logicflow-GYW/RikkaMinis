@@ -2,6 +2,7 @@ package com.rikkaminis.app.diagnostics
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -78,6 +79,166 @@ class FaultAttributionTest {
     @Test
     fun `the service list is consulted before the connection list`() {
         assertServiceBeforeConnection(source())
+    }
+
+    // ─── F-03: status codes are tokens, not substrings ──────────────────────
+
+    /**
+     * [F-03] A millisecond count must not be read as an HTTP status code.
+     *
+     * The codes used to be space-prefixed substrings (a space, then three
+     * digits) matched with a bare `contains`, which fixes the boundary on the
+     * left and none on the right. A connection-leg message carrying a duration
+     * — the normal shape of every timeout we classify — therefore matched the
+     * SERVICE list first and came back as the relay's fault: `"after 500 ms"`
+     * contains that substring, `"connect 5020 ms"` contains the 502 one, and
+     * `"port 4030"` contains the 403 one. The user is told to complain to their
+     * relay operator about a failure that is on their own network leg.
+     *
+     * Every sample below carries connection vocabulary, so the expected answer
+     * is unambiguous: only the status-code arm could move it to SERVICE.
+     */
+    @Test
+    fun `a millisecond count is not read as an http status code`() {
+        val connection = FaultAttribution.Layer.CONNECTION
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("java.net.SocketTimeoutException: connect timed out after 500 ms").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out: proxy retry in 400 ms").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("read timed out after 2500 ms (connect 5020 ms)").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connection reset while connect 5040 ms elapsed").layer,
+        )
+    }
+
+    @Test
+    fun `the status-code boundary holds on both sides of the digits`() {
+        val connection = FaultAttribution.Layer.CONNECTION
+        // Right-hand side: a longer number, a fraction, and a duration unit.
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out, elapsed 5000ms").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out after 1500 ms").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out, ratio 500.5").layer,
+        )
+        // Left-hand side: a code glued to a longer number is not a code.
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out, port 4030 refused").layer,
+        )
+    }
+
+    /**
+     * The half that must NOT move: real status codes keep their layer. These
+     * are the shapes the panel will actually see, and two of them (`status=500`,
+     * `code: 503`) never matched the old space-prefixed substring at all — the
+     * token rule is strictly wider there.
+     */
+    @Test
+    fun `real http status codes are still attributed to the service`() {
+        val service = FaultAttribution.Layer.SERVICE
+        assertEquals(service, FaultAttribution.attribute("HTTP 500 from relay").layer)
+        assertEquals(service, FaultAttribution.attribute("upstream returned status=500").layer)
+        assertEquals(service, FaultAttribution.attribute("error code: 503").layer)
+        assertEquals(service, FaultAttribution.attribute("got a 429, slow down").layer)
+        assertEquals(service, FaultAttribution.attribute("502 Bad Gateway").layer)
+        assertEquals(service, FaultAttribution.attribute("response: 400 (bad request)").layer)
+        assertEquals(service, FaultAttribution.attribute(" 500").layer)
+        assertEquals(service, FaultAttribution.attribute("504").layer)
+    }
+
+    /**
+     * The probe must be able to fail: the pre-fix substring rule misattributes.
+     *
+     * The pre-fix rule is reproduced here as a local lambda (the space-prefixed
+     * code substrings + a bare `contains`), so the control proves the OLD
+     * behaviour really differs on these samples instead of merely asserting the
+     * new one. Every sample carries connection vocabulary, which is what makes
+     * the expected answer unambiguous — without it the old rule and the new one
+     * could agree for the wrong reason.
+     */
+    @Test
+    fun `the token rule rejects the pre-fix substring vocabulary`() {
+        val preFixCodes = listOf(
+            " 400", " 401", " 403", " 429", " 500", " 502", " 503", " 504",
+        )
+        fun preFix(raw: String): FaultAttribution.Layer =
+            if (preFixCodes.any { raw.contains(it) }) FaultAttribution.Layer.SERVICE
+            else FaultAttribution.Layer.CONNECTION
+
+        val samples = listOf(
+            "java.net.SocketTimeoutException: connect timed out after 500 ms",
+            "connect timed out: proxy retry in 400 ms",
+            "read timed out after 2500 ms (connect 5020 ms)",
+            "connect timed out, port 4030 refused",
+        )
+        for (s in samples) {
+            assertEquals(
+                "the pre-fix rule must really misattribute \"$s\" — otherwise this control proves nothing",
+                FaultAttribution.Layer.SERVICE,
+                preFix(s),
+            )
+            assertEquals(
+                "the token rule must get \"$s\" right",
+                FaultAttribution.Layer.CONNECTION,
+                FaultAttribution.attribute(s).layer,
+            )
+        }
+    }
+
+    /**
+     * The status-code class must stay a regex in the source. A future edit that
+     * drops back to `contains(" 500")` would silently restore the hijack, and
+     * the behavioural tests above would only catch it for the samples they
+     * happen to list.
+     */
+    @Test
+    fun `status codes are matched by the token pattern, not by a substring`() {
+        val body = source()
+        assertNotNull(
+            "the status-code token pattern is gone",
+            Regex("private val STATUS_CODE_PATTERN\\s*=\\s*Regex\\(").find(body),
+        )
+        assertTrue(
+            "status codes must be matched through STATUS_CODE_PATTERN",
+            body.contains("STATUS_CODE_PATTERN.containsMatchIn(raw)"),
+        )
+        // Comments may (and do) quote the pre-fix literals to explain them —
+        // only the CODE is judged, so the check runs on a comment-stripped copy.
+        val code = body.lines()
+            .filterNot { it.trimStart().startsWith("*") || it.trimStart().startsWith("//") }
+            .joinToString("\n")
+        for (code3 in listOf("400", "401", "403", "429", "500", "502", "503", "504")) {
+            assertFalse(
+                "the space-prefixed substring \" $code3\" must be gone from the pattern lists",
+                code.contains("\" $code3\""),
+            )
+        }
+        // And the pattern itself must carry the boundaries it exists for.
+        val declAt = body.indexOf("STATUS_CODE_PATTERN = Regex(")
+        val patternText = body.substring(declAt, minOf(body.length, declAt + 400))
+        assertTrue(
+            "the pattern must reject a preceding digit (left boundary): $patternText",
+            patternText.contains("(?<![\\\\d.])"),
+        )
+        assertTrue(
+            "the pattern must reject a duration unit on the right: $patternText",
+            patternText.contains("(?!\\\\s*ms)"),
+        )
     }
 
     /** Order probe over the real `attribute()` body. */
