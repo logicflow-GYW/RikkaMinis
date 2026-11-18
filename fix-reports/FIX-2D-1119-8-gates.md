@@ -133,7 +133,15 @@ cont_next = (text[j] in BRANCH_STARTS_WITH_CONT_SINGLE
 
 **CI run #3291 / `44370448122` @ `e918ccb5e51e1e8cea67ad0539c5872b6b0a6d47`**：五 job 全 `success`（lint / build-apk / unit-tests / scan-gate / publish），`head_sha` 与本地 `git rev-parse HEAD`、远端 `git ls-remote` **逐字符一致**。publish 的 `Move the rolling tag` / `Publish to Releases` 两步 `skipped`（main 门控，符合预期）。
 
-**最终 tip 复核 run #3296 / `44373775290` @ `e293e644da3f00504e464bd14ecf6e85b1b2c116`**（报告提交后 tip 前进，故对最终 tip 再 dispatch 一次）：五 job 全 `success`，`head_sha` 与本地/远端逐字符一致，publish 两步同样 `skipped`；`scan-gate` 同样 `✅ ALL 376 CASES PASS` / `Summary: 115 passed, 0 failed`，六条新断言各 1 次命中。`git diff e918ccb5..HEAD` 只有本报告一个文件（200 行），**报告之外差异为空**。
+**最终 tip 复核**：报告提交会让 tip 前进，因此对每个 tip 都单独 dispatch 核对（publish 恒 `skipped`，main 门控）：
+
+| run | sha | 内容 | 五 job |
+|---|---|---|---|
+| #3291 / `44370448122` | `e918ccb5` | **代码态（本报告描述的全部改动）** | 全 success |
+| #3296 / `44373775290` | `e293e644` | 代码态 + 报告初版 | 全 success |
+| #3298 / `44376188937` | `f2569eda` | 代码态 + 报告补记 | 全 success |
+
+三次 run 的 `head_sha` 与各自当时的本地 `git rev-parse HEAD` / 远端 `git ls-remote` 逐字符一致；`git diff e918ccb5..HEAD` 只有本报告一个文件，**报告之外差异为空**（代码态自 `e918ccb5` 起未再改动）。
 
 - **scan-gate**（本支的判据就在这里）：`✅ ALL 376 CASES PASS`，摘要 `Summary: 115 passed, 0 failed`。新增断言在 CI 日志里逐条命中：`subagent_dispatch_check external empty-guard pin tree red` / `skill_frontmatter_roundtrip_check external fall-through tree red` / `truncated_call_guard_check external blind-verdict tree red` / `the refusal's fixture command carries --single` / `no wrong fixture command survives anywhere in the driver` / `no blanket --root . command survives anywhere in the driver`，各 1 次；`test_gate_body_external_fixtures` 与 `test_scan_parallel_local_refusal` 在并行夹具列表中各出现 1 次（`fixtures: 48/53`、`50/53`）。
 - **unit-tests**：**9750 PASSED 行 / 0 真 FAILED**（6 条含 `FAILED` 字样的行全是 PASSED 的用例名，如 `slot denied produces FAILED without calling provider PASSED`）。
