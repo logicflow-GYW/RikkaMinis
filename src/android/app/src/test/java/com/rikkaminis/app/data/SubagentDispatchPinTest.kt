@@ -1,5 +1,6 @@
 package com.rikkaminis.app.data
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -30,6 +31,9 @@ import org.junit.Test
  *    unpinned by that restore (A3-a);
  *  - a cancellation that lands between the pin write and its bookkeeping must
  *    still restore (A3-b);
+ *  - a Room failure — or a cancellation escaping a Room call — while opening a
+ *    window rolls the count back and is rethrown, so the window that could not
+ *    be opened leaves nothing behind (F-01);
  *  - a pin the user takes during the window, or one they took before it,
  *    survives.
  */
@@ -125,6 +129,109 @@ class SubagentDispatchPinTest {
     }
 
     @Test
+    fun `F-01 a Room failure while reading the current pin rolls the depth back`() = runBlocking {
+        // Pre-fix: the count was taken BEFORE the two suspend Room calls and no
+        // catch sat around them, so a Room failure left depth == 1 forever —
+        // every later dispatch read "a window is in flight" and waited on, or
+        // refused to take, a pin that would never close.
+        val repo = FakeRepo()
+        val boom = RuntimeException("disk full")
+        repo.readThrows = boom
+
+        val thrown = try {
+            open(SID, repo)
+            null
+        } catch (t: Throwable) {
+            t
+        }
+        assertThrown(boom, thrown)
+        assertFalse(
+            "a window that could not be opened must not leave a count behind",
+            SubagentDispatchPin.isDispatching(SID),
+        )
+        assertEquals("nothing was written", 0, repo.pinWrites)
+
+        repo.readThrows = null
+        assertEquals("the next window is the FIRST window again", 1, open(SID, repo))
+        assertEquals("so it takes the pin itself", 1, repo.pinWrites)
+        assertEquals(100L, repo.value(SID))
+    }
+
+    @Test
+    fun `F-01 a Room failure before the pin write rolls the depth back`() = runBlocking {
+        val repo = FakeRepo()
+        val boom = IllegalStateException("db closed")
+        repo.pinThrows = boom
+
+        val thrown = try {
+            open(SID, repo)
+            null
+        } catch (t: Throwable) {
+            t
+        }
+        assertThrown(boom, thrown)
+        assertFalse(SubagentDispatchPin.isDispatching(SID))
+        assertEquals(0, repo.pinWrites)
+
+        repo.pinThrows = null
+        assertEquals(1, open(SID, repo))
+        assertEquals(1, repo.pinWrites)
+        assertEquals(100L, repo.value(SID))
+    }
+
+    @Test
+    fun `F-01 a cancellation escaping the pin write rolls the depth back and is rethrown`() = runBlocking {
+        // The rollback must not swallow the cancellation: a caller that is
+        // stopping has to still see its own cancellation.
+        val repo = FakeRepo()
+        val cancelled = CancellationException("dispatch cancelled")
+        repo.pinThrowsAfterWrite = cancelled
+
+        val thrown = try {
+            open(SID, repo)
+            null
+        } catch (t: Throwable) {
+            t
+        }
+        assertThrown(cancelled, thrown)
+        assertFalse("the count is rolled back even for a cancellation", SubagentDispatchPin.isDispatching(SID))
+
+        repo.pinThrowsAfterWrite = null
+        assertEquals(1, open(SID, repo))
+        assertEquals(1, repo.pinWrites)
+    }
+
+    @Test
+    fun `F-01 a pin write that lands and then fails rolls the depth back`() = runBlocking {
+        // The row write landed and the continuation failed: the count is still
+        // given back, and the row is left alone because the value written is
+        // unknown — blindly unpinning could undo a newer pin the user took.
+        val repo = FakeRepo()
+        val boom = RuntimeException("write landed, continuation failed")
+        repo.pinThrowsAfterWrite = boom
+
+        val thrown = try {
+            open(SID, repo)
+            null
+        } catch (t: Throwable) {
+            t
+        }
+        assertThrown(boom, thrown)
+        assertFalse(SubagentDispatchPin.isDispatching(SID))
+        assertEquals("the write landed before it failed", 100L, repo.value(SID))
+        assertEquals(1, repo.pinWrites)
+
+        repo.pinThrowsAfterWrite = null
+        assertEquals(1, open(SID, repo))
+        assertEquals("the row is read as an existing pin, not adopted as ours", 1, repo.pinWrites)
+        // Registered residual (see the report): with no record of what was
+        // written, the close cannot undo it — the row stays pinned.
+        assertTrue(close(SID, repo))
+        assertEquals(0, repo.unpinWrites)
+        assertEquals(100L, repo.value(SID))
+    }
+
+    @Test
     fun `a manual pin taken during the window survives the restore`() = runBlocking {
         val repo = FakeRepo()
         open(SID, repo)
@@ -211,6 +318,24 @@ class SubagentDispatchPinTest {
 
     // ---- helpers -----------------------------------------------------------
 
+    /**
+     * The failure that escaped [SubagentDispatchPin.begin] is the SAME KIND with
+     * the SAME message as the one the fake threw.
+     *
+     * Deliberately not `assertSame`: kotlinx.coroutines' stacktrace recovery
+     * COPIES an exception that crosses a suspend boundary (the copy keeps the
+     * class and the message, not the identity), so an identity assertion is
+     * green or red depending on the coroutines version and the debug flag —
+     * which is exactly what happened here: the local harness (coroutines
+     * 1.8.1) kept the instance and CI did not. Identity was never the contract;
+     * "the failure is not swallowed and not wrapped" is.
+     */
+    private fun assertThrown(expected: Throwable, actual: Throwable?) {
+        assertNotNull("the failure must reach the caller, not be swallowed", actual)
+        assertEquals("the failure keeps its class", expected.javaClass, actual!!.javaClass)
+        assertEquals("the failure keeps its message", expected.message, actual.message)
+    }
+
     private suspend fun open(sid: String, repo: FakeRepo): Int =
         SubagentDispatchPin.begin(
             sessionId = sid,
@@ -235,6 +360,12 @@ class SubagentDispatchPinTest {
         private var reads = 0
         var readGate: (suspend (Int) -> Unit)? = null
         var afterWriteGate: (suspend () -> Unit)? = null
+        /** Room failure to inject: thrown by the read, before it returns. */
+        var readThrows: Throwable? = null
+        /** Room failure to inject: thrown by a pin write, before it lands. */
+        var pinThrows: Throwable? = null
+        /** Room failure to inject: the pin write lands, then this is thrown. */
+        var pinThrowsAfterWrite: Throwable? = null
 
         fun value(sid: String): Long? = rows[sid]
 
@@ -245,14 +376,19 @@ class SubagentDispatchPinTest {
         suspend fun read(sid: String): Long? {
             reads += 1
             readGate?.invoke(reads)
+            readThrows?.let { throw it }
             return rows[sid]
         }
 
         suspend fun pin(sid: String, pinned: Boolean): Long? {
+            val beforeWrite = pinThrows
+            if (pinned && beforeWrite != null) throw beforeWrite
             val value = if (pinned) nextValue else null
             rows[sid] = value
             if (pinned) pinWrites += 1 else unpinWrites += 1
             afterWriteGate?.invoke()
+            val afterWrite = pinThrowsAfterWrite
+            if (pinned && afterWrite != null) throw afterWrite
             return value
         }
     }
