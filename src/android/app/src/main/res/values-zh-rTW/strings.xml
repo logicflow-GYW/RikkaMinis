@@ -1711,6 +1711,10 @@
     <string name="perm_auto_approve_confirm_title">開啟免確認模式？</string>
     <string name="perm_auto_approve_confirm_text">一般設定變更將直接生效，不再彈確認框；工具呼叫也不再彈權限詢問。敏感設定（服務商 API 金鑰）與破壞性變更仍會確認。隨時可以關閉。</string>
     <string name="perm_auto_approve_confirm_on">開啟</string>
+    <string name="perm_section_zone_delete_guard">受保護資料夾</string>
+    <string name="perm_zone_delete_guard_title">保護資料夾不被整目錄刪除</string>
+    <string name="perm_zone_delete_guard_desc">拒絕「遞迴刪除整個受保護資料夾（shared、memory、skills、mcp-servers、mounts）或其第一層子目錄」的操作。刪除單一檔案與更深層目錄照常。與免確認模式相互獨立：開啟免確認模式不會關掉它。</string>
+    <string name="perm_zone_delete_guard_footer">預設開啟。shell 與 minis-fastio 兩條刪除路徑都受它約束。關掉後此類刪除會放行，且每一次仍會記入診斷日誌。</string>
     <string name="perm_section_runtime_batch">系統權限</string>
     <string name="perm_runtime_batch_desc">Android 會在你使用對應功能時逐個詢問這些權限。現在一次性全部授予，之後就不會反覆打斷。</string>
     <string name="perm_runtime_batch_title">一次授予全部系統權限</string>
