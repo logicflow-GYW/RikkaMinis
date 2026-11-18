@@ -200,7 +200,8 @@ FaultAttributionTest（12 例，+5）
 
 | run | 测试的提交 | 结论 |
 |---|---|---|
-| **#3303** / `44380970578` | `29ba43e3a7f67e6a3de3a964abe416b1af449aaa` | **五 job 全 success** ← 停止节点 |
+| **#3305** / `44383474429` | `ca6bb45ee2f3064ce6a29226baecc7ad6ecea6c5` | **五 job 全 success** ← 停止节点 |
+| #3303 / `44380970578` | `29ba43e3a7f67e6a3de3a964abe416b1af449aaa` | 五 job 全 success |
 | #3300 / `44377159360` | `3841af9db2a5b4044ae7f5b793f04799fa2e86bb` | 五 job 全 success |
 | #3293 / `44373325007` | `06de9d0f8d33bac837cb5724c605c637799cf170` | 五 job 全 success |
 | #3292 / `44373120997` | `b2252554e60327bc69911745f0082911ceee598e`（代码 + 测试） | 被 #3293 取代（同分支并发，`cancelled`，无失败 job） |
@@ -283,8 +284,10 @@ sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-runs \
 
 ## 9 CI 结论
 
-**停止节点达成**：run **#3303 / `44380970578` @ `29ba43e3a7f67e6a3de3a964abe416b1af449aaa`** 五 job 全 success（scan-gate / build-apk / unit-tests / lint / publish），`head_sha` 与分支 tip 逐字符一致，publish 的 `Move the rolling tag` 与 `Publish to Releases` 两步 skipped（main 门控）。**未合 main。**
+**停止节点达成**：run **#3305 / `44383474429` @ `ca6bb45ee2f3064ce6a29226baecc7ad6ecea6c5`** 五 job 全 success（scan-gate / build-apk / unit-tests / lint / publish），`head_sha` 与分支 tip 逐字符一致，publish 的 `Move the rolling tag` 与 `Publish to Releases` 两步 skipped（main 门控）。**未合 main。**
 
-单测 9757 PASSED / 0 真失败、scan-gate `115 passed, 0 failed` 这两项数据取自 #3293（`06de9d0f`）；#3300 与 #3303 相对它的差异只有本报告，源码树逐字节相同（`git diff --name-only 06de9d0f HEAD` 只列出本文件）。
+单测 9757 PASSED / 0 真失败、scan-gate `115 passed, 0 failed` 这两项数据取自 #3293（`06de9d0f`）；其后每一次 run 相对它的差异都只有本报告，源码树逐字节相同（`git diff --name-only 06de9d0f <tip>` 只列出本文件）。
 
-一处流程注记：本报告在代码提交之后才写完，因此「代码提交那次 run」的 `head_sha`（`b2252554`）自然不等于最终 tip。按既有口径，对每个前进后的 tip 各 dispatch 一次（#3293 / #3300 / #3303），而不是把报告塞进代码提交。四次 run 都记录在 §4.3。
+一处流程注记：本报告在代码提交之后才写完，因此「代码提交那次 run」的 `head_sha`（`b2252554`）自然不等于最终 tip。按既有口径，对每个前进后的 tip 各 dispatch 一次（#3293 / #3300 / #3303 / #3305），而不是把报告塞进代码提交。五次 run 都记录在 §4.3。
+
+**这条口径本身值得记**：报告是「证据的一部分」，它每改一次 tip 就前进一次，于是「head_sha == tip」这个判据会把作者推入「改报告 → 再 dispatch → 报告里的 run id 又过期」的循环。可行的停止条件只有两个：① 报告只写「哪次 run 绿了」而不写「当前 tip 是哪次 run」，改完不再 dispatch；② 认可「报告之外差异为空」与 `head_sha == tip` 等价（源码树逐字节相同），以它为停止节点。本次用的是 ②，因为 ① 会让报告里留下一个不指向最终 tip 的 run id。
