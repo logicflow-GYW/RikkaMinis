@@ -2279,6 +2279,31 @@ fun ChatScreen(
                     .onSizeChanged { topBarHeightPx = it.height },
             ) {
                 if (composerGlassOn) {
+                    // [fix/topbar-glass-flash-1118] Opaque floor UNDER the glass,
+                    // alpha = 1 - topBarGlassAlpha (see TopBarGlassOcclusion.scrimAlpha).
+                    //
+                    // Without it the two gates disagree for the first frames of a
+                    // chat open: `topBarTail` already lifts the list behind the bar
+                    // (it only reads the switch), while the glass layer is still at
+                    // alpha 0 (it reads `canScrollBackward`, which is false until
+                    // the list is measured and scrolled to the bottom — and
+                    // `animateFloatAsState` seeds itself with its target, so frame
+                    // one is genuinely alpha 0). A zero-alpha graphicsLayer draws
+                    // nothing and the bar container is transparent under the
+                    // switch, so the lifted rows are painted raw for the whole
+                    // spring-up: the reported "flash of what the bar was hiding".
+                    // The floor makes that window read as the ordinary opaque bar
+                    // and cross-fades into the glass — no layout change, so no row
+                    // jitter (animating `topBarTail` instead would move every row).
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(
+                                topBarGlassBase.copy(
+                                    alpha = TopBarGlassOcclusion.scrimAlpha(topBarGlassAlpha),
+                                ),
+                            ),
+                    )
                     Box(
                         modifier = Modifier
                             .matchParentSize()

@@ -1819,6 +1819,10 @@
     <string name="perm_auto_approve_confirm_title">Turn on auto-approve?</string>
     <string name="perm_auto_approve_confirm_text">Routine settings changes will be applied without asking, and agent tools will run without permission prompts. Sensitive settings (provider API keys) and destructive changes still ask. You can turn this off any time.</string>
     <string name="perm_auto_approve_confirm_on">Turn on</string>
+    <string name="perm_section_zone_delete_guard">Protected folders</string>
+    <string name="perm_zone_delete_guard_title">Protect folders from bulk deletion</string>
+    <string name="perm_zone_delete_guard_desc">Refuse a recursive delete aimed at a whole protected folder (shared, memory, skills, mcp-servers, mounts) or at one of their top-level subfolders. Removing individual files and deeper folders still works. This is independent of auto-approve: turning auto-approve on does not switch this off.</string>
+    <string name="perm_zone_delete_guard_footer">On by default. It applies to both the shell and the minis-fastio delete paths. Turning it off lets such deletes through, and each one is still recorded in the diagnostics log.</string>
     <string name="perm_section_runtime_batch">System permissions</string>
     <string name="perm_runtime_batch_desc">Android asks for these one at a time while you use each capability. Grant them all now in one sitting so they stop interrupting later.</string>
     <string name="perm_runtime_batch_title">Grant all system permissions</string>

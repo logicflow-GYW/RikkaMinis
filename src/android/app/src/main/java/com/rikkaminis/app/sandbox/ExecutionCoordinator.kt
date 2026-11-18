@@ -283,6 +283,12 @@ object ExecutionCoordinator {
 
     fun init(context: Context) {
         appContext = context.applicationContext
+        // [C7] Prime the zone-delete switch here rather than in MinisApp: both
+        // readers (this class's per-command check and FastioOffloadHandler's
+        // path-resolved check) live behind this init, and a process that never
+        // ran it still answers with the safe default (protection ON), so the
+        // store can never be observed as "off" just because init was missed.
+        ZoneDeleteGuardStore.init(context.applicationContext)
         // [D-2] size the shared shell cap from ConcurrencyPrefs. Runs after
         // ConcurrencyPrefs.prime in MinisApp.onCreate, so the effective cap is
         // the user-configured value (default 2), kept aligned with the other
@@ -399,28 +405,43 @@ object ExecutionCoordinator {
         // deliberately NOT protected — the user's rule is that scratch is
         // discardable and regenerable.
         //
-        // The guard yields to the existing auto-approve master switch: that is
-        // the user's standing statement that they accept the risk for the
-        // convenience, and it already governs every other confirmation. No new
-        // toggle — one switch, one mental model.
-        val autoApprove = com.rikkaminis.app.config.AutoApproveStore.isEnabled
-        val wideTarget = ProtectedZoneGuard.wideDeleteTarget(command)
-        if (wideTarget != null) {
-            if (!autoApprove) {
-                val refusal = ProtectedZoneGuard.refuseReason(command) ?: ""
+        // [C7] The guard has its OWN switch, default ON, and deliberately does
+        // not read AutoApproveStore any more. Riding on auto-approve inverted
+        // the intent: users turn that on to stop seeing dialogs, and it is also
+        // what makes deletes flow without a prompt — so the guard degraded to a
+        // logging pass at exactly the moment most deletes happened (protection
+        // rate 0%). The zone switch is UI-only (not in ConfigRegistry), so the
+        // agent that just got refused cannot reach `minis-config` and turn its
+        // own guard off.
+        //
+        // cwd: the persistent shell keeps its working directory inside the
+        // guest (proot `-w /root`, then a `cd`-trap file it writes itself) and
+        // nothing exposes it to this process. Passing a made-up "/root" made
+        // `rm -rf work` resolve to `/root/work` — a silent false negative
+        // whenever the shell actually stood in a zone. Unknown is passed as
+        // unknown: absolute targets are still decided, relative ones are
+        // judged against every base that could make them wide, and a hit is
+        // refused with a "use an absolute path" note instead of a guess.
+        val wideHit = ProtectedZoneGuard.wideDeleteHit(command, cwd = null)
+        if (wideHit != null) {
+            if (ZoneDeleteGuardStore.isEnabled) {
+                val refusal = ProtectedZoneGuard.refusalFor(wideHit)
                 Log.w(TAG, "[$sessionId] Refused destructive command: $refusal")
                 MemorySpikeRecorder.onEvent(
                     "refuse-zone",
-                    "session=$sessionId target=$wideTarget :: ${MemorySpikeRecorder.previewOf(command, 60)}",
+                    "session=$sessionId target=${wideHit.path} cwdKnown=${wideHit.cwdKnown} " +
+                        ":: ${MemorySpikeRecorder.previewOf(command, 60)}",
                 )
                 return CommandResult(refusal, -1, 0, true)
             }
-            // Allowed by the user's own switch, but still recorded: the audit
-            // line is what makes "I turned it on" reviewable afterwards.
-            Log.w(TAG, "[$sessionId] Protected-zone delete allowed by auto-approve: $wideTarget")
+            // The user turned the protection off, but the attempt is still
+            // recorded: the audit line is what makes "I turned it off"
+            // reviewable afterwards.
+            Log.w(TAG, "[$sessionId] Protected-zone delete allowed by zone-guard switch: ${wideHit.path}")
             MemorySpikeRecorder.onEvent(
                 "zone-delete-allowed",
-                "session=$sessionId target=$wideTarget :: ${MemorySpikeRecorder.previewOf(command, 60)}",
+                "session=$sessionId target=${wideHit.path} cwdKnown=${wideHit.cwdKnown} " +
+                    ":: ${MemorySpikeRecorder.previewOf(command, 60)}",
             )
         }
         val preExecReject = preExecRejectionMessage(preExecPhase, cmdClass, preExecNativeMB, memAvailableMB)

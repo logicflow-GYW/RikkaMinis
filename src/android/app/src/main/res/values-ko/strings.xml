@@ -1706,6 +1706,10 @@
     <string name="perm_auto_approve_confirm_title">자동 승인을 켜시겠습니까?</string>
     <string name="perm_auto_approve_confirm_text">일반 설정 변경은 확인 없이 적용되며 도구 권한 확인도 표시되지 않습니다. 민감한 설정(제공자 API 키)과 파괴적인 변경은 여전히 확인합니다. 언제든지 끌 수 있습니다.</string>
     <string name="perm_auto_approve_confirm_on">켜기</string>
+    <string name="perm_section_zone_delete_guard">보호된 폴더</string>
+    <string name="perm_zone_delete_guard_title">폴더 통째로 삭제 방지</string>
+    <string name="perm_zone_delete_guard_desc">보호된 폴더 전체(shared, memory, skills, mcp-servers, mounts) 또는 그 1단계 하위 폴더를 재귀적으로 삭제하는 요청을 거부합니다. 개별 파일과 더 깊은 폴더 삭제는 그대로 됩니다. 자동 승인과 무관합니다. 자동 승인을 켜도 이 보호는 꺼지지 않습니다.</string>
+    <string name="perm_zone_delete_guard_footer">기본값은 켜짐입니다. 셸과 minis-fastio 두 경로 모두에 적용됩니다. 끄면 이런 삭제가 허용되며, 그래도 매번 진단 로그에 기록됩니다.</string>
     <string name="perm_section_runtime_batch">시스템 권한</string>
     <string name="perm_runtime_batch_desc">Android는 기능을 사용할 때 이러한 권한을 하나씩 묻습니다. 지금 한 번에 모두 허용하면 나중에 방해받지 않습니다.</string>
     <string name="perm_runtime_batch_title">모든 시스템 권한 허용</string>

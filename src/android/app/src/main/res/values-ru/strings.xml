@@ -1660,6 +1660,10 @@
     <string name="perm_auto_approve_confirm_title">Включить автоодобрение?</string>
     <string name="perm_auto_approve_confirm_text">Обычные изменения настроек будут применяться без запроса, запросы разрешений инструментов прекратятся. Чувствительные настройки (API-ключи провайдеров) и разрушительные изменения по-прежнему требуют подтверждения. Можно отключить в любой момент.</string>
     <string name="perm_auto_approve_confirm_on">Включить</string>
+    <string name="perm_section_zone_delete_guard">Защищённые папки</string>
+    <string name="perm_zone_delete_guard_title">Защита папок от удаления целиком</string>
+    <string name="perm_zone_delete_guard_desc">Запрещает рекурсивное удаление целой защищённой папки (shared, memory, skills, mcp-servers, mounts) или её подпапки первого уровня. Удаление отдельных файлов и более глубоких папок по-прежнему работает. Не зависит от режима авто-одобрения: его включение не отключает эту защиту.</string>
+    <string name="perm_zone_delete_guard_footer">Включено по умолчанию. Действует и для оболочки, и для minis-fastio. Если выключить, такие удаления будут разрешены, но всё равно записаны в журнал диагностики.</string>
     <string name="perm_section_runtime_batch">Системные разрешения</string>
     <string name="perm_runtime_batch_desc">Android запрашивает их по одному при использовании каждой функции. Выдайте все сразу, чтобы они не прерывали позже.</string>
     <string name="perm_runtime_batch_title">Выдать все системные разрешения</string>

@@ -1707,6 +1707,10 @@
     <string name="perm_auto_approve_confirm_title">Auto-Genehmigung aktivieren?</string>
     <string name="perm_auto_approve_confirm_text">Übliche Einstellungsänderungen werden ohne Nachfrage angewendet, und Tool-Berechtigungsabfragen entfallen. Sensible Einstellungen (Anbieter-API-Schlüssel) und destruktive Änderungen werden weiterhin bestätigt. Jederzeit deaktivierbar.</string>
     <string name="perm_auto_approve_confirm_on">Aktivieren</string>
+    <string name="perm_section_zone_delete_guard">Geschützte Ordner</string>
+    <string name="perm_zone_delete_guard_title">Ordner vor vollständigem Löschen schützen</string>
+    <string name="perm_zone_delete_guard_desc">Lehnt ein rekursives Löschen ab, das auf einen ganzen geschützten Ordner (shared, memory, skills, mcp-servers, mounts) oder einen seiner Unterordner der ersten Ebene zielt. Einzelne Dateien und tiefer liegende Ordner lassen sich weiterhin löschen. Unabhängig vom Auto-Freigabe-Modus: Wer ihn einschaltet, schaltet diesen Schutz nicht ab.</string>
+    <string name="perm_zone_delete_guard_footer">Standardmäßig an. Gilt sowohl für die Shell als auch für minis-fastio. Wenn ausgeschaltet, werden solche Löschvorgänge zugelassen und trotzdem im Diagnoseprotokoll erfasst.</string>
     <string name="perm_section_runtime_batch">Systemberechtigungen</string>
     <string name="perm_runtime_batch_desc">Android fragt diese Berechtigungen einzeln bei der Nutzung ab. Jetzt alle auf einmal gewähren, damit sie später nicht stören.</string>
     <string name="perm_runtime_batch_title">Alle Systemberechtigungen gewähren</string>

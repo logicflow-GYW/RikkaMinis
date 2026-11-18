@@ -1705,6 +1705,10 @@
     <string name="perm_auto_approve_confirm_title">自動承認をオンにしますか？</string>
     <string name="perm_auto_approve_confirm_text">通常の設定変更は確認なしで適用され、ツールの権限確認も表示されなくなります。機密設定（プロバイダーの API キー）と破壊的な変更は引き続き確認します。いつでもオフにできます。</string>
     <string name="perm_auto_approve_confirm_on">オンにする</string>
+    <string name="perm_section_zone_delete_guard">保護フォルダ</string>
+    <string name="perm_zone_delete_guard_title">フォルダの丸ごと削除を防ぐ</string>
+    <string name="perm_zone_delete_guard_desc">保護フォルダ全体(shared、memory、skills、mcp-servers、mounts)またはその直下のフォルダを再帰的に削除する操作を拒否します。個別ファイルやより深いフォルダの削除はそのまま行えます。自動承認とは独立しています。自動承認をオンにしてもこの保護は無効になりません。</string>
+    <string name="perm_zone_delete_guard_footer">デフォルトはオンです。シェルと minis-fastio の両方に適用されます。オフにするとこの種の削除は通りますが、そのたびに診断ログに記録されます。</string>
     <string name="perm_section_runtime_batch">システム権限</string>
     <string name="perm_runtime_batch_desc">Android は機能を使用するたびにこれらの権限を個別に尋ねます。今まとめて許可しておくと、後で中断されません。</string>
     <string name="perm_runtime_batch_title">すべてのシステム権限を許可</string>

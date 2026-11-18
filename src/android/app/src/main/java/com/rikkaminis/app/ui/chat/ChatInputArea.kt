@@ -252,6 +252,15 @@ internal fun ChatInputArea(
     // is a replay of it.
     var lastClearedText by remember { mutableStateOf<String?>(null) }
     var lastClearedAtMs by remember { mutableStateOf(0L) }
+    // [W1118-COMPOSER A4] Why the NEXT clear is happening, for `stampClearedBody`.
+    // The state test ("previous stamp still in its window AND the box holds a
+    // piece of it") cannot distinguish the two kinds of clear that reach the
+    // funnel: the replay guard unwinding a landed replay (keep the stamp) and the
+    // USER sending a second message that happens to be a piece of the first
+    // (must restamp — otherwise the second message keeps the first one's stamp
+    // AND its shortened window, and its own replay walks back in). Set by the
+    // guard immediately before it clears, consumed by the stamp.
+    var guardUnwindClear by remember { mutableStateOf(false) }
     // One-shot observability latch, same shape as `dictationSkipLogged`: proof
     // from a real device that the replay guard fired, without per-event noise.
     var clearResidueLogged by remember { mutableStateOf(false) }
@@ -312,6 +321,13 @@ internal fun ChatInputArea(
     // resets out of range (the 406-character lesson).
     val stampClearedBody: () -> Unit = {
         val clearedBody = inputFieldValue.text
+        // [W1118-COMPOSER A4] `guardUnwindClear` is the ONLY thing that can make
+        // this clear a non-restamp: it is set by the replay guard right before it
+        // clears, and consumed here. A user clear (send / slash / clear-chat)
+        // always restamps, so a second message that happens to be a piece of the
+        // first gets its own stamp and its own full window.
+        val guardClear = guardUnwindClear
+        guardUnwindClear = false
         // [W1118-COMPOSER F-01] The decision lives in `shouldRestampClearedBody`
         // (pure, JVM-pinned): a clear that is really UNWINDING a replay must keep
         // the previous stamp, or the fragment in the box overwrites the stamp for
@@ -322,6 +338,7 @@ internal fun ChatInputArea(
                 clearedBody = clearedBody,
                 previousStamp = lastClearedText,
                 msSinceStamp = SystemClock.elapsedRealtime() - lastClearedAtMs,
+                guardClear = guardClear,
             )
         ) {
             lastClearedText = clearedBody
@@ -389,8 +406,24 @@ internal fun ChatInputArea(
     // and left a stale intent to hijack the caret on the NEXT external write.
     // Drain unconditionally — a stale intent must never outlive a commit — and
     // let an explicit caller caret win over it.
+    // [W1118-COMPOSER A2] The text written here is the USER's own body (a refused
+    // send handing the message back, a share injection, a slash toggle), never an
+    // IME replay of a body a clear removed — so it must not be measured against
+    // the cleared-body fingerprint. Leaving the stamp in place made the refusal
+    // path self-destructive: the send cleared "hello world", the refusal wrote it
+    // straight back, and the user's next Backspace (or the IME settling its
+    // trailing punctuation) produced a text that was still a fragment of the
+    // stamp inside the window → DROP_AND_CLEAR wiped the whole message the
+    // refusal had just restored.
+    //
+    // The rationale lives OUTSIDE the lambda on purpose: the shape test that
+    // guards this funnel measures a bounded window from its declaration, and a
+    // block of prose inside pushes the drain below out of range (the same
+    // distance-window lesson that bit `stampClearedBody` twice).
     val commitComposerBody: (String, Int?) -> Unit = { text, caret ->
         cancelPendingImeBurst()
+        lastClearedText = null
+        lastClearedAtMs = 0L
         val at = composerFunnelCaret(
             caret = caret,
             pendingCaret = viewModel.consumePendingCaret(),
@@ -1897,6 +1930,12 @@ internal fun ChatInputArea(
                                 // full-body stamp intact instead of overwriting
                                 // it with the fragment.
                                 if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR) {
+                                    // [W1118-COMPOSER A4] Tell the funnel WHY: this
+                                    // clear is unwinding a replay, so the stamp must
+                                    // survive. Without the flag the funnel would have
+                                    // to guess from state, and a user's second message
+                                    // that is a piece of the first looks identical.
+                                    guardUnwindClear = true
                                     clearComposerInput()
                                     return@BasicTextField
                                 }
@@ -1937,12 +1976,18 @@ internal fun ChatInputArea(
                             // reclaiming the composer and destroyed the
                             // fingerprint. Everything after it then arrived with
                             // `clearedText == null`, so the guard could never
-                            // fire again. Keep the stamp alive while the edit is
-                            // still a contiguous piece of the cleared body; drop
-                            // it the moment the user types something unrelated.
-                            if (tfv.text.isNotEmpty() &&
-                                !isFragmentOfClearedBody(tfv.text, lastClearedText.orEmpty())
-                            ) {
+                            // fire again.
+                            //
+                            // [W1118-COMPOSER A6] The rule is a pure function so
+                            // the DECISION is pinned, not a substring scan: the
+                            // old shape arm looked for `isFragmentOfClearedBody(`
+                            // within 400 characters above the write and was
+                            // satisfied by the observability log block a few
+                            // lines up, so deleting this condition left the suite
+                            // green. Keep the stamp while the edit is still a
+                            // piece of the cleared body; drop it the moment the
+                            // user types something unrelated.
+                            if (!shouldKeepClearedStamp(tfv.text, lastClearedText)) {
                                 lastClearedText = null
                             }
                             // [feat/paste-fold-marker] Fold a long paste into a

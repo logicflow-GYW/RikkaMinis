@@ -29,6 +29,98 @@ internal const val COMPOSER_CLEAR_RESIDUE_WINDOW_MS = 1_500L
 internal const val COMPOSER_CLEAR_RESIDUE_MIN_REPLAY_CHARS = 4
 
 /**
+ * [W1118-COMPOSER A1] Fastest rate at which a human can plausibly TYPE into the
+ * composer, in characters per second.
+ *
+ * This is the whole of arm B's safety argument. A char-by-char IME replay and a
+ * human retyping the same characters produce byte-identical `onValueChange`
+ * edits, so no content test can tell them apart. What CAN be told apart is
+ * VOLUME: how much text is in the box relative to how long the box has been
+ * empty. Thumb typing on a phone runs at roughly 3-6 characters per second and
+ * even a hardware-keyboard-fast user stays under 10; 12 is deliberately
+ * generous so the guard errs on the side of "the user could have typed this".
+ *
+ * Consequence, and the intended one: a replay that rebuilds the body faster than
+ * 12 chars/s converges and is wiped, while a user who genuinely retypes the
+ * message he just sent (always slower than that) keeps every keystroke.
+ */
+internal const val COMPOSER_REPLAY_MAX_TYPEABLE_CHARS_PER_SEC = 12
+
+/**
+ * [W1118-COMPOSER A1] Length at which a SINGLE edit stops being attributable to a
+ * human input method at all.
+ *
+ * Arm A sees one `onValueChange` landing in an EMPTY composer, so the question is
+ * "could one edit produce this?". Suggestion chips, glide swipes and short
+ * dictation all produce a WORD — 4 to ~10 characters. A single edit carrying 12
+ * or more characters is a phrase, and no IME commits a phrase in one shot; only a
+ * replay from the IME's own buffer does. This keeps the primary symptom (the whole
+ * sent message reappearing) caught for bodies of any length without relying on
+ * how fast the device delivered the commit.
+ */
+internal const val COMPOSER_SINGLE_EDIT_PHRASE_CHARS = 12
+
+/**
+ * [W1118-COMPOSER A1] Could a human have produced [chars] characters in
+ * [msSinceClear] milliseconds? True means "no — this is faster than any human",
+ * which is the only discriminator content alone cannot provide.
+ *
+ * Integer arithmetic on purpose (no float rounding at the boundary) and strict
+ * `>`: at exactly the calibrated rate the edit is treated as typeable, i.e. the
+ * guard stays out of the way.
+ */
+internal fun isSuperhumanTypingRate(chars: Int, msSinceClear: Long): Boolean {
+    if (chars <= 0) return false
+    val elapsed = msSinceClear.coerceAtLeast(0L)
+    return chars.toLong() * 1000L > elapsed * COMPOSER_REPLAY_MAX_TYPEABLE_CHARS_PER_SEC
+}
+
+/**
+ * [W1118-COMPOSER A1] Has the box rebuilt the WHOLE cleared body at a speed no
+ * human could have typed it?
+ *
+ * This is arm B's convergence criterion, and it replaces "the box holds a
+ * fragment, so wipe it". That older rule ate real input: sending "hello world"
+ * and then typing "he" put `fieldText = "h"` (arm A's floor lets a 1-character
+ * edit through) and `incoming = "he"`, both fragments of the cleared body — so
+ * the guard wiped the user's first two keystrokes, and, because the stamp
+ * survived, kept wiping every retry for the rest of the window.
+ *
+ * The code's own stated priority is that a swallowed keystroke is worse than a
+ * short stale fragment (see [composerResidueVerdict]), so arm B now waits for
+ * the state that can no longer be explained as typing: the ENTIRE body is back,
+ * and it got there faster than [COMPOSER_REPLAY_MAX_TYPEABLE_CHARS_PER_SEC].
+ *
+ * Why "the whole body" and not "most of it": a ratio test is what makes a short
+ * message dangerous. For a five-character body, "four fifths of it" is four
+ * characters, which a user can type in half a second — so a ratio test would eat
+ * exactly the case this batch is fixing. Full reconstruction has no such
+ * threshold: the comparison is purely "how fast did that many characters
+ * appear", and a human retyping N characters needs at least N/12 seconds, which
+ * is why a long body is always implausible inside the 1.5 s window while a short
+ * one is only implausible if it lands immediately.
+ *
+ * Consequence, and the intended one: a character-by-character IME replay leaves
+ * a growing prefix in the box (harmless, bounded by the window) and is wiped the
+ * moment the body is complete; a user who retypes the message he just sent, at
+ * any human speed, keeps every keystroke.
+ *
+ * Equality after [stripImeTrailingNoise] on both sides, so an IME's auto-space
+ * or full stop at the end still counts as "the whole body".
+ */
+internal fun hasReplayConverged(
+    incoming: String,
+    clearedText: String,
+    msSinceClear: Long,
+): Boolean {
+    val incomingNorm = stripImeTrailingNoise(incoming)
+    val clearedNorm = stripImeTrailingNoise(clearedText)
+    if (incomingNorm.isEmpty() || clearedNorm.isEmpty()) return false
+    if (incomingNorm != clearedNorm) return false
+    return isSuperhumanTypingRate(incomingNorm.length, msSinceClear)
+}
+
+/**
  * [fix/composer-post-send-residue] What the composer should do with an
  * `onValueChange` that arrives inside the post-clear window.
  *
@@ -40,9 +132,12 @@ internal const val COMPOSER_CLEAR_RESIDUE_MIN_REPLAY_CHARS = 4
  *    would stop the growth and still leave the user staring at half of the
  *    message he just sent — which is the exact symptom being fixed;
  *  * [DROP_AND_CLEAR] therefore also wipes what accumulated, and it is only
- *    reachable when everything currently in the box is a contiguous piece of
- *    the body that a clear just removed (never when the user typed something
- *    new).
+ *    reachable when the box holds a contiguous piece of the body that a clear
+ *    just removed (never when the user typed something new) AND the whole body
+ *    is back faster than a human could have typed it (see
+ *    [hasReplayConverged]). The speed test is what keeps a user who starts
+ *    typing again after a send from being wiped: content alone cannot tell his
+ *    keystrokes from a replay.
  */
 internal enum class ComposerResidueVerdict {
     /** Not a residue — handle the edit normally. */
@@ -103,14 +198,26 @@ internal fun stripImeTrailingNoise(text: String): String =
  *
  * Pure and Android-free so the decision is pinned on the JVM: a shape test can
  * only prove the helper is CALLED, never that its answer is used.
+ *
+ * [W1118-COMPOSER A4] [guardClear] separates the two kinds of clear that reach
+ * this funnel, because the state test above cannot tell them apart. A clear the
+ * REPLAY GUARD performs is unwinding a replay (keep the stamp); a clear the USER
+ * causes — send, slash command, clear-chat — is always a new body, even when the
+ * new body happens to be a piece of the previous one. Sending "hello world" and
+ * then, 1.2 s later, sending "hello" is not unwinding anything: "hello" is the
+ * second message, and leaving the first message's stamp and timestamp in place
+ * both mislabels it and shortens its window (measured from the FIRST send). The
+ * guard path is the only caller that passes `true`.
  */
 internal fun shouldRestampClearedBody(
     clearedBody: String,
     previousStamp: String?,
     msSinceStamp: Long,
     windowMs: Long = COMPOSER_CLEAR_RESIDUE_WINDOW_MS,
+    guardClear: Boolean = false,
 ): Boolean {
     if (clearedBody.isEmpty()) return false
+    if (!guardClear) return true
     val unwindingReplay = previousStamp != null &&
         msSinceStamp in 0L until windowMs &&
         isFragmentOfClearedBody(clearedBody, previousStamp)
@@ -133,11 +240,22 @@ internal fun shouldRestampClearedBody(
  *
  * The middle-piece rule is bounded by [minFragmentChars] so a two-character
  * coincidence inside a long message is not treated as a replay.
+ *
+ * [W1118-COMPOSER A3] The middle-piece rule is now OPT-IN, because it is only
+ * safe where the box already tells us a replay is in progress. With the box
+ * EMPTY, a four-character `contains` hit is far more likely to be the user's own
+ * word: send "I'll be there in a moment" and then glide-type "moment" (or tap a
+ * suggestion chip) into the emptied composer, and `contains` says "replay" and
+ * arm A silently drops the word. Prefix and suffix stay unconditional — an edit
+ * that starts or ends the body exactly, with nothing else in the box, is the
+ * replay shape (and the suffix case is what an IME buffering only the tail
+ * produces).
  */
 internal fun isFragmentOfClearedBody(
     incoming: String,
     clearedText: String,
     minFragmentChars: Int = COMPOSER_CLEAR_RESIDUE_MIN_REPLAY_CHARS,
+    allowMiddleFragment: Boolean = true,
 ): Boolean {
     if (incoming.isEmpty() || clearedText.isEmpty()) return false
     val incomingNorm = stripImeTrailingNoise(incoming)
@@ -146,8 +264,30 @@ internal fun isFragmentOfClearedBody(
     if (incomingNorm == clearedNorm) return true
     if (clearedNorm.startsWith(incomingNorm)) return true
     if (clearedNorm.endsWith(incomingNorm)) return true
+    if (!allowMiddleFragment) return false
     // A middle fragment: the IME resumed from partway through its own buffer.
     return incomingNorm.length >= minFragmentChars && clearedNorm.contains(incomingNorm)
+}
+
+/**
+ * [W1118-COMPOSER A2] Should the cleared-body fingerprint SURVIVE this edit?
+ *
+ * The fingerprint exists to recognise an IME replaying the body a clear removed.
+ * It must die the moment the box holds something that is not part of that body —
+ * otherwise a later edit that happens to match would be swallowed for the rest
+ * of the window. It must NOT die on the 1-3 character fragments arm A lets
+ * through on purpose, or the first fragment of a replay disarms the guard for
+ * everything after it (that was the second-round bug).
+ *
+ * Pure, so both the composer and the tests read the same decision: the shape arm
+ * that used to guard this (a substring scan 400 characters before the
+ * `lastClearedText = null` write) was satisfied by the OBSERVABILITY log block a
+ * few lines above, so deleting the real condition left the suite green.
+ */
+internal fun shouldKeepClearedStamp(incoming: String, clearedText: String?): Boolean {
+    if (clearedText.isNullOrEmpty()) return true
+    if (incoming.isEmpty()) return true
+    return isFragmentOfClearedBody(incoming, clearedText)
 }
 
 /**
@@ -178,8 +318,11 @@ internal fun isFragmentOfClearedBody(
  *  streamed in unopposed. On-device proof the shape is real:
  *  `ComposerMirror` logged `field = vm + 1ch` on 14 dictation sessions on
  *  2026-11-18, i.e. the field is permanently one commit ahead of the ViewModel.
- *  Arm B returns [ComposerResidueVerdict.DROP_AND_CLEAR] — the accumulated text
- *  is all residue, so leaving it would reproduce the reported symptom.
+ *  Arm B returns [ComposerResidueVerdict.DROP_AND_CLEAR] — but only once the
+ *  replay has CONVERGED (the whole body is back faster than a human could have
+ *  typed it, see [hasReplayConverged]). Everything in between is allowed: the
+ *  accumulated fragment is a bounded, self-correcting cosmetic problem, while
+ *  wiping a keystroke is data loss.
  *
  * Every arm still requires: a clear happened, a non-negative delta inside the
  * window, and the incoming text to be a contiguous piece of the cleared body.
@@ -202,12 +345,44 @@ internal fun composerResidueVerdict(
     if (incoming.isEmpty()) return ComposerResidueVerdict.NONE
     // A negative delta means the clock moved backwards — refuse rather than drop.
     if (msSinceClear < 0L || msSinceClear >= windowMs) return ComposerResidueVerdict.NONE
-    if (!isFragmentOfClearedBody(incoming, clearedText)) return ComposerResidueVerdict.NONE
 
     val boxEmpty = fieldText.isEmpty() && vmText.isEmpty()
+    // [W1118-COMPOSER A3] The middle-fragment rule is only available to arm B,
+    // where the box already proves a replay is in progress. With the box EMPTY a
+    // four-character `contains` hit is far more likely to be the user's own word
+    // — send "I'll be there in a moment", then glide-type "moment" (or tap a
+    // suggestion chip) into the emptied composer, and `contains` would call it a
+    // replay and arm A would DROP the word.
+    if (!isFragmentOfClearedBody(
+            incoming = incoming,
+            clearedText = clearedText,
+            allowMiddleFragment = !boxEmpty,
+        )
+    ) {
+        return ComposerResidueVerdict.NONE
+    }
+
+    // [W1118-COMPOSER A1] Arm A keeps the fragment rule: a single edit of four or
+    // more characters landing in an EMPTY box cannot be typing (one keystroke is
+    // one edit), so a long prefix / suffix there is the replay shape the first fix
+    // was written for. The documented trade stands — inside the window, pasting
+    // the text you just sent is treated as residue.
+    //
+    // ...but "four characters at once" is not by itself impossible input: a glide
+    // swipe, a suggestion chip and a short dictation all land as one edit of four
+    // or more characters, and dropping one of those silently is the same class of
+    // data loss arm B used to cause. Two independent tests settle it, either of
+    // which is enough:
+    //  * the edit carries a PHRASE (12+ characters) — no input method commits a
+    //    phrase in one edit, only a replay from the IME's own buffer does;
+    //  * the edit is longer than a human could have typed since the clear, which
+    //    catches a short body replayed in one frame.
     if (boxEmpty) {
-        // Arm A: nothing has landed, so the four-character floor is safe.
-        return if (incoming.length >= minReplayChars) {
+        val longEnough = incoming.length >= minReplayChars
+        val phrase = incoming.length >= COMPOSER_SINGLE_EDIT_PHRASE_CHARS
+        return if (longEnough &&
+            (phrase || isSuperhumanTypingRate(incoming.length, msSinceClear))
+        ) {
             ComposerResidueVerdict.DROP
         } else {
             ComposerResidueVerdict.NONE
@@ -218,11 +393,30 @@ internal fun composerResidueVerdict(
     // piece of the cleared body: one character of unrelated text means the user
     // has taken the composer back (or the input method inserted something of its
     // own) and wiping the box would destroy his work.
-    val boxIsReplay = isFragmentOfClearedBody(fieldText, clearedText) ||
-        isFragmentOfClearedBody(vmText, clearedText)
-    if (!boxIsReplay) return ComposerResidueVerdict.NONE
-    // `clearedText` is known non-null and non-empty here.
-    return ComposerResidueVerdict.DROP_AND_CLEAR
+    //
+    // [W1118-COMPOSER A5] Conjunction, matching that sentence. It used to be a
+    // disjunction, which meant a ViewModel copy lagging one burst behind
+    // (`fieldText = "hz"`, `vmText = "hel"`) authorised the wipe of the user's
+    // own "hz". An EMPTY copy is vacuously fine — it holds nothing that could
+    // contradict the replay — so only a non-empty copy has to prove itself.
+    val fieldIsReplay = fieldText.isEmpty() || isFragmentOfClearedBody(fieldText, clearedText)
+    val vmIsReplay = vmText.isEmpty() || isFragmentOfClearedBody(vmText, clearedText)
+    if (!(fieldIsReplay && vmIsReplay)) return ComposerResidueVerdict.NONE
+
+    // [W1118-COMPOSER A1] ...and only once the replay has CONVERGED. Here the box
+    // grew over several edits, which is exactly what a user retyping the message
+    // he just sent also does — content cannot tell them apart, speed can (see
+    // [hasReplayConverged]). "The box holds a fragment, so clear it" ate real
+    // input: after sending "hello world", typing "he" put a fragment in the box
+    // (arm A let "h" through by design), which was enough to wipe the user's first
+    // two keystrokes — repeatedly, for the rest of the window, because the stamp
+    // survived. Intermediate states are allowed through now, so the cost of being
+    // wrong is a short stale fragment instead of a lost keystroke.
+    return if (hasReplayConverged(incoming, clearedText, msSinceClear)) {
+        ComposerResidueVerdict.DROP_AND_CLEAR
+    } else {
+        ComposerResidueVerdict.NONE
+    }
 }
 
 /**

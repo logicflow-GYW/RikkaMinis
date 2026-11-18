@@ -6,7 +6,9 @@ import com.rikkaminis.app.sandbox.NativeOffloadHandler
 import com.rikkaminis.app.sandbox.NativeOffloadRequest
 import com.rikkaminis.app.sandbox.NativeOffloadResult
 import com.rikkaminis.app.sandbox.PRootKernel
+import com.rikkaminis.app.sandbox.ProtectedZoneGuard
 import com.rikkaminis.app.sandbox.RootfsManager
+import com.rikkaminis.app.sandbox.ZoneDeleteGuardStore
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -230,7 +232,9 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
                     if (refusal != null) {
                         failures++
                         entry.put("error", refusal.first).put("detail", refusal.second)
+                        noteZoneRefusal(resolution.guestPath, recursive, refusal.first)
                     } else {
+                        noteZoneAllowed(resolution.guestPath, recursive, "rm")
                         val totals = WalkTotals()
                         deleteTree(path, totals)
                         entry.put("deleted_files", totals.files)
@@ -282,6 +286,25 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
             return "bind_mount_root" to
                 "'${resolution.guestPath}' is a bind-mount root (${resolution.binding.hostBase}); refusing"
         }
+        // [C9] The path-resolved zone check ProtectedZoneGuard's KDoc used to
+        // promise and did not have: this handler deletes host files directly,
+        // so the lexical shell guard never sees it, and the whole of
+        // `/var/minis/shared` could be removed with one `minis-fastio rm -r`
+        // (measured 2026-11-18: zero refusals, exit 0). Same single source of
+        // truth as the shell path — [ProtectedZoneGuard.isRefusedDelete] — and
+        // the same switch ([ZoneDeleteGuardStore]), so the two can never
+        // disagree about what is protected.
+        //
+        // Ordered before `not_found` / `is_directory` on purpose: a wide delete
+        // of a zone is refused for being a zone whether or not it exists yet,
+        // and the reason must not change with the directory's state.
+        if (ProtectedZoneGuard.isRefusedDelete(resolution.guestPath, recursive) &&
+            ZoneDeleteGuardStore.isEnabled
+        ) {
+            return "protected_zone" to
+                "'${resolution.guestPath}' is a protected zone (or a whole subdirectory of one); " +
+                "name the files to remove, or move them aside first"
+        }
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
             return "not_found" to "'${resolution.guestPath}' does not exist"
         }
@@ -290,6 +313,40 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
                 "'${resolution.guestPath}' is a directory; pass -r to delete it recursively"
         }
         return null
+    }
+
+    /**
+     * [C7] Audit trail for the fastio path, matching the shell path's event
+     * kinds so one grep over the diagnostics log shows every wide delete
+     * attempt regardless of which tool made it.
+     *
+     * Recorded even when the switch is OFF (the delete then proceeds): the
+     * whole point of the `zone-delete-allowed` line is that "I turned the
+     * protection off" stays reviewable afterwards.
+     */
+    private fun noteZoneRefusal(guestPath: String, recursive: Boolean, code: String) {
+        if (code != "protected_zone") return
+        com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent(
+            "refuse-zone",
+            "path=fastio target=$guestPath recursive=$recursive",
+        )
+        com.rikkaminis.app.logging.AppLogger.warning(
+            TAG,
+            "refused protected-zone delete: $guestPath (recursive=$recursive)",
+        )
+    }
+
+    private fun noteZoneAllowed(guestPath: String, recursive: Boolean, verb: String) {
+        if (!ProtectedZoneGuard.isRefusedDelete(guestPath, recursive)) return
+        if (ZoneDeleteGuardStore.isEnabled) return
+        com.rikkaminis.app.diagnostics.MemorySpikeRecorder.onEvent(
+            "zone-delete-allowed",
+            "path=fastio verb=$verb target=$guestPath recursive=$recursive",
+        )
+        com.rikkaminis.app.logging.AppLogger.warning(
+            TAG,
+            "protected-zone $verb allowed by zone-guard switch: $guestPath",
+        )
     }
 
     // ── find ────────────────────────────────────────────────────────────────
@@ -592,8 +649,10 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val refusal = transferRefusal(src, dst, srcPath, intoDirectory, recursive, copy)
         if (refusal != null) {
             entry.put("error", refusal.first).put("detail", refusal.second)
+            if (!copy) noteZoneRefusal(src.guestPath, recursive = true, code = refusal.first)
             return finishTransfer(entry, failed = true, startedNs = startedNs, args = args)
         }
+        if (!copy) noteZoneAllowed(src.guestPath, recursive = true, verb = "mv")
         if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && !force) {
             entry.put("error", "already_exists")
                 .put("detail", "'$targetGuest' already exists; pass --force to overwrite")
@@ -978,6 +1037,17 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
                 "'${src.guestPath}' is a user-mounted external folder; move it through the shell " +
                 "so the read-only-mount guard applies"
         }
+        // [C5/C9] `mv` destroys its SOURCE, and it has no `-r` to test: moving a
+        // whole zone child out is the same delete as `rm -rf` as far as the zone
+        // is concerned. Judged with `recursive = true` for exactly that reason —
+        // the shell guard does the same, so both paths refuse the same set.
+        if (!copy && ProtectedZoneGuard.isRefusedDelete(src.guestPath, recursive = true) &&
+            ZoneDeleteGuardStore.isEnabled
+        ) {
+            return "protected_zone" to
+                "'${src.guestPath}' is a protected zone (or a whole subdirectory of one); " +
+                "move the individual files, or copy them out first"
+        }
         // Only when the mount root ITSELF would be replaced or removed: copying
         // INTO `/var/minis/workspace` resolves to `<root>/<name>`, which is a
         // normal write the caller plainly meant.
@@ -1062,6 +1132,7 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
     companion object {
         private const val TOOL_NAME = "fastio_rm"
         private const val DISPLAY_NAME = "minis-fastio (delete)"
+        private const val TAG = "FastioOffload"
 
         // One permission row per WRITE primitive: trusting deletion must not
         // silently authorise overwriting a different file.
@@ -1362,7 +1433,9 @@ Notes:
     a tree is large (thousands of entries), where the per-entry translation tax dominates.
   - Write primitives refuse: host /dev //proc //sys, user-mounted external folders as a write
     target (`mv` also an external source, since it deletes it), bind-mount roots as the thing
-    being replaced, and `cp` without -r on a directory. Nothing outside the app sandbox is reachable.
+    being replaced, a recursive delete of a protected zone or of one of its top-level folders
+    (`/var/minis/{shared,memory,skills,mcp-servers,mounts}` — `mv` counts, since it destroys the
+    source), and `cp` without -r on a directory. Nothing outside the app sandbox is reachable.
   - All subcommands report JSON on stdout; exit code 1 when any path failed, 2 for a usage error.
 """
     }
