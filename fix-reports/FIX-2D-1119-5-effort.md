@@ -126,6 +126,7 @@ B 端点的选择器与线端档位。**F-02**：网关只报「xhigh 不支持�
 |---|---|---|
 | `shared/work/r1119/effort-jvm/run.sh` | `EffortTierLearnerTest`(23) + `ThinkingEffortLadderCeilingTest`(12) + `GatewayEffortTruthTest`(24) + `EffortScopeDeclaredSetTest`(18) + 3 个桩 | **OK (101 tests)** |
 | `shared/work/r1119/effort-jvm/run-responses.sh` | 从生产文件**机械抽取** `clampResponsesEffort`（按声明行定位 + 配对收尾）编译，跑 `ResponsesEffortClampTest`(8) | **OK (8 tests)** |
+| `shared/work/r1119/effort-jvm/run-wiring.sh` | 既有的 `MetaR3B08WiringTest`(11)（纯源码形状测试，可独立编译） | **OK (11 tests)** |
 
 `run-responses.sh` 特意不是手抄副本：手抄副本会验证一份可能与生产脱节的旧代码。
 
@@ -184,7 +185,43 @@ downward, not upward`（端到端：真实 `record` → `learnedWithin` → `cla
 
 ### CI
 
-见 §4.1（报告提交后补写最终 tip 的 run）。
+run **#3299 / `44377006462`**，`head_sha = a4b11945b1650c2847c8318dafe817905fc7256e`
+（= 本地 HEAD = `origin/fix/effort-key-1119`，逐字符一致）：
+
+| job | 结论 |
+|---|---|
+| lint | success |
+| build-apk | success |
+| unit-tests | success |
+| scan-gate | success |
+| publish | success（两步 `skipped`：`Move the rolling tag android-latest` / `Publish to Releases` —— main 门控，分支构建不产 release） |
+
+- unit-tests：**9779 条 PASSED / 0 条 ` FAILED` 行**（第一版 CI 那次是 9778 PASSED + 1 FAILED，
+  见下）。本支新增/改动的 13 条逐条 `grep -cF` = 1 命中。
+- scan-gate：`Summary: 115 passed, 0 failed`。日志有
+  `scripts/scan/** untouched in this push — skipping the fixture self-test`，
+  说明夹具按机制跳过（本支未动 `scripts/scan/**`，按任务书也不该动）——**因此这次
+  绿不含夹具证据**，夹具证据来自本地 `test_scan.py --single test_thinking_wiring`。
+
+#### 第一次 CI 红（真错，已修）
+
+run #3297 / `44374321955` @ `9b0d43b0`：`unit-tests` 失败，唯一红是
+`MetaR3B08WiringTest > F-08 the Responses builder resolves its effort through the shared clamp`
+（断言 `"EffortTierLearner.learned(" in code.substring(...)`）。
+
+**它不是实现错，是既有形状测试锚在拼写上**：它守的决策是「Responses 路径要读学到的
+档位集合，而不是只有 family clamp」——本支仍然满足（现在是 `learnedWithin`，正是
+F-02 修法）。锚点改成
+`Regex("EffortTierLearner\\.learned(Within)?\\(")`，KDoc 里写明为什么更宽的名字才是
+正确锚点（裸 `learned(` 现在恰恰是 F-02 回归）。收窄本身由
+`EffortScopeDeclaredSetTest` 钉住。
+
+**该锚有牙（本地变异验证）**：把 Responses 路径的 `learnedWithin(...)` 整段删成
+`learnedEffortValues = null`，`MetaR3B08WiringTest` 立刻红（11 tests, 1 failure）；
+恢复后 11 条全绿。
+
+**这是本支唯一一处改动既有测试的地方（共两处，另一处见 §4「新增用例」末尾）**，
+两处都断言的是被本支替换掉的旧拼写，决策本身未被削弱。
 
 ## 5 变异负控
 
@@ -241,8 +278,10 @@ src/android/app/src/main/java/com/rikkaminis/app/provider/thinking/GatewayEffort
 src/android/app/src/main/java/com/rikkaminis/app/provider/thinking/ThinkingEffortLadder.kt  |  49 +-
 src/android/app/src/main/java/com/rikkaminis/app/provider/thinking/ThinkingRuleResolver.kt  |   9 +-
 src/android/app/src/main/java/com/rikkaminis/app/ui/chat/ChatViewModel.kt                   |  15 +-
+src/android/app/src/test/java/.../provider/MetaR3B08WiringTest.kt                          |  12 +-
 src/android/app/src/test/java/.../provider/thinking/EffortScopeDeclaredSetTest.kt          | 505 + (新)
 src/android/app/src/test/java/.../provider/thinking/ThinkingEffortLadderCeilingTest.kt     |  27 +-
+fix-reports/FIX-2D-1119-5-effort.md                                                        | (新)
 ```
 
 未触碰：`scripts/scan/**`、任何 `strings.xml`、其他支的域。
@@ -250,11 +289,12 @@ src/android/app/src/test/java/.../provider/thinking/ThinkingEffortLadderCeilingT
 ## 8 复现
 
 ```sh
-# 单元测试（两个装置，各一个 JVM）
+# 单元测试（三个装置，各一个 JVM）
 sh /var/minis/shared/work/r1119/effort-jvm/run.sh          # OK (101 tests)
 sh /var/minis/shared/work/r1119/effort-jvm/run-responses.sh # OK (8 tests)
+sh /var/minis/shared/work/r1119/effort-jvm/run-wiring.sh    # OK (11 tests)
 
-# 变异负控（9 臂）
+# 变异负控（9 臂；基线同时校验上面两个装置）
 nice -n 10 python3 /var/minis/shared/work/r1119/effort-jvm/mutate.py
 
 # 单门（勿跑全量）
