@@ -491,6 +491,13 @@ class EffortScopeDeclaredSetTest {
             "the Chat Completions path must read the learner by scope",
             "EffortTierLearner.learnedWithin(\n                scope, model.id," in openai,
         )
+        // resolveTier's 5th argument is the learner scope; the DEFAULT is the bare
+        // host, so a call site that omits it silently reads nothing the record sites
+        // wrote (they write scope-keyed). This is the one production call site.
+        assertTrue(
+            "resolveTier must be given the endpoint scope, not left on its host default",
+            "GatewayEffortTruth.resolveTier(host, model.id, level, model.reasoningEffortValues, scope)" in openai,
+        )
     }
 
     @Test
