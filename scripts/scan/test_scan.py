@@ -3187,6 +3187,17 @@ def test_scan_parallel_local_refusal():
           "python3 scripts/scan/<gate>.py" in msg
           and "python3 scripts/scan/<gate>.py --root ." not in msg,
           "positional-arg gates read sys.argv[1] as the root; --root . crashes them")
+    # [F-01 same family] The comment block above LOCAL_REFUSAL carried the SAME
+    # two wrong commands (it is where the message was copied from), so fixing
+    # only the message would leave the next editor to reintroduce them. Pin the
+    # whole module: neither wrong form may appear anywhere in the file.
+    driver_text = pathlib.Path(SCRIPT_DIR, "scan_parallel.py").read_text()
+    check("no wrong fixture command survives anywhere in the driver",
+          "test_scan.py <case_name>" not in driver_text,
+          "a bare <case_name> positional starts the full suite")
+    check("no blanket --root . command survives anywhere in the driver",
+          "<gate>.py --root ." not in driver_text,
+          "positional-arg gates crash on the literal --root")
 
     # [LOCAL_REFUSAL] The refusal must not REPLACE main(). This arm exists
     # because the first version of this change deleted `def main`'s signature
