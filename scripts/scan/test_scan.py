@@ -2742,6 +2742,98 @@ def test_da1017_external_fixtures():
         rc, out = run_scanner(script + ".py", dirty_root)
         check(f"{script} external {dirty_name} fixture red", rc == 1, out[-280:])
 
+
+def _gate_module(script):
+    """Import a gate module by path (no package, no sys.path games)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        script, os.path.join(SCRIPT_DIR, script + ".py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _read_repo_file(rel):
+    with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_gate_body_external_fixtures():
+    """[F-04] The three gates whose judgement lives in `main()`'s scan path.
+
+    `subagent_dispatch_check`, `skill_frontmatter_roundtrip_check` and
+    `truncated_call_guard_check` each ship a `--selftest` that exercises their
+    internal check functions on in-memory fixtures — and `test_da1017_gates` /
+    `test_da1018_gates` / `test_da1023_gates` only assert that marker plus
+    `rc == 0` on the REAL tree. So gutting `main()` to `print("OK"); return 0`
+    (keeping the `--selftest` branch intact) left every one of them green while
+    the gate judged nothing at all. This was verified by the audit: three dead
+    gates, one green suite.
+
+    Each case below therefore drives the gate as a SUBPROCESS against a temp
+    tree it has never seen: the clean tree must exit 0 and the dirty tree must
+    exit 1. A gate stubbed to exit 0 fails the dirty half; a gate that went
+    blind in the other direction fails the clean half.
+    """
+    print("━━━ gate-body external fixture pairs (F-04) ━━━")
+
+    # ── subagent_dispatch_check: call site + pin window object ──
+    mod = _gate_module("subagent_dispatch_check")
+    clean_files = {mod.TARGET: mod.GOOD, mod.PIN_OBJECT: mod.GOOD_PIN}
+    root = make_tree(clean_files)
+    rc, out = run_scanner("subagent_dispatch_check.py", root)
+    check("subagent_dispatch_check external clean tree green", rc == 0, out[-280:])
+    shutil.rmtree(root)
+
+    dirty_pin = dict(clean_files)
+    dirty_pin[mod.PIN_OBJECT] = mod.DIRTY["PIN_OBJ_EMPTY_GUARD_PIN"][0]
+    root = make_tree(dirty_pin)
+    rc, out = run_scanner("subagent_dispatch_check.py", root)
+    check("subagent_dispatch_check external empty-guard pin tree red", rc == 1, out[-280:])
+    shutil.rmtree(root)
+
+    # ── skill_frontmatter_roundtrip_check: the Failure branch drop-through ──
+    mod = _gate_module("skill_frontmatter_roundtrip_check")
+    clean_files = {mod.SR_REL: mod.GOOD_SR,
+                   mod.SM_REL: mod.GOOD_SM,
+                   mod.SB_REL: mod.GOOD_SB}
+    root = make_tree(clean_files)
+    rc, out = run_scanner("skill_frontmatter_roundtrip_check.py", root)
+    check("skill_frontmatter_roundtrip_check external clean tree green", rc == 0, out[-280:])
+    shutil.rmtree(root)
+
+    dirty = dict(clean_files)
+    dirty[mod.SB_REL] = mod.DIRTY_SB_FAILURE_FALLTHROUGH
+    root = make_tree(dirty)
+    rc, out = run_scanner("skill_frontmatter_roundtrip_check.py", root)
+    check("skill_frontmatter_roundtrip_check external fall-through tree red", rc == 1, out[-280:])
+    shutil.rmtree(root)
+
+    # ── truncated_call_guard_check: real sources, one decision removed ──
+    # This gate judges eight real files with cross-file criteria, so the
+    # fixture is built from the real tree and then has exactly one decision
+    # taken away — the clean half is the control that the copy is faithful.
+    mod = _gate_module("truncated_call_guard_check")
+    paths = [mod.POLICY, mod.ENGINE, mod.OPENAI, mod.ANTHROPIC,
+             mod.TOOL_EXECUTORS, mod.GEMINI, mod.SIGNALS, mod.ANTHROPIC_SIGNALS]
+    clean_files = {rel: _read_repo_file(rel) for rel in paths}
+    root = make_tree(clean_files)
+    rc, out = run_scanner("truncated_call_guard_check.py", root)
+    check("truncated_call_guard_check external clean tree green", rc == 0, out[-280:])
+    shutil.rmtree(root)
+
+    dirty = dict(clean_files)
+    mutated = dirty[mod.POLICY].replace(
+        mod.C1_CONDITION, "if (false) return null", 1)
+    check("truncated_call_guard_check fixture mutation is not a no-op",
+          mutated != dirty[mod.POLICY],
+          "C1_CONDITION drifted: the dirty fixture would equal the clean one")
+    dirty[mod.POLICY] = mutated
+    root = make_tree(dirty)
+    rc, out = run_scanner("truncated_call_guard_check.py", root)
+    check("truncated_call_guard_check external blind-verdict tree red", rc == 1, out[-280:])
+    shutil.rmtree(root)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # deep-audit-1016 gate (FIX-E / ISSUE-07, registered at branch wrap-up)
 # Same pattern as DA1017: the gate ships its own --selftest with negative
@@ -3079,6 +3171,22 @@ def test_scan_parallel_local_refusal():
     check("the refusal names the single-gate alternative",
           "scripts/scan/<gate>.py" in msg and "test_scan.py" in msg)
     check("the refusal names the opt-out", "--allow-local" in msg)
+    # [F-01] The two replacement commands must be runnable as written. The old
+    # text told people to run `test_scan.py <case_name>` (no `--single`), which
+    # parses `<case_name>` as the repo root and starts the WHOLE 52-fixture
+    # suite — the exact thing the refusal exists to stop. And it told people to
+    # pass `--root .` to every gate, but the positional-arg gates
+    # (skill_frontmatter_roundtrip_check, truncated_call_guard_check, …) read
+    # sys.argv[1] as the root and crash on the literal "--root". Both are pinned
+    # by their exact literal form, not by re-deriving them from the message.
+    check("the refusal's fixture command carries --single",
+          "python3 scripts/scan/test_scan.py --single <case_name>" in msg,
+          "without --single, <case_name> is parsed as the repo root and the full "
+          "suite starts")
+    check("the refusal's gate command leaves the flags to the gate",
+          "python3 scripts/scan/<gate>.py" in msg
+          and "python3 scripts/scan/<gate>.py --root ." not in msg,
+          "positional-arg gates read sys.argv[1] as the root; --root . crashes them")
 
     # [LOCAL_REFUSAL] The refusal must not REPLACE main(). This arm exists
     # because the first version of this change deleted `def main`'s signature
@@ -3532,6 +3640,7 @@ TEST_ORDER = (
     "test_trace_step_tag",
     "test_dv16_chat_ui_interaction",
     "test_da1017_external_fixtures",
+    "test_gate_body_external_fixtures",
     "test_real_repo",
     "test_scan_parallel_local_refusal",
 )

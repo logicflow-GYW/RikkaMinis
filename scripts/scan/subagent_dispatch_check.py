@@ -130,15 +130,113 @@ def _depth_var(region: str):
     return m.group(1) if m else None
 
 
-def _guard_mentions(region: str, upto: int, var: str) -> bool:
-    """True when an `if (<…var…>)` guards the code before [upto].
+_TERMINAL_RE = re.compile(r"\b(?:return|throw)\b")
+
+
+def _if_condition_end(region: str, open_idx: int) -> int:
+    """Index of the `)` closing the `(` at `open_idx`, or -1 if unbalanced."""
+    depth = 0
+    j = open_idx
+    while j < len(region):
+        c = region[j]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return -1
+
+
+def _block_end(region: str, open_idx: int) -> int:
+    """Index of the `}` closing the `{` at `open_idx`, or -1 if unbalanced."""
+    depth = 0
+    j = open_idx
+    while j < len(region):
+        c = region[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return -1
+
+
+def _statement_end(region: str, k: int) -> int:
+    """Index of the `;` or newline that ends the statement starting at `k`
+    (at bracket depth 0), or len(region) if it runs to the end."""
+    depth = 0
+    j = k
+    while j < len(region):
+        c = region[j]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and (c == ";" or c == "\n"):
+            return j
+        j += 1
+    return len(region)
+
+
+def _block_has_top_level_terminal(body: str) -> bool:
+    """True when a `{…}` interior ends its enclosing flow with a `return` /
+    `throw` at brace depth 0 (an early-exit block)."""
+    for m in _TERMINAL_RE.finditer(body):
+        depth = 0
+        for c in body[:m.start()]:
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+        if depth == 0:
+            return True
+    return False
+
+
+def _guard_controls(region: str, upto: int, var: str) -> bool:
+    """True when an `if (<…var…>)` actually CONTROLS the code at [upto].
+
+    [F-03] The old check only asked whether some `if (…)` before [upto]
+    mentioned `var` — a spelling check, not a guard check. An empty
+    `if (depth == 1) { }` followed by an unconditional `pin(…)` matched it and
+    the gate stayed green while pinning on every window. A mention guards the
+    target only when the target sits in the `if`'s controlled region:
+
+      · block body          `if (c) { … }`          — target inside the braces;
+      · early-exit block     `if (c) { …; return }`  — target after the block;
+      · early-exit statement `if (c) return`         — target after the statement.
 
     Deliberately not anchored on the comparison operator: `if (left != 0) …`,
     `if (left > 0) …` and `if (left == 0) { … } else return` are the same
     decision, and pinning the spelling is how a gate goes blind."""
-    for m in re.finditer(r"if\s*\(([^)]*)\)", region[:upto]):
-        if var in m.group(1):
-            return True
+    for m in re.finditer(r"\bif\s*\(", region[:upto]):
+        open_idx = m.end() - 1
+        close_idx = _if_condition_end(region, open_idx)
+        if close_idx < 0:
+            continue
+        if var not in region[open_idx + 1:close_idx]:
+            continue
+        k = close_idx + 1
+        while k < len(region) and region[k] in " \t\r\n":
+            k += 1
+        if k >= len(region):
+            continue
+        if region[k] == "{":
+            block_close = _block_end(region, k)
+            if block_close < 0:
+                continue
+            if k < upto < block_close:
+                return True
+            if upto > block_close and _block_has_top_level_terminal(region[k + 1:block_close]):
+                return True
+        else:
+            stmt_end = _statement_end(region, k)
+            if _TERMINAL_RE.match(region[k:stmt_end]) and upto >= stmt_end:
+                return True
     return False
 
 
@@ -250,10 +348,11 @@ def check_pin_object(src: str) -> list:
     pin_at = begin.find("pin(")
     if pin_at < 0:
         problems.append(("pin-open-never-pins", 0, "the first window must pin the dispatcher"))
-    elif depth_var is not None and not _guard_mentions(begin, pin_at, depth_var):
+    elif depth_var is not None and not _guard_controls(begin, pin_at, depth_var):
         problems.append(("pin-open-every-window", 0,
-                         "only the FIRST window may pin — the pin must sit behind a guard on "
-                         "the window count"))
+                         "only the FIRST window may pin — the pin must sit inside a guard on "
+                         "the window count (an empty `if (depth…) {}` before an unconditional "
+                         "pin does not guard it)"))
     read_at = begin.find("readPinnedAt(")
     if read_at < 0 or (pin_at >= 0 and read_at > pin_at):
         problems.append(("pin-open-adopts-existing", 0,
@@ -272,10 +371,11 @@ def check_pin_object(src: str) -> list:
         if close_depth is None:
             problems.append(("pin-close-no-depth-count", 0,
                              "the close op must count the window down (depths.compute)"))
-        elif not _guard_mentions(end, restore_at, close_depth):
+        elif not _guard_controls(end, restore_at, close_depth):
             problems.append(("pin-close-restores-early", 0,
-                             "only the LAST window may restore — the undo must sit behind a "
-                             "guard on the remaining depth"))
+                             "only the LAST window may restore — the undo must sit inside a "
+                             "guard on the remaining depth (an empty `if (left…) {}` before an "
+                             "unconditional unpin does not guard it)"))
         read_close = end.find("readPinnedAt(")
         if read_close < 0 or read_close > restore_at:
             problems.append(("pin-close-undone-blindly", 0,
@@ -445,6 +545,23 @@ DIRTY = {
 '''), "pin-close-undone-blindly", "pin"),
     "PIN_OBJ_NO_RESTORE": (GOOD_PIN.replace("                unpin(sessionId)\n", ""),
                            "pin-close-never-restores", "pin"),
+    # [F-03] The bypass the old `_guard_mentions` could not see: the `if` still
+    # mentions the window-count variable, but its block is EMPTY and the pin /
+    # unpin sit outside it. A spelling check matched the mention and stayed
+    # green; the controlled-region check must go red.
+    "PIN_OBJ_EMPTY_GUARD_PIN": (GOOD_PIN.replace(
+        """            if (depth == 1 && readPinnedAt(sessionId) == null) {
+                pin(sessionId)?.let { writtenPins[sessionId] = it }
+            }
+""",
+        """            if (depth == 1 && readPinnedAt(sessionId) == null) {
+            }
+            pin(sessionId)?.let { writtenPins[sessionId] = it }
+"""), "pin-open-every-window", "pin"),
+    "PIN_OBJ_EMPTY_GUARD_UNPIN": (GOOD_PIN.replace(
+        "            if (left != 0) return@withLock true\n",
+        "            if (left != 0) {\n            }\n"),
+        "pin-close-restores-early", "pin"),
 }
 
 

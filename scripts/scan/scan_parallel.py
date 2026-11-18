@@ -88,8 +88,8 @@ gate's syscalls to the app's own process group (parallel workers also die on
 `Errno 38` / `Function not implemented`, which reads like a red gate).
 
 Run one judgement locally instead:
-  python3 scripts/scan/<gate>.py --root .        # a single gate, seconds
-  python3 scripts/scan/test_scan.py <case_name>  # a single fixture
+  python3 scripts/scan/test_scan.py --single <case_name>   # one fixture
+  python3 scripts/scan/<gate>.py                            # one gate (its own flags)
 
 ...and read the rest from the `scan-gate` job of the branch's CI run.
 Override (real checkout, no CI): add --allow-local
