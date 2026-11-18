@@ -74,11 +74,20 @@ class ChatRefusedSendRestoreTest {
      * must hand the text back — so the list grows by the one implementation that
      * now satisfies it. Both the helper's name and its body are accepted, so the
      * arm keeps measuring the contract if the helper is ever inlined back.
+     *
+     * [W1118-COMPOSER A6] `ComposerCommand.ReplaceText(text = text` alone was
+     * BLIND: the intent only restores the text if the composer lands the caret at
+     * the END of it (`caretOverride = text.length`). Without the override the
+     * funnel falls back to `lastTrueCaretEnd` — stale by then — or to the
+     * ViewModel's parked intent, so the user got his message back with the caret
+     * in the wrong place (or in the middle of the text). A bare
+     * `ComposerCommand.ReplaceText(text = text)` with no override is not a hand
+     * back, so the entry now names the override too.
      */
     private val handBack = listOf(
         "setInputText(text)",
         "restoreComposerAfterRefusal(text)",
-        "ComposerCommand.ReplaceText(text = text",
+        "ComposerCommand.ReplaceText(text = text, caretOverride = text.length",
         "enqueuePrompt(",
         "pendingExhaustedText =",
     )
@@ -146,5 +155,82 @@ class ChatRefusedSendRestoreTest {
                 "(the 'Move to…' capsule then has nothing to move)",
             armAt > gateAt,
         )
+    }
+
+    /**
+     * [W1118-COMPOSER A6] The hand-back contract lives in ONE function, so the
+     * shape arm above can be satisfied by its NAME alone — replacing the body with
+     * `setInputText(text)` (the very defect F-06 fixed: no field write, caret at
+     * index 0, dead while dictating) left all four arms green. Pin the body: the
+     * restore must go through the composer intent channel, and it must land the
+     * caret at the end of the text.
+     */
+    @Test
+    fun `the restore helper hands the text back through the composer intent channel`() {
+        val src = chatSrc("ChatViewModel.kt")
+        val decl = src.indexOf("private fun restoreComposerAfterRefusal(")
+        assertTrue("restoreComposerAfterRefusal is gone", decl >= 0)
+        val body = braceBlockAt(src, decl)
+        assertTrue(
+            "the refusal restore must go through the composer's intent channel, so the " +
+                "FIELD and the caret are written too (a bare setInputText leaves the " +
+                "box empty while dictating): ${body.replace("\n", " ").take(160)}",
+            body.contains("requestComposerCommand(") && body.contains("ComposerCommand.ReplaceText("),
+        )
+        assertTrue(
+            "the restore must land the caret at the end of the text",
+            body.contains("caretOverride = text.length"),
+        )
+    }
+
+    /**
+     * The brace-matched block starting at [anchor]'s first `{`. String literals
+     * and comments are skipped so a brace inside prose cannot desynchronise the
+     * count — this test file reads Kotlin, and the KDoc above every refusal is
+     * full of braces and quotes.
+     */
+    private fun braceBlockAt(text: String, anchor: Int): String {
+        var i = text.indexOf('{', anchor)
+        assertTrue("no block opens after the anchor", i >= 0)
+        val start = i
+        var depth = 0
+        while (i < text.length) {
+            when {
+                text.startsWith("//", i) -> {
+                    val nl = text.indexOf('\n', i)
+                    if (nl < 0) break
+                    i = nl
+                    continue
+                }
+                text.startsWith("/*", i) -> {
+                    val end = text.indexOf("*/", i)
+                    if (end < 0) break
+                    i = end + 2
+                    continue
+                }
+                text.startsWith("\"\"\"", i) -> {
+                    val end = text.indexOf("\"\"\"", i + 3)
+                    if (end < 0) break
+                    i = end + 3
+                    continue
+                }
+                text[i] == '"' -> {
+                    var j = i + 1
+                    while (j < text.length && text[j] != '"') {
+                        if (text[j] == '\\') j++
+                        j++
+                    }
+                    i = j + 1
+                    continue
+                }
+                text[i] == '{' -> depth++
+                text[i] == '}' -> {
+                    depth--
+                    if (depth == 0) return text.substring(start, i + 1)
+                }
+            }
+            i++
+        }
+        throw AssertionError("unbalanced block at $anchor")
     }
 }
