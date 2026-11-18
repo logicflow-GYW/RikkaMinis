@@ -317,6 +317,29 @@ internal fun ChatInputArea(
             lastClearedAtMs = SystemClock.elapsedRealtime()
         }
     }
+    // [W1118-COMPOSER F-01] A wipe of ALREADY-LANDED REPLAY must not re-stamp.
+    //
+    // `clearComposerInput` calls `stampClearedBody`, which reads the field and
+    // records it as "the body a clear removed". That is right for every real
+    // clear entrance, but catastrophic on the replay path: the box holds a
+    // FRAGMENT of the message ("hel"), so the stamp was overwritten with the
+    // fragment and the full body was forgotten. One frame later the IME
+    // continues with "hello" — no longer a fragment of "hel" — the guard
+    // returns NONE, and the rest of the sent message walks back into the box
+    // (and into the ViewModel and the persisted draft slot). That is the
+    // regression W1118-COMPOSER F-01 caught in the shipped c2a69fe9.
+    //
+    // The wipe therefore keeps the ORIGINAL stamp and its ORIGINAL timestamp:
+    // the post-clear window must not be extended by a wipe either, or a long
+    // replay could keep renewing its own licence.
+    val wipeLandedReplay: () -> Unit = {
+        cancelPendingImeBurst()
+        selfWrite.text = ""
+        viewModel.setInputText("")
+        inputFieldValue = androidx.compose.ui.text.input.TextFieldValue("")
+        lastTrueCaretEnd = 0
+        viewModel.clearPastedText()
+    }
     val clearComposerInput: () -> Unit = {
         cancelPendingImeBurst()
         stampClearedBody()
@@ -1878,8 +1901,15 @@ internal fun ChatInputArea(
                                 // in the box). When the verdict says the box itself
                                 // is replay-filled, wipe it through the same funnel
                                 // every other clear uses.
+                                // [W1118-COMPOSER F-01] Wipe through the
+                                // NON-stamping path. `clearComposerInput()`
+                                // would read the fragment in the box ("hel")
+                                // and overwrite the stamp for the whole message
+                                // with it — after which every later fragment
+                                // looks unrelated and walks back in. The stamp
+                                // and its timestamp must survive the wipe.
                                 if (verdict == ComposerResidueVerdict.DROP_AND_CLEAR) {
-                                    clearComposerInput()
+                                    wipeLandedReplay()
                                     return@BasicTextField
                                 }
                                 return@BasicTextField
@@ -2240,7 +2270,17 @@ internal fun ChatInputArea(
                         interactionSource = interactionSource,
                         decorationBox = { innerTextField ->
                             OutlinedTextFieldDefaults.DecorationBox(
-                                value = inputText,
+                                // [W1118-COMPOSER F-08] The decoration box must
+                                // see the SAME text as the field it wraps. It was
+                                // reading `inputText` (the ViewModel copy), which
+                                // lags the field by the whole 150 ms IME burst
+                                // window and by any suppressed dictation mirror —
+                                // so `value.isEmpty()` disagreed with the text
+                                // actually being drawn. Latent today (the
+                                // placeholder was removed), a guaranteed
+                                // text-over-placeholder collision the moment a
+                                // label comes back.
+                                value = inputFieldValue.text,
                                 innerTextField = innerTextField,
                                 enabled = true,
                                 singleLine = false,

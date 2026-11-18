@@ -56,18 +56,61 @@ internal enum class ComposerResidueVerdict {
 }
 
 /**
+ * [W1118-COMPOSER F-02] Characters an IME appends when `finishComposingText()`
+ * settles a composing region, and which a byte-for-byte prefix test therefore
+ * treats as "different text".
+ *
+ * `clearComposerInput` stamps the body BEFORE `clearFocus()`, and `clearFocus`
+ * is what makes the IME settle its composing region — so the commit that comes
+ * back routinely differs from the stamp by one of these: an English auto-space
+ * ("hello world "), a Chinese full stop ("今天天气真好。"), a comma. The first
+ * version of this guard compared with `==` / startsWith / endsWith, returned
+ * NONE for every one of those, and produced ZERO `ComposerResidue` log lines on
+ * the very device that still had the bug. That zero was the tell: the replay
+ * was arriving, just never recognised.
+ *
+ * Kept deliberately narrow. Dropping ordinary characters would make the guard
+ * eat genuine typing; punctuation and whitespace at the EDGES only is the shape
+ * an IME adds on its own.
+ */
+internal const val IME_TRAILING_NOISE_CHARS = " \t\n\r。，、；：！？.,;:!?…—·"
+
+/** [W1118-COMPOSER F-02] Strip the IME's own trailing punctuation / whitespace. */
+internal fun stripImeTrailingNoise(text: String): String =
+    text.trimEnd { it in IME_TRAILING_NOISE_CHARS }
+
+/**
  * [fix/composer-post-send-residue-2] Is [incoming] a contiguous piece of
  * [clearedText]?
  *
  * Shared by the verdict and by the fingerprint's "do not self-destruct" check so
  * the two can never disagree about what belongs to the body a clear removed.
+ *
+ * [W1118-COMPOSER F-02] Two relaxations, both driven by a real device report:
+ *  * trailing IME punctuation / whitespace is ignored on both sides, because
+ *    `finishComposingText` adds it AFTER the stamp is taken;
+ *  * a MIDDLE piece of the body counts too (`"lo wor"`), not just a prefix or a
+ *    suffix — an IME that resumes from its own buffer does not have to start at
+ *    the beginning, and the old prefix/suffix-only rule let those through.
+ *
+ * The middle-piece rule is bounded by [minFragmentChars] so a two-character
+ * coincidence inside a long message is not treated as a replay.
  */
-internal fun isFragmentOfClearedBody(incoming: String, clearedText: String): Boolean =
-    incoming.isNotEmpty() && (
-        incoming == clearedText ||
-            clearedText.startsWith(incoming) ||
-            clearedText.endsWith(incoming)
-        )
+internal fun isFragmentOfClearedBody(
+    incoming: String,
+    clearedText: String,
+    minFragmentChars: Int = COMPOSER_CLEAR_RESIDUE_MIN_REPLAY_CHARS,
+): Boolean {
+    if (incoming.isEmpty() || clearedText.isEmpty()) return false
+    val incomingNorm = stripImeTrailingNoise(incoming)
+    val clearedNorm = stripImeTrailingNoise(clearedText)
+    if (incomingNorm.isEmpty() || clearedNorm.isEmpty()) return false
+    if (incomingNorm == clearedNorm) return true
+    if (clearedNorm.startsWith(incomingNorm)) return true
+    if (clearedNorm.endsWith(incomingNorm)) return true
+    // A middle fragment: the IME resumed from partway through its own buffer.
+    return incomingNorm.length >= minFragmentChars && clearedNorm.contains(incomingNorm)
+}
 
 /**
  * [fix/composer-post-send-residue] Decide what an `onValueChange` arriving right

@@ -4220,7 +4220,17 @@ class ChatViewModel(
                     text = context.getString(R.string.sysmsg_edit_wait_stream),
                     iconKind = "info",
                 )
-                setInputText(text)
+                // [W1118-COMPOSER F-06] Restore through the composer's intent
+                // channel, not a bare ViewModel write. `setInputText` leaves the
+                // field's text and caret alone, so the mirror put the text back
+                // with the caret at index 0 (and did nothing at all while an IME
+                // was dictating, because the mirror is suppressed then) — the
+                // user saw an empty box over a ViewModel that still had the
+                // message. `ReplaceText(text.length)` writes BOTH copies and
+                // lands the caret at the end, where it was when he sent.
+                requestComposerCommand(
+                    ComposerCommand.ReplaceText(text = text, caretOverride = text.length),
+                )
                 return
             }
             enqueuePrompt(text)
@@ -4261,7 +4271,12 @@ class ChatViewModel(
             // path). This branch returned bare, so a wall of text the user just
             // typed (or a paste it had already expanded) was dropped in
             // exchange for an inline "wait for compaction" notice.
-            setInputText(text)
+            // [W1118-COMPOSER F-06] Same intent-channel contract as the edit
+            // branch above: both copies plus an explicit caret, so a refused
+            // send leaves the box exactly as the user had it.
+            requestComposerCommand(
+                ComposerCommand.ReplaceText(text = text, caretOverride = text.length),
+            )
             return
         }
         // Context pressure check — warns at the needsCompact threshold but
@@ -4340,7 +4355,11 @@ class ChatViewModel(
             _error.value = "No provider configured"
             // [incr1118 D1-F04] Same contract as the compaction branch above:
             // the composer was cleared by the caller, so the text goes back.
-            setInputText(text)
+            // [W1118-COMPOSER F-06] …through the intent channel, so the FIELD
+            // and the caret are restored too, not just the ViewModel string.
+            requestComposerCommand(
+                ComposerCommand.ReplaceText(text = text, caretOverride = text.length),
+            )
             return
         }
         // [incr1118 D1-F04] Spent ONLY by a send that actually starts. It used

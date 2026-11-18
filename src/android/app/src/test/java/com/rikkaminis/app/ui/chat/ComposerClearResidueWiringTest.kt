@@ -33,12 +33,20 @@ class ComposerClearResidueWiringTest {
         val funnelStart = source.indexOf("val clearComposerInput: () -> Unit = {")
         val readBody = source.indexOf("val clearedBody = inputFieldValue.text")
         val record = source.indexOf("lastClearedText = clearedBody")
-        val callStamp = source.indexOf("stampClearedBody()")
-        val fieldReset = source.indexOf("inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(\"\")")
+        // [W1118-COMPOSER F-01] Both anchors must be resolved INSIDE the funnel:
+        // the landed-replay wipe contains the same two statements on purpose
+        // (it clears the field without stamping), so a top-of-file indexOf finds
+        // that copy and the arm fails for the wrong reason.
+        val callStamp = source.indexOf("stampClearedBody()", funnelStart)
+        val fieldReset = source.indexOf(
+            "inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(\"\")",
+            funnelStart,
+        )
         assertTrue("the stamp lambda is gone", stampDecl >= 0)
         assertTrue("the stamp must be declared before the funnel that calls it", stampDecl < funnelStart)
         assertTrue("the cleared body is never read from the field", readBody > stampDecl)
         assertTrue("the cleared body is never recorded", record > readBody)
+        assertTrue("the funnel never stamps at all", callStamp > funnelStart)
         assertTrue(
             "the funnel must stamp the body before it empties the field (after the " +
                 "reset the stamp would be empty forever and the guard would be dead)",
@@ -74,6 +82,37 @@ class ComposerClearResidueWiringTest {
         assertTrue(
             "an accumulated replay must be cleared through the funnel, not just skipped",
             after.contains("clearComposerInput()"),
+        )
+    }
+
+    /**
+     * [W1118-COMPOSER F-01] The wipe of an already-landed replay must NOT go
+     * through `clearComposerInput()`. That funnel calls `stampClearedBody()`,
+     * which reads whatever is in the box — on this path a FRAGMENT of the sent
+     * message — and overwrites the stamp for the whole message with it. One
+     * frame later the IME continues with a fragment that no longer matches the
+     * truncated stamp, the guard returns NONE, and the rest of the message walks
+     * back into the box. That is the regression the shipped c2a09fe9 carried.
+     */
+    @Test
+    fun `the landed-replay wipe keeps the original stamp`() {
+        val wipeDecl = source.indexOf("val wipeLandedReplay: () -> Unit = {")
+        assertTrue("the non-stamping wipe path is gone", wipeDecl >= 0)
+        val wipeBody = source.substring(wipeDecl, source.indexOf("val clearComposerInput", wipeDecl))
+        assertTrue(
+            "the landed-replay wipe must not re-stamp: it would record the fragment",
+            !wipeBody.contains("stampClearedBody()"),
+        )
+        val branch = source.indexOf("ComposerResidueVerdict.DROP_AND_CLEAR")
+        assertTrue("the verdict is never branched on", branch >= 0)
+        val after = source.substring(branch, minOf(source.length, branch + 600))
+        assertTrue(
+            "the DROP_AND_CLEAR branch must use the non-stamping wipe",
+            after.contains("wipeLandedReplay()"),
+        )
+        assertTrue(
+            "the DROP_AND_CLEAR branch must NOT call the stamping funnel",
+            !after.contains("clearComposerInput()"),
         )
     }
 

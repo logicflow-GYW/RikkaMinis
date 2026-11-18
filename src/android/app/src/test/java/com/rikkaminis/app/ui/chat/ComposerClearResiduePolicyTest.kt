@@ -134,6 +134,73 @@ class ComposerClearResiduePolicyTest {
     }
 
     /**
+     * [W1118-COMPOSER F-02] The shape that produced ZERO `ComposerResidue` log
+     * lines on the device that still had the bug: `clearComposerInput` stamps the
+     * body BEFORE `clearFocus()`, and `clearFocus` is what makes the IME settle
+     * its composing region — so the commit that comes back is the stamped body
+     * plus one character the IME added (auto-space, full stop, comma).
+     *
+     * The first version compared with `==` / startsWith / endsWith and returned
+     * NONE for every one of these. The zero log count was the tell, not proof
+     * that no replay happened.
+     */
+    @Test
+    fun `an english auto-space appended by finishComposingText is still a replay`() {
+        assertEquals(ComposerResidueVerdict.DROP, verdict(incoming = "hello world, this is the message I just sent "))
+    }
+
+    @Test
+    fun `a chinese full stop appended by finishComposingText is still a replay`() {
+        assertEquals(ComposerResidueVerdict.DROP, verdict(incoming = "今天天气真好。", clearedText = "今天天气真好"))
+    }
+
+    @Test
+    fun `a comma appended by finishComposingText is still a replay`() {
+        assertEquals(ComposerResidueVerdict.DROP, verdict(incoming = "今天天气真好，", clearedText = "今天天气真好"))
+    }
+
+    /**
+     * [W1118-COMPOSER F-02] An IME resuming from its own buffer does not have to
+     * start at the beginning of the body, so a MIDDLE piece counts too.
+     */
+    @Test
+    fun `a middle fragment of the cleared body is a replay`() {
+        assertEquals(
+            ComposerResidueVerdict.DROP,
+            verdict(incoming = "lo world, this is", clearedText = "hello world, this is the message I just sent"),
+        )
+    }
+
+    @Test
+    fun `a two character middle coincidence is not a replay`() {
+        // Below the fragment floor a `contains` hit is a coincidence, not a
+        // replay — and dropping it would eat a genuine keystroke pair.
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = "o w", clearedText = "hello world, this is the message I just sent"),
+        )
+    }
+
+    /**
+     * The fragment floor also has to hold on arm B (the box already holds an
+     * earlier fragment). Without it, any short coincidence inside the body would
+     * authorise a wipe of a box that is still legitimately replay-filled — a
+     * three-character "o w" occurs inside "hello world" by chance, so `contains`
+     * alone must never be enough.
+     */
+    @Test
+    fun `a short middle coincidence on a replay filled box does not authorise a wipe`() {
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(
+                incoming = "o w",
+                clearedText = "hello world, this is the message I just sent",
+                fieldText = "h",
+            ),
+        )
+    }
+
+    /**
      * The safety property that makes arm B usable: the accumulated text must
      * itself belong to the cleared body. One keystroke of the user's own text
      * and the box is his, so no wipe — a swallowed word is worse than a stale
