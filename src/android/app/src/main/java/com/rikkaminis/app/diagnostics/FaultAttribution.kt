@@ -16,7 +16,8 @@ package com.rikkaminis.app.diagnostics
  *
  * Signals (checked in priority order, first hit wins):
  *   - auth / quota vocabulary → credentials (fix keys / top up)
- *   - HTTP 4xx/5xx status vocabulary → service (endpoint alive, unhappy)
+ *   - HTTP 4xx/5xx status codes, matched as standalone three-digit tokens
+ *     (see [STATUS_CODE_PATTERN]) → service (endpoint alive, unhappy)
  *   - worker death / first-chunk budget vocabulary → service
  *     (the endpoint accepted the request and then went silent)
  *   - UnknownHost / connect / timeout / reset / TLS vocabulary → connection
@@ -61,8 +62,35 @@ object FaultAttribution {
         "ping",                                             // h2 ping liveness
     )
 
+    /**
+     * [F-03] HTTP status codes, matched as STANDALONE three-digit tokens.
+     *
+     * The codes used to sit in [SERVICE_PATTERNS] as space-prefixed strings
+     * (`" 500"`) matched with a bare `contains`. That fixes the boundary on
+     * the left and none on the right, so a duration in a connection-leg
+     * message read as a status code: `"connect timed out after 500 ms"`,
+     * `"waited 1500 ms"` and `"retry in 400 ms"` were all attributed to
+     * [Layer.SERVICE] — the user's own network/proxy failure reported as the
+     * relay's, which is the exact misdirection this module exists to prevent.
+     *
+     * The lookarounds restore the boundary without narrowing the real cases:
+     *  - `(?<![\d.])` — a preceding digit or dot means these digits are the
+     *    tail of a longer number (`1500`, `1.500`), not a code;
+     *  - `(?!\d)` / `(?!\.\d)` — the same on the right (`5000`, `500.5`);
+     *  - `(?!\s*ms)` — digits immediately followed by a duration unit are a
+     *    duration.
+     * `=`, `:`, whitespace, quotes and the string edges all still qualify as
+     * boundaries, so `"HTTP 500"`, `"status=500"`, `"error code: 503"`,
+     * a bare code with surrounding spaces, and `"500 Internal Server Error"`
+     * keep matching — the `=` and `:` forms did NOT match the old
+     * space-prefixed substring.
+     */
+    private val STATUS_CODE_PATTERN = Regex(
+        "(?<![\\d.])(400|401|403|429|500|502|503|504)(?!\\d)(?!\\.\\d)(?!\\s*ms)",
+    )
+
     private val SERVICE_PATTERNS = listOf(
-        "http 4", "http 5", " 400", " 401", " 403", " 429", " 500", " 502", " 503", " 504",
+        "http 4", "http 5",
         "bad request", "not found", "internal server", "bad gateway",
         "service unavailable", "overloaded", "rate limit", "expired",
         "first chunk timeout", "first_chunk", "no first chunk",
@@ -91,6 +119,14 @@ object FaultAttribution {
 
         if (CREDENTIAL_PATTERNS.any { raw.contains(it) }) {
             return Result(Layer.CREDENTIALS, "fault_layer_credentials")
+        }
+        // [F-03] Status codes are a TOKEN class, not a substring class — see
+        // [STATUS_CODE_PATTERN]. Checked with the service phrases (same layer,
+        // same verdict) and before the connection walk, so a millisecond count
+        // inside a connection-leg message cannot be read as a code on the way
+        // through to the connection vocabulary it belongs with.
+        if (STATUS_CODE_PATTERN.containsMatchIn(raw)) {
+            return Result(Layer.SERVICE, "fault_layer_service")
         }
         // [W1118-T6 R6 F-01] Service BEFORE connection: "first chunk timeout"
         // contains "timeout", so the old order shadowed every service phrase.
