@@ -78,9 +78,14 @@ return if (longEnough && (phrase || (covers && isSuperhumanTypingRate(incoming.l
 任务书要求的 5 条期望值逐条对上：`hello`/`hello world`@350 → `NONE`；`hello world`@350 → `DROP`；短正文整段 @350 → `DROP`；12 字以上前缀 @1200 → `DROP`（既有 `a single edit carrying a phrase is a residue even at a human-looking delay`，本轮未改且仍绿）；中段词 `"there"` vs `"I'll be there in a moment"` → `NONE`（既有 A3 用例，仍绿）。
 
 ### CI
-- 分支 run：**TBD-待补**
-- `head_sha` 与分支 tip 逐字符一致：**TBD-待补**
-- 五 job 全 success：**TBD-待补**
+- 分支 run：**#3268 / run id `44337727790`**，`conclusion = success`
+- `head_sha` = `671aff0f018ccd5d2a538af22e42539eec58a629`，与分支 tip（本地 HEAD、`git ls-remote origin refs/heads/fix/composer-residue-1118c`）**逐字符一致**
+- 五 job 全 success：`unit-tests` / `lint` / `scan-gate` / `build-apk` / `publish`
+- **publish 的门控生效**：`Move the rolling tag android-latest to this commit` **skipped**、`Publish to Releases` **skipped**（job 本身 green，未污染 release）
+- **unit-tests**：日志逐行统计 **9715 条 `… PASSED`、0 条真 FAILED**（6 条含 `FAILED` 字样的行都是用例名，且全部 `PASSED`），`BUILD SUCCESSFUL`。本轮新增/修订的 8 条用例逐条在列并 `PASSED`：
+  `the boolean facade agrees with the verdict`、`a chip word covering under half the body is not a residue`、`the whole body replayed at the same delay is still a residue`、`the coverage floor is half the body ignoring IME trailing noise`、`a restored body does not arm the post-send IME window`、`a four character prefix of a long body is no longer dropped`、`a short body replayed whole is still dropped`、`a composer commit disarms the post-send IME window`
+- **scan-gate**：`Summary: 115 passed, 0 failed`（本轮未改 `scripts/scan/**`，夹具按机制跳过，因此该绿不含新增门证据）
+- `ChatInputArea.kt` 的真实编译由 CI `build-apk` / `unit-tests`（instrumented compile 步）覆盖；沙箱内无 Android SDK，本地只做形状与括号核对，不在此声明编译通过
 
 ## 5 变异负控
 
@@ -123,7 +128,8 @@ nice -n 10 python3 /var/minis/shared/work/r1118c/harness/mutate.py
 # CI
 cd /var/minis/shared/work/r1118c/composer
 sh /var/minis/skills/github-ops/scripts/gh_sync.sh push
-sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-dispatch
+sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-dispatch \
+  --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --ref fix/composer-residue-1118c
 ```
 
 真机待验（本轮未验证，如实说明）：发送一条 5–11 字消息后立即点击联想词 / 滑行输入该消息的首词，输入框应**保留**该词（日志不再出现 `ComposerResidue … dropped a late IME replay`，或在更长正文的整段回放时仍出现）；发送后触发一次拒发回填，紧接着用拼音组词，输入应**保留**。
