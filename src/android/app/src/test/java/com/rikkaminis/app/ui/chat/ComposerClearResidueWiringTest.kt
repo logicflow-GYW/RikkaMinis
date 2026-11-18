@@ -48,7 +48,7 @@ class ComposerClearResidueWiringTest {
 
     @Test
     fun `on value change consults the replay guard with the recorded stamp`() {
-        val call = source.indexOf("isComposerClearResidue(")
+        val call = source.indexOf("composerResidueVerdict(")
         val stampArg = source.indexOf("clearedText = lastClearedText")
         assertTrue("the composer never consults the replay guard", call >= 0)
         assertTrue(
@@ -57,9 +57,48 @@ class ComposerClearResidueWiringTest {
         )
     }
 
+    /**
+     * [fix/composer-post-send-residue-2] Refusing to grow a replay is not enough:
+     * a char-by-char IME replay lands its first fragments before the guard can
+     * recognise it, so the box is already partly filled. If the composer only
+     * drops the newest edit, the user keeps staring at half of the message he
+     * just sent — the exact reported symptom.
+     */
+    @Test
+    fun `an accumulated replay is wiped through the clear funnel`() {
+        val verdictCall = source.indexOf("composerResidueVerdict(")
+        val dropAndClear = source.indexOf("ComposerResidueVerdict.DROP_AND_CLEAR")
+        assertTrue("the verdict enum is never branched on", dropAndClear >= 0)
+        assertTrue("the DROP_AND_CLEAR branch sits before the guard is even reached", dropAndClear > verdictCall)
+        val after = source.substring(dropAndClear)
+        assertTrue(
+            "an accumulated replay must be cleared through the funnel, not just skipped",
+            after.contains("clearComposerInput()"),
+        )
+    }
+
+    /**
+     * The stamp must survive a legitimate short fragment. A char-by-char replay
+     * starts with 1-3 characters, which arm A lets through BY DESIGN; the old
+     * `if (tfv.text.isNotEmpty()) lastClearedText = null` treated that as the
+     * user reclaiming the composer and destroyed the fingerprint, after which
+     * nothing could ever be caught again.
+     */
+    @Test
+    fun `the stamp survives an edit that is still a piece of the cleared body`() {
+        val drop = source.indexOf("lastClearedText = null")
+        assertTrue("the stamp is never dropped", drop >= 0)
+        val guard = source.indexOf("isFragmentOfClearedBody(", maxOf(0, drop - 400))
+        assertTrue(
+            "the stamp is dropped on ANY non-empty edit, so the first replay fragment " +
+                "disarms the guard for the rest of the window",
+            guard in 0 until drop,
+        )
+    }
+
     @Test
     fun `the guard runs before the field is written and before the paste fold`() {
-        val call = source.indexOf("isComposerClearResidue(")
+        val call = source.indexOf("composerResidueVerdict(")
         val fold = source.indexOf("foldLongPasteIfNeeded(")
         assertTrue("the paste fold anchors moved", fold >= 0)
         assertTrue("the replay guard runs after the paste fold", call < fold)
