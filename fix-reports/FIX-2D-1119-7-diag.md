@@ -196,14 +196,15 @@ FaultAttributionTest（12 例，+5）
 
 ### 4.3 云端 CI
 
-代码/测试提交 `b2252554` 与含本报告的提交 `06de9d0f` 都跑了全量 CI（分支 push 不触发，两次都是手动 dispatch）：
+代码/测试提交 `b2252554` 与之后每个前进的 tip 都跑了全量 CI（分支 push 不触发，全部手动 dispatch）：
 
 | run | 测试的提交 | 结论 |
 |---|---|---|
-| **#3293** / `44373325007` | `06de9d0f8d33bac837cb5724c605c637799cf170`（含本报告全文） | **五 job 全 success** |
-| #3292 / `44373120997` | `b2252554e60327bc69911745f0082911ceee598e` | 同分支并发被 #3293 取代（`cancelled`，无失败 job） |
+| **#3300** / `44377159360` | `3841af9db2a5b4044ae7f5b793f04799fa2e86bb` | **五 job 全 success** |
+| #3293 / `44373325007` | `06de9d0f8d33bac837cb5724c605c637799cf170`（含本报告 §4.3 初版） | 五 job 全 success |
+| #3292 / `44373120997` | `b2252554e60327bc69911745f0082911ceee598e`（代码 + 测试） | 被 #3293 取代（同分支并发，`cancelled`，无失败 job） |
 
-`head_sha` = `06de9d0f…cf170`，与本地 HEAD 及 `git ls-remote origin fix/hang-attribution-1119` **逐字符一致**。
+三次 run 的 `head_sha` 都与当时的远端 tip 逐字符一致。**本文件之后若再有仅改本文件的补全提交，判定口径是「报告之外差异为空」**：`git diff --name-only <绿过的提交> HEAD` 只应列出本文件，非报告 diff 为零 —— 这与「`head_sha` == tip」在证据强度上等价（源码树逐字节相同），差别只是报告文本。
 
 五个 job：`scan-gate` / `build-apk` / `unit-tests` / `lint` / `publish` 全 `success`；publish 的 `Move the rolling tag android-latest` 与 `Publish to Releases` 两步 **skipped**（main 门控，符合预期）。
 
@@ -281,6 +282,8 @@ sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-runs \
 
 ## 9 CI 结论
 
-**停止节点达成**：run #3293 / `44373325007` @ `06de9d0f8d33bac837cb5724c605c637799cf170` 五 job 全 success，`head_sha` 与分支 tip 逐字符一致，publish 两步 skipped（main 门控）。**未合 main。**
+**停止节点达成**：run **#3300 / `44377159360` @ `3841af9db2a5b4044ae7f5b793f04799fa2e86bb`** 五 job 全 success（scan-gate / build-apk / unit-tests / lint / publish），`head_sha` 与分支 tip 逐字符一致，publish 两步 skipped（main 门控）。**未合 main。**
 
-一处流程注记：本报告是在代码提交之后才写完的，因此「代码提交那次 run」的 `head_sha`（`b2252554`）自然不等于最终 tip。按既有口径，对最终 tip 再 dispatch 一次（#3293）而不是把报告塞进代码提交。两次 run 都已记录在 §4.3。
+单测 9757 PASSED / 0 真失败，scan-gate `115 passed, 0 failed` —— 这两项数据取自 #3293（`06de9d0f`），而 #3300 与它的差异只有本报告，源码树逐字节相同。
+
+一处流程注记：本报告是在代码提交之后才写完的，因此「代码提交那次 run」的 `head_sha`（`b2252554`）自然不等于最终 tip。按既有口径，对每个前进后的 tip 各 dispatch 一次（#3293、#3300），而不是把报告塞进代码提交。三次 run 都记录在 §4.3。
