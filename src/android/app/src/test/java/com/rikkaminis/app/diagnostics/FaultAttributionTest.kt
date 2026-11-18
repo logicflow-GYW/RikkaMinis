@@ -135,7 +135,12 @@ class FaultAttributionTest {
             connection,
             FaultAttribution.attribute("connect timed out, ratio 500.5").layer,
         )
-        // Left-hand side: a code glued to a longer number is not a code.
+        // Left-hand side, with no duration unit to fall back on: a code glued
+        // to the TAIL of a longer bare number is not a code.
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out, retried 1500 times").layer,
+        )
         assertEquals(
             connection,
             FaultAttribution.attribute("connect timed out, port 4030 refused").layer,
