@@ -391,6 +391,38 @@ object ExecutionCoordinator {
         val memAvailableMB = systemMemAvailableMB()
         val preExecPhase = internalDegradationPhase(preExecNativeMB, memAvailableMB)
         val cmdClass = classifyCommand(command)
+        // [protect-zones-1118] Refuse a delete aimed at a protected zone before
+        // any shell work. Measured motivation: in the prompt-eval harness the
+        // production prompt ran `rm` in 6 of 8 runs on an instruction with no
+        // referent, and one call reached `rm -v /var/minis/shared/README.md`.
+        // The scratch areas (`workspace`, `/tmp`, `offloads`, `browser`) are
+        // deliberately NOT protected — the user's rule is that scratch is
+        // discardable and regenerable.
+        //
+        // The guard yields to the existing auto-approve master switch: that is
+        // the user's standing statement that they accept the risk for the
+        // convenience, and it already governs every other confirmation. No new
+        // toggle — one switch, one mental model.
+        val autoApprove = com.rikkaminis.app.config.AutoApproveStore.isEnabled
+        val wideTarget = ProtectedZoneGuard.wideDeleteTarget(command)
+        if (wideTarget != null) {
+            if (!autoApprove) {
+                val refusal = ProtectedZoneGuard.refuseReason(command) ?: ""
+                Log.w(TAG, "[$sessionId] Refused destructive command: $refusal")
+                MemorySpikeRecorder.onEvent(
+                    "refuse-zone",
+                    "session=$sessionId target=$wideTarget :: ${MemorySpikeRecorder.previewOf(command, 60)}",
+                )
+                return CommandResult(refusal, -1, 0, true)
+            }
+            // Allowed by the user's own switch, but still recorded: the audit
+            // line is what makes "I turned it on" reviewable afterwards.
+            Log.w(TAG, "[$sessionId] Protected-zone delete allowed by auto-approve: $wideTarget")
+            MemorySpikeRecorder.onEvent(
+                "zone-delete-allowed",
+                "session=$sessionId target=$wideTarget :: ${MemorySpikeRecorder.previewOf(command, 60)}",
+            )
+        }
         val preExecReject = preExecRejectionMessage(preExecPhase, cmdClass, preExecNativeMB, memAvailableMB)
         if (preExecReject != null) {
             Log.w(TAG, "[$sessionId] Phase $preExecPhase: rejecting $cmdClass command (native ${preExecNativeMB}MB, memAvail ${memAvailableMB}MB)")
