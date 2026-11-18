@@ -142,7 +142,17 @@ C 组就是任务书点名的 8 条：单文件、二级子目录、移入、单
 
 ### 4.3 CI
 
-CI 结果与 `head_sha` 核对见 §7 收口记录（本报告提交时同步写入）。
+分支 CI **#3271 / run `44341644370`**，`head_sha = 09fae78694cb46ec26dc2ecc31ecfe363a816847`，与本地 `git rev-parse HEAD` **逐字符一致**（实现提交 `09fae786`）。event = `workflow_dispatch`（分支 push 不触发 CI，按纪律手动 dispatch）。
+
+| job | 结果 | 证据 |
+|---|---|---|
+| unit-tests | **success** | `BUILD SUCCESSFUL in 6m 24s`；`9740` 条 `> … PASSED`，`> … FAILED` **0** 条；31 条新用例逐条在列（用 `grep -cF "<用例名> PASSED"` 逐条核对，31/31 = 1） |
+| scan-gate | **success** | `Summary: 115 passed, 0 failed`；`scripts/scan/** untouched in this push — skipping the fixture self-test`（本支未碰扫描门，夹具按机制跳过，故本次「绿」不含夹具证据） |
+| lint | **success** | `Run :app:lintDebug` success |
+| build-apk | **success** | 20 步全 success（含 `Build APK with Gradle`、`Verify APK signature`、`Verify APK contents`） |
+| publish | **success** | `Move the rolling tag android-latest` / `Publish to Releases` 两步 **skipped**（main 门控生效，未污染 release） |
+
+报告提交 `acc82f04` 是纯文档，按 GLOBAL 纪律不 dispatch、不等 CI；其 diff 仅 `fix-reports/FIX-1118C-C-zone-guard.md`（+200），「报告之外差异为空」。
 
 ## 5 变异负控（8 臂，`r1118c/zoneguard-jvm/mutate.py`）
 
