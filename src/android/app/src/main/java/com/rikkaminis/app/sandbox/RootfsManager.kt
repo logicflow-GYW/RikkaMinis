@@ -129,7 +129,8 @@ class RootfsManager private constructor(private val context: Context) {
         installIfNeededLocked(forceReinstall)
     }
 
-    private suspend fun installIfNeededLocked(forceReinstall: Boolean): Unit = withContext(Dispatchers.IO) {
+    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    internal suspend fun installIfNeededLocked(forceReinstall: Boolean): Unit = withContext(Dispatchers.IO) {
         if (!forceReinstall && isInstalled) {
             Log.d(TAG, "Rootfs already installed at $rootfsDir")
             _installState.value = RootfsInstallState.Installed
@@ -423,7 +424,8 @@ class RootfsManager private constructor(private val context: Context) {
         autoRepairLocked()
     }
 
-    private suspend fun autoRepairLocked(): Boolean = withContext(Dispatchers.IO) {
+    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    internal suspend fun autoRepairLocked(): Boolean = withContext(Dispatchers.IO) {
         val initial = verifyIntegrity()
         if (initial.healthy) {
             Log.i(TAG, "[Repair] rootfs healthy, nothing to do")
@@ -544,7 +546,8 @@ class RootfsManager private constructor(private val context: Context) {
         restoreCriticalFromAssetsLocked()
     }
 
-    private suspend fun restoreCriticalFromAssetsLocked(): Boolean = withContext(Dispatchers.IO) {
+    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    internal suspend fun restoreCriticalFromAssetsLocked(): Boolean = withContext(Dispatchers.IO) {
         val assetName = try {
             context.assets.open(ROOTFS_ASSET).close()
             ROOTFS_ASSET
@@ -1036,7 +1039,8 @@ class RootfsManager private constructor(private val context: Context) {
         resetLocked()
     }
 
-    private suspend fun resetLocked(): Unit = withContext(Dispatchers.IO) {
+    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    internal suspend fun resetLocked(): Unit = withContext(Dispatchers.IO) {
         // [Refactor-apk-world] Snapshot user packages BEFORE the wipe — the
         // boot path also dumps, but a manual reset can happen mid-session
         // between boots, so dump here too as the authoritative last state.
