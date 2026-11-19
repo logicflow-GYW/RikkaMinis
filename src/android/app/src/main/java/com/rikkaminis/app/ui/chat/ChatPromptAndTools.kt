@@ -639,6 +639,94 @@ internal fun ChatViewModel.maybeReloadSkillsForPath(argsJson: String) {
     com.rikkaminis.app.ui.chat.maybeReloadSkillsForPath(argsJson, skillRepository)
 }
 
+/**
+ * [fix/r3-chat-1119 F-02] The immutable hand-off for the tool-block UI side
+ * channel.
+ *
+ * `executeShellCommand` is handed the engine's LIVE `MutableList<AssistantBlock>`
+ * (`loopState.allToolBlocks`) and its `onBlockUpdate` callback runs on the shell
+ * executor's IO thread while the agent-loop coroutine keeps mutating that same
+ * list (`add` for the next turn's blocks, `removeAt` for the length-wall trim,
+ * `clear` for a queued-prompt interrupt). A list that crosses threads must be a
+ * snapshot taken on the writing thread, so the consumer can neither observe a
+ * structural change nor throw a `ConcurrentModificationException` while the
+ * producer mutates the original.
+ */
+internal fun snapshotToolBlocksForHandoff(toolBlocks: List<AssistantBlock>): List<AssistantBlock> {
+    // The size is read ONCE and the copy is index-based, so a concurrent
+    // structural change can neither throw out of this function nor leave a
+    // hole: a shrink under the copy yields a shorter (still consistent)
+    // snapshot, and a grow is simply not included — a block whose turn has not
+    // been persisted yet must not render as settled.
+    //
+    // `getOrNull` is deliberately NOT used: it re-reads the size and can still
+    // throw between that read and the `get` (ArrayList's own bounds check).
+    // Catching the bounds failure is the only shape that cannot escape.
+    val n = toolBlocks.size
+    if (n == 0) return emptyList()
+    val out = ArrayList<AssistantBlock>(n)
+    var i = 0
+    while (i < n) {
+        val element = try {
+            toolBlocks[i]
+        } catch (_: IndexOutOfBoundsException) {
+            break
+        }
+        out.add(element)
+        i++
+    }
+    return out
+}
+
+/**
+ * [fix/r3-chat-1119 F-02] One shell-output flush: rewrite the block's content
+ * and return the list to hand to the Main thread.
+ *
+ * Runs on the shell executor's IO thread while the agent-loop coroutine may be
+ * structurally modifying the same list. Every access here is index-based and
+ * bounds-guarded — an `indexOfFirst { }` over a concurrently mutated
+ * `ArrayList` is itself a CME source (the Kotlin iterator checks `modCount`),
+ * so the old "find the block, then publish the live list" pair could throw
+ * BEFORE it ever reached the consumer.
+ *
+ * Returns `null` when the block is gone (the list shrank under us): there is
+ * nothing to publish and the caller must not touch the UI.
+ */
+internal fun applyShellBlockContentUpdate(
+    toolBlocks: MutableList<AssistantBlock>,
+    toolId: String,
+    displayContent: String,
+): List<AssistantBlock>? {
+    var idx = -1
+    var i = 0
+    val n = toolBlocks.size
+    while (i < n) {
+        val element = try {
+            toolBlocks[i]
+        } catch (_: IndexOutOfBoundsException) {
+            break
+        }
+        if (element.id == toolId) {
+            idx = i
+            break
+        }
+        i++
+    }
+    if (idx < 0) return null
+    val current = try {
+        toolBlocks[idx]
+    } catch (_: IndexOutOfBoundsException) {
+        return null
+    }
+    if (current.id != toolId) return null
+    try {
+        toolBlocks[idx] = current.copy(content = displayContent)
+    } catch (_: IndexOutOfBoundsException) {
+        return null
+    }
+    return snapshotToolBlocksForHandoff(toolBlocks)
+}
+
 internal suspend fun ChatViewModel.executeShellCommand(
     argsJson: String,
     toolId: String,
@@ -682,11 +770,17 @@ internal suspend fun ChatViewModel.executeShellCommand(
                 context = context,
                 toolKey = toolId,
                 onBlockUpdate = { displayContent ->
-                    val idx = toolBlocks.indexOfFirst { it.id == toolId }
-                    if (idx >= 0) {
-                        toolBlocks[idx] = toolBlocks[idx].copy(content = displayContent)
+                    // [fix/r3-chat-1119 F-02] Runs on the shell executor's IO
+                    // thread while the loop coroutine mutates the SAME list.
+                    // Every touch of `toolBlocks` happens in the bounds-guarded
+                    // helper, and the Main thread receives a SNAPSHOT — the old
+                    // shape handed the live `toolBlocks` over and made the
+                    // consumer's copy race the writer (CME on the main thread,
+                    // i.e. a crash on any fast multi-line output).
+                    val snapshot = applyShellBlockContentUpdate(toolBlocks, toolId, displayContent)
+                    if (snapshot != null) {
                         viewModelScope.launch(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, currentText, true, toolBlocks)
+                            updateAssistantMessage(assistantId, currentText, true, snapshot)
                         }
                     }
                 },
