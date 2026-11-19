@@ -391,6 +391,18 @@ internal object MarkdownMathHeuristic {
      * `sin(x + 1` is half written, and the fail-safe answer is "this is not a
      * structural group yet" — the head keeps counting as a word rather than the
      * rest of the content disappearing into a group that never closes.
+     *
+     * [r3d1119 / 2 F-01, P1] Brackets count as nesting, on the same counter:
+     * `[`, `{` are openers and `]`, `}` close one. The interval convention is
+     * the reason — `[a, b)` is a well-formed half-open interval whose closer is
+     * `)`, so a call written `P([a, b) and c)` has ONE balanced group; counting
+     * only `(`/`)` closed it at the first `)`, exposed `and` to the prose nets
+     * and downgraded the formula to text. The group still has to END on a `)`
+     * that brings the shared counter to zero, and a closer never takes the
+     * counter below zero — a stray `]`/`}` (`f(x] and y)`) therefore cannot
+     * close the group early. Only the group-ending `)` counts as a closer; an
+     * unmatched opener leaves the group open and returns `-1` (fail-safe), which
+     * is also what keeps `P([a, b and c` from being exempted on a bracket alone.
      */
     private fun callGroupEnd(content: String, tokenEnd: Int): Int {
         var k = tokenEnd
@@ -400,10 +412,13 @@ internal object MarkdownMathHeuristic {
         var i = k
         while (i < content.length) {
             when (content[i]) {
-                '(' -> depth++
+                '(', '[', '{' -> depth++
                 ')' -> {
                     depth--
                     if (depth == 0) return i + 1
+                }
+                ']', '}' -> {
+                    if (depth > 0) depth--
                 }
             }
             i++

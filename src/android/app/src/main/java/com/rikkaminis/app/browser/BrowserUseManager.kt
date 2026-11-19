@@ -24,11 +24,13 @@ import android.webkit.WebView
 import androidx.core.content.FileProvider
 import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
+import com.rikkaminis.app.offload.PopupWindowPolicy
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.util.saveOutcome
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -337,6 +339,32 @@ class BrowserUseManager(
      * begin completing the evicted deferred with a structured error).
      */
     private val asyncJsSlot = AsyncJsSlot<CompletableDeferred<String>>()
+
+    /**
+     * [FIX-DEFERRED-1119 F-05] Terminal signal for "this WebView can never
+     * answer again" — completed once by `onRendererGone` and once by
+     * [destroy], and awaited alongside any *local* `CompletableDeferred` that
+     * is not registered in a slot.
+     *
+     * Why this exists: [AsyncJsSlot] handles the bridge request that runs
+     * through [beginAsyncJsRequest] (there is at most one of those per tab),
+     * But `evaluateJavascript`'s own deferred was never registered anywhere — it
+     * is created per call and disposed with it, and nothing at this level
+     * serialises them (the per-tab action lock is one layer up, in
+     * `BrowserTabPool`). Putting them on the single async-JS slot would let two
+     * callers evict each other, so a plain `CompletableDeferred<Unit>` is the
+     * right shape: any number of waiters can observe one terminal event, and it
+     * never needs a token or a reset because renderer death and `destroy()` are
+     * both terminal for this instance (the tab is never rebuilt — see the
+     * teardown note in `onRendererGone`).
+     *
+     * Deliberately NOT a timeout: the caller-side stall this fixes is not
+     * "slow page", it is "the callback can never arrive". A magic constant
+     * would also cut off a legitimately slow `evaluateJavascript` on a huge
+     * document, and the tool paths already carry their own bound
+     * (`TAB_SERIAL_WAIT_TIMEOUT_MS`).
+     */
+    private val tabDeathSignal = CompletableDeferred<Unit>()
 
     /**
      * [audit2-A2] One-shot credential for the `__minis__.saveBlobDownload`
@@ -782,6 +810,13 @@ class BrowserUseManager(
                 asyncJsSlot.takeCurrent()?.complete(
                     "{\"error\":\"WebView renderer process was killed before the async JS request completed\"}"
                 )
+                // [FIX-DEFERRED-1119 F-05] The signal above only covers a
+                // request that went through `beginAsyncJsRequest`. A local
+                // `evaluateJavascript` await has no slot to be taken out of, so
+                // it is woken through the terminal signal instead — completed
+                // AFTER `rendererDead = true`, because the answer it produces
+                // is derived from that latch.
+                tabDeathSignal.complete(Unit)
                 // Deliberately NOT destroying the instance here (unlike the
                 // rebuild-by-key hosts): this tab is still in BrowserTabPool's
                 // list and the pool keeps handing the same WebView to the next
@@ -1068,6 +1103,23 @@ class BrowserUseManager(
                     emptyMap(), "File not found: $host$path".byteInputStream())
             }
             val mimeType = guessMimeType(localFile.name)
+            // [FULLSCAN-1119 F-22] Bounded preview read. The HTML path used to
+            // `readBytes()` the whole file, then decode it to a String, then
+            // re-encode it — three full copies of the file in the UI process,
+            // with no ceiling, for a `minis://` URL the agent can point at
+            // anything under /var/minis (a big log, a blob). Oversized now fails
+            // with a readable page instead of a blank screen or an OOM.
+            val previewCap = com.rikkaminis.app.sandbox.offload.PayloadSizePolicy.MAX_FILE_BYTES
+            val previewBytes = localFile.length()
+            if (!com.rikkaminis.app.offload.MinisPreviewPolicy.fitsPreview(previewBytes, previewCap)) {
+                val msg = com.rikkaminis.app.offload.BoundedFileRead
+                    .tooLargeMessage(previewBytes, previewCap)
+                Log.w(TAG, "minis:// preview refused: $host$path — $msg")
+                return android.webkit.WebResourceResponse(
+                    "text/plain", "UTF-8", 413, "Payload Too Large", emptyMap(),
+                    ("$msg\n\n$host$path\n").byteInputStream(),
+                )
+            }
             // For HTML mainframe responses, inject a `<meta viewport>` matching
             // the agent's session viewport when the page doesn't declare one.
             // Without this, Android WebView falls back to a hardcoded 980 CSS
@@ -1093,11 +1145,14 @@ class BrowserUseManager(
      * viewport untouched so author intent (e.g. `width=1200`) wins.
      */
     private fun ensureMetaViewport(html: ByteArray, cssWidth: Int): java.io.InputStream {
-        val text = String(html, Charsets.UTF_8)
-        if (text.contains("name=\"viewport\"", ignoreCase = true) ||
-            text.contains("name='viewport'", ignoreCase = true)) {
-            return text.toByteArray(Charsets.UTF_8).inputStream()
+        // [FULLSCAN-1119 F-22] A page that already declares a viewport is passed
+        // through as the ORIGINAL bytes — the old code decoded the whole file
+        // to a String and re-encoded it even when nothing needed injecting,
+        // which was a second full copy of every previewed HTML page.
+        if (com.rikkaminis.app.offload.MinisPreviewPolicy.declaresViewport(html)) {
+            return html.inputStream()
         }
+        val text = String(html, Charsets.UTF_8)
         // user-scalable=yes is the default but state it explicitly so a
         // future change to WebView defaults can't silently disable
         // pinch-zoom on the agent's auto-injected viewport.
@@ -1112,6 +1167,19 @@ class BrowserUseManager(
             "$meta$text"
         }
         return rewritten.toByteArray(Charsets.UTF_8).inputStream()
+    }
+
+    /**
+     * [FULLSCAN-1119 F-16] Answer a refused popup explicitly.
+     *
+     * Sending the Message with a NULL transport is the only way to tell WebView
+     * "the host will not open a window": it then releases the popup instead of
+     * waiting forever for a WebView that is never coming.
+     */
+    private fun declinePopup(resultMsg: Message, transport: WebView.WebViewTransport?, hasHandler: Boolean) {
+        Log.w(TAG, PopupWindowPolicy.declineReason(hasHandler))
+        transport?.webView = null
+        runCatching { resultMsg.sendToTarget() }
     }
 
     private fun setupWebChromeClient() {
@@ -1166,8 +1234,33 @@ class BrowserUseManager(
             override fun onCreateWindow(
                 view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message
             ): Boolean {
-                onNewWindow?.invoke(resultMsg)
-                return onNewWindow != null
+                // [FULLSCAN-1119 F-16] The return value and the message must
+                // agree. WebView treats `true` as "the host owns this popup" and
+                // then WAITS for a Message carrying a WebView transport; the
+                // pre-fix code returned `true` on every refusal path too (tab
+                // cap reached / pool disposed), and the tab-pool handler simply
+                // returned early without sending anything — so the popup's
+                // WebContents was never released, once per window.open().
+                val handler = onNewWindow
+                if (handler == null) {
+                    declinePopup(resultMsg, transport = resultMsg.obj as? WebView.WebViewTransport, hasHandler = false)
+                    return false
+                }
+                // Grab the transport BEFORE invoking: the handler may send the
+                // message, and a sent Message can be recycled (its obj cleared)
+                // by the time we look again.
+                val transport = resultMsg.obj as? WebView.WebViewTransport
+                handler.invoke(resultMsg)
+                return when (PopupWindowPolicy.decide(hasHandler = true, transportHasWebView = transport?.webView != null)) {
+                    PopupWindowPolicy.Action.ACCEPTED -> true
+                    PopupWindowPolicy.Action.DECLINE -> {
+                        // The handler refused (tab cap / disposed). Answer with an
+                        // explicit null transport so WebView tears the popup down
+                        // instead of holding it forever, and decline the request.
+                        declinePopup(resultMsg, transport, hasHandler = true)
+                        false
+                    }
+                }
             }
 
             override fun onCloseWindow(window: WebView) {
@@ -2304,10 +2397,12 @@ class BrowserUseManager(
     private suspend fun evaluateJavascript(js: String): String = withContext(Dispatchers.Main) {
         // [r3-B09 F-02] The callback handed to `WebView.evaluateJavascript` runs
         // in the renderer. With the renderer gone (or the view destroyed) it
-        // never runs, and this `deferred.await()` has no timeout — the caller
+        // never runs, so waiting on the result has no wake-up — the caller
         // would sit until the tool deadline. Answer with the bridge's own reject
         // shape so `evaluateAndReturn` / `evaluateJSAndParse` surface an error
-        // instead of a hang.
+        // instead of a hang. This guard covers "already dead on entry"; the
+        // race at the bottom of this function covers "died while waiting"
+        // ([FIX-DEFERRED-1119 F-05]).
         if (webViewInert()) {
             Log.w(TAG, "JS evaluation dropped: the WebView is gone")
             // [F-B-02] Third hand-written literal until now: it blamed the
@@ -2329,7 +2424,19 @@ class BrowserUseManager(
             }
             deferred.complete(unquoted)
         }
-        deferred.await()
+        // [FIX-DEFERRED-1119 F-05] The inertness check above only covers "the
+        // renderer was already dead when we got here". A renderer killed while
+        // this call is waiting produces no callback at all, and unlike
+        // [executeJS] / [fetch] this deferred is not registered in
+        // [asyncJsSlot] — so nothing used to wake it. Race it against the
+        // tab's terminal signal: whichever arrives first answers, and the
+        // death answer is the same `{"error":…}` shape every other teardown
+        // wake-up uses, so [evaluateAndReturn] / [evaluateJSAndParse] surface a
+        // real error instead of a hang. The result clause is listed first so a
+        // genuinely delivered result wins a tie.
+        awaitJsResultOrTabDeath(deferred, tabDeathSignal) {
+            deadTabAsyncJsAnswer(destroyed, rendererDead)!!
+        }
     }
 
     private suspend fun evaluateAndReturn(js: String): BrowserActionResult {
@@ -3077,6 +3184,10 @@ class BrowserUseManager(
             asyncJsSlot.takeCurrent()?.complete(
                 "{\"error\":\"WebView was destroyed before the async JS request completed\"}"
             )
+            // [FIX-DEFERRED-1119 F-05] Wake the per-call `evaluateJavascript`
+            // awaits too — they hold no slot, and after the swap below neither
+            // the callback nor a second teardown event can arrive.
+            tabDeathSignal.complete(Unit)
             // Remove from any parent before destroying — WebView.destroy() on
             // an attached view is undefined behavior on some OEMs and can
             // crash the app (ConnectionTerminated / missing renderer).
@@ -3367,3 +3478,37 @@ internal fun deadTabAsyncJsAnswer(destroyed: Boolean, rendererDead: Boolean): St
     } else {
         null
     }
+
+/**
+ * [FIX-DEFERRED-1119 F-05] Await a per-call JS result, but stop waiting the
+ * moment the tab is declared dead.
+ *
+ * `WebView.evaluateJavascript`'s callback runs inside the renderer: when the
+ * renderer is killed (or the view is destroyed) mid-call it simply never fires.
+ * The async-JS bridge requests survive that because `onRendererGone` /
+ * `destroy()` take their deferred out of [AsyncJsSlot]; a per-call deferred has
+ * no slot, so it needs a terminal event it can observe — [tabDeath], completed
+ * by the same two teardown paths.
+ *
+ * Two properties this pins, both of which a bare `deferred.await()` lacks:
+ *
+ *  - **termination** — the wait ends on the death event, not on a timeout, so
+ *    the caller learns *why* instead of burning its outer budget and then
+ *    blaming the page;
+ *  - **no cross-talk** — several of these can be in flight at once (they are
+ *    not serialised through a single slot), and the death answer is computed by
+ *    [deathAnswer] at wake-up time, i.e. from the latch the teardown set, not
+ *    from a constant captured when the call began.
+ *
+ * [result] is listed first so an already-delivered value wins a tie with an
+ * already-fired death event. Top-level and Android-free so the JVM can hold it
+ * to both properties.
+ */
+internal suspend fun awaitJsResultOrTabDeath(
+    result: CompletableDeferred<String>,
+    tabDeath: CompletableDeferred<Unit>,
+    deathAnswer: () -> String,
+): String = select {
+    result.onAwait { it }
+    tabDeath.onAwait { deathAnswer() }
+}

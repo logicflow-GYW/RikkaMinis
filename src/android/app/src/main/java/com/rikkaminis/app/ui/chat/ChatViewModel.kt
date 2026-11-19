@@ -2337,7 +2337,16 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.find { it.id == id }
             }
             if (entry != null) {
-                return withLearnedCeiling(entry.effectiveMaxThinkingLevel, expectedModelId = entry.model.id)
+                // [fix/effort-truth-1119b] 4 F-01: the declaration must come from the SAME
+                // object the wire reads (`effectiveModel` enriches the base row first, then
+                // folds the overrides). `entry.model` alone never touches models.dev, so
+                // every built-in row would answer null here and the narrowing would silently
+                // do nothing.
+                return withLearnedCeiling(
+                    entry.effectiveMaxThinkingLevel,
+                    expectedModelId = entry.model.id,
+                    declaredEffortValues = ModelsDevApi.effectiveModel(entry).reasoningEffortValues,
+                )
             }
             // [deep-audit-1044 B-04] The no-entry fallback is reached by a
             // group-resolved turn and by any snapshot written before the
@@ -2348,7 +2357,14 @@ class ChatViewModel(
             // through the same live exit as the other readers — it enriches
             // the snapshot exactly like the entry branch does.
             val model = liveEffectiveModel() ?: return ThinkingLevel.XHIGH
-            return withLearnedCeiling(model.catalogMaxThinkingLevel, expectedModelId = model.id)
+            // [fix/effort-truth-1119b] 4 F-01: `liveEffectiveModel` already holds the
+            // enriched+overridden model, i.e. the same declaration the provider hands the
+            // wire — pass it straight through.
+            return withLearnedCeiling(
+                model.catalogMaxThinkingLevel,
+                expectedModelId = model.id,
+                declaredEffortValues = model.reasoningEffortValues,
+            )
         }
 
     /**
@@ -2369,8 +2385,19 @@ class ChatViewModel(
      * explicit tap). The scope — not the bare host — is what keeps two instances of
      * one gateway on different ports / path prefixes from sharing a ceiling
      * ([fix/effort-key-1119]).
+     *
+     * [fix/effort-truth-1119b] The learned set is narrowed by [declaredEffortValues]
+     * before it reaches `lowerCeiling` ([EffortTierLearner.learnedWithinOrNull]), which
+     * is the rule the wire already applies. Without it a CEILING-shaped answer — a
+     * ladder PREFIX that names tiers this model never declared — could RAISE the picker
+     * above the declaration, and the user's next request at that tier was the 400 the
+     * entry was learned from.
      */
-    private fun withLearnedCeiling(declared: ThinkingLevel, expectedModelId: String?): ThinkingLevel {
+    private fun withLearnedCeiling(
+        declared: ThinkingLevel,
+        expectedModelId: String?,
+        declaredEffortValues: List<String>?,
+    ): ThinkingLevel {
         val provider = currentProvider ?: return declared
         // The switch paths set `_activeEntryId` before `currentProvider`; until the
         // second assignment lands, this provider still fronts the PREVIOUS member.
@@ -2379,8 +2406,18 @@ class ChatViewModel(
         // report the catalog ceiling and let `_providerGeneration` re-derive right after.
         if (expectedModelId != null && provider.model.id != expectedModelId) return declared
         val scope = provider.requestScope ?: return declared
-        val learned = EffortTierLearner.learned(scope, expectedModelId ?: provider.model.id)
-            ?: return declared
+        // [fix/effort-truth-1119b] 4 F-01 — the other half of [fix/effort-key-1119] F-02.
+        // The wire narrows a CEILING-shaped learned set by the model's declaration
+        // (`OpenAIProvider` → `learnedWithin`); this read used the raw `learned()`, so a
+        // prefix naming tiers this model never declared still lifted the picker's ceiling
+        // to them and every request made at that tier came back 400. Same rule, one
+        // reader: `learnedWithinOrNull` returns null when nothing is learned, which is
+        // what keeps `?: return declared` (catalog ceiling untouched) byte-identical.
+        val learned = EffortTierLearner.learnedWithinOrNull(
+            scope,
+            expectedModelId ?: provider.model.id,
+            declaredEffortValues,
+        ) ?: return declared
         return ThinkingEffortLadder.lowerCeiling(declared, learned)
     }
 
@@ -4967,15 +5004,29 @@ class ChatViewModel(
                             if (agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT) {
                                 val reminder = CONTINUATION_REMINDER_TEXT
                                 val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
-                                val reminderRow = runCatching {
+                                // [FIX-DEFERRED-1119 F-21] `runCatching` also
+                                // catches the CancellationException a Stop
+                                // raises out of this suspend Room write, so a
+                                // cancelled resume kept running: it appended a
+                                // `user` turn to the in-memory history (with
+                                // `dbMessageId = null` — the row may never have
+                                // been written) and re-armed
+                                // SessionActivityTracker. attemptUnlessCancelled
+                                // reports a real failure and rethrows the
+                                // cancellation, so the enclosing
+                                // `catch (CancellationException)` unwinds the
+                                // turn instead of letting it continue.
+                                val reminderRow = attemptUnlessCancelled(
+                                    onFailure = {
+                                        AppLogger.warning(TAG, "resume: continue-reminder persist failed: ${it.message}")
+                                    },
+                                ) {
                                     chatRepository.appendMessage(
                                         activeSessionId,
                                         "user",
                                         """[{"type":"text","value":${escapeJson(reminder)}}]""",
                                     )
-                                }.onFailure {
-                                    AppLogger.warning(TAG, "resume: continue-reminder persist failed: ${it.message}")
-                                }.getOrNull()
+                                }
                                 agentHistory.add(
                                     LLMMessage(
                                         role = LLMMessage.Role.USER,
@@ -5696,5 +5747,44 @@ internal fun shareDrainLanded(
     when (item.kind) {
         com.rikkaminis.app.share.PendingShare.Item.Kind.INLINE_TEXT -> item.value.isNotBlank()
         com.rikkaminis.app.share.PendingShare.Item.Kind.ATTACHMENT -> attachmentLanded(item)
+    }
+}
+
+/**
+ * [FIX-DEFERRED-1119 F-21] Run one suspending step; report a real failure,
+ * rethrow a cancellation.
+ *
+ * `runCatching { suspendCall() }` is a cancellation trap: `runCatching` catches
+ * `Throwable`, so the `CancellationException` that a Stop raises out of a
+ * suspended Room write lands in `onFailure` and the coroutine keeps executing
+ * the statements that follow. On the resume path that meant the turn continued
+ * past the enclosing `catch (CancellationException)`: it appended a `user` turn
+ * to the in-memory history (with a null `dbMessageId`, because the row may
+ * never have been written) and re-armed `SessionActivityTracker` after the user
+ * had already stopped the run.
+ *
+ * The same species had already been repaired at least three times
+ * (`ChatModelRouting`, `AgentLoopEngine`, `ConversationHistoryTool`), so the
+ * rule lives in one expression here rather than as a fourth inline
+ * `is CancellationException` test: cancellation always wins, an ordinary
+ * failure is reported by the caller and answers null.
+ *
+ * Deliberately NOT reusing `Throwable.asConsumerSideCancellation()`: that
+ * predicate exists to tell a *stream teardown* from a *stream error* and keys on
+ * `cause == null`. A DB write's cancellation carries no such meaning — no
+ * failure can be persisted anyway, so every `CancellationException` is
+ * rethrown.
+ */
+internal suspend fun <T> attemptUnlessCancelled(
+    onFailure: (Exception) -> Unit,
+    block: suspend () -> T,
+): T? {
+    return try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        onFailure(e)
+        null
     }
 }

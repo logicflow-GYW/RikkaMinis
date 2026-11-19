@@ -74,11 +74,17 @@ object FaultAttribution {
      * relay's, which is the exact misdirection this module exists to prevent.
      *
      * The lookarounds restore the boundary without narrowing the real cases:
-     *  - `(?<![\d.])` — a preceding digit or dot means these digits are the
-     *    tail of a longer number (`1500`, `1.500`), not a code;
-     *  - `(?!\d)` / `(?!\.\d)` — the same on the right (`5000`, `500.5`);
-     *  - `(?!\s*ms)` — digits immediately followed by a duration unit are a
-     *    duration.
+     *  - `(?<![A-Za-z0-9._])` — a preceding letter, digit, dot or underscore means
+     *    these digits are part of a longer token (`1500`, `1.500`, and — the case the
+     *    first version missed — `X500Principal`, where a leading `X` was enough to make
+     *    a TLS failure read as an HTTP 500);
+     *  - `(?![A-Za-z0-9._])` — the same class on the right (`5000`, `500.5`, `500ms`);
+     *  - `(?!\s*<time unit>)` — digits followed by a duration unit are a duration, not
+     *    a status. The unit list is an EQUIVALENCE CLASS, not one more arm: `ms`,
+     *    `msec`, `milliseconds`, `s`, `sec`, `seconds`, `秒`, `毫秒`. The first version
+     *    only knew `ms`, so `"read timed out after 504 seconds"` still read as a 504
+     *    and `"connect timed out after 500 milliseconds"` as a 500 — both are the
+     *    user's own network leg.
      * `=`, `:`, whitespace, quotes and the string edges all still qualify as
      * boundaries, so `"HTTP 500"`, `"status=500"`, `"error code: 503"`,
      * a bare code with surrounding spaces, and `"500 Internal Server Error"`
@@ -86,7 +92,10 @@ object FaultAttribution {
      * space-prefixed substring.
      */
     private val STATUS_CODE_PATTERN = Regex(
-        "(?<![\\d.])(400|401|403|429|500|502|503|504)(?!\\d)(?!\\.\\d)(?!\\s*ms)",
+        "(?<![A-Za-z0-9._])(400|401|403|429|500|502|503|504)" +
+            "(?![A-Za-z0-9._])" +
+            "(?!\\s*(?:milliseconds|millisecond|millis|msec|ms|seconds|second|secs|sec|s)\\b)" +
+            "(?!\\s*(?:毫秒|秒))",
     )
 
     private val SERVICE_PATTERNS = listOf(

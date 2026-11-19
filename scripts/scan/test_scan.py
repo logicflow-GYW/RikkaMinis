@@ -33,6 +33,10 @@ import time
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+USAGE = ("python3 scripts/scan/test_scan.py [repo_root] [--jobs N] "
+         "[--single NAME]")
+
+
 def _parse_argv(argv):
     """Split argv into (--jobs value, --single name, positional roots).
 
@@ -40,7 +44,16 @@ def _parse_argv(argv):
     form gate_run.sh and the docs use); `--jobs N` selects the worker-pool size
     and `--single NAME` is the child mode of that pool. Neither flag may be
     mistaken for the repo root, which is why this parses instead of indexing.
-    Unknown flags are left in place so old positional callers behave as before.
+
+    [F-01] This used to be a silent full-suite trap in three shapes, and the
+    `[LOCAL_REFUSAL]` message tells a local session to run exactly these:
+    `--single=NAME` fell through to `roots`, a trailing `--single` with no value
+    did the same, and a bare test name in the positional slot was taken as the
+    repo root with no existence check at all. In every case `SINGLE` stayed
+    None and the whole fixture suite started inside the PRoot sandbox — the
+    precise mistake the refusal exists to stop, reached through the command the
+    refusal itself recommends. A flag-shaped or empty `--single` value is now
+    REFUSED at parse time instead of being reinterpreted as the repo root.
     """
     jobs, single, roots = 1, None, []
     i = 0
@@ -64,8 +77,23 @@ def _parse_argv(argv):
             single = argv[i + 1]
             i += 2
             continue
+        if a.startswith("--single="):
+            single = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a == "--single":
+            sys.exit("test_scan.py: --single needs a test name, got a flag with "
+                     "no value (usage: %s)" % USAGE)
+        if a.startswith("-"):
+            # [F-01] An unknown flag is not a path. Keeping it in `roots` is how
+            # `--single=NAME` used to be swallowed; failing closed is the only
+            # reading that cannot start the whole suite by accident.
+            sys.exit("test_scan.py: unknown flag %r (usage: %s)" % (a, USAGE))
         roots.append(a)
         i += 1
+    if single is not None and (single == "" or single.startswith("-")):
+        sys.exit("test_scan.py: --single needs a test name, got %r (usage: %s)"
+                 % (single, USAGE))
     return jobs, single, roots
 
 
@@ -73,6 +101,18 @@ JOBS, SINGLE, _ROOTS = _parse_argv(sys.argv[1:])
 REPO_ROOT = os.path.abspath(
     _ROOTS[0] if _ROOTS else os.path.join(SCRIPT_DIR, "..", "..")
 )
+
+# [F-01] The positional slot is the repo root, and it used to be accepted with
+# no check at all: `test_scan.py test_four_way` (the shape the old refusal text
+# recommended) set REPO_ROOT to a path that does not exist and then started the
+# WHOLE fixture suite — every gate pointed at nothing, minutes of PRoot syscalls
+# spent to produce a wall of meaningless failures. Fail closed instead, and name
+# the flag that was probably meant.
+if _ROOTS and not os.path.isdir(REPO_ROOT):
+    sys.exit("test_scan.py: positional argument %r is not a directory — the "
+             "first positional argument is the REPO ROOT, not a test name.\n"
+             "  one fixture: %s\n"
+             "  whole suite: %s" % (_ROOTS[0], USAGE, USAGE))
 
 # Relative roots the scanners expect inside a repo tree.
 KOTLIN_APP = "src/android/app/src/main/java"
@@ -2792,6 +2832,17 @@ def test_gate_body_external_fixtures():
     check("subagent_dispatch_check external empty-guard pin tree red", rc == 1, out[-280:])
     shutil.rmtree(root)
 
+    # [F-03] The OTHER half of the gate: a dirty CALL SITE. The pair above only
+    # dirties the pin object, so `main()` could drop `check_source(...)` entirely
+    # (keeping the pin-object call) and stay green. This arm is the witness that
+    # the call-site scan actually runs.
+    dirty_call = dict(clean_files)
+    dirty_call[mod.TARGET] = mod.DIRTY["NO_CALL"][0]
+    root = make_tree(dirty_call)
+    rc, out = run_scanner("subagent_dispatch_check.py", root)
+    check("subagent_dispatch_check external dispatch-call tree red", rc == 1, out[-280:])
+    shutil.rmtree(root)
+
     # ── skill_frontmatter_roundtrip_check: the Failure branch drop-through ──
     mod = _gate_module("skill_frontmatter_roundtrip_check")
     clean_files = {mod.SR_REL: mod.GOOD_SR,
@@ -2807,6 +2858,16 @@ def test_gate_body_external_fixtures():
     root = make_tree(dirty)
     rc, out = run_scanner("skill_frontmatter_roundtrip_check.py", root)
     check("skill_frontmatter_roundtrip_check external fall-through tree red", rc == 1, out[-280:])
+    shutil.rmtree(root)
+
+    # [F-03] A dirty REPOSITORY file, i.e. the arm that proves `main()` still
+    # walks SkillRepository.kt: the fixture above only exercises the browser
+    # screen, so dropping the SR scan from `main()` left every arm green.
+    dirty_repo = dict(clean_files)
+    dirty_repo[mod.SR_REL] = mod.DIRTY_SR_POLARITY
+    root = make_tree(dirty_repo)
+    rc, out = run_scanner("skill_frontmatter_roundtrip_check.py", root)
+    check("skill_frontmatter_roundtrip_check external polarity tree red", rc == 1, out[-280:])
     shutil.rmtree(root)
 
     # ── truncated_call_guard_check: real sources, one decision removed ──
@@ -2838,6 +2899,22 @@ def test_gate_body_external_fixtures():
     root = make_tree(dirty)
     rc, out = run_scanner("truncated_call_guard_check.py", root)
     check("truncated_call_guard_check external blind-verdict tree red", rc == 1, out[-280:])
+    shutil.rmtree(root)
+
+    # [F-03] A second dimension: the C2 family (the engine must FEED the flag).
+    # The pair above only mutates the policy, so `main()` could stop calling
+    # `check` on the engine's call site and no arm would notice.
+    dirty2 = dict(clean_files)
+    mutated2 = dirty2[mod.ENGINE].replace(
+        mod.C2_ENGINE_CALL,
+        "TruncatedToolCallPolicy.rejectionReason(name, turnFinishReason, false)", 1)
+    check("truncated_call_guard_check engine mutation is not a no-op",
+          mutated2 != dirty2[mod.ENGINE],
+          "C2_ENGINE_CALL drifted: the dirty fixture would equal the clean one")
+    dirty2[mod.ENGINE] = mutated2
+    root = make_tree(dirty2)
+    rc, out = run_scanner("truncated_call_guard_check.py", root)
+    check("truncated_call_guard_check external engine-flag tree red", rc == 1, out[-280:])
     shutil.rmtree(root)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3218,6 +3295,112 @@ def test_scan_parallel_local_refusal():
     check("main() is reachable from __main__'s sys.exit(main())",
           "sys.exit(main())" in pathlib.Path(SCRIPT_DIR, "scan_parallel.py").read_text(),
           "the __main__ block no longer calls main()")
+
+    # [F-02] Both replacement commands the refusal prints are pinned as TEXT
+    # above, and text is not behaviour: the previous round shipped a message
+    # whose `--single` form parsed `<case_name>` as the repo root and started
+    # the whole suite, and no arm noticed because none of them RAN the command.
+    # These two arms are the subprocess witnesses. Each is bounded: `--single`
+    # runs exactly one fixture (measured: well under a second), and the driver
+    # is refused before it parses a single gate.
+    _arm_single_runs_exactly_one_case()
+    _arm_bad_arguments_fail_closed()
+    _arm_driver_refuses_with_exit_3()
+
+def _arm_bad_arguments_fail_closed():
+    """Every shape that used to become a silent FULL run must now exit non-zero.
+
+    [F-01] Each of these once ended with `SINGLE is None` and the positional
+    slot holding a flag or a test name, so `main()` walked the whole fixture
+    suite against a repo root that does not exist. The witness has to be the
+    process, not the parser: the parse-time `sys.exit` IS the behaviour, and a
+    unit-level call would prove a copy of it. Each arm must also fail FAST — a
+    run that reaches a fixture banner already did the damage.
+    """
+    for argv, label in (
+        (["--single"], "a trailing --single with no value"),
+        (["--single="], "an empty --single="),
+        (["test_primitive_selftests"], "a test name in the positional slot"),
+        (["--bogus-flag"], "an unknown flag"),
+    ):
+        try:
+            proc = subprocess.run(
+                [sys.executable, os.path.join(SCRIPT_DIR, "test_scan.py"), *argv],
+                capture_output=True, text=True, env=_clean_env(), timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            check("%s is refused" % label, False,
+                  "the command did not finish within 120s — it started the suite")
+            continue
+        out = (proc.stdout or "") + (proc.stderr or "")
+        started = "━━━" in out or RESULT_TAG in out
+        check("%s is refused before any fixture runs" % label,
+              proc.returncode != 0 and not started,
+              "rc=%s started=%s tail=%r" % (proc.returncode, started, out[-280:]))
+
+def _clean_env():
+    """Environment with every CI marker removed (the driver refuses otherwise)."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CI", "GITHUB_ACTIONS", "GITHUB_WORKFLOW")}
+    return env
+
+def _arm_single_runs_exactly_one_case():
+    """`test_scan.py --single <name>` must run THAT case and nothing else.
+
+    [F-02] The refusal message tells a local session to use this command, so it
+    is a load-bearing surface: if the flag is dropped by a refactor, the command
+    starts the whole fixture suite inside the PRoot sandbox — the exact mistake
+    the refusal exists to prevent, reached through the refusal's own advice.
+    The witness is the fixture's own output: one case's banner, its trailer, and
+    no other case's banner.
+    """
+    name = "test_primitive_selftests"
+    other = "test_four_way"
+    for argv, label in (
+        (["--single", name], "space form"),
+        (["--single=" + name], "equals form"),
+    ):
+        try:
+            proc = subprocess.run(
+                [sys.executable, os.path.join(SCRIPT_DIR, "test_scan.py"), *argv],
+                capture_output=True, text=True, env=_clean_env(), timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            check("`--single` (%s) runs one fixture" % label, False,
+                  "the command did not finish within 120s — it is running the "
+                  "whole suite, which is the failure this arm exists for")
+            continue
+        out = (proc.stdout or "") + (proc.stderr or "")
+        ran_named = (RESULT_TAG + " " + name) in out
+        ran_other = any(RESULT_TAG + " " + n in out
+                        for n in TEST_ORDER if n != name)
+        check("`--single` (%s) runs exactly the named fixture" % label,
+              proc.returncode == 0 and ran_named and not ran_other,
+              "rc=%s named=%s other=%s tail=%r"
+              % (proc.returncode, ran_named, ran_other, out[-280:]))
+
+def _arm_driver_refuses_with_exit_3():
+    """Outside CI the driver exits 3 — the documented refusal code.
+
+    [F-02] `scan_parallel.py`'s module docstring is the only place that records
+    `exit 3 = refused to run outside CI`, and no arm checked it. A refusal that
+    returned 1 would be indistinguishable from "a gate failed", so a wrapper
+    that only looks at "non-zero" would read a refusal as a red suite.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPT_DIR, "scan_parallel.py")],
+            capture_output=True, text=True, env=_clean_env(), timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        check("the driver refuses outside CI with exit 3", False,
+              "the driver did not finish within 180s — it is running the gates "
+              "locally, which is the failure this arm exists for")
+        return
+    out = (proc.stdout or "") + (proc.stderr or "")
+    check("the driver refuses outside CI with exit 3",
+          proc.returncode == 3 and "refusing to run" in out,
+          "rc=%s tail=%r" % (proc.returncode, out[-280:]))
 
 
 def test_scan_parallel_block_numbering():

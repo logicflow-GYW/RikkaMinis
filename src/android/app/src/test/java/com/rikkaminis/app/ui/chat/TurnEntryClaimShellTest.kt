@@ -128,8 +128,13 @@ class TurnEntryClaimShellTest {
             "tail must not re-read the claim epoch",
             !body.contains("val launchEpoch = streamingClaimEpoch"),
         )
-        val guard = body.indexOf("if (sendEpoch != streamingClaimEpoch || claimToken !== streamingClaimToken) {")
-        val site = body.indexOf("streamJob = viewModelScope.launch(")
+        // [fullscan-1119 F-04] The guard is now a call with all four signals
+        // (liveness + streaming flag + epoch + token) and the stream is a
+        // CHILD of the caller rather than a viewModelScope sibling. The two
+        // properties this test owns are unchanged: the tail takes the caller's
+        // identity as parameters, and the guard runs before the launch.
+        val guard = body.indexOf("if (!streamClaimStillOwned(")
+        val site = body.indexOf("streamJob = launchTurnStream(coroutineContext)")
         assertTrue("tail: missing the revocation guard", guard >= 0)
         assertTrue("tail: the guard must run before the stream starts", site > guard)
         assertTrue("tail: the guard must return false (the caller clears the flag)",

@@ -548,15 +548,19 @@ class WebDavClient(
                     when (name) {
                         "response" -> {
                             inResponse = true
-                            // [fix/composer-paste-lifecycle F-A-02] No reset
-                            // to `true` here. This line predated the
-                            // fail-closed declaration above and silently
-                            // cancelled it: a response with neither
-                            // `<propstat>` nor `<status>` (hand-rolled DAV
-                            // shims, S3 gateways) was read as "200 OK" again
-                            // — exactly the shape the declaration was
-                            // written to reject. Only an explicit
-                            // `<status>` (below) may set it.
+                            // [FULLSCAN-1119 A / F-23] This MUST reset to
+                            // false, and the comment here used to say the
+                            // opposite ("No reset to `true` here" — which
+                            // described a different variable). `statusOk` is
+                            // declared false once, before the loop, and only a
+                            // `<status>` element assigns it, so without this
+                            // line the SECOND response inherits the FIRST one's
+                            // verdict: a response carrying no `<status>` at all
+                            // was accepted as 200 whenever the response before
+                            // it had been. Fail-closed means "start each
+                            // response failed and let its own `<status>` arm
+                            // it", which is exactly what this assignment does.
+                            statusOk = false
                             href = null
                             displayName = null
                             contentLength = 0

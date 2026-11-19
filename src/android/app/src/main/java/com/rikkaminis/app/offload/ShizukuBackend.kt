@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.logging.AppLogger
 import rikka.shizuku.Shizuku
 import java.util.concurrent.TimeUnit
@@ -176,21 +177,23 @@ class ShizukuBackend(private val appContext: Context) {
             "shizuku.newProcess returned ${procAny.javaClass.name}, not java.lang.Process",
         )
 
-        val out = StringBuilder()
-        val err = StringBuilder()
+        // [FULLSCAN-1119 F-03] Bounded capture. Both pipes used to feed a bare
+        // StringBuilder with no ceiling: `du -sb /`, `find | xargs`, a big
+        // `dumpsys` or `cat` of a large file grew the UI process until the
+        // system killed it (an app-level crash, not a sandbox issue). Each
+        // stream now stops GROWING at the shell capture ceiling (the existing
+        // `runtime.shellOutputKb` knob — the same budget PersistentShell uses,
+        // not a new number) and keeps draining the pipe (a blocked child would
+        // hang until the timeout). The caller is told the capture was clipped
+        // via a stderr marker — never silently.
+        val capBytes = AgentRuntimeLimitsPrefs.shellOutputKb() * 1024
+        val out = BoundedStreamCapture("stdout", capBytes)
+        val err = BoundedStreamCapture("stderr", capBytes)
         val outThread = Thread {
-            runCatching {
-                proc.inputStream?.use { s ->
-                    s.bufferedReader().forEachLine { l -> synchronized(out) { out.append(l).append('\n') } }
-                }
-            }
+            runCatching { proc.inputStream?.use { s -> drainBounded(s, out) } }
         }
         val errThread = Thread {
-            runCatching {
-                proc.errorStream?.use { s ->
-                    s.bufferedReader().forEachLine { l -> synchronized(err) { err.append(l).append('\n') } }
-                }
-            }
+            runCatching { proc.errorStream?.use { s -> drainBounded(s, err) } }
         }
         outThread.isDaemon = true; errThread.isDaemon = true
         outThread.start(); errThread.start()
@@ -224,7 +227,7 @@ class ShizukuBackend(private val appContext: Context) {
             runCatching { proc.destroy() }
             runCatching { outThread.join(2000) }
             runCatching { errThread.join(2000) }
-            return ShizukuManager.ProcessResult(1, out.toString().trimEnd('\n'), (err.toString().trimEnd('\n') + "\nwaitFor failed: ${t.message}").trim())
+            return clippedResult(1, out, err, "waitFor failed: ${t.message}")
         }
 
         if (!exited) {
@@ -232,7 +235,7 @@ class ShizukuBackend(private val appContext: Context) {
             runCatching { outThread.join(2000) }
             runCatching { errThread.join(2000) }
             // Linux convention: 124 = command timed out (coreutils `timeout`).
-            return ShizukuManager.ProcessResult(124, out.toString().trimEnd('\n'), err.toString().trimEnd('\n'))
+            return clippedResult(124, out, err, null)
         }
 
         runCatching { outThread.join(2000) }
@@ -252,11 +255,73 @@ class ShizukuBackend(private val appContext: Context) {
         // streams were already closed by the reader threads' `use` blocks.)
         runCatching { proc.destroy() }
 
-        return ShizukuManager.ProcessResult(rc, out.toString().trimEnd('\n'), err.toString().trimEnd('\n'))
+        // [FULLSCAN-1119 F-03] Surface the clip instead of dropping it: the
+        // marker goes on stderr so every caller (exec / package info / …) shows
+        // it, and the log records the event once for diagnosis.
+        return clippedResult(rc, out, err, null)
+    }
+
+    /**
+     * Build the result, folding each stream's truncation marker into stderr.
+     *
+     * [FULLSCAN-1119 F-03] The marker is the "observable" half of the bound:
+     * without it a clipped capture looks like a command that produced less
+     * output than it did, and the agent misreads "command result incomplete"
+     * as "command failed".
+     */
+    private fun clippedResult(
+        rc: Int,
+        out: BoundedStreamCapture,
+        err: BoundedStreamCapture,
+        extraErr: String?,
+    ): ShizukuManager.ProcessResult {
+        val marker = out.truncationMarker()
+        if (marker != null) {
+            AppLogger.warning(
+                TAG,
+                "stdout capture clipped: ${out.droppedBytes} byte(s) dropped over the ${out.maxBytes}-byte ceiling (exit=$rc)",
+            )
+        }
+        val errMarker = err.truncationMarker()
+        if (errMarker != null) {
+            AppLogger.warning(
+                TAG,
+                "stderr capture clipped: ${err.droppedBytes} byte(s) dropped over the ${err.maxBytes}-byte ceiling (exit=$rc)",
+            )
+        }
+        val baseErr = err.text().trimEnd('\n')
+        // Normal path stays byte-for-byte identical to the pre-fix return:
+        // trimEnd('\n') only, no trim() of leading whitespace.
+        if (marker == null && errMarker == null && extraErr == null) {
+            return ShizukuManager.ProcessResult(rc, out.text().trimEnd('\n'), baseErr)
+        }
+        val errText = buildString {
+            append(baseErr)
+            for (line in listOfNotNull(marker, errMarker, extraErr)) {
+                if (isNotEmpty()) append('\n')
+                append(line)
+            }
+        }.trim()
+        return ShizukuManager.ProcessResult(rc, out.text().trimEnd('\n'), errText)
+    }
+
+    /** Read the child's pipe to EOF, keeping at most the capture ceiling. */
+    private fun drainBounded(stream: java.io.InputStream, sink: BoundedStreamCapture) {
+        val buf = CharArray(COPY_CHARS)
+        val reader = stream.bufferedReader()
+        while (true) {
+            val n = reader.read(buf, 0, buf.size)
+            if (n <= 0) break
+            sink.append(buf, n)
+        }
+        sink.finish()
     }
 
     companion object {
         private const val TAG = "ShizukuBackend"
+
+        /** Chars pulled from the child pipe per read while draining it. */
+        private const val COPY_CHARS = 8192
 
         // Known Shizuku-protocol manager packages. Order = UI install-preference.
         const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"

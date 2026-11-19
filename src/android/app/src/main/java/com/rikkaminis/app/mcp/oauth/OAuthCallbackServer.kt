@@ -94,7 +94,16 @@ class OAuthCallbackServer(
                         socket.soTimeout = IDLE_CONNECT_TIMEOUT_MS
                         val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                         val requestLine = reader.readLine() ?: continue
-                        Log.d(TAG, "Request: $requestLine")
+                        // [FULLSCAN-1119 F-18] The raw request line carries
+                        // `?code=<authorization code>&state=<CSRF value>`.
+                        // LogcatTailer persists app logs to a file the user can
+                        // SHARE, so printing the line made a one-shot credential
+                        // (and the CSRF nonce) readable by anyone who gets the
+                        // log. The summary keeps what the line was for —
+                        // "which callback arrived, and were the parameters
+                        // there" — while dropping every VALUE: method, path,
+                        // and per-parameter presence/length only.
+                        Log.d(TAG, callbackRequestSummary(requestLine))
 
                         // CORS preflight for providers (e.g. xAI) that
                         // OPTIONS /callback from their authorization page
@@ -132,7 +141,20 @@ class OAuthCallbackServer(
                         // Parse GET /callback?code=xxx&state=yyy HTTP/1.1
                         val parts = requestLine.split(" ")
                         if (parts.size >= 2) {
-                            val uri = URI("http://localhost${ parts[1] }")
+                            // [FULLSCAN-1119 F-18] Second leak path, same fact:
+                            // URI() throws URISyntaxException for a malformed
+                            // escape and its MESSAGE quotes the whole target —
+                            // `?code=` / `?state=` included — which the
+                            // catch-all below logs. Parse behind a narrow
+                            // catch and log only the target's LENGTH, so no
+                            // query value can reach the log through this arm.
+                            var parsed: URI? = null
+                            try {
+                                parsed = URI("http://localhost" + parts[1])
+                            } catch (_: java.net.URISyntaxException) {
+                                Log.w(TAG, "Unparseable callback target (${parts[1].length} chars)")
+                            }
+                            val uri = parsed ?: continue
                             // [da1018-G] Parse the RAW query and %-decode each
                             // component exactly once. The previous code read
                             // uri.query — already decoded once by the URI getter —
@@ -341,6 +363,53 @@ internal fun htmlEscape(value: String): String = buildString(value.length) {
             else -> append(c)
         }
     }
+}
+
+/**
+ * [FULLSCAN-1119 F-18] One log-safe description of an inbound callback request.
+ *
+ * The raw request line (`GET /callback?code=<authorization code>&state=<CSRF
+ * nonce> HTTP/1.1`) must never reach an app log: logcat is persisted by
+ * LogcatTailer into a file the user can share, so a straight `Log.d(tag,
+ * "Request: $line")` publishes a one-shot credential + CSRF value to anyone
+ * who can read that file.
+ *
+ * What is kept is exactly what the line was for — "did a callback arrive, on
+ * which path, and were the parameters present" — and every VALUE is reduced to
+ * `absent` / `empty` / `len=N` (a length is not a credential). Only the three
+ * OAuth parameter NAMES are named, from a fixed list: a hostile redirect to the
+ * loopback port can choose arbitrary key names, and echoing those back would
+ * just be a slower way to leak text. The remaining keys are counted, not named.
+ *
+ * Pure string work (no Android types) so the JVM test can pin the redaction on
+ * literal fixtures.
+ */
+internal fun callbackRequestSummary(requestLine: String): String {
+    val parts = requestLine.trim().split(" ")
+    if (parts.size < 2) return "unparseable request line (${requestLine.length} chars)"
+    val method = parts[0]
+    val target = parts[1]
+    val uri = runCatching {
+        if (target.startsWith("http://") || target.startsWith("https://")) {
+            URI(target)
+        } else {
+            URI("http://localhost$target")
+        }
+    }.getOrNull() ?: return "$method unparseable-target (${target.length} chars)"
+    val path = uri.rawPath?.takeIf { it.isNotEmpty() } ?: "/"
+    val rawQuery = uri.rawQuery ?: return "$method $path (no query)"
+    val params = parseCallbackQuery(rawQuery)
+
+    fun describe(name: String): String {
+        val value = params[name] ?: return "absent"
+        return if (value.isEmpty()) "empty" else "len=${value.length}"
+    }
+
+    return "$method $path (" +
+        "code=${describe("code")} " +
+        "state=${describe("state")} " +
+        "error=${describe("error")} " +
+        "params=${params.size})"
 }
 
 /**

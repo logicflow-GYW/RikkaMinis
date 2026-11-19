@@ -182,9 +182,44 @@ def _statement_end(region: str, k: int) -> int:
     return len(region)
 
 
+def _statement_is_conditional(body: str, idx: int) -> bool:
+    """True when the statement containing offset [idx] is a brace-less
+    `if (…)` / `when (…)` / `while (…)` / `for (…)`.
+
+    [F-04] A `return` / `throw` at brace depth 0 is only an UNCONDITIONAL early
+    exit when the statement it sits in is not itself conditional. In
+    `if (left != 0) { if (false) return@withLock true }` the inner `return` is
+    at depth 0 of the outer block, but it fires only when `false` holds, so the
+    `unpin(` after the block is NOT guarded by it. Walking back to the start of
+    the statement — skipping over a balanced parenthesised condition — is what
+    separates the two; a brace-ful `if (c) { … return … }` stops the walk at its
+    own `{`, so a terminal inside it is still read as unconditional."""
+    i, depth = idx - 1, 0
+    while i >= 0:
+        c = body[i]
+        if c == ")":
+            depth += 1
+        elif c == "(":
+            if depth == 0:
+                pass  # the condition's own opening paren: keep walking back
+            else:
+                depth -= 1
+        elif depth == 0 and c in ";{}\n":
+            break
+        i -= 1
+    return re.match(r"\s*(?:if|when|while|for)\s*\(", body[i + 1:idx]) is not None
+
 def _block_has_top_level_terminal(body: str) -> bool:
-    """True when a `{…}` interior ends its enclosing flow with a `return` /
-    `throw` at brace depth 0 (an early-exit block)."""
+    """True when a `{…}` interior ends its enclosing flow with an
+    UNCONDITIONAL `return` / `throw` at brace depth 0 (an early-exit block).
+
+    [F-04] "At brace depth 0" is not the same fact as "unconditional": in a
+    brace-less `if (c) return` the `return` is at depth 0 as well, and treating
+    it as an early exit made `if (left != 0) { if (false) return@withLock true }`
+    count as a guard on the `unpin(` after it — so the close op restored the pin
+    on every window while the gate stayed green. A terminal has to be a
+    control-flow fact, so a terminal whose own statement is a brace-less
+    conditional is not one."""
     for m in _TERMINAL_RE.finditer(body):
         depth = 0
         for c in body[:m.start()]:
@@ -192,9 +227,89 @@ def _block_has_top_level_terminal(body: str) -> bool:
                 depth += 1
             elif c == "}":
                 depth -= 1
-        if depth == 0:
+        if depth == 0 and not _statement_is_conditional(body, m.start()):
             return True
     return False
+
+_CMP_RE = re.compile(r"([A-Za-z_]\w*|\d[\w]*)\s*(==|!=|<=|>=|<|>)\s*([A-Za-z_]\w*|\d[\w]*)")
+_MIRROR_OP = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "==": "==", "!=": "!="}
+
+def _var_lower_bound(region: str, var: str):
+    """Lower bound of [var]'s value, read from its own declaration, or None.
+
+    `val depth = depths.merge(…) ?: 1` starts at 1; `val left = … ?: 0` at 0.
+    The bound is what turns "the condition mentions the variable" into "the
+    condition can actually be false" ([F-05]): without it the words
+    `depth >= 1` cannot be recognised as a statement that holds on every single
+    window."""
+    m = re.search(r"\b(?:val|var)\s+%s\s*=" % re.escape(var), region)
+    if not m:
+        return None
+    i, depth = m.end(), 0
+    while i < len(region):
+        c = region[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return None
+            depth -= 1
+        elif depth == 0 and c == "?":
+            j = i + 1
+            while j < len(region) and region[j] in " \t":
+                j += 1
+            if j < len(region) and region[j] == ":":
+                k = j + 1
+                while k < len(region) and region[k] in " \t":
+                    k += 1
+                lit = re.match(r"(\d+)", region[k:])
+                if lit:
+                    return int(lit.group(1))
+        i += 1
+    return None
+
+def _condition_guards_the_boundary(cond: str, var: str, lower) -> bool:
+    """True when [cond] compares [var] in a way that can actually be false.
+
+    [F-05] A guard that cannot fail guards nothing. `depths.merge` starts at 1,
+    so `if (depth >= 1)` and `if (depth > 0)` hold on EVERY window: an `if`
+    carrying them does not select the first window, it selects all of them, and
+    the old verdict — "the condition mentions the variable, so it guards the
+    pin" — stayed green while the pin ran on every window.
+
+    The equivalence class is the BOUNDARY TEST, not the spelling: `depth == 1`,
+    `depth <= 1`, `depth < 2` and their mirrored forms `1 == depth`,
+    `1 >= depth`, `2 > depth` select the same set and can all be false. The
+    negated form is the same decision too — the close op's
+    `if (left != 0) return` guards the `unpin(` after it exactly as
+    `if (left == 0) { unpin(…) }` guards the one inside it. Only the forms that
+    cannot be false (`>` / `>=` against the variable's own lower bound) are
+    refused. A condition with no numeric comparison of the variable at all is
+    still accepted: the gate does not claim to see through a boolean alias
+    (`val isFirst = depth == 1; if (isFirst) …`), and refusing what it cannot
+    read would trade a blind spot for a false red."""
+    if lower is None:
+        return True
+    saw_comparison = False
+    for m in _CMP_RE.finditer(cond):
+        left, op, right = m.group(1), m.group(2), m.group(3)
+        if left == var:
+            lit_s, op_s = right, op
+        elif right == var:
+            lit_s, op_s = left, _MIRROR_OP[op]
+        else:
+            continue
+        lit = re.fullmatch(r"(\d+)[Ll]?", lit_s)
+        if not lit:
+            continue
+        saw_comparison = True
+        bound = int(lit.group(1))
+        if op_s == ">" and lower > bound:
+            continue  # `var > n` with n below the bound: true on every value
+        if op_s == ">=" and lower >= bound:
+            continue  # `var >= n` with n at or below the bound: same
+        return True
+    return not saw_comparison
 
 
 def _guard_controls(region: str, upto: int, var: str) -> bool:
@@ -208,17 +323,29 @@ def _guard_controls(region: str, upto: int, var: str) -> bool:
 
       · block body          `if (c) { … }`          — target inside the braces;
       · early-exit block     `if (c) { …; return }`  — target after the block;
-      · early-exit statement `if (c) return`         — target after the statement.
+      · early-exit statement `if (c) return`         — target after the statement;
+      · single statement     `if (c) pin(…)`         — target inside the statement
+        ([F-05]: the brace-less form is a legal Kotlin guard and was reported
+        as `pin-open-every-window`).
 
-    Deliberately not anchored on the comparison operator: `if (left != 0) …`,
-    `if (left > 0) …` and `if (left == 0) { … } else return` are the same
-    decision, and pinning the spelling is how a gate goes blind."""
+    Deliberately not anchored on the comparison operator's spelling:
+    `if (left != 0) return`, `if (left == 0) { … }`, `if (0 == left) …` and
+    `if (left < 1) …` are the same decision, and pinning the spelling is how a
+    gate goes blind. What IS anchored is the semantics — [F-05] the condition
+    must compare the window variable against a number it can actually fail, so
+    a tautology over the counter's own domain (`if (depth >= 1)`) is refused
+    while every boundary spelling of the same decision is accepted. See
+    `_condition_guards_the_boundary`."""
+    lower = _var_lower_bound(region, var)
     for m in re.finditer(r"\bif\s*\(", region[:upto]):
         open_idx = m.end() - 1
         close_idx = _if_condition_end(region, open_idx)
         if close_idx < 0:
             continue
-        if var not in region[open_idx + 1:close_idx]:
+        cond = region[open_idx + 1:close_idx]
+        if var not in cond:
+            continue
+        if not _condition_guards_the_boundary(cond, var, lower):
             continue
         k = close_idx + 1
         while k < len(region) and region[k] in " \t\r\n":
@@ -235,7 +362,17 @@ def _guard_controls(region: str, upto: int, var: str) -> bool:
                 return True
         else:
             stmt_end = _statement_end(region, k)
-            if _TERMINAL_RE.match(region[k:stmt_end]) and upto >= stmt_end:
+            if _TERMINAL_RE.match(region[k:stmt_end]):
+                # `if (c) return` / `if (c) throw` — the target is guarded when
+                # it sits after the statement the early exit skips past.
+                if upto >= stmt_end:
+                    return True
+            elif k <= upto < stmt_end:
+                # [F-05] `if (c) pin(…)` — a brace-less single-statement guard
+                # controls the statement itself. The old code accepted only a
+                # `return` / `throw` in this position, so the legal one-line
+                # form was reported as `pin-open-every-window` (a false red on
+                # correct code, the mirror image of the tautology's false green).
                 return True
     return False
 
@@ -468,6 +605,21 @@ GOOD_PIN = '''object SubagentDispatchPin {
 }
 '''
 
+# [F-05] The brace-less single-statement guard is legal Kotlin and has to be
+# read as a guard: the old verdict reported it as `pin-open-every-window`.
+GOOD_PIN_SINGLE_LINE = GOOD_PIN.replace(
+    """            if (depth == 1 && readPinnedAt(sessionId) == null) {
+                pin(sessionId)?.let { writtenPins[sessionId] = it }
+            }
+""",
+    """            if (depth == 1 && readPinnedAt(sessionId) == null) pin(sessionId)?.let { writtenPins[sessionId] = it }
+""")
+
+# [F-05] The mirrored spelling of the same boundary decision (`1 == depth`).
+GOOD_PIN_MIRRORED_BOUND = GOOD_PIN.replace(
+    "if (depth == 1 && readPinnedAt(sessionId) == null) {",
+    "if (1 == depth && readPinnedAt(sessionId) == null) {")
+
 # (name, mutant source, expected code, which checker)
 DIRTY = {
     "NO_CALL": (GOOD.replace("ChatMutationMethods.prompt(context, params)",
@@ -562,6 +714,27 @@ DIRTY = {
         "            if (left != 0) return@withLock true\n",
         "            if (left != 0) {\n            }\n"),
         "pin-close-restores-early", "pin"),
+    # [F-04] The bypass the depth-0 terminal check could not see: the inner
+    # `return` sits at brace depth 0 of the outer block, but it is the body of a
+    # brace-less `if (false)`, so it is not an early exit — the `unpin(` after
+    # the block is reached on every window while the gate stayed green.
+    "PIN_OBJ_CONDITIONAL_RETURN_UNPIN": (GOOD_PIN.replace(
+        "            if (left != 0) return@withLock true\n",
+        "            if (left != 0) { if (false) return@withLock true }\n"),
+        "pin-close-restores-early", "pin"),
+    # [F-05] The tautology: `depths.merge` starts at 1, so `depth >= 1` holds on
+    # every window and the `if` selects all of them — the pin is not guarded.
+    "PIN_OBJ_TAUTOLOGY_GUARD_PIN": (GOOD_PIN.replace(
+        "if (depth == 1 && readPinnedAt(sessionId) == null) {",
+        "if (depth >= 1 && readPinnedAt(sessionId) == null) {"),
+        "pin-open-every-window", "pin"),
+    # [F-05] The same tautology on the close side: `left` starts at 0, so
+    # `left >= 0` is always true, the early return fires on every window and the
+    # restore below it never runs.
+    "PIN_OBJ_TAUTOLOGY_GUARD_UNPIN": (GOOD_PIN.replace(
+        "            if (left != 0) return@withLock true\n",
+        "            if (left >= 0) return@withLock true\n"),
+        "pin-close-restores-early", "pin"),
 }
 
 
@@ -575,6 +748,24 @@ def selftest() -> int:
     if pin_problems:
         ok = False
         print("SELFTEST FAIL: GOOD pin-object fixture is red: %r" % (pin_problems,))
+    # [F-05] The legal spellings the boundary criterion must still accept. A
+    # dirty-only selftest cannot tell "the criterion got sharper" from "it went
+    # blind in the other direction" — both read as more red lines, so the
+    # accepted forms are witnessed here as well. A fixture whose anchor drifted
+    # silently equals GOOD_PIN and would prove nothing.
+    for label, pin_src in (
+        ("brace-less single-statement guard", GOOD_PIN_SINGLE_LINE),
+        ("mirrored boundary spelling (1 == depth)", GOOD_PIN_MIRRORED_BOUND),
+    ):
+        if pin_src == GOOD_PIN:
+            ok = False
+            print("SELFTEST FAIL: %r fixture is a no-op (anchor drifted)" % label)
+            continue
+        pin_problems = check_pin_object(pin_src)
+        if pin_problems:
+            ok = False
+            print("SELFTEST FAIL: GOOD pin-object fixture %r is red: %r"
+                  % (label, pin_problems))
     arms = 0
     for name in sorted(DIRTY):
         src, expect, which = DIRTY[name]

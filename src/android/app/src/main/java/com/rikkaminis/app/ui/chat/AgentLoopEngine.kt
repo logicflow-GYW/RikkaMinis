@@ -237,6 +237,50 @@ internal object TurnVisibleContent {
 }
 
 /**
+ * [fix/r3-chat-1119 F-11] May the agent loop keep calling the model after an
+ * execution-budget gate fired, and when must the post-loop tail hand the run
+ * over to `finalizeBudgetStop`?
+ *
+ * The two TOOL-executor budget gates (`tool_calls` / `shell_commands` in
+ * `ChatPromptAndTools.kt`) set `t7BudgetStopReason` and refuse the call, but
+ * they run outside this loop. With no check here the run kept asking the model
+ * for the next turn while the T7 reducer already stood in FINALIZING — burning
+ * the remaining turns on an empty spin — and the exit tail then read the reason
+ * and rewrote a run that had answered to completion into a budget failure.
+ *
+ * The reason is a STATE the run observed, not a claim about how it left: a
+ * gate that fired and was then answered to completion must not be reported as
+ * an interrupted run, and a gate that actually stopped the run must not be
+ * dropped. Both readings live here so the two cannot drift.
+ */
+internal object BudgetStopExitPolicy {
+
+    /**
+     * A budget gate fired: the model owes no further call — no tool results are
+     * pending, nothing is being streamed — so the loop must leave now with the
+     * content already accumulated.
+     */
+    fun shouldStopLoop(budgetStopReason: String?): Boolean = budgetStopReason != null
+
+    /**
+     * The post-loop tail finalizes as a budget stop ONLY when the run was
+     * actually interrupted by it. A clean model completion that merely
+     * coexisted with a budget reason keeps its normal exit.
+     */
+    fun shouldFinalizeBudgetStop(budgetStopReason: String?, loopExitedNormally: Boolean): Boolean =
+        budgetStopReason != null && !loopExitedNormally
+
+    /**
+     * The reason the EXIT DECISION TABLE may see. A run that finished its
+     * answer is recorded SUCCEEDED / COMPLETED even when a gate fired earlier
+     * in the same run — the reason is a state the run observed, and the
+     * terminal state must describe how it left.
+     */
+    fun effectiveBudgetStopReason(budgetStopReason: String?, loopExitedNormally: Boolean): String? =
+        if (shouldFinalizeBudgetStop(budgetStopReason, loopExitedNormally)) budgetStopReason else null
+}
+
+/**
  * [deep-audit-1018 ISSUE-12c] Single source of truth for the stub-reminder
  * STACKING guard, shared by the two eofStubReminder injection sites in the
  * agent loop.
@@ -343,22 +387,51 @@ internal object ContinuationHistoryMerge {
     }
 
     /**
+     * [fix/r3-chat-1119 F-12] Does [incoming] carry anything the fold exists
+     * for — visible text or a rendered block?
+     *
+     * The old guard tested "carries NOTHING at all" (`content.isEmpty() &&
+     * contentParts.isEmpty()`). A continuation turn that streamed only
+     * whitespace — a length-wall or EOF-stub retry that answered with a blank
+     * — passed it, was folded into the previous assistant entry, and the
+     * empty-turn recovery then dropped THAT entry by index
+     * (`agentHistory.removeAt(size - 1)`): every character the user had already
+     * received was deleted and the model rewrote the answer from scratch,
+     * doubling it against the copy still on screen.
+     *
+     * "Nothing visible" is deliberately the same predicate the empty-turn
+     * detector uses ([TurnVisibleContent.hasVisibleContent]), so the fold and
+     * the recovery can never disagree about what an empty turn is.
+     */
+    fun hasContinuationContent(incoming: LLMMessage): Boolean {
+        if (incoming.content.isNotBlank()) return true
+        return incoming.contentParts.any { part ->
+            when (part) {
+                is AgentContentPart.Text -> part.text.isNotBlank()
+                is AgentContentPart.ToolUse -> true
+                else -> false
+            }
+        }
+    }
+
+    /**
      * Fold [incoming] (the assistant turn a continuation just re-entered) into
      * the previous assistant entry and drop the reminders that sat between the
      * segments. Returns false and mutates nothing when this is not a
      * continuation:
      *
-     *  - [incoming] carries no content — an EMPTY restarted turn must stay a
-     *    separate entry: [EmptyTurnRecovery.plan] reads `history[size - 2]`, the
-     *    entry behind "the assistant turn just appended", and folding the empty
-     *    turn would make it nudge (and delete) the *previous* segment;
+     *  - [incoming] carries no VISIBLE content ([hasContinuationContent]) — an
+     *    empty restarted turn must stay a separate entry:
+     *    [EmptyTurnRecovery.plan] reads `history[size - 2]`, the entry behind
+     *    "the assistant turn just appended", and folding the empty turn would
+     *    make it nudge (and delete) the *previous* segment;
      *  - the entry behind the reminders is not an ASSISTANT, or is already
      *    persisted (`dbMessageId != null`) — folding into a persisted row would
      *    re-create the memory/DB mismatch in the other direction.
      */
     fun mergeIntoPreviousAssistant(history: MutableList<LLMMessage>, incoming: LLMMessage): Boolean {
         if (incoming.role != LLMMessage.Role.ASSISTANT) return false
-        if (incoming.content.isEmpty() && incoming.contentParts.isEmpty()) return false
+        if (!hasContinuationContent(incoming)) return false
 
         val reminderIdx = mutableListOf<Int>()
         var idx = history.lastIndex
@@ -4573,6 +4646,29 @@ internal class AgentLoopEngine(
                 durationMs = System.currentTimeMillis() - turnStartMs,
             )
 
+            // [fix/r3-chat-1119 F-11] A tool-executor budget gate
+            // (tool_calls / shell_commands) sets `t7BudgetStopReason` and
+            // refuses the call, but the gate itself cannot leave the run.
+            // Without this check the loop kept calling the model while the T7
+            // reducer already stood in FINALIZING (an empty spin that burns the
+            // remaining turns), and the run's own tail then read the reason and
+            // rewrote whatever the model answered into a budget failure. Leave
+            // here: everything the user already saw is persisted above (and
+            // the turn is closed in the trace above), the post-loop tail
+            // delivers it, and no further model call is made.
+            //
+            // Placed AFTER turnEnd so the trace still closes this turn; placed
+            // BEFORE the queued-prompt interrupt because starting a fresh turn
+            // against an exhausted budget is exactly the empty spin.
+            if (BudgetStopExitPolicy.shouldStopLoop(traceObserver.t7BudgetStopReason)) {
+                AppLogger.warning(
+                    TAG_STREAM,
+                    "runAgentLoop turn=$turn budget stop: ${traceObserver.t7BudgetStopReason} — " +
+                        "exiting after tool results, no further model call",
+                )
+                break@turnLoop
+            }
+
             // [T-android-queued-message-interrupt-on-toolclose] iOS d14174d3
             // parity. User report: "怎么样了" queued bubble (dashed border,
             // red X) stayed pending behind a long sync→export→read→gh-issue
@@ -4610,7 +4706,18 @@ internal class AgentLoopEngine(
                         finishedAllToolBlocks = loopState.allToolBlocks,
                     )
                 } catch (e: Exception) {
-                    AppLogger.warning(TAG_STREAM, "host.injectQueuedPromptsAsNewTurn failed: ${e.message}")
+                    // [fullscan-1119 F-08] Same policy as the switch path:
+                    // a CancellationException is a Stop, not a failed
+                    // injection. Swallowing it here continued the loop into
+                    // the next turn after the user stopped — and that next
+                    // turn could start a compaction behind the stop (the
+                    // F-05 family, second entry). Real failures keep exactly
+                    // the audited behaviour: log and fall through to the
+                    // normal next-turn dispatch so a genuinely queued prompt
+                    // is never dropped.
+                    rethrowCancellationOr(e) { failure ->
+                        AppLogger.warning(TAG_STREAM, "host.injectQueuedPromptsAsNewTurn failed: ${failure.message}")
+                    }
                     null
                 }
                 if (handled != null) {
@@ -4690,7 +4797,9 @@ internal class AgentLoopEngine(
             withContext(Dispatchers.Main) {
                 host.finalizeAtTurnLimit(loopState.assistantId, loopState.accumulatedText, loopState.allToolBlocks, maxTurnsThisRun)
             }
-        } else if (traceObserver.t7BudgetStopReason != null) {
+        } else if (BudgetStopExitPolicy.shouldFinalizeBudgetStop(
+                traceObserver.t7BudgetStopReason, loopState.loopExitedNormally,
+            )) {
             // T7-C: 预算耗尽（deadline / 计数上限）—— 显式终态，不是静默失败。
             // [fix/budget-stop-silent-exit] A budget stop is NOT a clean
             // completion: the run was interrupted mid-work (the model still
@@ -4703,6 +4812,14 @@ internal class AgentLoopEngine(
             // like the turn-limit path: keep the accumulated text/blocks on
             // screen, attach a human banner, and mark resumable so "Resume"
             // (or a new message) continues with the budget reset.
+            //
+            // [fix/r3-chat-1119 F-11] The gate above is the second half of
+            // the fix: a reason is a STATE the run observed, not a claim
+            // about how it left. A tool/shell budget gate that fired and was
+            // then answered to completion (`loopExitedNormally`) must keep
+            // its normal exit — the old `reason != null` test rewrote a
+            // finished answer into a budget failure (banner + FAILED
+            // terminal) on every run that hit a gate mid-way.
             AppLogger.warning(TAG_STREAM, "runAgentLoop EXIT — budget stop: $traceObserver.t7BudgetStopReason, finalizing as resumable")
             withContext(Dispatchers.Main) {
                 host.finalizeBudgetStop(
@@ -4724,7 +4841,14 @@ internal class AgentLoopEngine(
         // T7-A: 2.0 终态收尾 —— 正常退出 / 达到轮数上限都走这里
         // T7-C: 预算中断 → deadline 走 Interrupted(DEADLINE_EXCEEDED)，
         //       计数耗尽走 Failed(EXECUTION_FAILED) + error 标注具体维度
-        val budgetStop = traceObserver.t7BudgetStopReason
+        val budgetStop = BudgetStopExitPolicy.effectiveBudgetStopReason(
+            traceObserver.t7BudgetStopReason, loopState.loopExitedNormally,
+        )
+        // [fix/r3-chat-1119 F-11] `effectiveBudgetStopReason` returns null when
+        // the loop exited cleanly, so a reason that merely COEXISTED with a
+        // finished answer no longer paints the trace FAILED / EXECUTION_FAILED
+        // / "budget_exhausted(...)". The two readings (finalize gate above,
+        // terminal here) come from the same policy so they cannot drift.
         // [deep-audit-1015 BUG-01a] The decision table lives in
         // AgentLoopExitDecision (same package, JVM-testable) and is CALLED
         // here rather than mirrored in the test — the old test carried a copy

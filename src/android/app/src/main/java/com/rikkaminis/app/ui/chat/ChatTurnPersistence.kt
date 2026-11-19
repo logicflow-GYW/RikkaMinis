@@ -20,11 +20,12 @@ import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.service.SessionConcurrencyManager
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.launch
-import androidx.lifecycle.viewModelScope
 
 
 
@@ -355,6 +356,51 @@ internal fun ChatViewModel.rollbackIncompleteTurn(): Boolean? {
 
 
 /**
+ * [fullscan-1119 F-04] Is the turn claim still ours after the prompt build?
+ *
+ * Four signals, all published at claim time and all checked before the stream
+ * may start:
+ *  - [claimIsActive] — the claiming coroutine has not been cancelled. A Stop
+ *    cancels the setup shell ([sendShellJob]); a launch from a cancelled
+ *    coroutine would create a stream nobody can reach.
+ *  - [streaming] — `_isStreaming` is still true. This is the signal the pre-fix
+ *    guard was missing: `cancelStream()` clears the flag SYNCHRONOUSLY but only
+ *    re-mints epoch/token for a NEW turn, so Stop-during-prep left
+ *    `sendEpoch == claimEpoch` and the same token — a perfect match — while the
+ *    turn had already been stopped.
+ *  - [sendEpoch]/[claimEpoch] — a newer turn claimed the slot (superseded).
+ *  - [callerToken]/[currentToken] — identity check against the token minted at
+ *    claim time (catches a re-claim that reused the same epoch).
+ *
+ * Pure on purpose: every cell is JVM-testable without the ViewModel.
+ */
+internal fun streamClaimStillOwned(
+    claimIsActive: Boolean,
+    streaming: Boolean,
+    sendEpoch: Long,
+    claimEpoch: Long,
+    callerToken: Any,
+    currentToken: Any,
+): Boolean = claimIsActive && streaming &&
+    sendEpoch == claimEpoch && callerToken === currentToken
+
+/**
+ * [fullscan-1119 F-04] Launch the stream job as a CHILD of the coroutine that
+ * claimed the turn.
+ *
+ * Why not `viewModelScope.launch`: `viewModelScope` outlives the setup shell,
+ * so a launch issued from a cancelled shell still ran — the audited
+ * "Stop during preparation starts a zombie stream". A child of the caller
+ * inherits its cancellation: the job is created already-cancelled and its body
+ * never runs, and a Stop that lands right after the launch takes the stream
+ * down together with the shell.
+ */
+internal fun launchTurnStream(
+    parentContext: CoroutineContext,
+    block: suspend CoroutineScope.() -> Unit,
+): Job = CoroutineScope(parentContext).launch(Dispatchers.IO) { block() }
+
+/**
  * [T-android-rerun-from-tool-block-position] Shared streaming tail used by
  * both [retryFromMessage] and [rerunFromToolBlock]: refresh the OAuth
  * token if needed, build the (OAuth-prefixed) system prompt, and launch
@@ -386,14 +432,38 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
     // [dv29-B01] Revocation guard: Stop (cancelStream) or a newer turn revokes
     // this claim while the prompt build above runs. Never start a stream for a
     // turn nobody owns any more.
-    if (sendEpoch != streamingClaimEpoch || claimToken !== streamingClaimToken) {
+    //
+    // [fullscan-1119 F-04] The epoch/token pair alone CANNOT see a Stop:
+    // cancelStream() writes `_isStreaming = false` and leaves both fields
+    // untouched (only a NEW turn re-mints them), so a stopped turn still
+    // "matches itself" and the old two-signal guard let the tail start a
+    // zombie stream after Stop-during-prep. The flag and the coroutine's own
+    // liveness are now part of the predicate — see [streamClaimStillOwned].
+    if (!streamClaimStillOwned(
+            claimIsActive = coroutineContext[Job]?.isActive != false,
+            streaming = _isStreaming.value,
+            sendEpoch = sendEpoch,
+            claimEpoch = streamingClaimEpoch,
+            callerToken = claimToken,
+            currentToken = streamingClaimToken,
+        )
+    ) {
         AppLogger.info(
             ChatViewModel.TAG_STREAM,
-            "$label tail aborted before stream (claim revoked; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)",
+            "$label tail aborted before stream (claim revoked; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch " +
+                "streaming=${_isStreaming.value})",
         )
         return false
     }
-    streamJob = viewModelScope.launch(Dispatchers.IO) {
+    // [fullscan-1119 F-04] The stream is launched as a CHILD of the setup
+    // shell that claimed the turn, not as a sibling under viewModelScope.
+    // `viewModelScope` is not cancelled by Stop, so a sibling launch survived
+    // the shell's cancellation and started a stream the user had already
+    // stopped; a child inherits the cancellation (a launch from a cancelled
+    // coroutine yields an already-cancelled job whose body never runs, and a
+    // cancel landing after the launch tears the stream down with the shell).
+    // Same shape as resumeQueueAfterCancel's `streamJob = launch(...)`.
+    streamJob = launchTurnStream(coroutineContext) {
         AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob ENTER sid=$activeSessionId")
         try {
             SessionConcurrencyManager.acquireSlot(activeSessionId)

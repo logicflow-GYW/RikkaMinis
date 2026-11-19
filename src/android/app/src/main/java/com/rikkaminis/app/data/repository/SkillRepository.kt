@@ -697,7 +697,13 @@ class SkillRepository(private val context: Context) {
         // deleted skill's "allowed in this session" row in memory.
         _sessionOverridesRevision.value = _sessionOverridesRevision.value + 1L
         val dir = File(skillsDir, id)
-        dir.deleteRecursively()
+        // [fix/r3-data-1119 F-08] `deleteRecursively()` follows a directory
+        // symlink: a skill dir holding `ref -> ../../memory` made this delete
+        // the user's real memory tree. `SkillTreeGuard.deleteTree` deletes a
+        // link AS a link and never descends through one.
+        if (!SkillTreeGuard.deleteTree(dir)) {
+            Log.w(TAG, "delete: could not fully remove $dir (symlinks are removed as links)")
+        }
         _skills.value = _skills.value.filter { it.id != id }
         Log.i(TAG, "Deleted skill: $id")
     }
@@ -1456,6 +1462,15 @@ class SkillRepository(private val context: Context) {
                 for (rel in relPaths) {
                     val src = File(dir, rel)
                     if (!src.isFile) continue
+                    // [fix/r3-data-1119 F-09] The listing already refuses to
+                    // produce an out-of-tree path (SkillTreeGuard), but the
+                    // writer re-checks containment: this is the seam that
+                    // decides what leaves the device in a shareable archive,
+                    // so it must not depend on the walker being correct.
+                    if (!SkillTreeGuard.isInside(dir, src)) {
+                        Log.w(TAG, "exportSkillToZip: refusing out-of-tree entry $rel")
+                        continue
+                    }
                     // Store entries with forward slashes — the portable
                     // separator every unzip tool (and importFromArchive) expects.
                     zos.putNextEntry(ZipEntry(rel.replace(File.separatorChar, '/')))
@@ -1515,17 +1530,14 @@ class SkillRepository(private val context: Context) {
      * editor swap files — never skill payload). Empty when [root] is not a
      * directory, which is how every caller distinguishes "no skill dir" from "an
      * empty one".
+     *
+     * [fix/r3-data-1119 F-09] Delegates to [SkillTreeGuard.listFilesUnder], the
+     * same restricted traversal [delete] uses. The pre-fix `walkTopDown()`
+     * followed symlinks with no cycle detection: `ln -s . loop` inside a skill
+     * made this walk forever (OOM), and a link to a file outside the skill root
+     * let [exportSkillToZip] pack a private file into a shareable archive.
      */
-    private fun listFilesUnder(root: File): List<String> {
-        if (!root.isDirectory) return emptyList()
-        val rootPath = root.absolutePath
-        // `absolutePath` of a directory has no trailing separator, except for "/".
-        val prefixLen = if (rootPath.endsWith(File.separator)) rootPath.length else rootPath.length + 1
-        return root.walkTopDown()
-            .filter { it.isFile && !it.name.startsWith(".") }
-            .map { it.absolutePath.substring(prefixLen) }
-            .toList()
-    }
+    private fun listFilesUnder(root: File): List<String> = SkillTreeGuard.listFilesUnder(root)
 
     /**
      * [F-10] Delete the files [planStaleSiblingDeletions] flags under [root], then

@@ -1274,10 +1274,20 @@ class ModelUseOffloadHandler(
         if (!hostFile.exists() || !hostFile.isFile) {
             throw ImageInputError("Image file not found at '$url' (resolved to ${hostFile.absolutePath}).")
         }
-        val bytes = try {
-            hostFile.readBytes()
-        } catch (e: Throwable) {
-            throw ImageInputError("Image file at '$url' is unreadable: ${e.message}")
+        // [FULLSCAN-1119 F-15] Bounded read. `readBytes()` here had no ceiling,
+        // so pointing `image_url` at a large file allocated it whole into the
+        // UI process. The ceiling is the protocol's own single-file cap
+        // (PayloadSizePolicy.MAX_FILE_BYTES) — not a new number — and going over
+        // it is an explicit failure: half an image is worse than none.
+        val bytes = when (val read = com.rikkaminis.app.offload.BoundedFileRead.readBytes(hostFile)) {
+            is com.rikkaminis.app.offload.BoundedFileRead.Outcome.Ok -> read.bytes
+            is com.rikkaminis.app.offload.BoundedFileRead.Outcome.TooLarge -> throw ImageInputError(
+                "Image file at '$url' ${com.rikkaminis.app.offload.BoundedFileRead.tooLargeMessage(read.actualBytes, read.capBytes)}. " +
+                    "Downscale it first (e.g. `magick in.jpg -resize 1600x1600 out.jpg`) and retry.",
+            )
+            is com.rikkaminis.app.offload.BoundedFileRead.Outcome.Failed -> throw ImageInputError(
+                "Image file at '$url' is unreadable: ${read.reason}",
+            )
         }
         return LLMMessage.ImagePart(
             data = bytes,

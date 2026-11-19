@@ -7,6 +7,53 @@ import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Upsert
 
+/**
+ * [fix/r3-data-1119 F-07] SQLite's hard bind-parameter ceiling.
+ *
+ * `SQLITE_MAX_VARIABLE_NUMBER` is **999** on the SQLite versions bundled by
+ * API 26–29 (SQLite 3.18–3.28) and was raised to 32766 only later — this
+ * app's `minSdk` is 26, so a `NOT IN (:list)` whose list is longer than 999
+ * fails with "too many SQL variables" **at bind time**, before any row is
+ * touched. A 1200-entry provider catalog therefore could not be saved at
+ * all on an API 8–10 device: every `syncAllIncremental` rolled back and
+ * `provider.db` never landed.
+ */
+internal const val SQLITE_MAX_VARIABLE_NUMBER = 999
+
+/**
+ * [fix/r3-data-1119 F-07] Rows handed to one `NOT IN (:list)` statement.
+ * Strictly below [SQLITE_MAX_VARIABLE_NUMBER] so the ceiling is never
+ * approached: Room binds one parameter per list element, and a list that
+ * reaches the ceiling is a hard SQL error rather than a slow query.
+ */
+internal const val SQL_DELETE_CHUNK_SIZE = 900
+
+/**
+ * [fix/r3-data-1119 F-07] Split [ids] into statement-sized chunks.
+ *
+ * A single `NOT IN (:list)` binds one parameter per element, so the list has
+ * to stay under SQLite's ceiling on every device this app runs on. Chunking
+ * is semantically neutral: `NOT IN` over the union of the chunks selects
+ * exactly the rows `NOT IN` over the whole list would have.
+ *
+ * The helper is a plain top-level function (not a DAO default method) so the
+ * policy is drivable from a JVM test and so Room never has to generate a
+ * super-call bridge for it — the DAO keeps exactly the abstract statements it
+ * had before.
+ */
+internal fun <T> chunkedIds(ids: List<T>, chunkSize: Int = SQL_DELETE_CHUNK_SIZE): List<List<T>> {
+    require(chunkSize > 0) { "chunkSize must be positive" }
+    if (ids.isEmpty()) return emptyList()
+    val out = ArrayList<List<T>>((ids.size + chunkSize - 1) / chunkSize)
+    var start = 0
+    while (start < ids.size) {
+        val end = minOf(start + chunkSize, ids.size)
+        out.add(ids.subList(start, end))
+        start = end
+    }
+    return out
+}
+
 @Dao
 interface ProviderConfigDao {
 
@@ -52,15 +99,23 @@ interface ProviderConfigDao {
     @Query("DELETE FROM provider_agent_loop_ids") suspend fun clearAgentLoopIds()
     @Query("DELETE FROM provider_config_meta") suspend fun clearMeta()
 
+    /**
+     * [fix/r3-data-1119 F-07] Raw statement for the instances delete. Room
+     * binds one parameter per list element, so the caller must never hand
+     * this more than [SQL_DELETE_CHUNK_SIZE] ids — see [chunkedIds].
+     */
     @Query("DELETE FROM provider_instances WHERE id NOT IN (:keepIds)")
     suspend fun deleteInstancesNotIn(keepIds: List<String>)
 
+    /** Raw statement for the entries delete; see [deleteInstancesNotIn]. */
     @Query("DELETE FROM provider_model_entries WHERE id NOT IN (:keepIds)")
     suspend fun deleteEntriesNotIn(keepIds: List<String>)
 
+    /** Raw statement for the groups delete; see [deleteInstancesNotIn]. */
     @Query("DELETE FROM provider_model_groups WHERE id NOT IN (:keepIds)")
     suspend fun deleteGroupsNotIn(keepIds: List<String>)
 
+    /** Raw statement for the meta delete; see [deleteInstancesNotIn]. */
     @Query("DELETE FROM provider_config_meta WHERE key NOT IN (:keepKeys)")
     suspend fun deleteMetaNotIn(keepKeys: List<String>)
 
@@ -101,6 +156,16 @@ interface ProviderConfigDao {
      * (the legacy mirror never carried those models). Passed in explicitly
      * rather than re-derived here: only the mapping layer can tell "row is
      * absent from the config" apart from "row could not be read".
+     *
+     * [fix/r3-data-1119 F-07] Every `NOT IN` delete below runs in
+     * [SQL_DELETE_CHUNK_SIZE]-sized statements. One statement binding the
+     * whole id list fails at bind time on API 26–29
+     * ([SQLITE_MAX_VARIABLE_NUMBER]), which rolled this whole transaction
+     * back — a provider catalog of ~1200 entries could not be saved at all on
+     * an Android 8–10 device. The chunks are semantically neutral (the union
+     * of `NOT IN` over the chunks is the same set), and because they all run
+     * inside this `@Transaction`, a chunk that fails still rolls the whole
+     * sync back rather than leaving a half-deleted table.
      */
     @Transaction
     suspend fun syncAllIncremental(
@@ -115,7 +180,9 @@ interface ProviderConfigDao {
             clearInstances() // CASCADE wipes their entries too
         } else {
             upsertInstances(instances)
-            deleteInstancesNotIn(instances.map { it.id })
+            for (chunk in chunkedIds(instances.map { it.id })) {
+                deleteInstancesNotIn(chunk)
+            }
         }
 
         // [fix/p1028-provider-corrupt-row] Quarantined rows count as "known":
@@ -128,14 +195,18 @@ interface ProviderConfigDao {
             clearEntries()
         } else {
             if (entries.isNotEmpty()) upsertEntries(entries)
-            deleteEntriesNotIn(keepEntryIds)
+            for (chunk in chunkedIds(keepEntryIds)) {
+                deleteEntriesNotIn(chunk)
+            }
         }
 
         if (groups.isEmpty()) {
             clearGroups()
         } else {
             upsertGroups(groups)
-            deleteGroupsNotIn(groups.map { it.id })
+            for (chunk in chunkedIds(groups.map { it.id })) {
+                deleteGroupsNotIn(chunk)
+            }
         }
 
         if (loopIds.isEmpty()) {
@@ -152,7 +223,9 @@ interface ProviderConfigDao {
             clearMeta()
         } else {
             upsertMeta(meta)
-            deleteMetaNotIn(meta.map { it.key })
+            for (chunk in chunkedIds(meta.map { it.key })) {
+                deleteMetaNotIn(chunk)
+            }
         }
     }
 

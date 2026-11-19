@@ -663,6 +663,38 @@ class ShareReceiverActivity : ComponentActivity() {
      *  attachment that reached the composer with no "could not read" error.
      *  Nothing is staged unless the core reports [SharedStreamCopy.Staged]. */
     private fun copyUriToStaging(uri: Uri, mimeType: String): String? {
+        // [R2 F-01] The ADMISSION GATE, before a name is claimed or a stream is
+        // opened. This Activity is exported and receives ACTION_SEND /
+        // ACTION_VIEW from ANY app on the device, so `uri` is attacker-chosen
+        // input that we then open with OUR OWN uid:
+        //
+        //  - `contentResolver.openInputStream(file:///data/user/0/<pkg>/…)`
+        //    opens a `FileInputStream` as this app — a third-party app that
+        //    sends a file:// URI naming our databases/ or shared_prefs/ made us
+        //    copy our own credentials into the shareable staging dir.
+        //  - `content://<pkg>.fileprovider/…` is worse: FileProvider admits a
+        //    caller whose package is ours, and the caller IS our own process
+        //    here, so every declared provider root was readable on demand.
+        //
+        // Two layers, both required: the scheme/authority whitelist below stops
+        // the external shape, and the canonical prefix guard (fail-closed on an
+        // unresolvable path) stops a legitimately-shaped URI that still names
+        // private data. See [admitSharedUri].
+        val admission = admitSharedUri(
+            scheme = uri.scheme,
+            authority = uri.authority,
+            path = uri.path,
+            appDataDir = applicationInfo?.dataDir ?: filesDir.parentFile?.absolutePath,
+            ownProviderAuthority = "$packageName.fileprovider",
+            canonicalize = { raw -> runCatching { File(raw).canonicalPath }.getOrNull() },
+        )
+        if (admission is SharedUriAdmission.Refused) {
+            AppLogger.warning(
+                TAG,
+                "refused shared uri ($uri): ${admission.reason}${admission.detail?.let { " — $it" } ?: ""}",
+            )
+            return null
+        }
         val ext = guessExtension(mimeType, uri)
         val prefix = when {
             mimeType.startsWith("image/") -> "shared-image"
@@ -774,4 +806,118 @@ internal fun decideSingleSend(
         else SingleSendDecision.AttachText(text)
     hasStream -> SingleSendDecision.Stream
     else -> SingleSendDecision.Drop
+}
+
+/** [R2 F-01] Why an incoming share URI was refused. */
+internal enum class SharedUriRefusal {
+    /** No scheme at all — a bare path is not a shareable URI. */
+    NoScheme,
+    /** `file://` — the caller names a host path and we would open it as us. */
+    FileScheme,
+    /** A `content://` URI naming OUR OWN FileProvider (self-granted read). */
+    OwnFileProvider,
+    /** A `content://` URI with no authority — nothing to hand the resolver. */
+    NoAuthority,
+    /** The path could not be canonicalized: refuse rather than guess. */
+    UnresolvablePath,
+    /** The canonical path lands in this app's private data directory. */
+    PrivateDataDir,
+}
+
+/** [R2 F-01] Verdict of [admitSharedUri]. */
+internal sealed class SharedUriAdmission {
+    /** The URI may be opened. [canonicalPath] is the resolved `file://` target
+     *  (null for `content://`, which the resolver — not us — resolves). */
+    data class Admitted(val canonicalPath: String?) : SharedUriAdmission()
+
+    /** The URI must not be opened; nothing is staged and no name is claimed. */
+    data class Refused(val reason: SharedUriRefusal, val detail: String? = null) : SharedUriAdmission()
+}
+
+/**
+ * [R2 F-01] May [ShareReceiverActivity] open this incoming URI with its own uid?
+ *
+ * The activity is `exported="true"` and answers ACTION_SEND / ACTION_VIEW from
+ * every app on the device, so the URI is attacker-controlled. Two independent
+ * refusals, both needed:
+ *
+ *  1. **Scheme / authority whitelist.** Only `content://` is admitted, and never
+ *     with our own FileProvider authority: `ContentResolver.openInputStream`
+ *     on a `file://` URI opens a raw `FileInputStream` as THIS app (the
+ *     documented F-01 mechanism — an attacker's `file:///data/user/0/<pkg>/
+ *     databases/minis.db` was copied into the shareable staging dir), and a
+ *     `content://<pkg>.fileprovider/…` URI resolves because the caller of
+ *     `openInputStream` is us, so every declared provider root was readable on
+ *     demand by any app that could start this activity.
+ *  2. **Canonical prefix guard, fail-closed.** A `file://` target is resolved
+ *     with [canonicalize] (which follows symlinks) and refused when it lands in
+ *     [appDataDir]. An unresolvable path is a REFUSAL, never a pass: the
+ *     fallback-to-the-raw-path shape is exactly what let `../` and symlink
+ *     spellings through.
+ *
+ * Pure (all filesystem work arrives through [canonicalize]) so the JVM test
+ * source set pins every arm without an Android `Context`.
+ */
+internal fun admitSharedUri(
+    scheme: String?,
+    authority: String?,
+    path: String?,
+    appDataDir: String?,
+    ownProviderAuthority: String,
+    canonicalize: (String) -> String?,
+): SharedUriAdmission {
+    val normalizedScheme = scheme?.lowercase()
+    if (normalizedScheme.isNullOrEmpty()) {
+        return SharedUriAdmission.Refused(SharedUriRefusal.NoScheme)
+    }
+    if (normalizedScheme == "file") {
+        // `file://` is refused on its own terms: `openInputStream` on a file
+        // URI is a raw `FileInputStream` opened as THIS app, so the scheme
+        // itself is the attack — no path can make it safe (the target could be
+        // another session's workspace just as easily as the database). Every
+        // real sender on API 24+ hands out `content://` (FileUriExposedException
+        // killed `file://` sharing), so nothing legitimate is lost here.
+        return SharedUriAdmission.Refused(SharedUriRefusal.FileScheme, path)
+    }
+    if (normalizedScheme != "content") {
+        return SharedUriAdmission.Refused(SharedUriRefusal.NoScheme, scheme)
+    }
+    if (authority.isNullOrEmpty()) {
+        return SharedUriAdmission.Refused(SharedUriRefusal.NoAuthority)
+    }
+    if (authority == ownProviderAuthority) {
+        // FileProvider admits a caller whose package is ours — and the caller
+        // of `openInputStream` here IS our own process, so every declared
+        // provider root (sessions/, global/, media/, logs/…) was readable on
+        // demand by any app that could start this activity.
+        return SharedUriAdmission.Refused(SharedUriRefusal.OwnFileProvider, authority)
+    }
+    // Layer 2 — canonical prefix guard, on the shapes that actually claim a
+    // host path. A `content://` path is usually provider-internal
+    // (`document/primary:Download/x.pdf`), and canonicalizing that as a host
+    // path would refuse every legitimate share; an ABSOLUTE path, however, is
+    // a claim about the host filesystem, and that claim is checked. An absolute
+    // path that will not canonicalize is a REFUSAL, not a pass: "I cannot tell
+    // where this lands" must never be read as "it lands somewhere allowed".
+    if (path.isNullOrEmpty() || !path.startsWith("/")) {
+        return SharedUriAdmission.Admitted(null)
+    }
+    val canonical = canonicalize(path)
+        ?: return SharedUriAdmission.Refused(SharedUriRefusal.UnresolvablePath, path)
+    if (isPathUnder(canonical, appDataDir)) {
+        return SharedUriAdmission.Refused(SharedUriRefusal.PrivateDataDir, canonical)
+    }
+    return SharedUriAdmission.Admitted(canonical)
+}
+
+/**
+ * [R2 F-01] True when [path] IS [root] or sits below it, compared on whole
+ * segments. A raw `startsWith` would admit `/data/user/0/<pkg>-backup/…` for
+ * root `/data/user/0/<pkg>`; both sides are canonicalized by the caller.
+ */
+internal fun isPathUnder(path: String?, root: String?): Boolean {
+    if (path.isNullOrEmpty() || root.isNullOrEmpty()) return false
+    val base = root.trimEnd('/')
+    if (base.isEmpty()) return false
+    return path == base || path.startsWith("$base/")
 }
