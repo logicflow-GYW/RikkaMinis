@@ -26,7 +26,7 @@
     <string name="memory_revoke_result_not_found">Entry not found in recent daily logs.</string>
     <string name="memory_revoke_result_io_error">Error writing file: %1$s</string>
     <string name="memory_save_toast">Saved</string>
-    <string name="memory_global_footer">Persistent instructions and preferences visible to the agent in every session. The agent cannot modify this file.</string>
+    <string name="memory_global_footer">This file contains user-owned instructions and preferences. The agent can propose edits; changes require your approval.</string>
 
     <!-- Permissions (Settings → Permissions) -->
 
@@ -86,9 +86,9 @@
     <!-- T135 — Settings + About i18n keys -->
     <string name="settings_title">Settings</string>
     <string name="settings_section_llm_providers">LLM Providers</string>
-    <string name="settings_section_llm_providers_footer">Configure which models the agent uses, manage API keys &amp; OAuth for each provider, and create model groups for fallback or load balancing.</string>
+    <string name="settings_section_llm_providers_footer">Manage provider API keys and endpoints, choose which models the agent uses, and create groups for fallback or load balancing.</string>
     <string name="settings_manage_providers">Manage Providers</string>
-    <string name="settings_manage_providers_subtitle">API keys and OAuth sign-in</string>
+    <string name="settings_manage_providers_subtitle">API keys and model configuration</string>
     <string name="settings_model_groups">Model Groups</string>
     <string name="settings_model_groups_subtitle">Fallback and load balancing</string>
     <string name="settings_token_usage">Token Usage</string>
@@ -107,7 +107,7 @@
     <string name="mcp_add">Add MCP Server</string>
     <string name="mcp_edit">Edit MCP Server</string>
     <string name="mcp_section_servers">Servers</string>
-    <string name="mcp_section_footer">MCP servers let the agent call external tools via RikkaMinis-mcp-cli. Configs are stored in /var/minis/mcp-servers/servers.json (Claude Desktop compatible).</string>
+    <string name="mcp_section_footer">MCP servers let the agent use external tools through minis-mcp-cli. Server settings are stored in /var/minis/mcp-servers/servers.json in the mcpServers format.</string>
     <string name="mcp_empty_title">No MCP servers</string>
     <string name="mcp_empty_action">Add a server with the + button.</string>
     <string name="mcp_transport_stdio">STDIO</string>
@@ -629,7 +629,7 @@
     <string name="perm_a11y_system_ready">Service enabled</string>
     <string name="perm_a11y_system_disabled">Service not enabled</string>
     <string name="perm_allow_minis_config">Allow Configuration Tool</string>
-    <string name="perm_minis_config_desc">When turned off, the agent can no longer read or modify your settings on its own. You can still review any past changes under Logs → Config Changes.</string>
+    <string name="perm_minis_config_desc">When disabled, the agent cannot read or change app settings through minis-config. You can still change settings yourself in Settings. There is no in-app history of configuration changes.</string>
     <string name="perm_section_privacy">Privacy</string>
     <string name="perm_section_media">Media</string>
     <string name="perm_section_system">System</string>
@@ -809,13 +809,13 @@
     <string name="rootfs_repair_description">Restore missing/corrupt bash, readline, and ncurses</string>
     <string name="rootfs_install_label">Install Rootfs</string>
     <string name="rootfs_reset_label">Reset Rootfs</string>
-    <string name="rootfs_reset_description">Delete everything and reinstall</string>
+    <string name="rootfs_reset_description">Reset only the Linux shell environment (rootfs). App settings, conversations and files stored outside the rootfs are kept.</string>
     <string name="rootfs_progress_section">Progress</string>
     <string name="rootfs_result_section">Result</string>
     <string name="rootfs_info_section">Info</string>
     <string name="rootfs_about_title">About Rootfs</string>
     <string name="rootfs_reset_confirm_title">Reset Rootfs?</string>
-    <string name="rootfs_reset_confirm_message">This will delete the entire rootfs. All data will be lost.</string>
+    <string name="rootfs_reset_confirm_message">This will reinstall the Linux shell environment (rootfs). App settings, conversations and files outside the rootfs will be kept.</string>
 
     <!-- T172-A providers / models / settings i18n -->
     <string name="provider_list_providers">Providers</string>
@@ -883,10 +883,10 @@
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">The label is shown in the provider list and model picker.</string>
     <string name="add_provider_credential">Credential</string>
     <string name="add_provider_multi_key_hint">Separate multiple keys with spaces or commas — they rotate automatically (least recently used first).</string>
-    <string name="add_provider_your_key_is_stored_securely_in_encrypted">Your key is stored securely in encrypted storage and never leaves the device.</string>
+    <string name="add_provider_your_key_is_stored_securely_in_encrypted">Your API key is stored encrypted on this device and sent to the configured API endpoint for authentication.</string>
     <string name="add_provider_endpoint">Endpoint</string>
-    <string name="add_provider_endpoint_anthropic_hint">Use the official Anthropic endpoint as-is. For third-party Anthropic-compatible services (e.g. Mimo), the base URL may need a path suffix such as \"/anthropic\" — check your provider\'s docs. The URL is used verbatim with \"/v1/messages\" appended.</string>
-    <string name="add_provider_endpoint_hint">Leave empty to use the default endpoint. \"/v1\" is appended automatically — enter the base host only.</string>
+    <string name="add_provider_endpoint_anthropic_hint">Leave blank to use Anthropic. For a compatible service (such as Mimo), enter its base URL including any required path prefix (such as /anthropic), not the full /v1/messages request URL.</string>
+    <string name="add_provider_endpoint_hint">Leave blank to use the default endpoint. For a custom endpoint, enter the base URL with any required path prefix. /v1 is added if missing at the end.</string>
     <string name="add_provider_endpoint_gemini_hint">Leave empty to use the default Google endpoint. Enter the full base URL including version path.</string>
     <string name="add_provider_custom_api_base_optional">Custom API Base (Optional)</string>
     <!-- T-android-codex-oauth-dns: shown when token-exchange POST to the
@@ -943,7 +943,7 @@
     <string name="quicktest_empty_reply">(empty reply)</string>
     <string name="quicktest_image_unsupported">This model\'s provider doesn\'t support image generation via Quick Test.</string>
     <string name="quicktest_no_image">No image was returned.</string>
-    <string name="quicktest_speech_unavailable">Speech output/transcription testing isn\'t available on Android yet.</string>
+    <string name="quicktest_speech_unavailable">This voice test could not run.</string>
     <string name="modelgroup_speech_output">Speech output</string>
     <string name="modelgroup_speech_transcription">Speech transcription</string>
     <string name="modelgroup_text_generation">Text generation</string>
@@ -958,10 +958,10 @@
     <string name="model_group_detail_always">Always</string>
     <string name="model_group_detail_unavailable">Unavailable</string>
     <string name="model_group_name_saved">Name saved</string>
-    <string name="model_group_routing_fallback_footer">Try models in order. If one fails, advance to the next.</string>
+    <string name="model_group_routing_fallback_footer">Try models in order. The fallback trigger controls when to try the next available model.</string>
     <string name="model_group_routing_loadbalance_footer">Each new message advances to the next model in the group.</string>
-    <string name="model_group_fallback_default_footer">Fall back on rate limits (429) and server errors (5xx) only.</string>
-    <string name="model_group_fallback_always_footer">Advanced: fall back on any error, including network and auth failures. Prefer Default unless you know why you need this.</string>
+    <string name="model_group_fallback_default_footer">Try the next model on rate limits, invalid API keys, or provider errors. Network and temporary errors can also trigger fallback after retries.</string>
+    <string name="model_group_fallback_always_footer">Also try the next model for request errors not covered by Default.</string>
     <string name="model_group_no_models">No models in this group.</string>
     <string name="model_group_model_unavailable">Model no longer available</string>
     <string name="model_group_detail_drag_to_reorder">Drag to reorder</string>
@@ -1003,7 +1003,7 @@
     <!-- T172-A parameterized strings -->
     <string name="add_custom_model_id_footer">Model ID is the API identifier sent to %1$s. Display Name is the friendlier label shown in the picker; defaults to Model ID when left blank.</string>
     <string name="add_custom_model_eg_id_placeholder">e.g. gpt-4o-custom</string>
-    <string name="add_provider_subtitle_openai">Works with Codex, DeepSeek, Moonshot, Groq and other compatible vendors</string>
+    <string name="add_provider_subtitle_openai">OpenAI and compatible services such as DeepSeek, Moonshot, and Groq</string>
     <string name="add_provider_subtitle_anthropic">Works with Claude and Anthropic-protocol-compatible services</string>
     <string name="add_provider_subtitle_gemini">Works with the Gemini series and Google AI Studio</string>
     <string name="add_provider_subtitle_openrouter">Aggregates GPT, Claude, Gemini, Llama and other mainstream models</string>
@@ -1152,7 +1152,7 @@
     <string name="settings_backup">Backup &amp; Restore</string>
     <string name="settings_backup_subtitle">Export or import settings and providers</string>
     <string name="auto_backup_section_title">Automatic backup</string>
-    <string name="auto_backup_section_footer">Runs once a day at first app open. Covers capability (providers, thinking rules, skills, env vars, memory, MCP) and outputs (shared/ files and knowledge-graph data) — chat transcripts are deliberately excluded (agent process byproduct). Includes API keys; local copies stay in app storage, remote copies go to your WebDAV server (newest 3 kept).</string>
+    <string name="auto_backup_section_footer">Runs once daily when the app first comes to the foreground. Includes settings, providers, skills, memory, MCP configuration and shared files; chat history and credentials are excluded (API keys, OAuth tokens, environment-variable values and other secrets). Local copies stay in app storage; WebDAV copies keep the newest 3.</string>
     <string name="auto_backup_enable">Daily automatic backup</string>
     <string name="auto_backup_enable_sub">Backs up automatically the first time the app is opened each day</string>
     <string name="auto_backup_run_now">Back up now</string>
@@ -1225,8 +1225,8 @@
     <string name="backup_done_chat">%1$d session(s), %2$d message(s) restored</string>
     <string name="backup_saved">Backup saved</string>
     <string name="backup_notify_failed">Backup failed</string>
-    <string name="backup_secret_title">Backup will include API keys</string>
-    <string name="backup_secret_body">The exported file contains provider API keys and login credentials, usable by anyone who obtains it. Keep it safe and do not share it. Keys are stored as plain Base64 (not encrypted) and can be read by anyone who has the file.</string>
+    <string name="backup_secret_title">Backup includes API keys and other secrets</string>
+    <string name="backup_secret_body">The exported JSON contains provider API keys and other included secrets in readable, unencrypted form (some values are Base64-encoded, not encrypted). Anyone with the file may be able to use them. Store it safely and do not share it.</string>
     <string name="backup_secret_confirm">Include keys and export</string>
     <string name="backup_secret_without">Without keys</string>
     <string name="backup_done_title">Restore complete</string>
@@ -1260,7 +1260,7 @@
     <string name="mount_add_name_label">Mount name</string>
     <string name="mount_add_name_hint">This will be the folder name under /var/minis/mounts/</string>
     <string name="mount_add_allow_writes">Allow writes</string>
-    <string name="mount_add_allow_writes_desc">When off, file_write/file_edit tools refuse writes; the shell can still bypass this.</string>
+    <string name="mount_add_allow_writes_desc">When off, RikkaMinis file tools and supported shell commands refuse writes to the mount. This is not an OS-level read-only mount; other write paths may not be covered.</string>
     <string name="mount_add_confirm">Add</string>
     <string name="mount_unmount_title">Unmount this folder?</string>
     <string name="mount_unmount_message">The source folder in Files will not be deleted, only the binding.</string>
@@ -1375,9 +1375,9 @@
 
     <!-- T-imgsize: composer-side image-budget Snackbar messages -->
     <string name="image_budget_compressed">Compressed %1$d image(s) before send</string>
-    <string name="image_budget_total_exceeded">Total image size exceeds 25MB; later images dropped</string>
+    <string name="image_budget_total_exceeded">The configured image-size limit was reached; later images were dropped.</string>
     <!-- T-request-imgsize: request-level image-budget Snackbar message -->
-    <string name="image_budget_request_elided">Older %1$d image(s) elided from request to fit 25MB budget</string>
+    <string name="image_budget_request_elided">Older images exceeding the configured request-size limit were omitted: %1$d.</string>
     <string name="composer_swipe_release_to_send">Release to send</string>
     <string name="composer_swipe_release_to_queue">Release to queue</string>
 
@@ -1447,7 +1447,7 @@
     <!-- Spoken substitutions for links during read-aloud (TTS) -->
     <!-- [T-android-voice-correction] Consent + correction UI -->
     <string name="voice_provider_system">System</string>
-    <string name="add_provider_subtitle_kimi">Kimi Coding Plan — sign in with your Kimi account</string>
+    <string name="add_provider_subtitle_kimi">Use a Kimi Coding Plan API key</string>
     <string name="browser_downloads_title">Downloads</string>
     <string name="browser_downloads_clear">Clear</string>
     <string name="browser_downloads_empty">No downloads</string>
@@ -1556,8 +1556,8 @@
     <string name="filepreview_truncated_kb">Showing first %1$d KB of %2$s</string>
     <string name="filepreview_truncated_rows">Showing first %1$d rows of %2$s</string>
     <string name="filepreview_no_app">No app available to open this file.</string>
-    <string name="rootfs_explain_body">The rootfs contains the Alpine Linux filesystem used by the sandbox. Resetting will delete all data and restore to factory state.</string>
-    <string name="rootfs_reset_body">Reset: Delete everything\nNote: persistent data lives in the shared area outside the rootfs and is kept across resets.</string>
+    <string name="rootfs_explain_body">The rootfs contains the Alpine Linux filesystem used by the shell. Resetting it removes and reinstalls that environment; app settings and data stored outside the rootfs are kept.</string>
+    <string name="rootfs_reset_body">Resetting reinstalls the Linux shell environment (rootfs). App settings, conversations and files stored outside it are kept.</string>
     <string name="config_confirm_effect_warning">This may affect later tool calls.</string>
     <string name="config_confirm_effect_info">Reversible, but worth a quick look.</string>
     <string name="chat_copy_code">Copy code</string>
@@ -1651,7 +1651,7 @@
     <string name="chat_tuning_glass_blur_desc">How far the backdrop smears. Rikkahub uses 12 dp for its blur preset and 16 dp for glass.</string>
     <string name="chat_tuning_glass_tint">Glass density</string>
     <string name="chat_tuning_glass_tint_desc">How much of the card colour covers the blur. 0% is pure blur, 100% is the card colour alone (a solid card).</string>
-    <string name="chat_tuning_glass_footer">The on/off switch is in Appearance → Chat appearance. With it off, these two numbers have no effect.</string>    <!-- [feat/chat-tuning-panel-b] Runtime Limits — context/memory & media/tool budget sections. -->
+    <string name="chat_tuning_glass_footer">The Glass switch is in Settings → Appearance, in the Glass section. When off, the blur and tint settings have no effect.</string>    <!-- [feat/chat-tuning-panel-b] Runtime Limits — context/memory & media/tool budget sections. -->
     <string name="appearance_glass_title">Input bar and top bar</string>    <string name="runtime_limits_section_context">Context &amp; memory</string>
     <string name="appearance_section_glass">Glass</string>
     <string name="appearance_glass_footer">Applies to the input bar and the top bar. Blur radius and density are in Chat Tuning; below Android 12 the surfaces stay solid.</string>    <string name="runtime_limits_compact_tail">Auto-compact tail floor (tokens)</string>
@@ -1777,7 +1777,7 @@
     <string name="scheduled_global_switch_subtitle">Master switch; new tasks start disabled</string>
     <string name="scheduled_list_header">Tasks</string>
     <string name="scheduled_list_footer">Tasks run once per day, on the first foreground check inside their window; at most one task runs at a time.</string>
-    <string name="scheduled_empty_hint">No scheduled tasks yet. Tap New task above to create one — for example, a daily morning summary. Tasks start disabled; enable them after creating.</string>
+    <string name="scheduled_empty_hint">No scheduled tasks yet. Tap New task above to create one. Tasks start disabled; enable one when creating it or later in the list. A task runs once per day on the first time the app is opened during its daily window.</string>
     <string name="scheduled_resume">Resume</string>
     <string name="scheduled_state_suspended">%1$d failures in a row — suspended</string>
     <string name="scheduled_state_ok">Last run ok (%1$s)</string>
@@ -1812,12 +1812,12 @@
     <string name="perm_auto_approve_title">Auto-approve mode</string>
     <string name="perm_auto_approve_desc">Apply routine settings changes without asking. Sensitive and destructive changes can still require confirmation.</string>
     <string name="perm_auto_approve_sensitive">Include sensitive settings</string>
-    <string name="perm_auto_approve_sensitive_desc">Also apply provider credentials (API keys, base URLs) without asking. The agent could silently repoint them.</string>
+    <string name="perm_auto_approve_sensitive_desc">Also apply sensitive settings without confirmation. API key changes and destructive actions still require confirmation.</string>
     <string name="perm_auto_approve_privileged">Allow privileged tools</string>
     <string name="perm_auto_approve_privileged_desc">Let the agent use the accessibility and Shizuku command lines (they drive other apps and read the screen).</string>
-    <string name="perm_auto_approve_footer">Off by default. Turning this on stops the confirmation dialog for routine writes and stops permission prompts for agent tools. Every change is still logged under Logs → Config Changes.</string>
+    <string name="perm_auto_approve_footer">Off by default. When enabled, routine changes and permitted tool calls do not prompt. Sensitive settings require the separate option; API key changes and destructive actions always require confirmation. Review the agent’s report in chat; there is no in-app change history or revert list.</string>
     <string name="perm_auto_approve_confirm_title">Turn on auto-approve?</string>
-    <string name="perm_auto_approve_confirm_text">Routine settings changes will be applied without asking, and agent tools will run without permission prompts. Sensitive settings (provider API keys) and destructive changes still ask. You can turn this off any time.</string>
+    <string name="perm_auto_approve_confirm_text">Routine settings changes will be applied without asking, and permitted tool calls will not prompt. Sensitive settings also require enabling their separate option. API key changes and destructive actions always require confirmation.</string>
     <string name="perm_auto_approve_confirm_on">Turn on</string>
     <string name="perm_section_zone_delete_guard">Protected folders</string>
     <string name="perm_zone_delete_guard_title">Protect folders from bulk deletion</string>
