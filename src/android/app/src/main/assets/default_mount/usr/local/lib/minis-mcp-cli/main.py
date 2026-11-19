@@ -84,6 +84,54 @@ def _require_server(name, pretty):
     return server
 
 
+# [R3-B F-10] The OAuth credentials for a server live OUTSIDE servers.json, in
+# three sibling files the native side and the in-guest transport both read:
+#
+#   <CONFIG_DIR>/oauth/<name>.json       issued tokens (Bearer / refresh)
+#   <CONFIG_DIR>/oauth/<name>.json.tmp   a writer mid-rename
+#   <CONFIG_DIR>/oauth/<name>.secret     client-secret handoff seeded by `add`
+#
+# Deleting a server, or re-adding one under the same name, used to leave all
+# three behind, so the next same-name server inherited the previous server's
+# Bearer token (`transport/http.py::_oauth_access_token` reads the file on
+# every call) and sent it to the new URL — a cross-server credential leak, plus
+# plaintext credentials left on disk for a server the user deleted.
+def _oauth_credential_files(name):
+    """Every path an OAuth credential for [name] can occupy."""
+    d = os.path.join(config.CONFIG_DIR, "oauth")
+    return [
+        os.path.join(d, "%s.json" % name),
+        os.path.join(d, "%s.json.tmp" % name),
+        os.path.join(d, "%s.secret" % name),
+    ]
+
+
+def _clear_oauth_credentials(name, pretty):
+    """Remove [name]'s OAuth bridge + client-secret handoff files.
+
+    Callers MUST run this BEFORE servers.json is rewritten ([R3-B F-10]):
+    the new config must never be visible next to the old server's tokens, not
+    even for the window between the two writes.
+
+    A missing file is not an error (nothing was ever authorized). A file that
+    exists and cannot be removed IS one: the whole point is that no credential
+    survives the delete/overwrite, so a silent failure would restore the leak.
+    """
+    failures = []
+    for path in _oauth_credential_files(name):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            failures.append("%s: %s" % (path, exc))
+    if failures:
+        _fail(
+            "failed to clear OAuth credentials for %s (%s)" % (name, "; ".join(failures)),
+            "MCP_ERROR", name, pretty,
+        )
+
+
 # --- daemon lifecycle + IPC -------------------------------------------------
 
 def _read_daemon_port():
@@ -462,6 +510,12 @@ def cmd_add(args, pretty):
     # `<oauth-dir>/<name>.secret`, oauth bridge) — whitelist it at the write
     # path, refuse rather than guess.
     validate_server_name(name, "--name")
+    # [R3-B F-10] A same-name add is an OVERWRITE: the previous server's issued
+    # tokens and client-secret handoff must be gone before the new config lands,
+    # or the new server sends the old server's Bearer token (see
+    # _clear_oauth_credentials). Runs before the secret is seeded below, else
+    # this would delete the secret we are about to write.
+    _clear_oauth_credentials(name, pretty)
     url = _pop_opt(args, "--url")
     command = _pop_opt(args, "--command")
     note = _pop_opt(args, "--note")
@@ -593,6 +647,13 @@ def cmd_remove(args, pretty):
         _fail("usage: remove <server>", "PARSE_ERROR", None, pretty)
     if not config.remove_server(name):
         _fail("server not found: %s" % name, "NOT_FOUND", name, pretty)
+    # [R3-B F-10] The config entry is gone; its OAuth bridge + client-secret
+    # handoff files are not, unless removed here. `transport/http.py` reads
+    # `<oauth-dir>/<name>.json` on every call, so a later server re-using the
+    # name would send the deleted server's Bearer token. The native side's
+    # delete() already purges these (MCPOAuthStore.purge); the CLI path never
+    # went through it.
+    _clear_oauth_credentials(name, pretty)
     _emit({"removed": name}, pretty)
 
 
