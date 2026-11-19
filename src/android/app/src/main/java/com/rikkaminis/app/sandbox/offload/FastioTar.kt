@@ -931,7 +931,12 @@ internal class TarReader(private val source: InputStream) {
                 }
                 'x', 'g' -> {
                     paxHeaders++
-                    applyPax(readText(member.size))
+                    // [FULLSCAN-1119 F-14] UTF-8 calibration: the record length in
+                    // a pax header counts BYTES, so the parser must walk bytes.
+                    // Decoding first and then counting in chars is what swapped
+                    // CJK names for "????" (loop stopped early) or glued the next
+                    // record onto the path.
+                    applyPax(readRaw(member.size))
                     continue
                 }
                 else -> {
@@ -990,7 +995,8 @@ internal class TarReader(private val source: InputStream) {
         return block
     }
 
-    private fun readText(size: Long): String {
+    /** Read a metadata member's payload raw (size-checked, padding skipped). */
+    private fun readRaw(size: Long): ByteArray {
         if (size <= 0 || size > MAX_LONG_NAME_BYTES) throw EOFException("implausible long-name size $size")
         val bytes = ByteArray(size.toInt())
         var filled = 0
@@ -1000,8 +1006,12 @@ internal class TarReader(private val source: InputStream) {
             filled += read
         }
         skipPadding(size)
-        return bytes.toString(StandardCharsets.UTF_8).trimEnd('\u0000')
+        return bytes
     }
+
+    /** GNU `L`/`K` payload: a NUL-terminated name, i.e. plain text. */
+    private fun readText(size: Long): String =
+        readRaw(size).toString(StandardCharsets.UTF_8).trimEnd('\u0000')
 
     private fun skipBytes(count: Long) {
         var left = count
@@ -1018,25 +1028,68 @@ internal class TarReader(private val source: InputStream) {
         if (pad > 0) skipBytes(pad)
     }
 
-    private fun applyPax(text: String) {
-        // Records are "LENGTH KEY=VALUE\n"; we honour only the two path
-        // overrides and ignore the rest (mtime/size/uid are advisory here).
+    /**
+     * Parse a pax extended-header payload (typeflag `x`/`g`).
+     *
+     * Record grammar (POSIX pax / GNU tar): `"<LEN> <KEY>=<VALUE>\n"` where
+     * `LEN` is the record's total length in **BYTES** — the decimal digits of
+     * `LEN` themselves, the separating space, `KEY`, `=`, `VALUE` and the
+     * trailing newline.
+     *
+     * [FULLSCAN-1119 F-14] The offsets below are byte offsets into [payload]
+     * and only the key/value slices are decoded as UTF-8. The previous version
+     * scanned a decoded `String` while advancing by the byte count, which is
+     * only correct while every byte is one char:
+     *   - a 139-byte `path=` record inside a 55-char header made
+     *     `cursor + length > text.length` stop the loop ⇒ the long CJK name was
+     *     DROPPED and the (truncated) ustar name was used instead;
+     *   - a shorter CJK path overshot the record end ⇒ the value swallowed the
+     *     following record (`中文.txt\n20 mtime=1700000000`).
+     * Both are covered by `OffloadBoundsTest` (pax UTF-8 cases).
+     */
+    private fun applyPax(payload: ByteArray) {
         var cursor = 0
-        while (cursor < text.length) {
-            val space = text.indexOf(' ', cursor)
+        while (cursor < payload.size) {
+            val space = indexOfByte(payload, PAX_SPACE, cursor)
             if (space < 0) break
-            val length = text.substring(cursor, space).toIntOrNull() ?: break
-            if (length <= 0 || cursor + length > text.length) break
-            val record = text.substring(space + 1, cursor + length).trimEnd('\n')
-            val eq = record.indexOf('=')
-            if (eq > 0) {
-                when (record.substring(0, eq)) {
-                    "path" -> paxPath = record.substring(eq + 1)
-                    "linkpath" -> paxLink = record.substring(eq + 1)
+            val length = parsePaxLength(payload, cursor, space) ?: break
+            // A record must fit inside this payload: `length` counts from
+            // [cursor] inclusive. (Also keeps the Int addition in range.)
+            if (length <= space - cursor + 1 || length > payload.size - cursor) break
+            val recordEnd = cursor + length
+            // The newline is part of LEN but not part of the value.
+            val bodyEnd = if (payload[recordEnd - 1] == PAX_NEWLINE) recordEnd - 1 else recordEnd
+            val eq = indexOfByte(payload, PAX_EQUALS, space + 1).takeIf { it in (space + 1) until bodyEnd }
+            if (eq != null) {
+                when (String(payload, space + 1, eq - space - 1, StandardCharsets.UTF_8)) {
+                    "path" -> paxPath = String(payload, eq + 1, bodyEnd - eq - 1, StandardCharsets.UTF_8)
+                    "linkpath" -> paxLink = String(payload, eq + 1, bodyEnd - eq - 1, StandardCharsets.UTF_8)
                 }
             }
-            cursor += length
+            cursor = recordEnd
         }
+    }
+
+    private fun indexOfByte(buf: ByteArray, target: Byte, from: Int): Int {
+        var i = from
+        while (i < buf.size) {
+            if (buf[i] == target) return i
+            i++
+        }
+        return -1
+    }
+
+    /** Decimal digits in `[from, until)`, or null when the field is not one. */
+    private fun parsePaxLength(buf: ByteArray, from: Int, until: Int): Int? {
+        if (until <= from) return null
+        var value = 0L
+        for (i in from until until) {
+            val c = buf[i].toInt() - '0'.code
+            if (c < 0 || c > 9) return null
+            value = value * 10 + c
+            if (value > Int.MAX_VALUE) return null
+        }
+        return value.toInt()
     }
 }
 
@@ -1290,3 +1343,8 @@ private const val MAX_REPORTED_SKIPS = 20
  * 升级触发: an archive that legitimately needs it fails with a clear error.
  */
 private const val MAX_LONG_NAME_BYTES = 1L * 1024 * 1024
+
+// [FULLSCAN-1119 F-14] pax record delimiters — parsed as bytes, never as chars.
+private val PAX_SPACE = ' '.code.toByte()
+private val PAX_EQUALS = '='.code.toByte()
+private val PAX_NEWLINE = '\n'.code.toByte()

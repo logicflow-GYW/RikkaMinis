@@ -24,6 +24,7 @@ import android.webkit.WebView
 import androidx.core.content.FileProvider
 import com.rikkaminis.app.browser.SafeWebViewClient
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
+import com.rikkaminis.app.offload.PopupWindowPolicy
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.util.saveOutcome
 import kotlinx.coroutines.CompletableDeferred
@@ -1068,6 +1069,23 @@ class BrowserUseManager(
                     emptyMap(), "File not found: $host$path".byteInputStream())
             }
             val mimeType = guessMimeType(localFile.name)
+            // [FULLSCAN-1119 F-22] Bounded preview read. The HTML path used to
+            // `readBytes()` the whole file, then decode it to a String, then
+            // re-encode it — three full copies of the file in the UI process,
+            // with no ceiling, for a `minis://` URL the agent can point at
+            // anything under /var/minis (a big log, a blob). Oversized now fails
+            // with a readable page instead of a blank screen or an OOM.
+            val previewCap = com.rikkaminis.app.sandbox.offload.PayloadSizePolicy.MAX_FILE_BYTES
+            val previewBytes = localFile.length()
+            if (!com.rikkaminis.app.offload.MinisPreviewPolicy.fitsPreview(previewBytes, previewCap)) {
+                val msg = com.rikkaminis.app.offload.BoundedFileRead
+                    .tooLargeMessage(previewBytes, previewCap)
+                Log.w(TAG, "minis:// preview refused: $host$path — $msg")
+                return android.webkit.WebResourceResponse(
+                    "text/plain", "UTF-8", 413, "Payload Too Large", emptyMap(),
+                    ("$msg\n\n$host$path\n").byteInputStream(),
+                )
+            }
             // For HTML mainframe responses, inject a `<meta viewport>` matching
             // the agent's session viewport when the page doesn't declare one.
             // Without this, Android WebView falls back to a hardcoded 980 CSS
@@ -1093,11 +1111,14 @@ class BrowserUseManager(
      * viewport untouched so author intent (e.g. `width=1200`) wins.
      */
     private fun ensureMetaViewport(html: ByteArray, cssWidth: Int): java.io.InputStream {
-        val text = String(html, Charsets.UTF_8)
-        if (text.contains("name=\"viewport\"", ignoreCase = true) ||
-            text.contains("name='viewport'", ignoreCase = true)) {
-            return text.toByteArray(Charsets.UTF_8).inputStream()
+        // [FULLSCAN-1119 F-22] A page that already declares a viewport is passed
+        // through as the ORIGINAL bytes — the old code decoded the whole file
+        // to a String and re-encoded it even when nothing needed injecting,
+        // which was a second full copy of every previewed HTML page.
+        if (com.rikkaminis.app.offload.MinisPreviewPolicy.declaresViewport(html)) {
+            return html.inputStream()
         }
+        val text = String(html, Charsets.UTF_8)
         // user-scalable=yes is the default but state it explicitly so a
         // future change to WebView defaults can't silently disable
         // pinch-zoom on the agent's auto-injected viewport.
@@ -1112,6 +1133,19 @@ class BrowserUseManager(
             "$meta$text"
         }
         return rewritten.toByteArray(Charsets.UTF_8).inputStream()
+    }
+
+    /**
+     * [FULLSCAN-1119 F-16] Answer a refused popup explicitly.
+     *
+     * Sending the Message with a NULL transport is the only way to tell WebView
+     * "the host will not open a window": it then releases the popup instead of
+     * waiting forever for a WebView that is never coming.
+     */
+    private fun declinePopup(resultMsg: Message, transport: WebView.WebViewTransport?, hasHandler: Boolean) {
+        Log.w(TAG, PopupWindowPolicy.declineReason(hasHandler))
+        transport?.webView = null
+        runCatching { resultMsg.sendToTarget() }
     }
 
     private fun setupWebChromeClient() {
@@ -1166,8 +1200,33 @@ class BrowserUseManager(
             override fun onCreateWindow(
                 view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message
             ): Boolean {
-                onNewWindow?.invoke(resultMsg)
-                return onNewWindow != null
+                // [FULLSCAN-1119 F-16] The return value and the message must
+                // agree. WebView treats `true` as "the host owns this popup" and
+                // then WAITS for a Message carrying a WebView transport; the
+                // pre-fix code returned `true` on every refusal path too (tab
+                // cap reached / pool disposed), and the tab-pool handler simply
+                // returned early without sending anything — so the popup's
+                // WebContents was never released, once per window.open().
+                val handler = onNewWindow
+                if (handler == null) {
+                    declinePopup(resultMsg, transport = resultMsg.obj as? WebView.WebViewTransport, hasHandler = false)
+                    return false
+                }
+                // Grab the transport BEFORE invoking: the handler may send the
+                // message, and a sent Message can be recycled (its obj cleared)
+                // by the time we look again.
+                val transport = resultMsg.obj as? WebView.WebViewTransport
+                handler.invoke(resultMsg)
+                return when (PopupWindowPolicy.decide(hasHandler = true, transportHasWebView = transport?.webView != null)) {
+                    PopupWindowPolicy.Action.ACCEPTED -> true
+                    PopupWindowPolicy.Action.DECLINE -> {
+                        // The handler refused (tab cap / disposed). Answer with an
+                        // explicit null transport so WebView tears the popup down
+                        // instead of holding it forever, and decline the request.
+                        declinePopup(resultMsg, transport, hasHandler = true)
+                        false
+                    }
+                }
             }
 
             override fun onCloseWindow(window: WebView) {
