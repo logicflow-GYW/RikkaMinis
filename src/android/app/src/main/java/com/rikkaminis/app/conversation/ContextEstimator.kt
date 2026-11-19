@@ -77,19 +77,29 @@ object ContextEstimator {
             message.contentParts.forEach { part ->
                 when (part) {
                     is AgentContentPart.Text -> total += ContextCompactor.estimateTokens(part.text)
-                    is AgentContentPart.ToolResult -> total += ContextCompactor.estimateTokens(part.content)
+                    is AgentContentPart.ToolResult -> {
+                        total += ContextCompactor.estimateTokens(part.content)
+                        // [fullscan-1119 F-12] A tool result can carry an image
+                        // (read_image / screenshot): the bytes ride in
+                        // `imageData`, and this branch used to count ONLY the
+                        // text `content`. A 1 MiB tool screenshot therefore
+                        // cost ~0 tokens — the local budget chain (preflight /
+                        // auto-compact / trim) read "context still fits" while
+                        // the wire request was already over the window and the
+                        // provider answered 400. Count it exactly like every
+                        // other image path: [imageDataTokenEstimate] is the ONE
+                        // formula.
+                        part.imageData?.let { total += imageDataTokenEstimate(it.size) }
+                    }
                     is AgentContentPart.ToolUse -> total += ContextCompactor.estimateTokens(part.input.toString())
                     is AgentContentPart.ImageData ->
-                        // base64 = ceil(4N/3) 字符；4 字符/token ≈ N 字节 1.33 token 上界
-                        total += (part.data.size.toLong() * 4 / 3 + ContextCompactor.CHARS_PER_TOKEN - 1) /
-                            ContextCompactor.CHARS_PER_TOKEN
+                        total += imageDataTokenEstimate(part.data.size)
                 }
             }
         } else {
             total += ContextCompactor.estimateTokens(message.content)
             for (img in message.imageParts) {
-                total += (img.data.size.toLong() * 4 / 3 + ContextCompactor.CHARS_PER_TOKEN - 1) /
-                    ContextCompactor.CHARS_PER_TOKEN
+                total += imageDataTokenEstimate(img.data.size)
             }
             for (audio in message.audioParts) {
                 total += ContextCompactor.estimateTokens(audio.base64Data)
@@ -103,4 +113,20 @@ object ContextEstimator {
     /** 工具 schema 按实际 wire 格式（OpenAI function 定义）估算。 */
     fun estimateToolSchemaTokens(tools: List<AgentToolDefinition>): Long =
         tools.sumOf { ContextCompactor.estimateTokens(it.toOpenAIJson().toString()) }
+
+    /**
+     * [fullscan-1119 F-12] Image bytes → token upper bound.
+     *
+     * base64 = ceil(4N/3) chars; [ContextCompactor.CHARS_PER_TOKEN] chars/token.
+     * Deliberately an over-estimate (the file header explains why: early
+     * compaction beats a 400 from the window).
+     *
+     * Every image path goes through THIS function — [AgentContentPart.ImageData],
+     * the legacy `imageParts` list, and `ToolResult.imageData`. The object's
+     * whole rationale is "one formula, no second copy"; three inline copies is
+     * how the tool-result branch silently drifted to zero.
+     */
+    private fun imageDataTokenEstimate(bytes: Int): Long =
+        (bytes.toLong() * 4 / 3 + ContextCompactor.CHARS_PER_TOKEN - 1) /
+            ContextCompactor.CHARS_PER_TOKEN
 }

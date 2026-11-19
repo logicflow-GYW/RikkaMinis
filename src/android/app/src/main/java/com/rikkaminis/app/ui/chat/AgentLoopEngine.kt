@@ -4610,7 +4610,18 @@ internal class AgentLoopEngine(
                         finishedAllToolBlocks = loopState.allToolBlocks,
                     )
                 } catch (e: Exception) {
-                    AppLogger.warning(TAG_STREAM, "host.injectQueuedPromptsAsNewTurn failed: ${e.message}")
+                    // [fullscan-1119 F-08] Same policy as the switch path:
+                    // a CancellationException is a Stop, not a failed
+                    // injection. Swallowing it here continued the loop into
+                    // the next turn after the user stopped — and that next
+                    // turn could start a compaction behind the stop (the
+                    // F-05 family, second entry). Real failures keep exactly
+                    // the audited behaviour: log and fall through to the
+                    // normal next-turn dispatch so a genuinely queued prompt
+                    // is never dropped.
+                    rethrowCancellationOr(e) { failure ->
+                        AppLogger.warning(TAG_STREAM, "host.injectQueuedPromptsAsNewTurn failed: ${failure.message}")
+                    }
                     null
                 }
                 if (handled != null) {
