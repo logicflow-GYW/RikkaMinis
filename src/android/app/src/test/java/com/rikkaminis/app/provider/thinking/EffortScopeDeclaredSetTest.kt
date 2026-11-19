@@ -368,6 +368,61 @@ class EffortScopeDeclaredSetTest {
         )
     }
 
+    // ── [fix/effort-truth-1119b] learnedWithinOrNull — 「没学到」必须能被调用方看见 ──
+    //
+    // [learnedWithin] folds "nothing learned" into the declaration, which is right for the
+    // two wire call sites (their fallback IS the declaration) and WRONG for every caller
+    // that has another source behind it: `GatewayEffortTruth.resolveTier` has the measured
+    // table, `ChatViewModel.withLearnedCeiling` has "leave the catalog ceiling alone".
+    // Routing those through `learnedWithin` short-circuits both (4 F-02 / 4 F-01).
+
+    @Test
+    fun `with nothing learned the narrowed read answers null, not the declaration`() {
+        // The whole reason this variant exists: a non-null answer here would make
+        // `resolveTier` skip `tiersFor` and hand the wire a stale models.dev row.
+        assertNull(EffortTierLearner.learnedWithinOrNull("https://gw.example/v1", "never-seen", listOf("low", "high")))
+        assertNull(EffortTierLearner.learnedWithinOrNull("https://gw.example/v1", "never-seen", null))
+    }
+
+    @Test
+    fun `an expired entry answers null so the caller keeps its own fallback`() {
+        val model = "stale-model"
+        learnedFile(
+            """"https://gw.example/v1/$model":{"tiers":["low","medium"],"shape":"ceiling","at":${System.currentTimeMillis() - 40L * 24 * 60 * 60 * 1000}}""",
+        )
+        assertNull(EffortTierLearner.learned("https://gw.example/v1", model))
+        assertNull(EffortTierLearner.learnedWithinOrNull("https://gw.example/v1", model, listOf("low", "high")))
+    }
+
+    @Test
+    fun `the narrowed read keeps the two shapes apart`() {
+        // CEILING → narrowed by the declaration; ENUM → one-hand truth, untouched.
+        EffortTierLearner.record("https://gw.example/v1", """{"model":"c1"}""", thinkingLevel400)
+        assertEquals(
+            listOf("low", "high"),
+            EffortTierLearner.learnedWithinOrNull("https://gw.example/v1", "c1", listOf("low", "high")),
+        )
+        EffortTierLearner.record(
+            "https://gw.example/v1", """{"model":"e1"}""",
+            """{"error":"field ReasoningEffort invalid, should be one of: low, high, xhigh"}""",
+        )
+        assertEquals(
+            listOf("low", "high", "xhigh"),
+            EffortTierLearner.learnedWithinOrNull("https://gw.example/v1", "e1", listOf("low")),
+        )
+    }
+
+    @Test
+    fun `learnedWithin is exactly the OrNull read with the declaration as its fallback`() {
+        // One rule, one implementation: an edit that lets the two drift would re-open
+        // the half-fixed state this round is closing.
+        assertNull(EffortTierLearner.learnedWithinOrNull("https://gw.example/v1", "m9", listOf("high")))
+        assertEquals(
+            listOf("high"),
+            EffortTierLearner.learnedWithin("https://gw.example/v1", "m9", listOf("high")),
+        )
+    }
+
     // ── wiring: both wire paths key on the scope and narrow by the declaration ──
     //
     // The pure functions above can be correct while the call sites still pass a bare

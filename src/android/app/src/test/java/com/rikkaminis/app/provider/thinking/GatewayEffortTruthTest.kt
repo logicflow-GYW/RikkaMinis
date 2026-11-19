@@ -1,11 +1,14 @@
 package com.rikkaminis.app.provider.thinking
 
 import com.rikkaminis.app.data.model.ThinkingLevel
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
+import java.io.File
 
 /**
  * [T-sensenova-effort-enum] Pins the gateway-measured effort enums and the wire decision
@@ -20,6 +23,25 @@ import org.junit.Test
 class GatewayEffortTruthTest {
 
     private val host = "token.sensenova.cn"
+
+    private lateinit var dir: File
+    private lateinit var effortsFile: File
+
+    @Before
+    fun setUpLearner() {
+        // An initialized-but-empty learner: `entryFor` really runs (it would return null
+        // on a null target without even looking), which is what makes the "nothing
+        // learned" arms below mean something.
+        dir = File(System.getProperty("java.io.tmpdir"), "get-${java.util.UUID.randomUUID()}")
+        effortsFile = File(dir, "gateway_efforts.json")
+        EffortTierLearner.initFile(effortsFile)
+    }
+
+    @After
+    fun tearDownLearner() {
+        EffortTierLearner.reset()
+        dir.deleteRecursively()
+    }
 
     @Test
     fun `only the measured hosts are treated as sensenova`() {
@@ -266,5 +288,81 @@ class GatewayEffortTruthTest {
         assertFalse(GatewayEffortTruth.isMeasuredHost("api.senseaudio.cn.evil.test"))
         assertEquals("medium", GatewayEffortTruth.resolveTier("api.openai.com", "any-model", ThinkingLevel.MEDIUM, null))
         assertEquals("medium", GatewayEffortTruth.resolveTier("api.senseaudio.cn.evil.test", "any-model", ThinkingLevel.MEDIUM, null))
+    }
+
+    // ── [fix/effort-truth-1119b] 4 F-02: the learned set is read NARROWED, and its
+    //    absence must not swallow the measured table ─────────────────────────────
+
+    private val thinkingLevel400 =
+        """{"error":{"message":"Thinking level is unsupported: THINKING_LEVEL_XHIGH","type":"api_error"}}"""
+
+    @Test
+    fun `a learned ceiling is narrowed by the declaration before it clamps`() {
+        // The finding: a CEILING entry is the ladder PREFIX below the refused tier, so it
+        // names `medium` even for a model that never declared it. Reading it raw put that
+        // tier back on the wire — the same 400 the entry came from. `api.senseaudio.cn`
+        // rejects `medium`, which is exactly the value in the middle of this prefix.
+        val id = "deepseek-v4.1-flash"
+        EffortTierLearner.record(saHost, """{"model":"$id"}""", thinkingLevel400)
+        // Precondition: the raw read really contains the undeclared tier (otherwise this
+        // test would pass for the wrong reason).
+        assertTrue(EffortTierLearner.learned(saHost, id)!!.contains("medium"))
+
+        assertEquals(
+            "low",
+            GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.MEDIUM, listOf("low", "high")),
+        )
+        // And the declared tiers keep working through the same narrowed set.
+        assertEquals(
+            "high",
+            GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.HIGH, listOf("low", "high")),
+        )
+    }
+
+    @Test
+    fun `a learned ceiling with nothing declared keeps its old width`() {
+        // The narrowing must not be a blanket restriction: a model the catalog never
+        // described still gets the full weight of the gateway's own answer.
+        val id = "deepseek-v4.1-flash"
+        EffortTierLearner.record(saHost, """{"model":"$id"}""", thinkingLevel400)
+        assertEquals("medium", GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.MEDIUM, null))
+        assertEquals("high", GatewayEffortTruth.resolveTier(saHost, id, ThinkingLevel.XHIGH, null))
+    }
+
+    @Test
+    fun `an enumerated learned set is NOT narrowed on this path either`() {
+        // One-hand truth: the gateway spelled its legal set out. Narrowing it by the
+        // catalog is what the learner exists to prevent (sensenova under-declares).
+        val id = "glm-5.2"
+        EffortTierLearner.record(
+            host, """{"model":"$id"}""",
+            """{"error":"field ReasoningEffort invalid, should be one of: low, high, xhigh"}""",
+        )
+        assertEquals(
+            "xhigh",
+            GatewayEffortTruth.resolveTier(host, id, ThinkingLevel.XHIGH, listOf("low")),
+        )
+    }
+
+    @Test
+    fun `with nothing learned the measured table still outranks the declaration`() {
+        // THE trap of this round: `learnedWithin` answers the DECLARATION when nothing is
+        // learned, so routing this read through it would short-circuit `tiersFor` and hand
+        // the wire the stale models.dev row the measurement exists to correct. The read is
+        // the `OrNull` variant for exactly this arm.
+        val unrelated = "glm-5.2"
+        EffortTierLearner.record(saHost, """{"model":"$unrelated"}""", thinkingLevel400)
+
+        assertEquals(
+            "xhigh",
+            GatewayEffortTruth.resolveTier(
+                host, "sensenova-6.8-flash-lite", ThinkingLevel.XHIGH,
+                listOf("none", "low", "medium", "high"),
+            ),
+        )
+        // Sanity: that model has no entry of its own, so the table — not the declaration
+        // and not the last resort — is what answered.
+        assertNull(EffortTierLearner.learned(host, "sensenova-6.8-flash-lite"))
+        assertTrue(GatewayEffortTruth.tiersFor(host, "sensenova-6.8-flash-lite")!!.contains("xhigh"))
     }
 }

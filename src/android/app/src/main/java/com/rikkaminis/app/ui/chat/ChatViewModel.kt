@@ -2337,7 +2337,16 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.find { it.id == id }
             }
             if (entry != null) {
-                return withLearnedCeiling(entry.effectiveMaxThinkingLevel, expectedModelId = entry.model.id)
+                // [fix/effort-truth-1119b] 4 F-01: the declaration must come from the SAME
+                // object the wire reads (`effectiveModel` enriches the base row first, then
+                // folds the overrides). `entry.model` alone never touches models.dev, so
+                // every built-in row would answer null here and the narrowing would silently
+                // do nothing.
+                return withLearnedCeiling(
+                    entry.effectiveMaxThinkingLevel,
+                    expectedModelId = entry.model.id,
+                    declaredEffortValues = ModelsDevApi.effectiveModel(entry).reasoningEffortValues,
+                )
             }
             // [deep-audit-1044 B-04] The no-entry fallback is reached by a
             // group-resolved turn and by any snapshot written before the
@@ -2348,7 +2357,14 @@ class ChatViewModel(
             // through the same live exit as the other readers — it enriches
             // the snapshot exactly like the entry branch does.
             val model = liveEffectiveModel() ?: return ThinkingLevel.XHIGH
-            return withLearnedCeiling(model.catalogMaxThinkingLevel, expectedModelId = model.id)
+            // [fix/effort-truth-1119b] 4 F-01: `liveEffectiveModel` already holds the
+            // enriched+overridden model, i.e. the same declaration the provider hands the
+            // wire — pass it straight through.
+            return withLearnedCeiling(
+                model.catalogMaxThinkingLevel,
+                expectedModelId = model.id,
+                declaredEffortValues = model.reasoningEffortValues,
+            )
         }
 
     /**
@@ -2369,8 +2385,19 @@ class ChatViewModel(
      * explicit tap). The scope — not the bare host — is what keeps two instances of
      * one gateway on different ports / path prefixes from sharing a ceiling
      * ([fix/effort-key-1119]).
+     *
+     * [fix/effort-truth-1119b] The learned set is narrowed by [declaredEffortValues]
+     * before it reaches `lowerCeiling` ([EffortTierLearner.learnedWithinOrNull]), which
+     * is the rule the wire already applies. Without it a CEILING-shaped answer — a
+     * ladder PREFIX that names tiers this model never declared — could RAISE the picker
+     * above the declaration, and the user's next request at that tier was the 400 the
+     * entry was learned from.
      */
-    private fun withLearnedCeiling(declared: ThinkingLevel, expectedModelId: String?): ThinkingLevel {
+    private fun withLearnedCeiling(
+        declared: ThinkingLevel,
+        expectedModelId: String?,
+        declaredEffortValues: List<String>?,
+    ): ThinkingLevel {
         val provider = currentProvider ?: return declared
         // The switch paths set `_activeEntryId` before `currentProvider`; until the
         // second assignment lands, this provider still fronts the PREVIOUS member.
@@ -2379,8 +2406,18 @@ class ChatViewModel(
         // report the catalog ceiling and let `_providerGeneration` re-derive right after.
         if (expectedModelId != null && provider.model.id != expectedModelId) return declared
         val scope = provider.requestScope ?: return declared
-        val learned = EffortTierLearner.learned(scope, expectedModelId ?: provider.model.id)
-            ?: return declared
+        // [fix/effort-truth-1119b] 4 F-01 — the other half of [fix/effort-key-1119] F-02.
+        // The wire narrows a CEILING-shaped learned set by the model's declaration
+        // (`OpenAIProvider` → `learnedWithin`); this read used the raw `learned()`, so a
+        // prefix naming tiers this model never declared still lifted the picker's ceiling
+        // to them and every request made at that tier came back 400. Same rule, one
+        // reader: `learnedWithinOrNull` returns null when nothing is learned, which is
+        // what keeps `?: return declared` (catalog ceiling untouched) byte-identical.
+        val learned = EffortTierLearner.learnedWithinOrNull(
+            scope,
+            expectedModelId ?: provider.model.id,
+            declaredEffortValues,
+        ) ?: return declared
         return ThinkingEffortLadder.lowerCeiling(declared, learned)
     }
 
