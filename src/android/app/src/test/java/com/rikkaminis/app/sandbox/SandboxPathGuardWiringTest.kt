@@ -284,6 +284,95 @@ class SandboxPathGuardWiringTest {
 
     // ── helpers ─────────────────────────────────────────────────────────
 
+    // ── R2 F-04/F-06: the canonical-path guards stay wired ──────────────
+
+    /**
+     * [R2 F-04] `deleteItem` must consult the CANONICAL verdict before it
+     * deletes, and that verdict must not be handed root lists it cannot use.
+     *
+     * The behavioural arms live in
+     * [com.rikkaminis.app.ui.sandbox.SymlinkBoundaryTest]; this pins the
+     * delegation — a later "simplify the guards" edit that drops the canonical
+     * check (or passes it empty root lists, which read as "nothing allowed" but
+     * also as "nothing refused" once someone flips the polarity) turns this
+     * red.
+     */
+    @Test
+    fun `the browser delete consults the canonical verdict before removing anything`() {
+        val body = declarationSlice(readRepoFile(FILE_BROWSER), "fun deleteItem(")
+        val verdictAt = body.indexOf("canonicalDeleteRefusal(")
+        assertTrue(
+            "deleteItem() lost the canonical-path verdict (the F-04 defect):\n$body",
+            verdictAt > 0,
+        )
+        val deleteAt = body.indexOf("internalGuestTmpDeleteTreeNoFollow(")
+        assertTrue("the delete call is gone from deleteItem():\n$body", deleteAt > verdictAt)
+        assertTrue(
+            "the verdict must be handed the browser's own roots:\n$body",
+            body.contains("allowedRoots = sandboxRoots()"),
+        )
+        assertTrue(
+            "the verdict must be handed the read-only zones:\n$body",
+            body.contains("readOnlyRoots = readOnlyRoots()"),
+        )
+        assertTrue(
+            "the verdict must be given the entry's resolved target, not its name:\n$body",
+            body.contains("target = item.hostPath"),
+        )
+    }
+
+    /** [R2 F-05] Every path the browser resolves must pass through the bound. */
+    @Test
+    fun `the browser resolution arms all bound their answer`() {
+        val src = readRepoFile(FILE_BROWSER)
+        val from = declarationSlice(src, "fun from(")
+        assertTrue(
+            "FileItem.from no longer bounds a link's target:\n$from",
+            from.contains("boundedSymlinkTarget("),
+        )
+        val listing = declarationSlice(src, "fun resolveListingHostDir(")
+        assertTrue(
+            "resolveListingHostDir lost its sandbox bound:\n$listing",
+            listing.contains("sandboxRoots") && listing.contains("boundedSymlinkTarget("),
+        )
+        val hostTarget = declarationSlice(src, "fun resolveHostSymlinkTarget(")
+        assertTrue(
+            "resolveHostSymlinkTarget lost its bound (the F-05 mechanism):\n$hostTarget",
+            hostTarget.contains("boundedSymlinkTarget("),
+        )
+        assertFalse(
+            "resolveHostSymlinkTarget must not answer a raw path unbounded:\n$hostTarget",
+            hostTarget.contains("return File(rawTarget).takeIf"),
+        )
+    }
+
+    /** [R2 F-06] Every session-delete site goes through the guarded helper. */
+    @Test
+    fun `no session delete site bypasses the no-follow guarded helper`() {
+        val src = readRepoFile(SESSION_STORE)
+        // Every `.deleteRecursively()` call in the file must be gone: the
+        // helper is the only removal path (it walks without following links and
+        // refuses a target outside its root).
+        val literal = src.lines().filter { line ->
+            !line.trimStart().startsWith("*") &&
+                !line.trimStart().startsWith("//") &&
+                line.contains(".deleteRecursively()")
+        }
+        assertTrue(
+            "a session delete still calls File.deleteRecursively() (the F-06 defect):\n$literal",
+            literal.isEmpty(),
+        )
+        val helper = declarationSlice(src, "fun deleteRecursivelyChecked(")
+        assertTrue(
+            "the delete helper lost the no-follow walker:\n$helper",
+            helper.contains("internalGuestTmpDeleteTreeNoFollow("),
+        )
+        assertTrue(
+            "the delete helper lost its canonical bound:\n$helper",
+            helper.contains("canonicalFile"),
+        )
+    }
+
     private fun readRepoFile(relative: String): String {
         var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
         while (dir != null) {
@@ -423,6 +512,8 @@ class SandboxPathGuardWiringTest {
     }
 
     private companion object {
+        private const val SESSION_STORE =
+            "src/android/app/src/main/java/com/rikkaminis/app/data/storage/SessionFileStore.kt"
         private const val PROOT_KERNEL =
             "src/android/app/src/main/java/com/rikkaminis/app/sandbox/PRootKernel.kt"
         private const val FILE_BROWSER =
