@@ -117,7 +117,15 @@ decide(origin, appForeground, hasLiveWork):
 
 ## 5 CI
 
-（提交后回填：run id / head_sha / 五 job 结论 / unit-tests 与 scan-gate 计数）
+| 项 | 值 |
+|---|---|
+| run | **#3326 / `44455380218`** |
+| head_sha | `68883327fc23b834364fdd5954f6e6cded812790` |
+| 三方 sha | 本地 `git rev-parse HEAD` == `git ls-remote origin` == `run.head_sha`：**三者逐字符一致** |
+| 五 job | `build-apk` / `lint` / `scan-gate` / `unit-tests` / `publish` 全 **success** |
+| unit-tests | **9850 行 PASSED / 0 真 FAILED**（日志里 4 行含 `FAILED` 字样的都是 `… PASSED` 的用例名：`slot denied produces FAILED without calling provider` 等）；新增 26 条逐条 PASSED 已核（`ForegroundStartPolicyTest` 14 条、`DialogShowGateTest` 12 条） |
+| scan-gate | `Summary: 115 passed, 0 failed`；日志 **`scripts/scan/** untouched in this push — skipping the fixture self-test`** ⇒ 本支未动门，绿不含夹具证据（按机制跳过，不是跳过判据） |
+| publish | job success，`tag` / `release` 两步 skipped（main 门控） |
 
 ## 6 残余与边界
 
