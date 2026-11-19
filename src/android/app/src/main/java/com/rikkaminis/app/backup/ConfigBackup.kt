@@ -1950,6 +1950,23 @@ object ConfigBackup {
         // its list raw — skipping there would lose it entirely.
         val serverListMergedInStage7 = mcpRepo != null && mcpArr != null && mcpArr.length() > 0
         if (mcpArr != null && mcpRepo != null) {
+            // [FULLSCAN-1119 A / F-01] A credentials-free payload carries the
+            // MCP server's SHAPE with its credential values blanked
+            // ([stripMcpSecretValues]: headers/env → "", `--token=` left
+            // empty, URL query/userinfo → `[redacted…]`). Importing that
+            // verbatim over a same-id server on this device replaced the live
+            // `Authorization` header / env token with the empty string and the
+            // server silently stopped authenticating — and the daily auto
+            // backup is always `includeSecrets=false`, so this hit every
+            // unattended restore. `ImportResult.hadSecrets` only reports; it
+            // never protected anything.
+            //
+            // So for a secrets-free payload, restore the live credential
+            // VALUES into the backup entry before importing (see
+            // [McpCredentialFields.mergeRedactedMcpServerPayload]). With
+            // `includesSecrets=true` the payload carries real values and is
+            // imported untouched — that direction must stay a plain overwrite.
+            val payloadHasSecrets = root.optBoolean("includesSecrets", false)
             var needsReauth = 0
             for (i in 0 until mcpArr.length()) {
                 val srv = mcpArr.optJSONObject(i) ?: continue
@@ -1961,6 +1978,24 @@ object ConfigBackup {
                     ?: srv.optString("id", "").ifEmpty { "server #${i + 1}" }
                 val entry = inner?.optJSONObject(id) ?: srv
                 try {
+                    // With `includesSecrets=true` the payload carries real
+                    // values and is imported untouched — that direction must
+                    // stay a plain overwrite.
+                    if (!payloadHasSecrets) {
+                        // Only an EXISTING same-id server has live values worth
+                        // keeping; a genuinely new server imports the redacted
+                        // entry (its user is asked to refill — same as before).
+                        val local = mcpRepo.servers.value.firstOrNull { it.id == id }
+                        val localJson = local?.let { s ->
+                            runCatching { JSONObject(mcpRepo.exportServerJSON(s)) }.getOrNull()
+                        }
+                        // Mutates `srv` in place; a shape/id mismatch is a
+                        // no-op, which leaves the redacted entry to import
+                        // exactly as before.
+                        if (localJson != null) {
+                            McpCredentialFields.mergeRedactedMcpServerPayload(srv, localJson)
+                        }
+                    }
                     val imported = mcpRepo.importJSON(srv.toString())
                     if (imported.isEmpty()) {
                         skipped.add("MCP server \"$id\": import rejected")
@@ -2870,53 +2905,37 @@ object ConfigBackup {
             }
         }
         // [review D-3] Credential carriers beyond headers/env:
-        // 1. `args` entries of the `--token=…` / `--api-key=…` shape (stdio
-        //    servers that take the credential as a CLI flag).
-        // 2. `url` query values for sensitive keys (?key=/token=/api_key=…),
-        //    mirroring LLMRequestLog.SENSITIVE_QUERY_KEYS.
+        // 1. `args` entries whose flag name IS a credential (the flag list,
+        //    not a spelling — see [McpCredentialFields.redactSecretArgs]).
+        // 2. `url` credentials: sensitive query values AND userinfo.
         // Both are blanked only when they actually carry a credential shape;
         // benign values survive so the restored entry stays wired to its
         // command/host (only the secret needs refilling).
+        //
+        // [FULLSCAN-1119 A / F-02] This used to judge `args` with a full-match
+        // regex on `--key=value` and to look at the URL only when it contained
+        // `?`. Two credential carriers therefore rode into every unattended
+        // auto backup in the clear: the space-separated flag form
+        // (`--token abc`, and `--api-key abc def`) and URL userinfo
+        // (`https://user:pass@host/`). The rules now live in
+        // [McpCredentialFields] as flag-name equivalence classes so they can be
+        // pinned on a plain JVM, and so `--tokenize` / `--port 8080` provably
+        // stay untouched.
         val args = obj.optJSONArray("args")
         if (args != null) {
-            for (i in 0 until args.length()) {
-                val v = args.optString(i, "")
-                if (SECRET_ARG_RE.matches(v)) args.put(i, v.substringBefore('=') + "=")
+            val raw = (0 until args.length()).map { args.optString(it, "") }
+            val redacted = McpCredentialFields.redactSecretArgs(raw)
+            if (redacted != raw) {
+                val out = JSONArray()
+                for (a in redacted) out.put(a)
+                obj.put("args", out)
             }
         }
         val url = obj.optString("url", "")
-        if (url.contains("?")) {
-            obj.put("url", redactUrlQuery(url))
+        if (url.isNotEmpty()) {
+            val redacted = McpCredentialFields.redactUrlCredentials(url)
+            if (redacted != url) obj.put("url", redacted)
         }
-    }
-
-    /** `--flag=value` shapes whose flag name smells like a credential.
-     *  Full-match regex — `\S.*` requires a value of >= 1 non-space char,
-     *  so `--token=` (already blanked) and `--port=8080` are untouched. */
-    private val SECRET_ARG_RE = Regex(
-        """(?i)^--(token|api[_-]?key|secret|password|access[_-]?token)\s*=\S.*""",
-    )
-
-    /** Sensitive URL query keys — same list as LLMRequestLog.SENSITIVE_QUERY_KEYS. */
-    private val SENSITIVE_QUERY_KEYS = setOf(
-        "key", "api_key", "apikey", "api-key", "token", "access_token",
-        "secret", "password", "signature", "sig", "auth", "authorization",
-    )
-
-    private fun redactUrlQuery(url: String): String {
-        val qIdx = url.indexOf('?')
-        val query = url.substring(qIdx + 1)
-        val fragIdx = query.indexOf('#')
-        val (qBody, frag) = if (fragIdx >= 0) query.substring(0, fragIdx) to query.substring(fragIdx) else query to ""
-        val redacted = qBody.split('&').joinToString("&") { pair ->
-            val eq = pair.indexOf('=')
-            if (eq > 0) {
-                val k = pair.substring(0, eq)
-                val v = pair.substring(eq + 1)
-                if (k.lowercase() in SENSITIVE_QUERY_KEYS) "$k=[redacted:${v.length}]" else pair
-            } else pair
-        }
-        return url.substring(0, qIdx + 1) + redacted + frag
     }
 
     internal fun sanitizeChatParts(partsJson: String?, slimText: Boolean = true): String? {
@@ -3464,6 +3483,7 @@ internal suspend fun importChatSections(
             val s = chatSessionsArr.optJSONObject(i) ?: continue
             val label = s.optString("title", "session #${i + 1}").ifEmpty { "session #${i + 1}" }
             try {
+                val scalars = ChatRestoreFields.readSessionScalars(s)
                 val session = ChatSessionEntity(
                     id = s.optString("id"),
                     title = s.optString("title").ifEmpty { null },
@@ -3479,9 +3499,17 @@ internal suspend fun importChatSections(
                     ),
                     source = s.optString("source").ifEmpty { null },
                     memoryEnabled = s.optInt("memoryEnabled", 1),
-                    pinnedAt = if (s.has("pinnedAt")) s.optLong("pinnedAt") else null,
+                    // [FULLSCAN-1119 A / F-20] All three are nullable columns
+                    // whose null means "not set". `has()` is TRUE for an
+                    // explicit JSON null, so `if (has)` + `optLong` /
+                    // `optString` turned "unset" into 0 / "" — a restored
+                    // session came back pinned at the epoch, with an empty
+                    // thinking override, and with an empty (non-null) reasoning
+                    // blob instead of none. [ChatRestoreFields] holds the
+                    // tri-state rule so it is pinned on a plain JVM.
+                    pinnedAt = scalars.pinnedAt,
                     editCount = s.optInt("editCount", 0),
-                    thinkingOverride = if (s.has("thinkingOverride")) s.optString("thinkingOverride") else null,
+                    thinkingOverride = scalars.thinkingOverride,
                 )
                 if (chatRepo.dao.getSession(session.id) == null) {
                     chatRepo.dao.insertSession(session)
@@ -3517,10 +3545,11 @@ internal suspend fun importChatSections(
                     ),
                     createdAt = m.optLong("createdAt"),
                     sortOrder = m.optInt("sortOrder", i),
-                    reasoningContent = if (m.has("reasoningContent")) {
-                        ChatRepository.capReasoningContentForRow(m.optString("reasoningContent"))
-                    } else {
-                        null
+                    // [FULLSCAN-1119 A / F-20] An explicit `"reasoningContent":
+                    // null` used to be capped into `""` and stored as a present
+                    // empty blob; absent and null both mean "no reasoning".
+                    reasoningContent = ChatRestoreFields.readReasoningContent(m)?.let {
+                        ChatRepository.capReasoningContentForRow(it)
                     },
                 )
                 if (chatRepo.dao.getMessage(message.id) == null) {
