@@ -10,6 +10,23 @@ object BrowserUseJS {
     /** Maximum get_text payload sent across the browser/offload boundary. */
     const val MAX_GET_TEXT_CHARS = 900 * 1024
 
+    /**
+     * [R3-B F-04] Maximum response body `fetch()` will carry back across the
+     * JS bridge. Bounded for two reasons, both measured in the renderer:
+     *
+     *  - the body is base64-encoded and handed to the Android side as one
+     *    string, so a 30–100 MB file arrives as a ~40–130 MB string;
+     *  - the pre-fix JS built that string one byte at a time
+     *    (`binary += String.fromCharCode(bytes[i])`), which is quadratic in the
+     *    body size.
+     *
+     * 16 MiB keeps the encoded payload (~21.3 MiB of base64) under the app's
+     * existing blob-download budget of 24 MiB, and is large enough for any
+     * payload a browser tool realistically needs. Over the limit the fetch
+     * FAILS with a structured error — it never returns a truncated half file.
+     */
+    const val MAX_FETCH_BYTES = 16 * 1024 * 1024
+
     fun jsQuote(s: String): String = buildString {
         for (ch in s) {
             when (ch) {
@@ -515,14 +532,92 @@ object BrowserUseJS {
         // realistic carrier.
         val escaped = url.replace("\\", "\\\\").replace("\"", "\\\"")
             .replace("\n", "\\n").replace("\r", "\\r")
+        // [R3-B F-04] The byte budget travels INTO the script: the limit has to
+        // be enforced while the body is still being read, not after it has
+        // already been pulled into the renderer.
         return """
             (async function() {
                 try {
+                    const MAX_BYTES = $MAX_FETCH_BYTES;
                     const resp = await fetch("$escaped");
-                    const buf = await resp.arrayBuffer();
-                    const bytes = new Uint8Array(buf);
+                    // [R3-B F-04] Content-Length is a promise, not a fact —
+                    // a chunked response has none — so it is only used to fail
+                    // EARLY. The authoritative check is the running byte count
+                    // below, which also covers a lying or absent header.
+                    const declared = resp.headers.get('content-length');
+                    if (declared !== null) {
+                        const declaredBytes = parseInt(declared, 10);
+                        if (isFinite(declaredBytes) && declaredBytes > MAX_BYTES) {
+                            try { if (resp.body && resp.body.cancel) resp.body.cancel(); } catch(e) {}
+                            return JSON.stringify({
+                                error: 'response too large: ' + declaredBytes + ' bytes (limit ' + MAX_BYTES + ')',
+                                tooLarge: true,
+                                size: declaredBytes
+                            });
+                        }
+                    }
+                    if (!resp.body) {
+                        // No body at all (204/205/HEAD): the pre-fix path
+                        // returned an empty payload here too — keep that, the
+                        // Android side answers it as an empty 2xx success.
+                        return JSON.stringify({
+                            base64: '',
+                            contentType: resp.headers.get('content-type') || '',
+                            contentDisposition: resp.headers.get('content-disposition') || '',
+                            status: resp.status,
+                            url: resp.url,
+                            size: 0
+                        });
+                    }
+                    if (typeof resp.body.getReader !== 'function') {
+                        // A body that cannot be streamed cannot be bounded
+                        // either — refuse instead of guessing.
+                        return JSON.stringify({
+                            error: 'response body is not streamable',
+                            size: 0
+                        });
+                    }
+                    // [R3-B F-04] Streamed read with a running byte budget. The
+                    // body is pulled in CHUNKS (never one arrayBuffer), and the
+                    // limit is checked as it grows, so a 100 MB download is
+                    // refused after the first chunk over the limit instead of
+                    // being materialised in full first. Over the limit the
+                    // reader is cancelled and the fetch FAILS — a truncated
+                    // half-file must never look like a successful result.
+                    const reader = resp.body.getReader();
+                    const chunks = [];
+                    let total = 0;
+                    while (true) {
+                        const part = await reader.read();
+                        if (part.done) break;
+                        if (part.value) {
+                            total += part.value.length;
+                            if (total > MAX_BYTES) {
+                                try { reader.cancel(); } catch(e) {}
+                                return JSON.stringify({
+                                    error: 'response too large: over ' + MAX_BYTES + ' bytes',
+                                    tooLarge: true,
+                                    size: total
+                                });
+                            }
+                            chunks.push(part.value);
+                        }
+                    }
+                    const merged = new Uint8Array(total);
+                    let offset = 0;
+                    for (let i = 0; i < chunks.length; i++) {
+                        merged.set(chunks[i], offset);
+                        offset += chunks[i].length;
+                    }
+                    // Build the binary string in bounded slices, not one byte
+                    // at a time: the per-byte concat is what made the pre-fix
+                    // path quadratic in the body size.
+                    const SLICE = 0x8000;
                     let binary = '';
-                    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                    for (let i = 0; i < merged.length; i += SLICE) {
+                        binary += String.fromCharCode.apply(
+                            null, merged.subarray(i, Math.min(i + SLICE, merged.length)));
+                    }
                     const b64 = btoa(binary);
                     return JSON.stringify({
                         base64: b64,
@@ -530,7 +625,7 @@ object BrowserUseJS {
                         contentDisposition: resp.headers.get('content-disposition') || '',
                         status: resp.status,
                         url: resp.url,
-                        size: bytes.length
+                        size: total
                     });
                 } catch(e) {
                     return JSON.stringify({error: e.message});

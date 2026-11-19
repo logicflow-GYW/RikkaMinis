@@ -3,6 +3,24 @@ package com.rikkaminis.app.mcp.oauth
 import org.json.JSONObject
 
 /**
+ * [R3-B F-17] `JSONObject.optString(key)` answers the four-character literal
+ * `"null"` for a JSON null — it only falls back to its default when the key is
+ * ABSENT. Every nullable string read in this package therefore turned
+ * `"refresh_token": null` into a token called "null", `"scopes": null` into a
+ * scope named "null", and `"redirect_uri": null` into a redirect URI that
+ * `URI(...)` parses with no host.
+ *
+ * Not `private` on purpose: the same read appears in [MCPOAuthConfig],
+ * [MCPOAuthController] and [MCPOAuthStore], and three private copies is how the
+ * sixth occurrence gets missed. One helper, same package.
+ *
+ * A present-but-blank value is null as well — every caller already treated a
+ * blank string that way, so this keeps the old semantics for real values.
+ */
+internal fun JSONObject.optStringOrNull(key: String, fallback: String = ""): String? =
+    if (isNull(key)) null else optString(key, fallback).ifBlank { null }
+
+/**
  * [T-android-mcp-oauth] Non-secret OAuth configuration for an MCP server
  * (Static mode: user-supplied client credentials, PKCE Authorization Code
  * flow). Round-tripped inside the server entry in servers.json. The client
@@ -55,18 +73,18 @@ data class MCPOAuthConfig(
 
         /** First non-blank value among [keys], or "" — the alias walk. */
         private fun JSONObject.firstNonBlank(keys: List<String>): String =
-            keys.firstNotNullOfOrNull { key -> optString(key, "").ifBlank { null } } ?: ""
+            keys.firstNotNullOfOrNull { key -> optStringOrNull(key) } ?: ""
 
         /** Parse from the `oauth` object inside a server entry. Returns null
          *  when the object is absent or lacks the required endpoints. */
         fun fromJson(obj: JSONObject?): MCPOAuthConfig? {
             if (obj == null) return null
             val config = MCPOAuthConfig(
-                mode = obj.optString("mode", "static").ifBlank { "static" },
+                mode = obj.optStringOrNull("mode") ?: "static",
                 clientId = obj.firstNonBlank(CLIENT_ID_KEYS),
                 authorizationEndpoint = obj.firstNonBlank(AUTH_ENDPOINT_KEYS),
                 tokenEndpoint = obj.firstNonBlank(TOKEN_ENDPOINT_KEYS),
-                scopes = obj.optString("scopes", "").ifBlank { null },
+                scopes = obj.optStringOrNull("scopes"),
                 redirectUri = obj.firstNonBlank(REDIRECT_URI_KEYS).ifBlank { null },
             )
             // An oauth block with no endpoints is noise, not configuration.

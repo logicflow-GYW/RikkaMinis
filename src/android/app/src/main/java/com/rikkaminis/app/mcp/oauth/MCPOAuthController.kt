@@ -60,11 +60,15 @@ class MCPOAuthController(private val context: Context) {
             return Result.Failed("OAuth is not fully configured (client id + endpoints required).")
         }
         val redirect = redirectUri(oauth)
-        val redirectHost = runCatching { URI(redirect).host?.lowercase() }.getOrNull()
-        if (redirectHost != "localhost" && redirectHost != "127.0.0.1") {
-            return Result.Failed("Redirect URI must be a loopback address, e.g. $DEFAULT_REDIRECT_URI.")
-        }
-        val port = runCatching { URI(redirect).port.takeIf { it > 0 } }.getOrNull() ?: LOOPBACK_PORT
+        // [R3-B F-18] The authorization server will send the browser back to
+        // this exact URI. The callback server is a plain-HTTP loopback socket
+        // on [LOOPBACK_PORT], so a redirect that differs from that endpoint —
+        // no port (implicit :80), https, a non-loopback host — validates as a
+        // loopback address and then never arrives: the flow hangs for the full
+        // five-minute timeout. Refuse BEFORE the browser opens.
+        redirectEndpointError(redirect)?.let { return Result.Failed(it) }
+        // The check above pins the port, so the listener port is the constant.
+        val port = LOOPBACK_PORT
         val resource = McpPkce.canonicalResourceUri(serverUrl)
         val pkce = McpPkce.newPkce()
         val authUrl = McpPkce.buildAuthorizationUrl(
@@ -167,7 +171,7 @@ class MCPOAuthController(private val context: Context) {
                     context, server,
                     MCPOAuthStore.StoredTokens(
                         accessToken = access,
-                        refreshToken = json.optString("refresh_token", "").ifBlank { null },
+                        refreshToken = json.optStringOrNull("refresh_token"),
                         expiresAtMs = expiresAt,
                     ),
                 )
@@ -178,7 +182,7 @@ class MCPOAuthController(private val context: Context) {
                     context, server,
                     MCPOAuthStore.BridgePayload(
                         accessToken = access,
-                        refreshToken = json.optString("refresh_token", "").ifBlank { null },
+                        refreshToken = json.optStringOrNull("refresh_token"),
                         expiresAtSeconds = if (expiresAt > 0) expiresAt / 1000 else 0L,
                         tokenEndpoint = oauth.tokenEndpoint,
                         clientId = oauth.clientId,
@@ -236,5 +240,38 @@ class MCPOAuthController(private val context: Context) {
          *  54545 so a concurrent login never collides. Mirrors iOS 54546. */
         const val LOOPBACK_PORT = 54546
         const val DEFAULT_REDIRECT_URI = "http://localhost:$LOOPBACK_PORT/callback"
+
+        /**
+         * [R3-B F-18] Why [redirect] is NOT the endpoint the callback server
+         * actually listens on, or null when it is.
+         *
+         * The pre-fix check only looked at the host, so `http://localhost/cb`
+         * (implicit :80) and `https://localhost:54546/cb` both passed — and
+         * both are undeliverable: the server is a plain-HTTP socket bound to
+         * [listenPort], the Custom Tab cannot answer TLS on it, and the flow
+         * waits out the whole 5-minute timeout. Anything that is not
+         * `http://<loopback>:<listenPort>/...` is refused up front.
+         */
+        internal fun redirectEndpointError(
+            redirect: String,
+            listenPort: Int = LOOPBACK_PORT,
+        ): String? {
+            val uri = runCatching { URI(redirect) }.getOrNull()
+                ?: return "Redirect URI is not a valid URI: $redirect"
+            if (uri.scheme?.lowercase() != "http") {
+                return "Redirect URI must use http:// — the callback server is a plain " +
+                    "HTTP loopback socket, e.g. $DEFAULT_REDIRECT_URI."
+            }
+            val host = uri.host?.lowercase()
+            if (host != "localhost" && host != "127.0.0.1") {
+                return "Redirect URI must be a loopback address (localhost or 127.0.0.1), " +
+                    "e.g. $DEFAULT_REDIRECT_URI."
+            }
+            if (uri.port != listenPort) {
+                return "Redirect URI must name port $listenPort — that is where the " +
+                    "callback server listens, e.g. $DEFAULT_REDIRECT_URI."
+            }
+            return null
+        }
     }
 }
