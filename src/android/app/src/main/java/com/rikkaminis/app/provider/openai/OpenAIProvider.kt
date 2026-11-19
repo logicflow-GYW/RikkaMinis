@@ -128,6 +128,24 @@ class OpenAIProvider constructor(
      */
     var thinkingRuleInstanceId: String? = null
 
+    /**
+     * [fix/r2-fastmode-1119 / F-19] Main-process Fast Mode answer for THIS call,
+     * when the caller that dispatched the request sent one.
+     *
+     * Background: [com.rikkaminis.app.data.FastModePrefs] is primed once per
+     * process and its SharedPreferences listener does not cross process
+     * boundaries, so in `:modelservice` the context-free `isEnabled()` can serve
+     * a startup-era snapshot for the whole worker lifetime. The dispatcher now
+     * carries the main process's value on every request; the two assembly sites
+     * in ModelExecutionService stamp it here.
+     *
+     * Tri-state by design: `null` = no value carried (in-process call, or an
+     * older caller) → fall back to the local cache. `true`/`false` = explicit
+     * main-process answer, which outranks the cache. This is the ONLY Fast Mode
+     * decision point in the provider — do not add a second read site.
+     */
+    internal var fastModeOverride: Boolean? = null
+
     companion object {
         /**
          * [T-toolinput-sample-1012] Granularity of the "→ ToolInputDelta"
@@ -3326,7 +3344,10 @@ class OpenAIProvider constructor(
         // through. Ineligible upstreams ignore the
         // field or silently downgrade (receipt visible via the
         // response.completed service_tier log).
-        if (com.rikkaminis.app.data.FastModePrefs.isEnabled() &&
+        // [fix/r2-fastmode-1119 / F-19] The carried override wins over the
+        // process-local cache; `null` (nothing carried) keeps the old behaviour.
+        val fastMode = fastModeOverride ?: com.rikkaminis.app.data.FastModePrefs.isEnabled()
+        if (fastMode &&
             model.id.contains("gpt", ignoreCase = true)
         ) {
             body.put("service_tier", "priority")

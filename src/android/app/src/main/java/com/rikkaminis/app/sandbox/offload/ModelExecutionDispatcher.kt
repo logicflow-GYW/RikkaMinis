@@ -298,6 +298,16 @@ object ModelExecutionDispatcher {
             }
             if (thinkingLevel != ThinkingLevel.OFF) put("thinking_level", thinkingLevel.name)
             if (streaming) put("streaming", true)
+            // [fix/r2-fastmode-1119 / F-19] Tri-state on purpose. FastModePrefs is
+            // primed once per PROCESS (MinisApp.onCreate), and the SharedPreferences
+            // listener that re-primes it does not cross process boundaries — so a
+            // long-lived :modelservice keeps serving its own startup snapshot while
+            // the main process has already flipped the toggle. Present-only (the
+            // `enhanced_cache` shape above) cannot express "the user turned it OFF":
+            // an absent key is indistinguishable from an older client. Always write
+            // the boolean, both values; the worker treats an ABSENT key as "old
+            // caller, fall back to its own cache".
+            put("fast_mode", com.rikkaminis.app.data.FastModePrefs.isEnabled())
             // [FIX-1 / F-191] Present-only: an off toggle stays absent so the
             // payload is byte-identical to pre-fix for every user who never
             // enabled it.
