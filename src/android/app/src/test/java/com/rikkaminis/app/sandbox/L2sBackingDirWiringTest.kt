@@ -78,7 +78,7 @@ class L2sBackingDirWiringTest {
             Regex("(?m)^\\s*clearRootfsForReinstall\\(rootfsDir\\)\\s*$").findAll(src).count(),
         )
         val reset = src.substringAfter("suspend fun reset(): Unit").substringBefore("fun getRootfsSize")
-        assertTrue("manual reset must force the install choke point", reset.contains("installIfNeeded(forceReinstall = true)"))
+        assertTrue("manual reset must force the install choke point", reset.contains("installIfNeededLocked(forceReinstall = true)"))
         assertFalse(
             "RootfsManager must not recursively delete the rootfs and its L2S carrier",
             Regex("(?m)^\\s*rootfsDir\\.deleteRecursively\\(\\)\\s*$").containsMatchIn(src),

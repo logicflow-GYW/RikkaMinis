@@ -412,6 +412,15 @@ object PRootKernel {
     internal val MOUNT_GUARD_CMDS =
         listOf("touch", "tee", "cp", "mv", "mkdir", "rm", "rmdir", "ln", "dd")
 
+    // [FULLSCAN-1119 R2 F-07] Commands whose write target may be an ANCESTOR of
+    // a read-only mount and still reach the mount's contents. A recursive
+    // delete and a rename both traverse the tree they are given, so
+    // `rm -rf /var/minis/mounts` (or `mv /var/minis/mounts /tmp/x`) destroys
+    // host files inside every read-only bind. `touch`/`mkdir`/`tee`/`cp`/`ln`
+    // only create or write NEW names at that level, so they stay allowed — the
+    // ancestor rule would otherwise refuse `touch /var/minis/x` for no reason.
+    internal val MOUNT_GUARD_ANCESTOR_CMDS = setOf("rm", "rmdir", "mv")
+
     // Guest path of the read-only prefix list the wrappers read at run time.
     // [audit3 F-07] hardcoded unwritable too — an absent list makes every check
     // pass, so deleting it was the cheapest full bypass.
@@ -1414,6 +1423,9 @@ object PRootKernel {
             |# $GUARD_MARKER — reject writes into read-only mounted folders.
             |# Auto-installed by MinisApp PRootKernel (T219-4).
             |cfg=$MOUNT_GUARD_CFG_LINUX_PATH
+            |# [FULLSCAN-1119 R2 F-07] 1 for the commands that can reach INSIDE a
+            |# directory they are handed (rm/rmdir/mv); see MOUNT_GUARD_ANCESTOR_CMDS.
+            |ancestor_guard=${if (name in MOUNT_GUARD_ANCESTOR_CMDS) 1 else 0}
             |canon_out=""
             |# [audit3 F-07] POSIX-lexical canonicalization: collapses `//`, `/./`,
             |# `/../` and a trailing `/`, and resolves RELATIVE paths against the
@@ -1475,12 +1487,38 @@ object PRootKernel {
             |    if [ ! -f "${'$'}cfg" ]; then
             |        return 0
             |    fi
+            |    # [FULLSCAN-1119 R2 F-07] The target may be an ANCESTOR of a
+            |    # read-only mount. `rm -rf /var/minis/mounts` (or `mv
+            |    # /var/minis/mounts /tmp/x`) matched no prefix, was allowed
+            |    # through, and the recursive delete walked INTO the bind mount and
+            |    # removed host files the mount is supposed to protect. `/` is the
+            |    # same defect at full scale and matches no `/*` pattern below, so
+            |    # it is refused explicitly.
+            |    if [ "${'$'}ancestor_guard" = 1 ] && [ "${'$'}resolved" = "/" ]; then
+            |        echo "$name: ${'$'}1: / contains read-only mounted folders — writes are disabled (toggle in Settings → Mount External Folders)" >&2
+            |        return 1
+            |    fi
             |    while IFS= read -r prefix; do
             |        [ -z "${'$'}prefix" ] && continue
             |        case "${'$'}resolved" in
             |            "${'$'}prefix"|"${'$'}prefix"/*)
             |                echo "$name: ${'$'}1: read-only mounted folder — writes are disabled (toggle in Settings → Mount External Folders)" >&2
             |                return 1;;
+            |        esac
+            |        # The mirror case: the target CONTAINS the mount. A recursive
+            |        # write recreates every path under it, but a recursive delete
+            |        # and a rename both reach the mount's contents, so the same
+            |        # refusal applies — only to `rm`/`mv`/`rmdir` (the commands
+            |        # that destroy their target); `cp -r <dir>` into a directory
+            |        # that merely CONTAINS a read-only mount is left alone, because
+            |        # it writes new names beside the mount instead of through it.
+            |        case "${'$'}ancestor_guard" in
+            |            1)
+            |                case "${'$'}prefix" in
+            |                    "${'$'}resolved"/*)
+            |                        echo "$name: ${'$'}1: contains a read-only mounted folder (${'$'}prefix) — writes are disabled (toggle in Settings → Mount External Folders)" >&2
+            |                        return 1;;
+            |                esac;;
             |        esac
             |    done < "${'$'}cfg"
             |    return 0

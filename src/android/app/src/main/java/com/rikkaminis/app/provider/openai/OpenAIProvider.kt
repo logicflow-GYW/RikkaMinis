@@ -15,6 +15,7 @@ import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.data.model.acceptsImageInput
 import com.rikkaminis.app.data.model.ImageInputDecision
 import com.rikkaminis.app.data.model.imageInputDecision
+import com.rikkaminis.app.debug.LLMRequestLog
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.ProviderBoundary
 import com.rikkaminis.app.provider.TOOL_LOG_INPUT_STEP_CHARS
@@ -53,6 +54,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import okhttp3.EventListener
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -434,6 +436,13 @@ class OpenAIProvider constructor(
         .eventListenerFactory { com.rikkaminis.app.network.ProviderHealthTraceListener(model.id, model.displayName) }
         .build()
 
+    // [F-09] The second hop may carry opaque, vendor-specific signing fields.
+    // Keep it out of the provider trace (URL and raw failure details) and out
+    // of the provider health counters, but keep the same pool and timeouts.
+    private val imageDownloadClient by lazy {
+        client.newBuilder().eventListener(EventListener.NONE).build()
+    }
+
     /** Detect OpenRouter base URL. */
     private val isOpenRouter: Boolean = basePath.contains("openrouter.ai")
 
@@ -725,7 +734,7 @@ class OpenAIProvider constructor(
                 } ?: false)
             com.rikkaminis.app.logging.AppLogger.info(
                 "OpenAIProvider",
-                "[T321] → REQ url=${request.url} model=${model.id} stream=${body.optBoolean("stream", false)} " +
+                "[T321] → REQ url=${LLMRequestLog.redactURL(request.url.toString())} model=${model.id} stream=${body.optBoolean("stream", false)} " +
                     "headerKeys=${request.headers.names()} authPresent=$authPresent " +
                     "messages=$msgsLen tools=$toolsLen temp=$temp maxTokens=$maxTok hasSystem=$hasSystem " +
                     "useResponsesAPI=${!usesChatCompletionsAPI} bodyLen=${bodyStr.length}"
@@ -1527,10 +1536,11 @@ class OpenAIProvider constructor(
             // ChatViewModel.toolCalls empty: the agent loop sees no tool calls, exits,
             // and the UI hangs with the tool thumbnail spinning while the stop button
             // disappears (T247 root cause; same path hit by T237 DeepSeek truncation).
-            for ((itemId, acc) in responsesToolCalls) {
+            // The map key is only for lookup: when item.id was absent it is call_id.
+            for (acc in responsesToolCalls.values) {
                 if (acc.callId.isNotEmpty() && acc.name.isNotEmpty()) {
                     val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
-                    val combined = combineResponsesAPIIds(acc.callId, itemId)
+                    val combined = combineResponsesAPIIds(acc.callId, acc.itemId)
                     com.rikkaminis.app.logging.AppLogger.warning(
                         "OpenAIProvider",
                         "Stream ended mid-tool-call id=$combined name=${acc.name} argsLen=${acc.args.length} — flushing as ToolCallComplete (T248)",
@@ -1770,7 +1780,7 @@ class OpenAIProvider constructor(
 
         com.rikkaminis.app.logging.AppLogger.info(
             "OpenAIProvider",
-            "[ModelUseRoute] route=raw-passthrough method=$verb url=$url " +
+            "[ModelUseRoute] route=raw-passthrough method=$verb url=${LLMRequestLog.redactURL(url)} " +
                 "bodyKeys=[${bodyObject?.keys()?.asSequence()?.sorted()?.joinToString(",") ?: ""}] " +
                 "headerOverrides=[${headers.keys.sorted().joinToString(",")}]",
         )
@@ -1877,7 +1887,7 @@ class OpenAIProvider constructor(
 
             com.rikkaminis.app.logging.AppLogger.info(
                 "OpenAIProvider",
-                "[ModelUseRoute] → images/generations url=$url model=${model.id} n=$n " +
+                "[ModelUseRoute] → images/generations url=${LLMRequestLog.redactURL(url)} model=${model.id} n=$n " +
                     "size=$size quality=$quality respFormat=${if (triedWithoutFormat) "<none>" else "b64_json"}",
             )
 
@@ -1970,7 +1980,7 @@ class OpenAIProvider constructor(
                         // close() sat after bytes(), so an IOException there
                         // skipped it and leaked the connection instead of
                         // returning it to the pool.
-                        client.newCall(dlReq).execute().use { dlResp ->
+                        imageDownloadClient.newCall(dlReq).execute().use { dlResp ->
                             // [R5-E1 E-F-05] The SECOND hop carries its own
                             // status code and nothing was reading it: only the
                             // size ceiling and a non-empty body were checked, so
@@ -1984,13 +1994,11 @@ class OpenAIProvider constructor(
                             // anywhere: the classic M7 false success.
                             if (!GeneratedImageVerdict.downloadAccepted(dlResp.code)) {
                                 lastDownloadStatus = dlResp.code
-                                // The URL itself is NOT logged here: a generated-image
-                                // link is usually a signed object URL, and its query
-                                // carries the credential. Status + body prefix is what
-                                // identifies the failure; the item's index names which.
+                                // The error body can echo the signed URL or signing fields.
+                                // Only log the status and item index, never the body.
                                 com.rikkaminis.app.logging.AppLogger.warning(
                                     "OpenAIProvider",
-                                    "[ModelUseRoute] image download HTTP ${dlResp.code} skipped item=$i body=${dlResp.body?.string()?.take(200).orEmpty()}",
+                                    "[ModelUseRoute] image download HTTP ${dlResp.code} skipped item=$i",
                                 )
                                 // Same inline-lambda rule as the size arm below:
                                 // no `continue` here (Kotlin < 2.2 rejects it).
@@ -2046,9 +2054,13 @@ class OpenAIProvider constructor(
                             }
                         }
                     } catch (e: Exception) {
+                        // redactURL masks known query keys, but object-store signing
+                        // fields are vendor-specific. OkHttp's redact() keeps only
+                        // the origin; a parse failure must not print the raw input.
+                        val origin = urlStr.toHttpUrlOrNull()?.redact() ?: "<invalid URL>"
                         com.rikkaminis.app.logging.AppLogger.warning(
                             "OpenAIProvider",
-                            "[ModelUseRoute] failed to download image from $urlStr: ${e.message}",
+                            "[ModelUseRoute] failed to download image from $origin (item=$i, ${e.javaClass.simpleName})",
                         )
                     }
                 }

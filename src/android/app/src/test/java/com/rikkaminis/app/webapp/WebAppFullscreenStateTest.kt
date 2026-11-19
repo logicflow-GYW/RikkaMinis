@@ -103,7 +103,7 @@ class WebAppFullscreenStateTest {
         assertEquals(
             "renderHost definition + the single load-time call",
             2,
-            countOccurrences(code, "renderHost()"),
+            countOccurrences(code, "renderHost("),
         )
     }
 

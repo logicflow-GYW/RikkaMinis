@@ -1872,8 +1872,13 @@ object ConfigBackup {
                     }
                     // The enabled flag is user intent, not part of SKILL.md, so
                     // it has to be reapplied after the content import.
-                    if (!s.optBoolean("isEnabled", true)) {
-                        runCatching { skillRepo.setEnabled(imported.id, false) }
+                    // [fix/r2-backup-1119 F-21] Restore both directions: an
+                    // existing disabled skill must also be re-enabled.
+                    skillEnableWriteTarget(
+                        current = imported.isEnabled,
+                        backupSaysEnabled = s.optBoolean("isEnabled", true),
+                    )?.let { desired ->
+                        runCatching { skillRepo.setEnabled(imported.id, desired) }
                     }
                     // [fix/audit-1015-b2b] Export wrote installedAt/updatedAt/
                     // useCount; import never read them back, so a restore
@@ -3169,6 +3174,15 @@ internal fun buildEnvVarExportEntries(
 internal fun summariseIds(ids: List<String>, max: Int = 3): String {
     if (ids.size <= max) return ids.joinToString(", ")
     return ids.take(max).joinToString(", ") + " … (+${ids.size - max})"
+}
+
+/**
+ * [fix/r2-backup-1119 F-21] Imports preserve existing enablement (new skills
+ * default to enabled). Reapply the backup's flag in either direction; null
+ * means no write is needed. SKILL.md does not carry this user preference.
+ */
+internal fun skillEnableWriteTarget(current: Boolean, backupSaysEnabled: Boolean): Boolean? {
+    return if (current == backupSaysEnabled) null else backupSaysEnabled
 }
 
 /**

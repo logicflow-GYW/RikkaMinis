@@ -437,7 +437,7 @@ class ModelUseOffloadHandler(
                 outputExt = outputExt,
                 passthroughRequest = ModelUseProtocol.buildPassthroughWireRequest(ptSpec, ptBody),
             )
-            val ptRemote = runBlocking { ModelExecutionDispatcher.dispatch(context, ptRequestJson) }
+            val ptRemote = runBlocking { ModelExecutionDispatcher.dispatch(context, ptRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id)) }
             return shapeRawPassthrough(
                 spec = ptSpec,
                 warnings = ptWarnings,
@@ -516,7 +516,7 @@ class ModelUseOffloadHandler(
             inputJson = inputText,
             outputExt = outputExt,
         )
-        val remoteResult = runBlocking { ModelExecutionDispatcher.dispatch(context, remoteRequestJson) }
+        val remoteResult = runBlocking { ModelExecutionDispatcher.dispatch(context, remoteRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id)) }
         if (remoteResult != null) {
             val remote = try { JSONObject(remoteResult) } catch (e: Throwable) { null }
             if (remote != null) {

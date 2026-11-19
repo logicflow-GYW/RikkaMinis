@@ -161,10 +161,9 @@ MAX_DEPTH = 4
 # ── audited call sites. Removing an entry re-arms the gate for that line;
 # editing the line makes the entry stale (re-audit, then re-seed with --seed).
 ALLOWED = {
+    # An opener such as `AppLogger.info(` alone is not a call-site identity:
+    # it would exempt every same-level multiline call in that file (F-09).
     ('src/android/app/src/main/java/com/rikkaminis/app/provider/ModelsDevApi.kt', 'Log.d(TAG, "No models.dev match for base URL: $forBaseURL")'),
-    ('src/android/app/src/main/java/com/rikkaminis/app/provider/openai/OkHttpNetTraceListener.kt', 'com.rikkaminis.app.logging.AppLogger.info('),
-    ('src/android/app/src/main/java/com/rikkaminis/app/provider/openai/OpenAIProvider.kt', 'com.rikkaminis.app.logging.AppLogger.info('),
-    ('src/android/app/src/main/java/com/rikkaminis/app/provider/openai/OpenAIProvider.kt', 'com.rikkaminis.app.logging.AppLogger.warning('),
     ('src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/OpenOffloadHandler.kt', 'Log.d(TAG, "startActivity url=\'$url\' action=${intent.action} resolved='),
     ('src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/OpenOffloadHandler.kt', 'Log.w(TAG, "no handler for \'$url\'")'),
     ('src/android/app/src/main/java/com/rikkaminis/app/sandbox/offload/OpenOffloadHandler.kt', 'Log.w(TAG, "parseUri failed for \'$url\': ${e.message}")'),
@@ -566,9 +565,32 @@ def self_test():
     `basePath`). Their clean counterparts pin the flip side, so a fix that just
     flags every alias is caught by the GREEN arms.
     """
-    fixture = "src/android/app/src/main/java/com/rikkaminis/app/network/Trace.kt"
+    # Use the production-relative path: otherwise a regression in a path-scoped
+    # allow-list could pass all fixtures in a synthetic Trace.kt (F-09).
+    fixture = "src/android/app/src/main/java/com/rikkaminis/app/provider/openai/OpenAIProvider.kt"
     arms = [
         # (label, source lines, must be reported?)
+        ("provider-multiline-info-raw", [
+            '        val url = "https://example.test/v1?key=SECRET123"',
+            "        com.rikkaminis.app.logging.AppLogger.info(",
+            '            "OpenAIProvider",',
+            '            "url=$url",',
+            "        )",
+        ], True),
+        ("provider-multiline-warning-raw", [
+            '        val urlStr = "https://example.test/image?X-Amz-Signature=SECRET123"',
+            "        com.rikkaminis.app.logging.AppLogger.warning(",
+            '            "OpenAIProvider",',
+            '            "download from $urlStr",',
+            "        )",
+        ], True),
+        ("provider-multiline-warning-origin", [
+            "        val origin = urlStr.toHttpUrlOrNull()?.redact() ?: \"<invalid URL>\"",
+            "        com.rikkaminis.app.logging.AppLogger.warning(",
+            '            "OpenAIProvider",',
+            '            "download from $origin",',
+            "        )",
+        ], False),
         ("interp-whole-url", [
             "        AppLogger.info(",
             "            tag,",

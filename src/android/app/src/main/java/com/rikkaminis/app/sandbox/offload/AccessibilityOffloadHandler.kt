@@ -18,6 +18,34 @@ import com.rikkaminis.app.sandbox.NativeOffloadRequest
 import com.rikkaminis.app.sandbox.NativeOffloadResult
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path as NioPath
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
+
+/** App-private storage used for screenshots when they are not returned inline. */
+internal fun a11yScreenshotDirectory(cacheDir: File): File = File(cacheDir, "a11y_screenshots")
+
+/** Delete a legacy screenshot tree without following links out of that tree. */
+internal fun deleteA11yScreenshotTreeNoFollow(root: File) {
+    val path = root.toPath()
+    if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return
+    Files.walkFileTree(path, object : SimpleFileVisitor<NioPath>() {
+        override fun visitFile(file: NioPath, attrs: BasicFileAttributes): FileVisitResult {
+            Files.deleteIfExists(file)
+            return FileVisitResult.CONTINUE
+        }
+
+        override fun postVisitDirectory(dir: NioPath, exc: java.io.IOException?): FileVisitResult {
+            if (exc != null) throw exc
+            Files.deleteIfExists(dir)
+            return FileVisitResult.CONTINUE
+        }
+    })
+}
 
 /**
  * [meta1028-D2 F-03] `wait appear|disappear` needs at least ONE selector.
@@ -59,6 +87,24 @@ internal fun waitVerdict(present: Boolean, screenMatch: Boolean): WaitVerdict =
  * matches the rest of `android-*` so `--quiet` strips it cleanly.
  */
 class AccessibilityOffloadHandler(private val context: Context) : NativeOffloadHandler {
+    init {
+        runCatching {
+            context.getExternalFilesDir("a11y_screenshots")?.let(::deleteA11yScreenshotTreeNoFollow)
+        }.onFailure { AppLogger.warning(TAG, "legacy screenshot cleanup failed: ${it.message}") }
+        runCatching {
+            val privateDir = a11yScreenshotDirectory(context.cacheDir).also { it.mkdirs() }
+            com.rikkaminis.app.ui.components.pruneShareDir(privateDir)
+            // Session deletion removes attachments; startup also prunes expired
+            // captures in sessions that are retained but no longer use a11y.
+            File(context.filesDir, "minis-sessions").listFiles()?.forEach { session ->
+                val dir = File(session, "attachments/a11y_screenshots")
+                if (!Files.isSymbolicLink(dir.toPath())) {
+                    com.rikkaminis.app.ui.components.pruneShareDir(dir)
+                }
+            }
+        }.onFailure { AppLogger.warning(TAG, "private screenshot cleanup failed: ${it.message}") }
+    }
+
     companion object {
         private const val TAG = "A11yOffload"
         private const val TOOL = "android-a11y-cli"
@@ -96,8 +142,9 @@ First-run: enable "RikkaMinis" under Settings → Accessibility, then `service p
     --display <int>            Display id to capture (default 0 = default).
     --inline | -b              Return base64 PNG inline instead of writing
                                to a file. Otherwise the PNG is written to
-                               <externalFilesDir>/a11y_screenshots/<ts>.png
-                               and the path is returned.
+                               private session attachments (or private cache when
+                               no session is present). Session paths work in the
+                               shell; for a cache-only host path use --inline.
 """
         private const val TAP_HELP = "tap node <id> | tap xy <x> <y> | tap text <s> | tap id <res>\n"
         private const val INPUT_HELP = "input text <s> [--node id] [--clear|--append] | input clear | input key BACK|HOME|RECENTS|NOTIFICATIONS\n"
@@ -219,7 +266,7 @@ First-run: enable "RikkaMinis" under Settings → Accessibility, then `service p
         )
         return try {
             when (sub) {
-                "ui"        -> uiSub(args)
+                "ui"        -> uiSub(args, request.sessionId)
                 "tap"       -> tapSub(args)
                 "input"     -> inputSub(args)
                 "scroll"    -> scrollSub(args)
@@ -284,14 +331,14 @@ First-run: enable "RikkaMinis" under Settings → Accessibility, then `service p
 
     // ── ui ───────────────────────────────────────────────────────────────
 
-    private fun uiSub(args: OffloadArgs): NativeOffloadResult {
+    private fun uiSub(args: OffloadArgs, sessionId: String?): NativeOffloadResult {
         return when (args.positional.getOrNull(1)) {
             null         -> NativeOffloadResult(2, UI_HELP)
             "dump"       -> uiDump(args)
             "find"       -> uiFind(args)
             "info"       -> uiInfo(args)
             "node"       -> uiNode(args)
-            "screenshot" -> uiScreenshot(args)
+            "screenshot" -> uiScreenshot(args, sessionId)
             else         -> NativeOffloadResult(2, "$TOOL ui: unknown action\n$UI_HELP")
         }
     }
@@ -461,7 +508,7 @@ First-run: enable "RikkaMinis" under Settings → Accessibility, then `service p
         return ok(args, data)
     }
 
-    private fun uiScreenshot(args: OffloadArgs): NativeOffloadResult {
+    private fun uiScreenshot(args: OffloadArgs, sessionId: String?): NativeOffloadResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return err(args, "NOT_SUPPORTED",
                 "ui screenshot requires Android 11 (API 30); use `android-shizuku-cli exec screencap` instead.")
@@ -516,17 +563,24 @@ First-run: enable "RikkaMinis" under Settings → Accessibility, then `service p
             return ok(args, data)
         }
 
-        val dir = (context.getExternalFilesDir("a11y_screenshots") ?: java.io.File(context.cacheDir, "a11y_screenshots"))
-        if (!dir.exists()) dir.mkdirs()
-        // [da1028-C] Plaintext screenshots are the most sensitive thing this
-        // handler writes and nothing ever deleted them (externalFilesDir is not
-        // the OS-reclaimable cache). Same 24h contract as cache/share. This runs
-        // on the offload server's worker thread, never the main thread.
+        // Session attachments are private internal storage AND visible to this
+        // session's shell; cache-only host paths are not visible inside PRoot.
+        val guestDir = "/var/minis/attachments/a11y_screenshots"
+        val dir = if (sessionId != null) {
+            com.rikkaminis.app.sandbox.PRootKernel.resolvePathForSession(sessionId, guestDir, context)
+                ?: return err(args, "WRITE_FAILED", "cannot resolve private screenshot directory")
+        } else a11yScreenshotDirectory(context.cacheDir)
+        dir.mkdirs()
+        // [FULLSCAN-1119 R2 F-14] Screenshots can contain OTPs and credentials:
+        // cacheDir is private app storage, unlike getExternalFilesDir. Reuse the
+        // established 24h pruner so stale plaintext captures do not accumulate.
         com.rikkaminis.app.ui.components.pruneShareDir(dir)
         val file = java.io.File(dir, "a11y_${System.currentTimeMillis()}.png")
         return try {
             java.io.FileOutputStream(file).use { it.write(pngBytes) }
-            data.put("path", file.absolutePath)
+            data.put("path", if (sessionId != null) "$guestDir/${file.name}" else file.absolutePath)
+            data.put("storage", "app_private")
+            if (sessionId == null) data.put("path_note", "Private host cache path; not exposed to the guest shell. Use --inline for retrieval.")
             ok(args, data)
         } catch (t: Throwable) {
             AppLogger.warning(TAG, "screenshot write failed: ${t.message}")
