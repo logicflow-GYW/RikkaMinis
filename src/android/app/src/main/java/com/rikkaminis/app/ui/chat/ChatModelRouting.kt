@@ -9,8 +9,12 @@ import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.ProviderFactory
 import com.rikkaminis.app.sandbox.ExecutionCoordinator
 import com.rikkaminis.app.service.SessionActivityTracker
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 // [FE-5 batch 7] Model selection / routing cluster extracted verbatim from
 // ChatViewModel as extension functions (same pattern as ChatPromptAndTools).
@@ -291,6 +295,15 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
     // own `streamJob = launch`, i.e. two live streams under one _isStreaming.
     sendShellJob?.cancel()
     streamJob?.cancel()
+    // [fullscan-1119 F-05] The switch is a new turn: the OLD turn's
+    // compaction is turn-scoped side work and must die with it. Before this,
+    // a mid-stream switch left the compact running; it finished AFTER the
+    // rewind and published its summary + marker over the new model's
+    // transcript (greyed rows + a summary describing the conversation the
+    // switch just rewound). Captured into a local so the shell can AWAIT it —
+    // cancel alone is not enough (see [awaitCancelledCompact]).
+    val preSwitchCompact = compactJob
+    preSwitchCompact?.cancel()
     flushAllStreamingDeltas()
     ExecutionCoordinator.stopCurrentCommand(activeSessionId)
     SessionActivityTracker.clearToolRunning(com.rikkaminis.app.service.ToolOutcome.Cancelled)
@@ -343,6 +356,17 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
         var streamLaunched = false
         try {
             try {
+                // [fullscan-1119 F-05] Order barrier, not just a cancel: a
+                // cancelled compact can still be inside its commit block
+                // (marker insert → in-memory publish). Waiting for the job to
+                // be gone BEFORE the rewind gives two guarantees:
+                //  • anything it already wrote is visible to
+                //    dropCompactMarkerIfRewound below (which clears an
+                //    orphaned marker + summary), and
+                //  • nothing it writes can land AFTER that drop, so the new
+                //    turn's own compaction can never be overwritten by the
+                //    old one's late result.
+                awaitCancelledCompact(preSwitchCompact)
                 val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
                 val dbMessages = chatRepository.loadMessages(sid)
                 val lastUserSortOrder = dbMessages.findLast { it.role == "user" }?.sortOrder
@@ -384,8 +408,17 @@ internal fun ChatViewModel.switchModelAndRerun(label: String) {
                 // half-synced history would silently answer the CURRENT user message
                 // with wrong or empty context - surface the failure and leave the turn
                 // unanswered instead of guessing.
-                Log.w(ChatViewModel.TAG, "switchModelAndRerun: DB re-sync failed: ${e.message}")
-                _error.value = "Model switch failed: ${e.message}"
+                //
+                // [fullscan-1119 F-06] …but cancellation is NOT a switch failure:
+                // Stop and back-to-back switches cancel this shell, and swallowing
+                // the CancellationException here surfaced "Model switch failed:
+                // StandaloneCoroutine was cancelled" over a turn the user had just
+                // stopped. Cancellation propagates; every real failure keeps the
+                // audited banner ([rethrowCancellationOr]).
+                rethrowCancellationOr(e) { failure ->
+                    Log.w(ChatViewModel.TAG, "switchModelAndRerun: DB re-sync failed: ${failure.message}")
+                    _error.value = "Model switch failed: ${failure.message}"
+                }
                 return@launch
             }
             // Restart the loop on the switched provider (mirrors retryFromMessage).
@@ -668,3 +701,50 @@ internal fun ordersCompactionCandidates(
     }
     return (quiet + noisy).take(1 + ChatViewModel.COMPACT_SUMMARY_FALLBACK_LIMIT)
 }
+
+/**
+ * [fullscan-1119 F-06 / F-08] Cancellation is not a failure — rethrow it,
+ * route everything else to [onGeneric].
+ *
+ * `CancellationException` is an `Exception`, so every `catch (e: Exception)`
+ * that shows a banner or continues the loop silently converts "the user
+ * pressed Stop" into "the operation failed" (F-06: a spurious "Model switch
+ * failed"; F-08: the agent loop walking into the next turn after Stop).
+ * Kotlin's catch order is what keeps this correct: the CE check must happen
+ * INSIDE the catch arm, before the failure handling. Two call sites, one
+ * policy — a per-site copy is how the second one drifts.
+ */
+internal inline fun rethrowCancellationOr(e: Exception, onGeneric: (Exception) -> Unit) {
+    if (e is CancellationException) throw e
+    onGeneric(e)
+}
+
+/**
+ * [fullscan-1119 F-05] Stop the pre-switch compact and WAIT (bounded) until it
+ * is gone.
+ *
+ * `cancel()` only marks the job; its commit block (marker insert → in-memory
+ * publish) is a live window. Without the await, a cancel landing inside that
+ * window lets the OLD compact write AFTER the switch's rewind, so its summary
+ * and marker land on the new turn's transcript and can overwrite state the new
+ * turn has already produced. Awaiting first makes any write it managed to do
+ * strictly ordered BEFORE the rewind: `dropCompactMarkerIfRewound` sees it, and
+ * nothing can land after the drop.
+ *
+ * Bounded on purpose: this runs on the switch path, and a compact wedged in a
+ * provider call must not hold the new turn hostage. The cancel has already been
+ * issued when the timeout fires, so the worst case is the pre-fix ordering for
+ * one job that ignored cancellation — not an unbounded stall.
+ */
+internal suspend fun awaitCancelledCompact(oldCompact: Job?) {
+    val job = oldCompact ?: return
+    if (!job.isActive) {
+        // Already unwound (or never started): joining would return immediately,
+        // but the check keeps the common case free of a suspension.
+        return
+    }
+    withTimeoutOrNull(COMPACT_CANCEL_AWAIT_MS) { job.cancelAndJoin() }
+}
+
+/** Upper bound for waiting on a cancelled compact before the model switch. */
+internal const val COMPACT_CANCEL_AWAIT_MS = 5_000L
