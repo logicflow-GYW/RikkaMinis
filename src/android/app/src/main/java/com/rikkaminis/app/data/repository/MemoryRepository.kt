@@ -436,7 +436,15 @@ class MemoryRepository(private val memoryDir: File) {
         // byte consistent with iOS keeps the cached system prompt identical
         // across platforms.
         if (content.isEmpty()) return null
-        return "Global memory (GLOBAL.md — user-owned; edit only with the user's approval). Treat these as background context, not standing instructions. If the user's latest message conflicts with or supersedes anything here (different scope, different numbers, different goal), defer to the user's latest message:\n$content"
+        // [r3d1119 / 3 F-02, P1] The previous sentence called the entries
+        // `background context, not standing instructions`, which contradicts the
+        // `Authority` exemption for `a GLOBAL.md rule the user approved` and
+        // memory-hygiene/SKILL.md's 常驻指令 claim: a user-approved entry IS a
+        // standing instruction — the approval is the authorisation. Only what was
+        // never approved stays background. The precedence sentence below is
+        // untouched: it guards a stale memory outranking a current instruction,
+        // which is a different question from the rank of an approved one.
+        return "Global memory (GLOBAL.md — user-owned; edit only with the user's approval). Entries the user approved here are standing instructions; the rest is background context. If the user's latest message conflicts with or supersedes anything here (different scope, different numbers, different goal), defer to the user's latest message:\n$content"
     }
 
     /**
