@@ -140,13 +140,10 @@ class WebDavClient(
      * resolve domains here. localhost and IPv6 loopback are explicit exceptions.
      */
     internal fun isLoopbackOrPrivateHost(host: String): Boolean {
-        var h = host.trim().lowercase()
-        if (h.length > 2 && h.startsWith("[") && h.endsWith("]")) {
-            h = h.substring(1, h.length - 1)
-        }
+        val h = host.lowercase()
         if (h == "localhost" || h.endsWith(".localhost")) return true
         // IPv6 loopback only; other IPv6 literals stay "not private".
-        if (h == "::1") return true
+        if (h == "::1" || h == "[::1]") return true
         val parts = h.split('.')
         if (parts.size != 4) return false
         val octets = IntArray(4)

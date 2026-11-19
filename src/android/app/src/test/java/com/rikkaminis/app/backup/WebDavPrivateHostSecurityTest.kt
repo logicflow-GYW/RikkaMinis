@@ -63,7 +63,7 @@ class WebDavPrivateHostSecurityTest {
         val denied = listOf(
             "172.15.0.1", "172.32.0.1", "256.1.1.1", "10.256.1.1", "127.0.0.256",
             "192.168.1.256", "10.1.2", "10.1.2.3.4", "10..1.3", "10.1.2.-3",
-            "10.1.2.+3", "10.1.2.٣", "[fd00::1]", "",
+            "10.1.2.+3", "10.1.2.٣", "[fd00::1]", "[10.1.2.3]", "[localhost]", "",
         )
         for (host in denied) {
             assertFalse("must not be treated as private: $host", dav("http://127.0.0.1/dav").isLoopbackOrPrivateHost(host))
