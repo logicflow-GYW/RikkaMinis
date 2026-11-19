@@ -112,6 +112,24 @@ internal class FakeAgentLoopHost(
     val scripts = ArrayDeque<TurnScript>()
     /** Tool results consumed in execution order (one per executeTool call). */
     val toolResults = ArrayDeque<ToolExecutionResult>()
+    /**
+     * [fix/r3-chat-1119 F-11] Fault injection at the tool boundary: runs at
+     * the START of every [executeTool], before the scripted result is
+     * consumed. The real execution-budget gates live in
+     * `ChatPromptAndTools.executeTool` / `executeShellCommand` — they set
+     * `traceObserver.t7BudgetStopReason` and return a failed result — so a
+     * scenario reproduces that state by setting the reason here.
+     */
+    var beforeExecuteTool: (() -> Unit)? = null
+    /**
+     * [fix/r3-chat-1119 F-11] Fault injection at the CLEAN-COMPLETION
+     * boundary: runs when the loop publishes its final (isStreaming=false)
+     * snapshot, i.e. immediately before `loopExitedNormally = true`. Used to
+     * reproduce "a budget reason was observed at some point AND the run
+     * answered to completion" — the state the old exit tail mis-classified as
+     * a budget failure.
+     */
+    var beforeCleanCompletion: (() -> Unit)? = null
     /** Config entries visible to the fallback router (fallback scenarios). */
     var configEntries: List<ModelEntry> = emptyList()
     /** maybeAutoCompactInLoop scripted verdict. */
@@ -185,6 +203,7 @@ internal class FakeAgentLoopHost(
         blocks: List<AssistantBlock>,
         isAwaitingModelResponse: Boolean,
     ) {
+        if (!isStreaming) beforeCleanCompletion?.invoke()
         assistantSnapshots.add(text to isStreaming)
         lastBlocksCache = blocks.toList()
         record("updateAssistantMessage(streaming=$isStreaming,len=${text.length})")
@@ -252,6 +271,7 @@ internal class FakeAgentLoopHost(
     ): ToolExecutionResult {
         toolExecutions.add(ToolExecution(toolId, name, argsJson, currentText))
         record("executeTool($name)")
+        beforeExecuteTool?.invoke()
         toolThrowables.removeFirstOrNull()?.let { throw it }
         return toolResults.removeFirstOrNull()
             ?: ToolExecutionResult(output = "harness: no scripted result for $name", success = false, toolTitle = name)

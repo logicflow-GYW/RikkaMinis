@@ -1129,6 +1129,42 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     // the field the restore log line below prints, plus the trigger for the
     // createdAt self-heal.
     //
+    // [fix/r3-chat-1119 F-01] The self-heal trigger is NO LONGER "the anchor
+    // row is missing from the UI list". It is "the anchor row is missing from
+    // the SESSION". The two are not the same set, and the difference is the
+    // whole defect:
+    //
+    //  - `buildChatMessagesTranscript` drops every row without visible
+    //    content — a role=user row that carries only tool carriers
+    //    (toolUse / toolResult parts) has no bubble, so it never reaches
+    //    `messages`. `buildLlmMessages` keeps it. `lastCompactedMessageId`
+    //    anchors on exactly such a row in a tool-heavy session (it is the
+    //    last message of the folded range, and the folded range in a tool
+    //    loop ends with a tool_result).
+    //  - The old predicate asked the UI list. It answered "orphan" for a
+    //    perfectly valid anchor, fell into the createdAt self-heal, and —
+    //    because the heal candidate is picked by INDEX among the pre-marker
+    //    rows while `compactedCount` counts only THIS round's increment —
+    //    landed on an unrelated earlier row. `rewriteMarkerForHeal` then
+    //    REWROTE the marker in Room with that earlier anchor: the effective
+    //    boundary moved back to the first round, and the next message re-sent
+    //    every already-summarised turn verbatim.
+    //
+    //  - The fix is an EQUIVALENCE-CLASS widening, not a whitelist: an
+    //    anchor is VALID when its id is still represented in the session
+    //    (`historyDbIds`), whatever message type it is (assistant text,
+    //    user text, tool_result carrier, …). It is ORPHANED only when the
+    //    id is gone from the session entirely (deleted / truncated away).
+    //    `historyDbIds` is built from `loaded.llmHistory` — the very rows
+    //    the model request is built from — so it is the authority on "what
+    //    does this session still hold".
+    //
+    //  - The UI list stays the SECONDARY source for `insertIdx` (the
+    //    divider position, a log field only). When the anchor is not a UI
+    //    row there is no bubble to place a divider after, and the old
+    //    "divider at top, no graying" fallback is exactly right for that
+    //    case — but it must NOT be the thing that triggers a DB rewrite.
+    //
     // [SYMPTOM-A F-A3] The self-heal branch is NOT the load-bearing mechanism
     // this comment used to describe. Measured reality (2026-10-29 full log,
     // corroborated in source):
@@ -1154,6 +1190,16 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     // write per open" while the anchor stays invisible — write amplification,
     // zero user benefit.
     //
+    // [fix/r3-chat-1119 F-01] That reasoning was the DEFECT, not a guard: the
+    // heal's job is to repair an ANCHOR, and an anchor is a message id in the
+    // session — not a bubble on screen. The UI list is a rendering surface,
+    // and a tool_result carrier has no bubble by design. The acceptance gate
+    // for "is this anchor still valid" is therefore "the session still holds
+    // this id" ([CompactAnchorValidity.isAnchorStillHeld]) — the equivalence
+    // class is EVERY message type, not a whitelist of visible ones. The UI
+    // index is kept for the DIVIDER position only, and a valid-but-invisible
+    // anchor simply has no divider to place.
+    //
     // UPGRADE TRIGGER: if any UI artefact starts depending on `insertIdx`
     // again (divider, graying, an "already folded" marker), fix the :1123 gate
     // FIRST — accept "present in historyDbIds" instead of "present in the UI
@@ -1172,11 +1218,24 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     if (firstKeptId == null) {
         // v2 OR v1 compactAll-shape — anchored by lcmId.
         val lcmIdx = lcmId?.let { uiIdxForDbId(it) } ?: -1
-        if (lcmIdx >= 0) {
-            // Happy path: lcmId resolves directly. Divider AFTER anchor.
-            insertIdx = lcmIdx + 1
+        // [fix/r3-chat-1119 F-01] The anchor is VALID whenever the session
+        // still holds it. `lcmIdx` only says whether there is a BUBBLE for
+        // it — a tool_result anchor has none, and mistaking that for
+        // "orphan" is what rewrote the marker back to round 1.
+        val lcmStillHeld = CompactAnchorValidity.isAnchorStillHeld(lcmId, historyDbIds)
+        if (lcmStillHeld) {
+            // Valid anchor. Divider AFTER the anchor when it has a bubble.
+            insertIdx = if (lcmIdx >= 0) lcmIdx + 1 else 0
+            if (lcmIdx < 0) {
+                AppLogger.info(
+                    ChatViewModel.TAG,
+                    "[Compact] Phase2.5 anchor ${lcmId?.take(8)} is held by the session but has no " +
+                        "UI row (tool_result carrier) — marker left untouched, divider at top",
+                )
+            }
         } else {
-            // lcmId missing or orphaned. Try createdAt self-heal.
+            // lcmId missing or genuinely orphaned (gone from the session).
+            // Try createdAt self-heal.
             val heal = healAnchorByCreatedAt(rawMessages, marker.createdAt, historyDbIds, marker.compactedCount)
             val healUiIdx = heal?.let { uiIdxForDbId(it.id) } ?: -1
             if (heal != null && healUiIdx >= 0) {
@@ -1210,8 +1269,10 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
         val bIdx = messages.indexOfFirst { msg ->
             firstKeptId in msg.sourceDbIds || msg.id == firstKeptId
         }
-        if (bIdx >= 0) {
-            insertIdx = bIdx
+        // [fix/r3-chat-1119 F-01] Same equivalence class for the v1 boundary.
+        val firstKeptStillHeld = CompactAnchorValidity.isAnchorStillHeld(firstKeptId, historyDbIds)
+        if (firstKeptStillHeld) {
+            insertIdx = if (bIdx >= 0) bIdx else 0
         } else {
             // Boundary deleted / orphaned. Try createdAt self-heal —
             // same path as compactAll, then divider AFTER the healed
@@ -1267,11 +1328,12 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
     // used to give. [SYMPTOM-A F-A3] The self-heal does NOT keep
     // effectiveAgentHistory() working — that path parses the marker against
     // agentHistory on its own and never reads `insertIdx` (3 days: 1726
-    // slices, 0 degradations). For tool-heavy sessions the anchor row is
-    // invisible in the UI transcript, so the heal cannot resolve and nothing
-    // gets persisted; see the block above ("Resolve insertIdx") for the full
-    // chain and for the upgrade trigger that would make this gate load-bearing
-    // again.
+    // slices, 0 degradations). [fix/r3-chat-1119 F-01] For tool-heavy sessions
+    // the anchor row has no UI bubble, which is now correctly read as "valid,
+    // nothing to heal" (see [CompactAnchorValidity]) instead of "orphaned" —
+    // so `insertIdx` stays 0 and no DB write happens; see the block above
+    // ("Resolve insertIdx") for the full chain and for the upgrade trigger
+    // that would make this index load-bearing again.
     // "Revert Compact" now lives in the message long-press menu, so it no
     // longer depends on the divider row existing.
     AppLogger.info(
@@ -1280,6 +1342,58 @@ internal suspend fun ChatViewModel.applyCompactMarkerGraying(
             "v=${(healedMarker ?: marker).version} — no graying, no divider (silent)",
     )
     return messages
+}
+
+/**
+ * [fix/r3-chat-1119 F-01] Is a compact marker's anchor still a message of this
+ * session?
+ *
+ * This is the ONE question the createdAt self-heal is allowed to depend on.
+ * The old gate asked "does the anchor id appear in the UI transcript?", which
+ * is a rendering question with a different answer set:
+ *
+ *  - `buildChatMessagesTranscript` drops every row without visible content
+ *    (`userRowHasVisibleContent`), so a role=user row carrying only tool
+ *    carriers (toolUse / toolResult parts) has no bubble and no UI index;
+ *  - `buildLlmMessages` keeps that same row, AND it is the row
+ *    `lastCompactedMessageId` points at in any tool-heavy session (the folded
+ *    range of a tool round ends on a tool_result);
+ *  - the createdAt heal picks its replacement by INDEX among pre-marker rows
+ *    (`candidates[compactedCount - 1]`) while `compactedCount` counts only THIS
+ *    round's increment — so it lands on an unrelated earlier row, and the
+ *    caller then REWRITES the marker in Room with it. The boundary jumps back
+ *    to the first compact round and the next request re-sends every
+ *    already-summarised turn verbatim.
+ *
+ * So the equivalence class must be "the session still holds this id", not
+ * "the UI shows this id". Any message type qualifies (assistant text, user
+ * text, tool_result carrier, image row, …) as long as the loaded LLM history
+ * still represents it; only an id that is gone from the session (deleted or
+ * truncated away) is an orphan, and only then may the heal run.
+ *
+ * Pure + JVM-testable (no Android dependencies).
+ */
+internal object CompactAnchorValidity {
+
+    /**
+     * True when [anchorId] is a non-empty id that [historyDbIds] still holds.
+     * A null/blank anchor, or an empty [historyDbIds] set (no loaded history
+     * to prove anything against), is NOT "held" — the caller keeps its
+     * pre-existing self-heal behaviour for that shape.
+     */
+    fun isAnchorStillHeld(anchorId: String?, historyDbIds: Set<String>): Boolean =
+        !anchorId.isNullOrEmpty() && anchorId in historyDbIds
+
+    /**
+     * The decision the caller needs: must the createdAt self-heal run?
+     *
+     * Kept as an explicit named predicate (rather than inlining the negation)
+     * so the two directions are pinned separately: a held anchor must NEVER
+     * heal (data retention), and a genuinely missing one MUST still heal (the
+     * feature this fix must not delete).
+     */
+    fun shouldSelfHeal(anchorId: String?, historyDbIds: Set<String>): Boolean =
+        !isAnchorStillHeld(anchorId, historyDbIds)
 }
 
 /**
