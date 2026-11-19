@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.sandbox.internalGuestTmpDeleteTreeNoFollow
 import com.rikkaminis.app.ui.settings.SharedFolderRegistry
 import com.rikkaminis.app.ui.settings.invalidateStorageSnapshot
@@ -119,6 +120,147 @@ internal fun fileDateBucket(
 }
 
 /**
+ * [R2 F-04/F-05] Real (fully resolved) form of [f], or `null` when the
+ * filesystem cannot answer.
+ *
+ * `File.canonicalFile` is NOT the right primitive here: it resolves `..` and
+ * `.` lexically and happily returns a path that does not exist, so
+ * "unresolvable" never happens and a deleted/renamed target reads as a valid
+ * one. `toRealPath()` requires every component to exist and resolves symlinks,
+ * which is exactly the question the guards are asking — and its failure is the
+ * fail-closed answer.
+ */
+internal fun canonicalFileOrNull(f: File): File? =
+    try {
+        f.toPath().toRealPath().toFile()
+    } catch (_: Exception) {
+        null
+    }
+
+/**
+ * [R2 F-04/F-05] True when [path] IS [root] or sits below it, compared on whole
+ * segments after canonicalizing BOTH sides.
+ *
+ * Both sides canonical: a raw `startsWith` on `/data/user/0/<pkg>` admits
+ * `/data/user/0/<pkg>-other`, and comparing a canonical path against a
+ * non-canonical root (`/data/data/…` vs `/data/user/0/…` on the same device)
+ * silently answers "outside" for a path that is inside. Unresolvable ⇒ false.
+ */
+internal fun isCanonicalUnder(path: File, root: File): Boolean {
+    val p = canonicalFileOrNull(path)?.path ?: return false
+    val r = canonicalFileOrNull(root)?.path ?: return false
+    val base = r.trimEnd(File.separatorChar)
+    if (base.isEmpty()) return false
+    return p == base || p.startsWith("$base${File.separatorChar}")
+}
+
+/** [R2 F-05] True when [path] is under ANY of [roots]; an empty [roots] list is
+ *  "nothing is allowed" — the fail-closed reading, never "no restriction". */
+internal fun isUnderAnyRoot(path: File?, roots: List<File>): Boolean {
+    if (path == null || roots.isEmpty()) return false
+    return roots.any { isCanonicalUnder(path, it) }
+}
+
+/** [R2 F-04] Why a delete was refused on the CANONICAL path. */
+internal enum class CanonicalDeleteRefusal {
+    /** The canonical target is outside every sandbox root (or unresolvable). */
+    OutsideSandbox,
+    /** The canonical target lands in a declared read-only zone. */
+    ReadOnlyZone,
+}
+
+/**
+ * [R2 F-04/F-05] Refusal verdict for deleting [target], decided on the
+ * CANONICAL path rather than on the logical one the browser displays.
+ *
+ * The defect this closes: `deleteItem` validated `linuxPathOf(item)` — a string
+ * built from the browser's root + breadcrumb + name. After `ln -s
+ * /var/minis/memory /var/minis/workspace/m`, entering `m` lists the REAL
+ * `memory/` files while the logical path still reads `/var/minis/workspace/m/…`,
+ * so every read-only guard saw a writable path and the trash icon deleted
+ * `SOUL.md` / `GLOBAL.md` from disk.
+ *
+ * [target] is what actually gets removed:
+ *  - a SYMLINK contributes its PARENT directory — the delete unlinks the name,
+ *    so the only thing that has to be inside is the directory holding it (a
+ *    dangling link stays deletable, which is correct: it is a name, not data);
+ *  - everything else contributes itself.
+ *
+ * `null` (unresolvable) is a REFUSAL: a path whose canonical form cannot be
+ * established is not proven inside the sandbox.
+ */
+internal fun canonicalDeleteRefusal(
+    target: File?,
+    isSymlink: Boolean,
+    allowedRoots: List<File>,
+    readOnlyRoots: List<File>,
+): CanonicalDeleteRefusal? {
+    if (target == null) return CanonicalDeleteRefusal.OutsideSandbox
+    val subject = if (isSymlink) target.absoluteFile.parentFile else target
+    val canonical = canonicalFileOrNull(subject ?: return CanonicalDeleteRefusal.OutsideSandbox)
+        ?: return CanonicalDeleteRefusal.OutsideSandbox
+    if (!isUnderAnyRoot(canonical, allowedRoots)) return CanonicalDeleteRefusal.OutsideSandbox
+    if (isUnderAnyRoot(canonical, readOnlyRoots)) return CanonicalDeleteRefusal.ReadOnlyZone
+    return null
+}
+
+/**
+ * [R2 F-05] Bound a symlink target to the browser's sandbox roots.
+ *
+ * The pre-fix resolver answered `File(rawTarget).takeIf { it.exists() }` when
+ * the guest mapping missed — an unbounded host path, so a link to
+ * `/data/user/0/<pkg>/shared_prefs` (or a `../../../../databases` relative
+ * spelling) was browsable, previewable, shareable and deletable from the UI.
+ *
+ * Returns the CANONICAL target when it sits under one of [allowedRoots], and
+ * `null` otherwise — including when canonicalization fails. `null` is the
+ * documented "refuse instead of guess" answer every caller already has a branch
+ * for (the entry stays "unknown" / the listing stays empty).
+ */
+internal fun boundedSymlinkTarget(candidate: File?, allowedRoots: List<File>): File? {
+    if (candidate == null) return null
+    val canonical = canonicalFileOrNull(candidate) ?: return null
+    return canonical.takeIf { isUnderAnyRoot(it, allowedRoots) }
+}
+
+/**
+ * [R2 F-05] Pick the host target for a symlink whose own target text is
+ * [rawTarget], given what the guest mapper answered ([mapped]).
+ *
+ * The pre-fix shape was:
+ *
+ * ```
+ * if (mapped != null && mapped.exists()) return mapped
+ * return File(rawTarget).takeIf { it.exists() }
+ * ```
+ *
+ * The fallback covers a real case — a link written on the HOST side names a host
+ * path, not a guest one, and dropping it would make every such link unopenable —
+ * but it answered ANY path, so `ln -s /data/user/0/<pkg>/shared_prefs p` turned
+ * the private preferences directory into a browseable, previewable, deletable
+ * folder. Both arms are bounded by the browser's own roots here, and an
+ * unresolvable/unplaceable answer is `null` (the documented
+ * "refuse instead of guess" answer), never the raw path.
+ *
+ * Pure: [exists] and [roots] arrive as parameters so the JVM test source set
+ * pins every arm without an Android `Context` or a real filesystem.
+ */
+internal fun resolveHostSymlinkTarget(
+    mapped: File?,
+    rawTarget: String?,
+    exists: (File) -> Boolean,
+    roots: List<File>,
+): File? {
+    if (mapped != null && exists(mapped)) {
+        boundedSymlinkTarget(mapped, roots)?.let { return it }
+    }
+    if (rawTarget.isNullOrEmpty()) return null
+    val raw = runCatching { File(rawTarget) }.getOrNull() ?: return null
+    if (!exists(raw)) return null
+    return boundedSymlinkTarget(raw, roots)
+}
+
+/**
  * [R5-F F-F-02] Host directory a listing must read for [hostDir], following a
  * link whose target is a GUEST path at ANY depth.
  *
@@ -139,11 +281,17 @@ internal fun fileDateBucket(
 internal fun resolveListingHostDir(
     hostDir: File,
     mapGuest: (String) -> File?,
+    sandboxRoots: List<File> = emptyList(),
 ): File {
     // Fast path — every non-link path, and every link whose target exists on
     // the host under its literal spelling.
     try {
-        return hostDir.toPath().toRealPath().toFile()
+        val real = hostDir.toPath().toRealPath().toFile()
+        // [R2 F-05] Bound the fast path too: `toRealPath()` FOLLOWS links, so a
+        // plain-looking `<root>/dirLink/sub` reaches whatever the link names —
+        // including `/data/user/0/<pkg>/databases`. Only the answer is checked
+        // (not the spelling), so a link into a legitimate root still lists.
+        if (sandboxRoots.isEmpty() || isUnderAnyRoot(real, sandboxRoots)) return real
     } catch (_: Exception) {
         // Fall through: an unresolvable path may sit under a guest-path link.
     }
@@ -167,12 +315,65 @@ internal fun resolveListingHostDir(
         if (target != node && target.exists()) {
             var out = target
             for (name in tail) out = File(out, name)
-            return out
+            // [R2 F-05] Same bound as the fast path, applied to the REBASED
+            // path: a guest-absolute link (`ln -s /var/minis/workspace/x l`) is
+            // mapped by [mapGuest] to a host dir, and the mapping itself is the
+            // thing that could name a private directory. Unbounded, this arm
+            // was the F-05 escape with a container spelling.
+            if (sandboxRoots.isEmpty()) return out
+            boundedSymlinkTarget(out, sandboxRoots)?.let { return it }
+            // Refused: never hand back the link (the caller's `listFiles()`
+            // would follow it and list exactly the tree we just refused).
+            return refusedListing(hostDir, sandboxRoots)
         }
         tail.addFirst(node.name)
         node = node.parentFile
     }
-    return hostDir
+    // Nothing along the chain mapped to a placeable target. When roots are in
+    // play the answer must still be inside them: `hostDir` may BE a link whose
+    // `listFiles()` follows it (the F-05 shape).
+    if (sandboxRoots.isEmpty()) return hostDir
+    return refusedListing(hostDir, sandboxRoots)
+}
+
+/** [R2 F-05] Name used as the "this listing was refused" target. Never created
+ *  on disk, so `listFiles()` on it answers `null` (an empty folder in the UI). */
+private const val REFUSED_LISTING_NAME = ".minis-refused-listing"
+
+/**
+ * [R2 F-05] What to LIST when [hostDir] resolved to a refused target.
+ *
+ * Two cases, because "the caller will call `listFiles()`" is the constraint:
+ *  - the refusal happened DEEPER than [hostDir] (a nested link) ⇒ the nearest
+ *    allowed ancestor is a real, listable directory and is the honest answer;
+ *  - [hostDir] ITSELF is the refused entry ⇒ nothing may be listed, and any
+ *    existing path here would be followed, so answer a name that does not
+ *    exist.
+ */
+internal fun refusedListing(hostDir: File, roots: List<File>): File {
+    // Always a name that does NOT exist: an existing path here would be listed
+    // (or followed), and the whole point is that nothing about the refused
+    // entry may be read. The UI shows an empty folder, which is honest.
+    val parent = hostDir.absoluteFile.parentFile ?: hostDir
+    val sentinel = File(parent, REFUSED_LISTING_NAME)
+    // Keep the answer inside the roots even in the pathological case where the
+    // refused entry's own parent is outside them.
+    val anchor = nearestAllowedDir(parent, roots)
+    return File(anchor, REFUSED_LISTING_NAME).takeIf { !it.exists() } ?: sentinel
+}
+
+/**
+ * [R2 F-05] Nearest ancestor of [dir] (itself included) that resolves inside
+ * [roots], or [dir] when none does — the "list nothing rather than the wrong
+ * thing" answer for a refused link.
+ */
+internal fun nearestAllowedDir(dir: File, roots: List<File>): File {
+    var cur: File? = dir
+    while (cur != null) {
+        if (isUnderAnyRoot(cur, roots)) return cur
+        cur = cur.parentFile
+    }
+    return dir
 }
 
 /**
@@ -321,7 +522,11 @@ data class FileItem(
         private val weekdayFormatter = SimpleDateFormat("EEEE", Locale.getDefault())
         private val shortDateFormatter = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
 
-        fun from(file: File, resolveGuestAbsolute: (String) -> File? = { null }): FileItem? {
+        fun from(
+            file: File,
+            resolveGuestAbsolute: (String) -> File? = { null },
+            sandboxRoots: List<File> = emptyList(),
+        ): FileItem? {
             // [sweep1014-B29] Symlink check MUST precede the exists() check:
             // exists() follows the link, so a broken (dangling) symlink reads
             // as nonexistent and was dropped before the isSymlink handling
@@ -342,7 +547,44 @@ data class FileItem(
                 } catch (_: Exception) {
                     null
                 }
-                resolveListedEntry(file, rawTarget, resolveGuestAbsolute)
+                // [R2 F-05] Bounded: the mapped/unmapped answer only stands when
+                // its CANONICAL form is still inside a declared sandbox root.
+                // A link to `/data/user/0/<pkg>/shared_prefs` (or the relative
+                // `../../../../databases` spelling) used to describe the private
+                // directory as an ordinary folder — browsable, previewable,
+                // shareable and deletable from the UI. An empty [sandboxRoots]
+                // list keeps the historical behaviour for callers that pass no
+                // roots (chat link resolution, tests); the browser always passes
+                // them.
+                val entry = resolveListedEntry(file, rawTarget, resolveGuestAbsolute)
+                if (sandboxRoots.isEmpty()) {
+                    entry
+                } else {
+                    // [R2 F-05] Bound the RESOLVED target in every shape. When
+                    // the guest mapper cannot place an absolute target (a link
+                    // written host-side, or a relative one) the filesystem is
+                    // still the authority on where it points — `toRealPath()`
+                    // follows it, and the answer is what the entry may open.
+                    // A refused target reads as "unknown" (never as the link:
+                    // `isDirectory` follows links, so handing the link back
+                    // would keep the folder affordance and let `navigateTo`
+                    // enter the private directory).
+                    val candidate = if (entry != file) {
+                        entry
+                    } else {
+                        runCatching { file.toPath().toRealPath().toFile() }.getOrNull()
+                    }
+                    boundedSymlinkTarget(candidate, sandboxRoots) ?: return FileItem(
+                        file = file,
+                        name = file.name,
+                        isDirectory = false,
+                        isSymlink = true,
+                        size = 0L,
+                        modifiedMs = runCatching { Files.getLastModifiedTime(file.toPath()).toMillis() }
+                            .getOrDefault(0L),
+                        hostPath = file,
+                    )
+                }
             } else file
 
             return FileItem(
@@ -498,8 +740,76 @@ class FileBrowserViewModel(
         } else {
             com.rikkaminis.app.sandbox.PRootKernel.resolveHostPath(rawTarget)
         }
-        if (mapped != null && mapped.exists()) return mapped
-        return File(rawTarget).takeIf { it.exists() }
+        // [R2 F-05] The unbounded fallback `File(rawTarget).takeIf { it.exists() }`
+        // that used to sit here is now BOUNDED. It existed for a reason — a link
+        // written on the host side names a host path, not a guest one, and
+        // dropping the fallback entirely would make every such link unopenable —
+        // but it answered any path at all, so `ln -s /data/user/0/<pkg>/
+        // shared_prefs p` made the private preferences directory a browseable,
+        // previewable, deletable folder. Both arms now go through the pure
+        // [resolveHostSymlinkTarget], which bounds each answer by the browser's
+        // own roots and answers null (refuse instead of guess) otherwise.
+        return resolveHostSymlinkTarget(
+            mapped = mapped,
+            rawTarget = rawTarget,
+            exists = { it.exists() },
+            roots = sandboxRoots(),
+        )
+    }
+
+    /**
+     * [R2 F-04/F-05] The filesystem roots this browser is allowed to reach.
+     *
+     * Derived, never a literal list: the root the screen was opened at (the
+     * rootfs, a session dir, a mounted folder, …), the two shared global roots
+     * (`minis-global/{memory,skills}` back `/var/minis/{memory,skills}`), the
+     * global shared folder, the rootfs itself when a guest root is in play, and
+     * every currently-mounted external folder. Missing entries are simply
+     * absent from the list, which the guards read as "not allowed".
+     */
+    private fun sandboxRoots(): List<File> {
+        val roots = LinkedHashSet<File>()
+        roots += rootPath
+        val ctx = appContext
+        if (ctx != null) {
+            val filesDir = ctx.filesDir
+            roots += File(filesDir, "minis-sessions")
+            roots += File(filesDir, "minis-global")
+            roots += File(filesDir, "media")
+            roots += File(filesDir, "share_extension")
+            // PRoot's bind-mount table is what /var/minis/* really points at;
+            // its host sides are legitimate browse targets.
+            com.rikkaminis.app.sandbox.PRootKernel.bindMounts.values
+                .mapNotNullTo(roots) { runCatching { File(it) }.getOrNull() }
+            runCatching {
+                com.rikkaminis.app.sandbox.RootfsManager.getInstance(ctx).rootfsDir
+            }.getOrNull()?.let { roots += it }
+            runCatching {
+                com.rikkaminis.app.sandbox.PRootKernel.mountedFoldersStore
+                    ?.entries?.value
+                    ?.mapNotNull { it.resolvedHostPath }
+                    ?.map { File(it) }
+            }.getOrNull()?.let { roots += it }
+        }
+        return roots.filter { it.exists() }
+    }
+
+    /**
+     * [R2 F-04] The HOST directories behind the read-only zones, so the
+     * canonical-path guard can refuse them.
+     *
+     * Derived, never a second path list: `SharedFolderRegistry.readOnlyLinuxPaths`
+     * is the single source for "which guest paths are read-only", and each is
+     * mapped to its host dir through PRoot's own bind table (the same mapping
+     * the listing uses). A guest path with no live bind contributes nothing —
+     * the string-based guards below still cover it.
+     */
+    private fun readOnlyRoots(): List<File> {
+        val mounts = com.rikkaminis.app.sandbox.PRootKernel.bindMounts
+        return SharedFolderRegistry.readOnlyLinuxPaths.mapNotNull { guest ->
+            val host = mounts[guest] ?: return@mapNotNull null
+            runCatching { File(host) }.getOrNull()
+        }
     }
 
     init {
@@ -606,6 +916,42 @@ class FileBrowserViewModel(
 
     fun deleteItem(item: FileItem) {
         viewModelScope.launch(Dispatchers.IO) {
+            // [R2 F-04] CANONICAL guard, decided on the file that will actually
+            // be removed — not on the logical path the browser displays.
+            //
+            // The defect: every refusal below reads `linuxPathOf(item)`, a
+            // string built from the browser's root + breadcrumb + name. Enter a
+            // link (`ln -s /var/minis/memory /var/minis/workspace/m`) and the
+            // listing shows the REAL memory files while the logical path still
+            // says `/var/minis/workspace/m/SOUL.md` — writable by every
+            // string-based rule, so the trash icon deleted the file. A guard
+            // that asks about a spelling answers about a spelling.
+            val canonicalRefusal = canonicalDeleteRefusal(
+                target = item.hostPath,
+                isSymlink = item.isSymlink,
+                allowedRoots = sandboxRoots(),
+                readOnlyRoots = readOnlyRoots(),
+            )
+            when (canonicalRefusal) {
+                CanonicalDeleteRefusal.OutsideSandbox -> {
+                    AppLogger.warning(
+                        "FileBrowser",
+                        "refused delete of ${item.name}: canonical target " +
+                            "${item.hostPath.absolutePath} is outside every sandbox root",
+                    )
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Outside the sandbox: ${item.name} cannot be deleted",
+                    )
+                    return@launch
+                }
+                CanonicalDeleteRefusal.ReadOnlyZone -> {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Read-only folder: ${item.name} cannot be deleted",
+                    )
+                    return@launch
+                }
+                null -> Unit
+            }
             // [da1031-C] ISSUE-04 A1: guard BEFORE deleting. T219's read-only
             // mount lock is software-only (PRoot `-b` has no read-only
             // modifier) and File.delete() works on the HOST path, which that
@@ -771,7 +1117,11 @@ class FileBrowserViewModel(
                 // folder whose name the user just tapped listed as EMPTY. The
                 // helper walks up to the deepest symlink ancestor and rebases —
                 // see its KDoc for the shape.
-                val resolvedPath = resolveListingHostDir(hostPath, ::resolveGuestAbsoluteTarget)
+                val resolvedPath = resolveListingHostDir(
+                    hostPath,
+                    ::resolveGuestAbsoluteTarget,
+                    sandboxRoots(),
+                )
 
                 // Dotfile filter is gated on the user-facing "Show Hidden
                 // Files" preference (T-hidden-files a3e7f1d0). Snapshot
@@ -783,7 +1133,7 @@ class FileBrowserViewModel(
                     // [R4-V F-11] Pass the guest→host mapper so absolute link
                     // targets (a PRoot link stores `/var/minis/…`) describe the
                     // file the shell meant, not a nonexistent host path.
-                    ?.mapNotNull { FileItem.from(it, ::resolveGuestAbsoluteTarget) }
+                    ?.mapNotNull { FileItem.from(it, ::resolveGuestAbsoluteTarget, sandboxRoots()) }
                     ?: emptyList()
 
                 rawItems = files

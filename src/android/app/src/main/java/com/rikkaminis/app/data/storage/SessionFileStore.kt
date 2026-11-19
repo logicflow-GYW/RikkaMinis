@@ -3,6 +3,7 @@ package com.rikkaminis.app.data.storage
 import android.content.Context
 import com.rikkaminis.app.data.ComposerDraftStore
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.sandbox.internalGuestTmpDeleteTreeNoFollow
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -291,10 +292,10 @@ class SessionFileStore internal constructor(
 
     /** Recursively delete a session's bind-mounted dir + its media + its browser tab-pool state. No-op if absent. */
     fun deleteSessionFiles(sessionId: String): DeleteResult {
-        val sessionDeleted = deleteRecursivelyChecked(sessionDir(sessionId)) &&
-            deleteRecursivelyChecked(browserTabFile(sessionId))
+        val sessionDeleted = deleteRecursivelyChecked(sessionDir(sessionId), sessionsRoot) &&
+            deleteRecursivelyChecked(browserTabFile(sessionId), browserTabsRoot)
         val mediaDeleted = mediaSessionDirs(sessionId).fold(true) { acc, dir ->
-            deleteRecursivelyChecked(dir) && acc
+            deleteRecursivelyChecked(dir, mediaRoot) && acc
         }
         return DeleteResult(sessionDeleted, mediaDeleted)
     }
@@ -306,10 +307,58 @@ class SessionFileStore internal constructor(
      * showing "Cleared 0 B" while the bytes were still on disk (a fake close).
      * This wrapper reports the real outcome so callers can surface a partial-
      * failure state instead of pretending success.
+     *
+     * [R2 F-06] TWO guards, both required, because they stop different things:
+     *
+     *  1. **Canonical prefix, fail-closed, BEFORE the absent check.** [dir] must
+     *     canonicalize to [root] or below it. Without this, a path-assembly
+     *     mistake (a session id carrying `..`, a symlinked spelling, a root that
+     *     moved) deletes a tree that was never the subject. It runs before
+     *     `exists()` because `File(sessionsRoot, "../victim")` does not exist —
+     *     an early return there would answer "success" for a path that leaves
+     *     the root entirely. An unresolvable path is a REFUSAL: "I cannot tell
+     *     where this lands" must never be read as "it lands somewhere fine".
+     *     One guard, not two: `canonicalFile` already resolves symlinks AND
+     *     normalizes `..`, so a separate real-path arm would be the same check
+     *     spelled twice (measured — removing it changed no outcome, which is
+     *     why it is not here).
+     *  2. **No-follow walk.** `File.deleteRecursively()` walks with
+     *     `File.listFiles()`, which FOLLOWS a directory symlink, so a session
+     *     whose workspace held `link -> /sdcard/DCIM` emptied the target when
+     *     the session was deleted (measured shape: the target's own files gone,
+     *     the link's target directory left behind). The canonical guard does not
+     *     cover this — a link pointing INSIDE the same session root is
+     *     canonical-clean and still wipes a sibling subtree — and the no-follow
+     *     walk does not cover a mis-assembled path. Same walker the guest temp
+     *     sweeper and the file browser already use.
      */
-    private fun deleteRecursivelyChecked(dir: File): Boolean {
+    private fun deleteRecursivelyChecked(dir: File, root: File): Boolean {
+        val canonicalRoot = try {
+            root.canonicalFile
+        } catch (_: Exception) {
+            AppLogger.warning(TAG, "refused delete: cannot canonicalize root ${root.path}")
+            return false
+        }
+        val canonicalDir = try {
+            dir.canonicalFile
+        } catch (_: Exception) {
+            AppLogger.warning(TAG, "refused delete: cannot canonicalize ${dir.path}")
+            return false
+        }
+        val base = canonicalRoot.path.trimEnd(File.separatorChar)
+        val inside = base.isNotEmpty() &&
+            (canonicalDir.path == base ||
+                canonicalDir.path.startsWith("$base${File.separatorChar}"))
+        if (!inside) {
+            AppLogger.warning(
+                TAG,
+                "refused delete: ${dir.path} resolves to ${canonicalDir.path}, " +
+                    "outside ${canonicalRoot.path}",
+            )
+            return false
+        }
         if (!dir.exists()) return true // absent == nothing to delete == success
-        val ok = dir.deleteRecursively()
+        val ok = internalGuestTmpDeleteTreeNoFollow(canonicalDir.toPath())
         return if (!ok) {
             // A failed recursive delete may have removed some children; try one
             // more pass and report whatever survives.
@@ -382,7 +431,7 @@ class SessionFileStore internal constructor(
         with(report) {
             // Delete the scanned session dirs (ids in the report).
             if (sessionIds.isNotEmpty()) {
-                sessionIds.forEach { sessionDir(it).takeIf { d -> d.exists() }?.deleteRecursively() }
+                sessionIds.forEach { id -> deleteRecursivelyChecked(sessionDir(id), sessionsRoot) }
             }
             // Re-delete media leaves (walk again; ids may overlap session dirs).
             deleteOrphanMediaLeaves(live)
@@ -560,10 +609,29 @@ class SessionFileStore internal constructor(
 
     private fun deleteOrphanMediaLeaves(liveSessionIds: Set<String>) {
         if (!mediaRoot.exists()) return
-        mediaRoot.walkTopDown().forEach { dir ->
-            if (isOrphanMediaLeaf(dir, liveSessionIds)) dir.deleteRecursively()
+        // [R2 F-06] Walk with NO-FOLLOW semantics: `walkTopDown()` descends
+        // through a directory symlink, so a media date folder holding
+        // `link -> /sdcard/DCIM` put the TARGET's children into the candidate
+        // set. The delete itself is guarded (canonical prefix + no-follow walk),
+        // but the enumeration must not enter foreign trees at all — the sweep's
+        // subject is "what lives under mediaRoot".
+        val stack = ArrayDeque<File>()
+        stack.addLast(mediaRoot)
+        while (stack.isNotEmpty()) {
+            val dir = stack.removeLast()
+            if (isOrphanMediaLeaf(dir, liveSessionIds)) {
+                deleteRecursivelyChecked(dir, mediaRoot)
+                continue
+            }
+            dir.listFiles()?.forEach { child ->
+                if (isRealDirectory(child)) stack.addLast(child)
+            }
         }
     }
+
+    /** True when [f] is a directory IN ITS OWN RIGHT (lstat), never a link. */
+    private fun isRealDirectory(f: File): Boolean =
+        Files.isDirectory(f.toPath(), LinkOption.NOFOLLOW_LINKS)
 
     /**
      * [da1025-D] Delete orphaned browser tab-pool state files:
