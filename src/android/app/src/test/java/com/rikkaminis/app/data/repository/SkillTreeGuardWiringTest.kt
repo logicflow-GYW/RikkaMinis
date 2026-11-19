@@ -6,7 +6,7 @@ import org.junit.Test
 import java.io.File
 
 /**
- * [fix/r3-data-1119 F-08] The wiring: delete() must actually
+ * [fix/r3-data-1119 F-08 / F-09] The wiring: the two call sites must actually
  * go through [SkillTreeGuard].
  *
  * [SkillTreeGuardTest] proves the primitive is safe. It cannot prove the
@@ -99,6 +99,32 @@ class SkillTreeGuardWiringTest {
         assertFalse(
             "delete() must not use the symlink-following deleteRecursively()",
             body.contains("deleteRecursively()"),
+        )
+    }
+
+    @Test
+    fun `listFilesUnder delegates to the guarded walk`() {
+        val body = bodyOf(stripComments(repoSource()), "private fun listFilesUnder(root: File)")
+        assertTrue(
+            "listFilesUnder must delegate to SkillTreeGuard.listFilesUnder",
+            body.contains("SkillTreeGuard.listFilesUnder(root)"),
+        )
+        assertFalse(
+            "the symlink-following walkTopDown() must be gone",
+            body.contains("walkTopDown()"),
+        )
+    }
+
+    @Test
+    fun `the export writer re-checks containment before packing an entry`() {
+        val body = bodyOf(stripComments(repoSource()), "fun exportSkillToZip(skillId: String)")
+        val guardAt = body.indexOf("SkillTreeGuard.isInside(dir, src)")
+        val entryAt = body.indexOf("putNextEntry(")
+        assertTrue("the zip writer must assert containment before packing", guardAt >= 0)
+        assertTrue("putNextEntry( anchor exists", entryAt > 0)
+        assertTrue(
+            "the containment check must run BEFORE the entry is written",
+            guardAt < entryAt,
         )
     }
 }
