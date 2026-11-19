@@ -564,12 +564,83 @@ class SystemPromptSegmentOrderTest {
     }
 
     /**
+     * [r3d1119 / 3 F-02, P1] `MemoryRepository.loadGlobalMemoryFragment()` kept the
+     * sentence `Treat these as background context, not standing instructions.`
+     * directly after the sentence its predecessor fixed, while the SAME request also
+     * carries the `Authority` exemption for `a GLOBAL.md rule the user approved` and
+     * `memory-hygiene/SKILL.md` states that approved GLOBAL.md entries are 常驻指令.
+     * A model told twice, in opposite directions, what an approved entry is, can
+     * downgrade it to reference material.
+     *
+     * The resolution is the header, not the skill: a user-approved entry IS a
+     * standing instruction (the approval is the authorisation), so the header says so
+     * — and the "user's latest message wins" sentence stays, because it guards a
+     * different thing: a stale memory outranking a current instruction, not the rank
+     * of an approved one.
+     *
+     * Scoped to the injected header literal, not the file or the section: the daily-log
+     * header in the same file legitimately calls memories `not standing instructions`,
+     * and that sentence is not what this fix touches.
+     */
+    @Test
+    fun theGlobalMemoryInjectionHeaderTreatsApprovedEntriesAsStandingInstructions() {
+        val repo = stripComments(
+            readRepoFile("src/main/java/com/rikkaminis/app/data/repository/MemoryRepository.kt"),
+        )
+        val header = quotedStringAfter(
+            repo, "fun loadGlobalMemoryFragment()", "return \"",
+        )
+        assertTrue(
+            "the injected GLOBAL.md header still calls the entries `not standing " +
+                "instructions` — `$header` — while the Authority section in the same " +
+                "request exempts `a GLOBAL.md rule the user approved` and " +
+                "memory-hygiene/SKILL.md calls those entries 常驻指令",
+            !header.contains("not standing instructions"),
+        )
+        assertTrue(
+            "the injected GLOBAL.md header no longer states the standing-instruction " +
+                "rank of an approved entry — `$header`",
+            header.contains("standing instructions"),
+        )
+        assertTrue(
+            "the injected GLOBAL.md header lost the user's-latest-message precedence — " +
+                "`$header` — the two requirements are independent: an approved entry is " +
+                "standing, and a newer instruction still outranks it",
+            header.contains("defer to the user's latest message"),
+        )
+        assertTrue(
+            "the injected GLOBAL.md header lost the approval/writability path — `$header`",
+            header.contains("approval", ignoreCase = true) ||
+                header.contains("approve", ignoreCase = true),
+        )
+
+        // The fix must not have been "delete the claim from the skill": SKILL.md keeps
+        // calling approved entries 常驻指令, and that is the claim the header now has
+        // to be consistent with.
+        val skill = readRepoFile("src/main/assets/skills/memory-hygiene/SKILL.md")
+        assertTrue(
+            "SKILL.md no longer calls approved GLOBAL.md entries 常驻指令 — the " +
+                "contradiction was resolved by weakening the skill instead of the " +
+                "injected header",
+            skill.contains("常驻指令"),
+        )
+    }
+
+    /**
      * [fix/prompt-memory-truth-1119 F-02] `memory-hygiene/SKILL.md` is exempted from
      * the Authority section (`under /var/minis/skills/`), so what it says the agent
      * may do without asking is followed. Its 淘汰 section used to say
      * 「我主动做，不必等用户」and「从 GLOBAL 删掉」— a documented licence to silently
      * delete the user's global memory, contradicting the same file's own rule that
      * GLOBAL.md is 提议、不擅写 and the prompt's `apply it only after the user approves`.
+     *
+     * [r3d1119 / 3 F-01, P1] The earlier form of this test asserted whole-section
+     * substrings (`section.contains("提议")`), and the section TITLE is
+     * `## 淘汰（我主动提议，仍需用户批准）` — the title alone satisfied both
+     * content assertions, so deleting all four body rules, or rewording any of them
+     * into a silent-delete instruction, stayed green. The title line is stripped
+     * first and each list item is asserted on its own, so deleting or un-constraining
+     * any single rule turns this red.
      */
     @Test
     fun theMemoryHygieneSkillCallsPruningAProposal() {
@@ -582,16 +653,53 @@ class SystemPromptSegmentOrderTest {
         )
         val end = skill.indexOf("\n## ", at + 1).let { if (it < 0) skill.length else it }
         val section = skill.substring(at, end)
+
+        // The heading is not evidence: strip the title line before any content
+        // assertion, so a title that mentions 提议/批准 cannot carry the rule.
+        val titleEnd = section.indexOf('\n')
+        val title = if (titleEnd < 0) section else section.substring(0, titleEnd)
+        val body = if (titleEnd < 0) "" else section.substring(titleEnd + 1)
         assertTrue(
-            "the 淘汰 section no longer asks the agent to make a PROPOSAL — `$section`",
-            section.contains("提议"),
+            "the 淘汰 section lost the approval wording from its title — `$title`",
+            title.contains("提议") && title.contains("批准"),
+        )
+
+        val items = body.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("- ") }
+            .toList()
+        assertTrue(
+            "the 淘汰 section has no list item left — the heading is the only line, " +
+                "and a heading is not a pruning rule",
+            items.isNotEmpty(),
         )
         assertTrue(
-            "the 淘汰 section does not require the user's approval before GLOBAL.md is " +
-                "edited — `$section` — this file is Authority-exempt, so an unqualified " +
-                "delete instruction is a licence to rewrite user memory silently",
-            section.contains("批准"),
+            "the 淘汰 section dropped a pruning rule — expected at least " +
+                "${PRUNING_RULE_MIN_ITEMS} documented rules, found ${items.size} (`$items`)",
+            items.size >= PRUNING_RULE_MIN_ITEMS,
         )
+        for (item in items) {
+            assertTrue(
+                "pruning rule `$item` no longer asks the agent to make a PROPOSAL — " +
+                    "this file is Authority-exempt, so an unqualified edit instruction " +
+                    "is a licence to rewrite user memory silently",
+                item.contains("提议"),
+            )
+            assertTrue(
+                "pruning rule `$item` no longer requires the user's approval before " +
+                    "GLOBAL.md is edited — the old whole-section check was satisfied by " +
+                    "the heading and stayed green when the body rules were deleted",
+                item.contains("批准"),
+            )
+            assertTrue(
+                "pruning rule `$item` still licenses a silent delete — `直接删`, " +
+                    "`无需用户确认` or `不必等`",
+                !item.contains("直接删") && !item.contains("无需用户确认") &&
+                    !item.contains("不必等"),
+            )
+        }
+        // Section-wide, on top of the per-item checks: no silent-delete wording
+        // anywhere in the section. A negation cannot be satisfied by the heading.
         assertTrue(
             "the 淘汰 section still tells the agent to prune `不必等用户` — `$section`",
             !section.contains("不必等用户"),
@@ -895,3 +1003,13 @@ class SystemPromptSegmentOrderTest {
         return out.toString()
     }
 }
+
+/**
+ * [r3d1119 / 3 F-01, P1] How many pruning rules `## 淘汰` in
+ * `memory-hygiene/SKILL.md` has to document: the rule that wrote a scanner gate or
+ * a test, the recurrence-upgrade rule, the cheaper-trigger move, and the merge rule.
+ * A top-level constant because `const val` is not allowed in a class body; the test
+ * uses it as a floor, so adding a fifth well-constrained rule stays green while
+ * deleting any one of the four turns the test red.
+ */
+private const val PRUNING_RULE_MIN_ITEMS = 4

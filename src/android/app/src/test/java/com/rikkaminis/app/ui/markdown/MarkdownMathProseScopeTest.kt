@@ -27,6 +27,12 @@ import org.junit.Test
  * rejected still has its words OUTSIDE the group (`… of a circle`,
  * `… total `). See the prose arms below and the FIX report.
  *
+ * [r3d1119 / 2 F-01, P1] "Call group" is bracket-aware: `[`/`{` are openers and
+ * `]`/`}` close one on the same counter, so a call written with a half-open
+ * interval (`P([a, b) and c)`) is ONE balanced group whose terminator is the
+ * call's `)`. See `callGroupEnd` in MarkdownMathHeuristic — the prose net and the
+ * word-count net share that one definition, so the two renderers cannot drift.
+ *
  * Every expectation is a literal — never derived from the constants under
  * test.
  */
@@ -108,5 +114,56 @@ class MarkdownMathProseScopeTest {
         // list, so the words inside it are still prose evidence. The fix is
         // scoped to call groups, not to every parenthesis.
         text("(a and b) is one case")
+    }
+
+    // ── [r3d1119 / 2 F-01, P1]: brackets are nesting on the same counter ──
+    // `P([a, b) and c)` carries a half-open interval. The `)` that closes the
+    // interval is not the `)` that closes the call, so a counter that read only
+    // `(`/`)` closed the group at `b)`, handed `and` to the prose nets and
+    // downgraded a probability to plain text. Brackets now count as nesting on
+    // the shared counter, the group still ends on a `)` that brings it to zero,
+    // and a closer never takes it below zero.
+
+    @Test
+    fun `a call whose argument is a half open interval is math`() {
+        // `[` has no `]`; the interval is closed by the `)`, and the group must
+        // keep scanning to the `)` that ends the CALL.
+        math("P([a, b) and c)")
+        // balanced brackets inside the call: the group ends at the call's `)`.
+        math("P([a,b])")
+        // brackets without a call head are not a call group at all — no
+        // exemption, and the verdict comes from the length/glyph nets as before.
+        math("[1, 2) ∪ (3, 5]")
+    }
+
+    @Test
+    fun `a call with prose inside and no bracket is still math`() {
+        // The bracket rule must not be what makes this one pass: `and` sits
+        // inside a balanced call and is exempt either way.
+        math("P(a and b)")
+    }
+
+    @Test
+    fun `prose outside a call keeps its text verdict under the bracket rule`() {
+        text("f(x) = x^2 where x > 0")
+        text("hello and welcome")
+    }
+
+    @Test
+    fun `an unclosed bracket does not make a call group`() {
+        // `[` with no closer at all: the group never balances, nothing is
+        // exempt, and the prose word inside it is read — the fail-safe side, the
+        // same way an unclosed `(` is handled above.
+        text("P([a, b and c")
+    }
+
+    @Test
+    fun `a bracket closer cannot close a call group early`() {
+        // `]` is not the group terminator. A stray closer takes the counter to
+        // zero without ending the group, so the prose word behind it is still
+        // read: the clamp fails toward text, never toward swallowing prose.
+        text("f(x] and y)")
+        // `{`/`}` count as nesting, so `f({x} + 1)` is one balanced group.
+        math("f({x} + 1)")
     }
 }
