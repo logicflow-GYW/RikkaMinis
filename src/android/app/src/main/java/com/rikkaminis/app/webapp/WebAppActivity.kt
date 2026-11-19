@@ -49,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -69,11 +70,15 @@ import com.rikkaminis.app.MainActivity
 import com.rikkaminis.app.MinisApp
 import com.rikkaminis.app.R
 import com.rikkaminis.app.browser.SafeWebViewClient
+import com.rikkaminis.app.crash.CrashFrequencyDetector
+import com.rikkaminis.app.data.db.DatabaseVersionGuard
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.share.ShareHostPolicy
 import com.rikkaminis.app.ui.preview.ASSET_LOADER_HOST
 import com.rikkaminis.app.ui.preview.toAssetLoaderUrl
 import com.rikkaminis.app.ui.sandbox.fileUrlFor
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -100,16 +105,8 @@ import java.io.File
 class WebAppActivity : ComponentActivity() {
 
     private val logTag = "WebAppActivity"
-    private var webViewRef: WebView? = null
-    /**
-     * [GH#341] Counts renderer deaths for the WebView owned by this Activity.
-     * `loadHtml` (which builds the WebViewClient) runs on the Activity, while
-     * the Compose host is the only place that can rebuild the instance — this
-     * mutable state is the hand-off between them. The host collects it as a
-     * `key`, so an increment discards the dead WebView and reloads the page.
-     */
-    private var rendererEpoch by androidx.compose.runtime.mutableIntStateOf(0)
-    private var resolvedFile: File? = null
+    private var requestedShortcutId: String? = null
+    private var shortcutLoadJob: Job? = null
     /**
      * [da1032-A] The ONE fullscreen source. It lives on the Activity — not in
      * the composition — because two writers need it (the system back callback
@@ -166,17 +163,36 @@ class WebAppActivity : ComponentActivity() {
             }
         })
 
+        openShortcut(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openShortcut(intent)
+    }
+
+    private fun openShortcut(intent: Intent?) {
         val shortcutId = intent?.getStringExtra(EXTRA_SHORTCUT_ID)
+        if (shortcutId != null && shortcutId == requestedShortcutId) return
+        requestedShortcutId = shortcutId
+        // A slow lookup for A must not win after a newer tap for B.
+        shortcutLoadJob?.cancel()
         if (shortcutId.isNullOrBlank()) {
             renderSourceMissing(sourceSessionId = null)
             return
         }
 
-        lifecycleScope.launch {
-            val app = applicationContext as MinisApp
-            val shortcut = withContext(Dispatchers.IO) {
-                app.webAppShortcutRepository.get(shortcutId)
+        shortcutLoadJob = lifecycleScope.launch {
+            val app = applicationContext as? MinisApp
+            val repository = app?.let { minisApp ->
+                webAppRepositoryIfReady(
+                    isSafeMode = CrashFrequencyDetector.isSafeMode(),
+                    isInitSkipped = CrashFrequencyDetector.isInitSkipped(),
+                    isNewerDbGuidance = minisApp.dbVersionDecision == DatabaseVersionGuard.Decision.SHOW_NEWER_DB_GUIDANCE,
+                ) { minisApp.webAppShortcutRepository }
             }
+            val shortcut = repository?.let { withContext(Dispatchers.IO) { it.get(shortcutId) } }
             if (shortcut == null) {
                 renderSourceMissing(sourceSessionId = null)
                 return@launch
@@ -189,9 +205,8 @@ class WebAppActivity : ComponentActivity() {
                 renderSourceMissing(sourceSessionId = shortcut.sourceSessionId)
                 return@launch
             }
-            shortcut.title.takeIf { it.isNotBlank() }?.let { title = it }
-            resolvedFile = file
-            renderHost()
+            title = shortcut.title.ifBlank { getString(R.string.webapp_activity_label) }
+            renderHost(shortcutId, file)
         }
     }
 
@@ -213,20 +228,22 @@ class WebAppActivity : ComponentActivity() {
         }
     }
 
-    private fun renderHost() {
-        val file = resolvedFile ?: return
+    private fun renderHost(shortcutId: String, file: File) {
         setContent {
             MaterialTheme {
-                WebAppHost(
-                    file = file,
-                    fullscreen = fullscreenState.value,
-                    onFullscreenChange = { fs ->
-                        fullscreenState.value = fs
-                        applySystemBars(fullscreen = fs)
-                    },
-                    onClose = { finish() },
-                    onWebViewReady = { wv -> webViewRef = wv },
-                )
+                // The loader is rooted at this page's parent directory. Give
+                // B a fresh WebView/client (and history), not just a new URL on A.
+                key(shortcutId, file) {
+                    WebAppHost(
+                        file = file,
+                        fullscreen = fullscreenState.value,
+                        onFullscreenChange = { fs ->
+                            fullscreenState.value = fs
+                            applySystemBars(fullscreen = fs)
+                        },
+                        onClose = { finish() },
+                    )
+                }
             }
         }
     }
@@ -237,13 +254,9 @@ class WebAppActivity : ComponentActivity() {
      */
     @OptIn(ExperimentalMaterial3Api::class)
     private fun renderSourceMissing(sourceSessionId: String?) {
-        webViewRef?.apply {
-            stopLoading()
-            (parent as? ViewGroup)?.removeView(this)
-            destroy()
-        }
-        webViewRef = null
-
+        // A failed lookup is not a loaded shortcut; let a later tap retry.
+        requestedShortcutId = null
+        setTitle(R.string.webapp_activity_label)
         setContent {
             MaterialTheme {
                 Scaffold(
@@ -309,7 +322,6 @@ class WebAppActivity : ComponentActivity() {
         fullscreen: Boolean,
         onFullscreenChange: (Boolean) -> Unit,
         onClose: () -> Unit,
-        onWebViewReady: (WebView) -> Unit,
     ) {
         val context = LocalContext.current
         // [da1032-A] `fullscreen` is a plain read here on purpose: the Activity
@@ -325,10 +337,8 @@ class WebAppActivity : ComponentActivity() {
         // so the auto-hide timer restarts on every tap.
         var interactionTick by remember { mutableStateOf(0) }
         var webViewState by remember { mutableStateOf<WebView?>(null) }
-        // [GH#341] `rendererEpoch` is the Activity-owned counter below; reading
-        // it here makes this composition a subscriber, so an increment (the
-        // renderer died) discards the dead WebView via the `key` and rebuilds
-        // it — a WebApp has nothing to lose by reloading.
+        // [GH#341] Renderer recovery is local to this shortcut's composition.
+        var rendererEpoch by remember { mutableIntStateOf(0) }
 
         LaunchedEffect(toolbarVisible, interactionTick) {
             if (toolbarVisible) {
@@ -342,55 +352,50 @@ class WebAppActivity : ComponentActivity() {
             // rendererEpoch below discards this AndroidView and re-runs the
             // factory with a fresh WebView.
             key(rendererEpoch) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    val wv = WebView(ctx)
-                    // [audit-0909 T7-M1] Do NOT call
-                    // CookieManager.setAcceptCookie(false) here: it is a
-                    // PROCESS-WIDE switch (Android has no per-WebView
-                    // first-party cookie toggle) and it was never restored on
-                    // destroy — opening any WebApp silently stopped every
-                    // already-live agent-browser tab from accepting cookies
-                    // (login/hCaptcha failures until that tab is recreated and
-                    // BrowserUseManager.configureWebView flips the switch back
-                    // on). This asset-loader page needs no cookies anyway; the
-                    // per-WebView third-party switch below is the real knob.
-                    CookieManager.getInstance().setAcceptThirdPartyCookies(wv, false)
-                    configureWebView(wv)
-                    // Tap-to-show — return false so WebView still handles the input.
-                    wv.setOnTouchListener { _, ev ->
-                        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
-                            toolbarVisible = true
-                            interactionTick += 1
-                        }
-                        false
+                // Both renderer death and onRelease must dispose this exact
+                // instance. Latch before detaching to make either order safe.
+                val release: (WebView) -> Unit = remember {
+                    var released = false
+                    fun(wv: WebView) {
+                        if (released) return
+                        released = true
+                        if (webViewState === wv) webViewState = null
+                        runCatching {
+                            (wv.parent as? ViewGroup)?.removeView(wv)
+                            try {
+                                wv.stopLoading()
+                            } finally {
+                                wv.destroy()
+                            }
+                        }.onFailure { AppLogger.warning(logTag, "WebView teardown failed: ${it.message}") }
                     }
-                    loadHtml(wv, file)
-                    onWebViewReady(wv)
-                    webViewState = wv
-                    wv
-                },
-                // [audit-0909 T7-M2] The composition can still replace this
-                // AndroidView (a renderer death bumps `rendererEpoch` above,
-                // which re-keys the block), and a pass used to drop the
-                // previous instance without destroying its WebView — a live
-                // renderer per replacement (BrowserUseManager's own note puts
-                // those at 50-100 MB each). onRelease covers both the
-                // replacement and the activity-teardown path; destroy() is
-                // idempotent and clearing the refs keeps onDestroy() from
-                // touching an already-destroyed instance.
-                // [da1032-A] The fullscreen toggle no longer re-runs
-                // setContent (the state is Activity-owned and this host only
-                // reads it), so the epoch is the only remaining rebuild path
-                // this hook guards.
-                onRelease = { wv ->
-                    if (webViewRef === wv) webViewRef = null
-                    if (webViewState === wv) webViewState = null
-                    wv.stopLoading()
-                    wv.destroy()
-                },
-            )
+                }
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        val wv = WebView(ctx)
+                        // [audit-0909 T7-M1] The first-party cookie switch is process-wide;
+                        // using it here would also break live browser tabs.
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, false)
+                        configureWebView(wv)
+                        wv.setOnTouchListener { _, ev ->
+                            if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+                                toolbarVisible = true
+                                interactionTick += 1
+                            }
+                            false
+                        }
+                        webViewState = wv
+                        loadHtml(wv, file) {
+                            if (webViewState === wv) {
+                                release(wv)
+                                rendererEpoch += 1
+                            }
+                        }
+                        wv
+                    },
+                    onRelease = release,
+                )
             }
 
             // Top inset spacer reserves room when system bars are visible so
@@ -603,7 +608,7 @@ class WebAppActivity : ComponentActivity() {
         }
     }
 
-    private fun loadHtml(webView: WebView, file: File) {
+    private fun loadHtml(webView: WebView, file: File, onRendererLost: () -> Unit) {
         val parent = file.parentFile ?: run {
             renderSourceMissing(sourceSessionId = null)
             return
@@ -616,23 +621,10 @@ class WebAppActivity : ComponentActivity() {
             .build()
 
         webView.webViewClient = object : SafeWebViewClient() {
-            /**
-             * [GH#341] Renderer died. Clear the refs (so [onDestroy] and the
-             * toolbar's reload/share actions never touch a dead instance) and
-             * bump the host's epoch so the WebView is rebuilt and the page
-             * reloaded — a WebApp has nothing to lose by reloading.
-             */
             override fun onRendererGone(view: WebView?) {
-                if (webViewRef === view) webViewRef = null
-                // This Activity owns the WebView but not the recovery: the
-                // Compose host rebuilds it off the epoch below. The dead
-                // instance still has to go, though — nothing else will
-                // (overriding this hook replaced the base teardown).
-                destroyDeadWebView(view)
-                // The renderer died in the Activity-owned WebView, but the
-                // Compose host owns the instance and is the only place that can
-                // rebuild it — hand the signal over via a state flag.
-                rendererEpoch += 1
+                // The host clears the toolbar's ref immediately and discards
+                // the dead WebView via its keyed AndroidView/onRelease.
+                onRendererLost()
             }
 
             override fun shouldInterceptRequest(
@@ -684,16 +676,6 @@ class WebAppActivity : ComponentActivity() {
         webView.loadUrl(url)
     }
 
-    override fun onDestroy() {
-        webViewRef?.apply {
-            stopLoading()
-            (parent as? ViewGroup)?.removeView(this)
-            destroy()
-        }
-        webViewRef = null
-        super.onDestroy()
-    }
-
     companion object {
         const val EXTRA_SHORTCUT_ID = "webapp_shortcut_id"
         const val ACTION_OPEN_WEBAPP = "com.rikkaminis.app.action.OPEN_WEBAPP"
@@ -707,4 +689,19 @@ class WebAppActivity : ComponentActivity() {
         // of the origin string that could drift apart from the loader mapping.
         private const val AUTO_HIDE_MS = 4000L
     }
+}
+
+/** This exported shortcut bypasses MainActivity's repository-init gates. */
+internal fun <T> webAppRepositoryIfReady(
+    isSafeMode: Boolean,
+    isInitSkipped: Boolean,
+    isNewerDbGuidance: Boolean,
+    readRepository: () -> T,
+): T? {
+    if (!ShareHostPolicy.mayUseAppRepositories(isSafeMode, isInitSkipped, isNewerDbGuidance)) {
+        return null
+    }
+    // A new early-return path must still fail closed if the lateinit was not set.
+    // Catch only the property read, not a suspend DAO call or its cancellation.
+    return runCatching(readRepository).getOrNull()
 }
