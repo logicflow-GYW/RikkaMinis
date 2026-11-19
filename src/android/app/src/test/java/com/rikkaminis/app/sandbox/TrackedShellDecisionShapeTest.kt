@@ -106,7 +106,7 @@ class TrackedShellDecisionShapeTest {
         assertTrue(
             "the timeout branch must return the captured output — returning only " +
                 "the notice threw away every clue about where the command stopped (F-10)",
-            src.contains("internalTimeoutOutput(cb.output.toString(), timeout)"),
+            src.contains("internalTimeoutOutput(cb.snapshotOutput(), timeout)"),
         )
         assertTrue(
             "the timeout branch must keep the truncation flag",
@@ -130,8 +130,8 @@ class TrackedShellDecisionShapeTest {
     fun `the stall branch and the timeout branch now agree in shape`() {
         // Both failures now carry the captured text plus a trailing notice.
         val src = shellSrc()
-        val stall = src.indexOf("cb.output.toString() + stallMessage(stallAfterMs)")
-        val timeout = src.indexOf("internalTimeoutOutput(cb.output.toString(), timeout)")
+        val stall = src.indexOf("cb.snapshotOutput() + stallMessage(stallAfterMs)")
+        val timeout = src.indexOf("internalTimeoutOutput(cb.snapshotOutput(), timeout)")
         assertTrue("stall branch anchor missing", stall >= 0)
         assertTrue("timeout branch anchor missing", timeout >= 0)
     }

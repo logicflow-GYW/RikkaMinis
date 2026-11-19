@@ -12,6 +12,50 @@ import com.rikkaminis.app.sandbox.NativeOffloadRequest
 import com.rikkaminis.app.sandbox.NativeOffloadResult
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
+import java.nio.file.*
+import java.nio.file.attribute.BasicFileAttributes
+import com.rikkaminis.app.data.repository.SkillTreeGuard
+
+internal data class DeviceDirectorySize(val bytes: Long, val visited: Long, val truncated: Boolean, val errors: List<String>)
+
+/** No FOLLOW_LINKS: guest-created links must never expand the accounting tree. */
+internal fun deviceDirectorySize(
+    dir: File,
+    maxEntries: Long = FastioOffloadHandler.DEFAULT_MAX_ENTRIES,
+    maxDepth: Int = SkillTreeGuard.MAX_DEPTH,
+): DeviceDirectorySize {
+    var bytes = 0L
+    var visited = 0L
+    var truncated = false
+    val errors = ArrayList<String>()
+    if (!Files.exists(dir.toPath(), LinkOption.NOFOLLOW_LINKS)) return DeviceDirectorySize(0, 0, false, emptyList())
+    fun charge(): Boolean {
+        if (visited >= maxEntries) { truncated = true; return false }
+        visited++
+        return true
+    }
+    try {
+        Files.walkFileTree(dir.toPath(), emptySet<FileVisitOption>(), maxDepth, object : SimpleFileVisitor<Path>() {
+            override fun preVisitDirectory(path: Path, attrs: BasicFileAttributes): FileVisitResult =
+                if (charge()) FileVisitResult.CONTINUE else FileVisitResult.TERMINATE
+
+            override fun visitFile(path: Path, attrs: BasicFileAttributes): FileVisitResult {
+                if (!charge()) return FileVisitResult.TERMINATE
+                if (attrs.isDirectory) truncated = true // depth boundary, never silently undercount
+                if (attrs.isRegularFile) bytes += attrs.size()
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun visitFileFailed(path: Path, exc: IOException): FileVisitResult {
+                if (!charge()) return FileVisitResult.TERMINATE
+                errors.add("${path.fileName}: ${exc.javaClass.simpleName}")
+                return FileVisitResult.CONTINUE
+            }
+        })
+    } catch (e: IOException) { errors.add(e.javaClass.simpleName) }
+    return DeviceDirectorySize(bytes, visited, truncated, errors)
+}
 
 /**
  * android-device — device model, OS version, battery, and storage info.
@@ -131,15 +175,18 @@ class DeviceOffloadHandler(private val context: Context) : NativeOffloadHandler 
         } catch (e: Throwable) {
             json.put("error", e.message ?: "StatFs unavailable")
         }
-        json.put("app_data_mb", String.format("%.1f", dirSize(context.filesDir) / 1e6))
-            .put("app_cache_mb", String.format("%.1f", dirSize(context.cacheDir) / 1e6))
+        val dataSize = deviceDirectorySize(context.filesDir)
+        val cacheSize = deviceDirectorySize(context.cacheDir)
+        json.put("app_data_mb", String.format("%.1f", dataSize.bytes / 1e6))
+            .put("app_cache_mb", String.format("%.1f", cacheSize.bytes / 1e6))
+        for ((name, result) in listOf("app_data" to dataSize, "app_cache" to cacheSize)) {
+            if (result.truncated || result.errors.isNotEmpty()) {
+                json.put("${name}_partial", true)
+                json.put("${name}_visited", result.visited)
+                if (result.errors.isNotEmpty()) json.put("${name}_errors", org.json.JSONArray(result.errors))
+            }
+        }
         return json
-    }
-
-    private fun dirSize(dir: File): Long {
-        var n = 0L
-        dir.walkTopDown().forEach { if (it.isFile) n += it.length() }
-        return n
     }
 
     companion object {

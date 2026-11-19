@@ -5,6 +5,11 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.util.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -89,6 +94,10 @@ data class RootfsHealth(
  */
 class RootfsManager private constructor(private val context: Context) {
 
+    // Singleton manager: one lock covers install, reset AND in-place repair.
+    // Locked implementations call one another without trying to reacquire it.
+    private val lifecycleMutex = Mutex()
+
     val rootfsDir: File = File(context.filesDir, "alpine-rootfs")
     val prootBinary: File = File(context.applicationInfo.nativeLibraryDir, "libproot.so")
 
@@ -116,7 +125,12 @@ class RootfsManager private constructor(private val context: Context) {
      * Progress is published to [installState] (Preparing → Extracting(f) →
      * Finalizing → Installed / Failed).
      */
-    suspend fun installIfNeeded(forceReinstall: Boolean = false) = withContext(Dispatchers.IO) {
+    suspend fun installIfNeeded(forceReinstall: Boolean = false): Unit = lifecycleMutex.withLock {
+        installIfNeededLocked(forceReinstall)
+    }
+
+    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    internal suspend fun installIfNeededLocked(forceReinstall: Boolean): Unit = withContext(Dispatchers.IO) {
         if (!forceReinstall && isInstalled) {
             Log.d(TAG, "Rootfs already installed at $rootfsDir")
             _installState.value = RootfsInstallState.Installed
@@ -191,10 +205,10 @@ class RootfsManager private constructor(private val context: Context) {
                 }
                 if (assetName.endsWith(".gz")) {
                     GZIPInputStream(progressStream).use { gzipStream ->
-                        extractTar(gzipStream, rootfsDir)
+                        extractTar(gzipStream, rootfsDir, checkActive = currentCoroutineContext()::ensureActive)
                     }
                 } else {
-                    extractTar(progressStream, rootfsDir)
+                    extractTar(progressStream, rootfsDir, checkActive = currentCoroutineContext()::ensureActive)
                 }
             }
 
@@ -406,7 +420,12 @@ class RootfsManager private constructor(private val context: Context) {
      *
      * Returns true when the rootfs is healthy after the attempt.
      */
-    suspend fun autoRepair(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun autoRepair(): Boolean = lifecycleMutex.withLock {
+        autoRepairLocked()
+    }
+
+    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    internal suspend fun autoRepairLocked(): Boolean = withContext(Dispatchers.IO) {
         val initial = verifyIntegrity()
         if (initial.healthy) {
             Log.i(TAG, "[Repair] rootfs healthy, nothing to do")
@@ -462,7 +481,7 @@ class RootfsManager private constructor(private val context: Context) {
         // it, a broken bash stayed broken forever until a manual reset.
         // Only factory files safe to overwrite are restored; the apk
         // database (user package records) is deliberately untouched.
-        val restored = restoreCriticalFromAssets()
+        val restored = restoreCriticalFromAssetsLocked()
         if (restored) {
             Log.i(TAG, "[Repair] rootfs healthy after targeted asset restore")
             return@withContext true
@@ -497,7 +516,7 @@ class RootfsManager private constructor(private val context: Context) {
                 RootfsEventLog.Events.STAGE3_RESET,
                 "trigger=apkDatabaseUnusable missing=${initial.missing.joinToString(",")}",
             )
-            runCatching { reset() }
+            runCatching { resetLocked() }.getOrElse { if (it is CancellationException) throw it }
         }
 
         val final = verifyIntegrity()
@@ -523,7 +542,12 @@ class RootfsManager private constructor(private val context: Context) {
      * the restore (the apk database is ignored — restoring it would discard
      * user package records).
      */
-    suspend fun restoreCriticalFromAssets(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun restoreCriticalFromAssets(): Boolean = lifecycleMutex.withLock {
+        restoreCriticalFromAssetsLocked()
+    }
+
+    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    internal suspend fun restoreCriticalFromAssetsLocked(): Boolean = withContext(Dispatchers.IO) {
         val assetName = try {
             context.assets.open(ROOTFS_ASSET).close()
             ROOTFS_ASSET
@@ -533,7 +557,7 @@ class RootfsManager private constructor(private val context: Context) {
         try {
             context.assets.open(assetName).use { raw ->
                 val tarInput = if (assetName.endsWith(".gz")) GZIPInputStream(raw) else raw
-                extractTar(tarInput, rootfsDir, onlyPrefixes = CRITICAL_RESTORE_PREFIXES)
+                extractTar(tarInput, rootfsDir, onlyPrefixes = CRITICAL_RESTORE_PREFIXES, checkActive = currentCoroutineContext()::ensureActive)
             }
             // Some Android filesystems reject the tar's absolute `/bin/busybox`
             // symlink target during targeted extraction. Recreate the Alpine
@@ -548,6 +572,8 @@ class RootfsManager private constructor(private val context: Context) {
                 Log.w(TAG, "[Repair] targeted restore incomplete, still missing: ${h.missing}")
             }
             nonDbOk
+        } catch (t: CancellationException) {
+            throw t
         } catch (t: Exception) {
             Log.e(TAG, "[Repair] targeted restore failed", t)
             false
@@ -1009,7 +1035,12 @@ class RootfsManager private constructor(private val context: Context) {
     /** Called after a rootfs wipe and reinstall completed. */
     var afterRootfsReinstalled: (suspend () -> Unit)? = null
 
-    suspend fun reset(): Unit = withContext(Dispatchers.IO) {
+    suspend fun reset(): Unit = lifecycleMutex.withLock {
+        resetLocked()
+    }
+
+    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    internal suspend fun resetLocked(): Unit = withContext(Dispatchers.IO) {
         // [Refactor-apk-world] Snapshot user packages BEFORE the wipe — the
         // boot path also dumps, but a manual reset can happen mid-session
         // between boots, so dump here too as the authoritative last state.
@@ -1018,7 +1049,7 @@ class RootfsManager private constructor(private val context: Context) {
         // screen; log them so a wipe is always attributable to a human action
         // vs an automatic repair.
         RootfsEventLog.logEvent(eventLogsDir, RootfsEventLog.Events.MANUAL_RESET)
-        installIfNeeded(forceReinstall = true)
+        installIfNeededLocked(forceReinstall = true)
         // [meta1028 D3-F02] The tree on disk is new; everything the boot
         // critical section materialized inside it is gone. Publish BEFORE
         // returning so a caller that immediately runs a command can't observe
@@ -1405,11 +1436,13 @@ internal fun extractTar(
     input: InputStream,
     targetDir: File,
     onlyPrefixes: Set<String>? = null,
+    checkActive: () -> Unit = {},
 ) {
     val header = ByteArray(512)
 
     while (true) {
-        val bytesRead = readFully(input, header)
+        checkActive()
+        val bytesRead = readFully(input, header, checkActive)
         if (bytesRead < 512) break
 
         // Check for end-of-archive (two consecutive zero blocks)
@@ -1442,7 +1475,7 @@ internal fun extractTar(
         if (fullName.isEmpty()) {
             if (size > 0) {
                 val blocks = (size + 511) / 512 * 512
-                skipFully(input, blocks)
+                skipFully(input, blocks, checkActive)
             }
             continue
         }
@@ -1496,6 +1529,7 @@ internal fun extractTar(
                         var remaining = size
                         val buf = ByteArray(8192)
                         while (remaining > 0) {
+                            checkActive()
                             val toRead = minOf(buf.size.toLong(), remaining).toInt()
                             val n = input.read(buf, 0, toRead)
                             if (n < 0) break
@@ -1509,12 +1543,12 @@ internal fun extractTar(
                     }
                 } else {
                     // Filtered out: consume data so the stream stays aligned
-                    skipFully(input, size)
+                    skipFully(input, size, checkActive)
                 }
                 // Skip padding to next 512-byte boundary (both branches)
                 val remainder = (size % 512).toInt()
                 if (remainder != 0) {
-                    skipFully(input, (512 - remainder).toLong())
+                    skipFully(input, (512 - remainder).toLong(), checkActive)
                 }
                 continue // Already consumed data + padding
             }
@@ -1535,7 +1569,7 @@ internal fun extractTar(
         // Skip data blocks for non-file entries that we didn't consume above
         if (typeFlag != '0' && typeFlag != '\u0000' && size > 0) {
             val blocks = (size + 511) / 512 * 512
-            skipFully(input, blocks)
+            skipFully(input, blocks, checkActive)
         }
     }
 }
@@ -1550,9 +1584,10 @@ internal fun extractString(header: ByteArray, offset: Int, length: Int): String 
     return String(header, offset, actualEnd - offset, Charset.forName("UTF-8"))
 }
 
-internal fun readFully(input: InputStream, buf: ByteArray): Int {
+internal fun readFully(input: InputStream, buf: ByteArray, checkActive: () -> Unit = {}): Int {
     var offset = 0
     while (offset < buf.size) {
+        checkActive()
         val n = input.read(buf, offset, buf.size - offset)
         if (n < 0) return offset
         offset += n
@@ -1560,10 +1595,11 @@ internal fun readFully(input: InputStream, buf: ByteArray): Int {
     return offset
 }
 
-internal fun skipFully(input: InputStream, count: Long) {
+internal fun skipFully(input: InputStream, count: Long, checkActive: () -> Unit = {}) {
     var remaining = count
     val buf = ByteArray(8192)
     while (remaining > 0) {
+        checkActive()
         val toRead = minOf(buf.size.toLong(), remaining).toInt()
         val n = input.read(buf, 0, toRead)
         if (n < 0) break

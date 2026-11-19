@@ -263,7 +263,7 @@ class PersistentShell(
 
     private class CommandCallback(
         val marker: String,
-        val output: StringBuilder = StringBuilder(),
+        private val output: StringBuilder = StringBuilder(),
         /**
          * `(line, isPartial)` — [isPartial] means the line is the unterminated
          * tail of the current read chunk and must REPLACE the previous partial
@@ -298,10 +298,11 @@ class PersistentShell(
          * The ceiling is read per append so a live `shellOutputKb` change
          * still applies mid-command, exactly as before.
          */
+        private val outputLock = Any()
         val byteBudget = IncrementalUtf8Budget { AgentRuntimeLimitsPrefs.shellOutputKb() * 1024 }
 
         /** Whether any appended chunk was clipped or skipped. */
-        val truncated: Boolean get() = byteBudget.truncated
+        val truncated: Boolean get() = synchronized(outputLock) { byteBudget.truncated }
 
         /**
          * [meta-audit-1028 E3 / F-09] Monotonic count of characters the reader
@@ -335,8 +336,10 @@ class PersistentShell(
             // [audit-1015 PERF-01] The byte accumulator lives in
             // [IncrementalUtf8Budget] (pure + JVM-tested) — each chunk measures
             // ONLY the incoming text, never a full recompute over [output].
-            byteBudget.appendTo(output, text)
+            synchronized(outputLock) { byteBudget.appendTo(output, text) }
         }
+
+        fun snapshotOutput(): String = synchronized(outputLock) { output.toString() }
 
         /** Signal completion, but only the first caller wins. Returns whether
          *  THIS caller won (used by the stall guard: if the command completed on
@@ -575,7 +578,7 @@ class PersistentShell(
                     }
                     if (scan.hit) {
                         // Signal completion with truncated flag
-                        cb.finishOnce(cb.output.toString(), scan.exitCode, cb.truncated)
+                        cb.finishOnce(cb.snapshotOutput(), scan.exitCode, cb.truncated)
                         pendingCallback = null
                         tail = ""
                     } else {
@@ -602,7 +605,7 @@ class PersistentShell(
             // tail (potential split-marker prefix) so the last bytes of the
             // command output aren't lost.
             if (tail.isNotEmpty()) cb.appendOutput(tail)
-            cb.finishOnce(cb.output.toString(), -1, cb.truncated)
+            cb.finishOnce(cb.snapshotOutput(), -1, cb.truncated)
             pendingCallback = null
         }
 
@@ -794,7 +797,7 @@ class PersistentShell(
                         // finished in this same tick, its own result stands and
                         // the shell stays alive.
                         val won = cb.finishOnce(
-                            cb.output.toString() + stallMessage(stallAfterMs),
+                            cb.snapshotOutput() + stallMessage(stallAfterMs),
                             STALL_EXIT_CODE,
                             cb.truncated,
                         )
@@ -899,7 +902,7 @@ class PersistentShell(
                 // is the same situation (we simply stopped waiting, the PTY
                 // produced no completion marker).
                 CommandResult(
-                    internalTimeoutOutput(cb.output.toString(), timeout),
+                    internalTimeoutOutput(cb.snapshotOutput(), timeout),
                     TIMEOUT_EXIT_CODE,
                     cb.truncated,
                 )
@@ -1025,7 +1028,7 @@ class PersistentShell(
             try { writer?.close() } catch (_: Exception) {}
         }
         pendingCallback?.let {
-            it.finishOnce(it.output.toString(), -1, it.truncated)
+            it.finishOnce(it.snapshotOutput(), -1, it.truncated)
         }
         pendingCallback = null
         commandCount = 0
