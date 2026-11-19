@@ -211,7 +211,7 @@ class ModelUsePassthroughTest {
         )
         assertTrue(
             "the passthrough branch must dispatch to the worker",
-            h.contains("ModelExecutionDispatcher.dispatch(context, ptRequestJson)"),
+            h.contains("ModelExecutionDispatcher.dispatch(context, ptRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id))"),
         )
         assertTrue(
             "the request must be shipped through the shared wire builder",
