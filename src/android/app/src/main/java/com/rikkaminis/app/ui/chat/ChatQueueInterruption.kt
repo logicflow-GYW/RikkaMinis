@@ -500,23 +500,26 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
  * overwrote the first job reference while BOTH agent loops kept running, i.e.
  * two writers interleaving into one session transcript.
  *
- * [mintAndClaim] runs only for the winner, inside the monitor, before the flag
- * is raised — the caller keeps the established publication order (claim token
- * first, then epoch, then the flag). The monitor is the StateFlow instance
- * itself: it is per-ViewModel and is already the shared truth every
- * streaming-state reader consults, so this adds no second lock (a second lock
- * would be the next race). Callers must keep slow work (disk reads, provider
- * creation) OUTSIDE this function.
+ * [mintAndClaim] runs only for the winner, inside the monitor — the caller
+ * raises the flag there itself (the literal stays at the call site: the
+ * claim/release ownership gate derives its subjects from that assignment, and
+ * hiding it behind a helper would make the gate blind to this entry). The
+ * caller keeps the established publication order (claim token first, then
+ * epoch, then the flag). The monitor is the StateFlow instance itself: it is
+ * per-ViewModel and is already the shared truth every streaming-state reader
+ * consults, so this adds no second lock (a second lock would be the next
+ * race). Callers must keep slow work (disk reads, provider creation) OUTSIDE
+ * this function.
  *
  * Pure JVM: takes the flag as a parameter, so the interleaving is testable
  * without the ViewModel.
  */
 internal fun claimQueuedDrainSlot(
     streaming: MutableStateFlow<Boolean>,
-    mintAndClaim: (MutableStateFlow<Boolean>) -> Unit,
+    mintAndClaim: () -> Unit,
 ): Boolean = synchronized(streaming) {
     if (streaming.value) return@synchronized false
-    mintAndClaim(streaming)
+    mintAndClaim()
     true
 }
 
@@ -533,6 +536,12 @@ internal fun claimQueuedDrainSlot(
  * as a fresh send.
  */
 internal fun ChatViewModel.resumeQueueAfterCancel() {
+    // [fullscan-1119 F-07] The claim identity is minted OUTSIDE the coroutine
+    // so the in-coroutine revocation guard compares a value captured BEFORE
+    // the coroutine started against the live field. A token read inside the
+    // coroutine and compared with the field it was just read from is a
+    // tautology that can never fire (dv29-B01).
+    val drainToken = Any()
     viewModelScope.launch(Dispatchers.IO) {
         kotlinx.coroutines.delay(200)
         if (_promptQueue.value.isEmpty()) return@launch
@@ -582,14 +591,16 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         // the token mint, the epoch publish and the flag flip, so exactly one
         // caller can win. The disk read above stays OUTSIDE the critical
         // section.
-        val claimed = claimQueuedDrainSlot(_isStreaming) { flag ->
+        val claimed = claimQueuedDrainSlot(_isStreaming) {
             // Same publication order as every other claim site: token first
             // ([T-claim-token-vs-stale-finally]), then the epoch
-            // ([T-stale-finally-vs-new-claim]), and the flag flips last.
-            streamingClaimToken = Any()
+            // ([T-stale-finally-vs-new-claim]), and the flag flips last —
+            // inside the monitor, so the check above and this raise cannot be
+            // split by another drain.
+            streamingClaimToken = drainToken
             streamEpoch++
             streamingClaimEpoch = streamEpoch
-            flag.value = true
+            _isStreaming.value = true
         }
         if (!claimed) {
             AppLogger.info(
@@ -612,6 +623,18 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         // [T-claim-token-vs-stale-finally] Capture the claim identity this job
         // was launched under.
         val claimToken = streamingClaimToken
+        // [fullscan-1119 F-07] Revocation guard before the stream starts, with
+        // the identity captured OUTSIDE this coroutine ([drainToken]) — the
+        // claim can be revoked between the claim above and this launch by a
+        // newer turn (a Stop alone leaves the token intact, so the epoch is
+        // compared too). Bail out instead of starting a stream nobody owns.
+        if (streamEpoch != streamingClaimEpoch || drainToken !== streamingClaimToken) {
+            AppLogger.info(
+                ChatViewModel.TAG_STREAM,
+                "resumeQueueAfterCancel: claim revoked before stream start (superseded) — aborting drain",
+            )
+            return@launch
+        }
         streamJob = launch(Dispatchers.IO) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")
             try {
