@@ -187,13 +187,50 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
         private const val TRIM_MAX_IDLE_TABS_TO_KEEP = 1
 
         /**
-         * [r3-B09 F-09] Hand-rolled redirect budget for URL downloads. The
-         * connection's own auto-follow already covers same-protocol hops; this
-         * budget only bounds the explicit Location chase (cross-protocol, or a
-         * server that ignores the standard), so a redirect loop burns 5 hops —
+         * [r3-B09 F-09] [R3-B F-03] Hand-rolled redirect budget for URL
+         * downloads. Auto-follow is switched off ([R3-B F-03]), so this budget
+         * bounds EVERY hop the download chases — a redirect loop burns 5 hops,
          * not the download coroutine's whole lifetime.
          */
         private const val MAX_DOWNLOAD_REDIRECT_HOPS = 5
+
+        /**
+         * [R3-B F-03] Whether hop [hopUrl] may carry the credentials attached
+         * for [sourceUrl]. The WebView's cookie jar is only sent while the hop
+         * stays on the SOURCE host: a cookie is not scoped by port, so the host
+         * is the whole policy. Malformed URLs carry nothing.
+         */
+        internal fun downloadHopKeepsCredentials(sourceUrl: String, hopUrl: String): Boolean {
+            val source = runCatching { java.net.URL(sourceUrl).host?.lowercase() }.getOrNull()
+            val hop = runCatching { java.net.URL(hopUrl).host?.lowercase() }.getOrNull()
+            return source != null && hop != null && source == hop
+        }
+
+        /**
+         * [R3-B F-03] The refusal a Location hop would deserve, or null to
+         * follow it. Two guards, both decided BEFORE the next connection is
+         * opened: a redirect may not downgrade `https` to plain `http` (the
+         * payload would then travel unauthenticated while the source host's
+         * cookie is still attached to it), and the chase is bounded by
+         * [maxHops] — with auto-follow off this now sees every hop instead of
+         * only the cross-protocol ones the platform silently dropped.
+         */
+        internal fun downloadRedirectRefusal(
+            fromUrl: String,
+            nextUrl: String,
+            hopsAfterThis: Int,
+            maxHops: Int,
+        ): String? {
+            if (hopsAfterThis > maxHops) {
+                return "too many redirects (> $maxHops)"
+            }
+            val fromScheme = runCatching { java.net.URL(fromUrl).protocol?.lowercase() }.getOrNull()
+            val nextScheme = runCatching { java.net.URL(nextUrl).protocol?.lowercase() }.getOrNull()
+            if (fromScheme == "https" && nextScheme == "http") {
+                return "refusing an https -> http redirect: $nextUrl"
+            }
+            return null
+        }
     }
 
     /**
@@ -793,22 +830,31 @@ class BrowserTabPool(private val context: Context) : ComponentCallbacks2 {
                     val c = java.net.URL(currentUrl).openConnection() as java.net.HttpURLConnection
                     c.connectTimeout = 15_000
                     c.readTimeout = 30_000
-                    c.instanceFollowRedirects = true
+                    // [R3-B F-03] Auto-follow is OFF. HttpURLConnection keeps a
+                    // manually-set `Cookie` header across the hops it follows by
+                    // itself, so a same-protocol cross-host 301/302/307/308
+                    // (GitHub Release → object storage is the real shape) sent
+                    // the SOURCE site's session cookie to the third-party host,
+                    // and made the hop budget below blind to those hops. Every
+                    // hop is resolved by hand here instead.
+                    c.instanceFollowRedirects = false
                     userAgent?.takeIf { it.isNotEmpty() }?.let { c.setRequestProperty("User-Agent", it) }
                     // Reuse the WebView's cookies so authenticated downloads work
-                    // — re-read per hop, a redirect can cross hosts.
-                    android.webkit.CookieManager.getInstance().getCookie(currentUrl)?.let {
-                        c.setRequestProperty("Cookie", it)
+                    // — but only while the hop stays on the source host.
+                    if (downloadHopKeepsCredentials(url, currentUrl)) {
+                        android.webkit.CookieManager.getInstance().getCookie(currentUrl)?.let {
+                            c.setRequestProperty("Cookie", it)
+                        }
                     }
                     val code = c.responseCode
                     val location = if (code in 300..399) c.getHeaderField("Location") else null
                     if (location != null) {
                         c.disconnect()
                         hops++
-                        if (hops > MAX_DOWNLOAD_REDIRECT_HOPS) {
-                            throw java.io.IOException("too many redirects (> $MAX_DOWNLOAD_REDIRECT_HOPS)")
-                        }
-                        currentUrl = java.net.URL(java.net.URL(currentUrl), location).toString()
+                        val nextUrl = java.net.URL(java.net.URL(currentUrl), location).toString()
+                        downloadRedirectRefusal(currentUrl, nextUrl, hops, MAX_DOWNLOAD_REDIRECT_HOPS)
+                            ?.let { throw java.io.IOException(it) }
+                        currentUrl = nextUrl
                         continue
                     }
                     // [r3-B09 F-09] 4xx/5xx bodies are error pages, not the
