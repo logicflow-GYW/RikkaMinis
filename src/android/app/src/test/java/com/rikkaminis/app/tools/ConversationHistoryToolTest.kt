@@ -1,5 +1,6 @@
 package com.rikkaminis.app.tools
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -363,5 +364,44 @@ class ConversationHistoryToolTest {
         val req = parseConversationHistoryRequest(json)
         assertTrue("expected Ok for $json, got $req", req is ConversationHistoryRequest.Ok)
         return (req as ConversationHistoryRequest.Ok).args
+    }
+
+    // ── [fix/r3-data-1119 F-13] cancellation is not a tool failure ────────
+
+    @Test
+    fun `a cancelled read propagates instead of becoming a failed tool`() {
+        // The user pressing Stop while `loadRows` reads Room must not be turned
+        // into `success = false`: the caller reports that as a tool failure and
+        // writes a JobCancellationException block into the session's
+        // .learnings/ERRORS.md, i.e. a permanent "this tool is broken" record
+        // created by a normal user action.
+        var thrown: Throwable? = null
+        try {
+            runBlocking {
+                executeConversationHistoryTool("""{}""", "s") {
+                    throw CancellationException("stop pressed")
+                }
+            }
+        } catch (e: Throwable) {
+            thrown = e
+        }
+        assertTrue(
+            "a CancellationException must propagate, not be reported as a tool failure",
+            thrown is CancellationException,
+        )
+    }
+
+    @Test
+    fun `a real read failure is still reported as a failed tool`() {
+        // Negative control for the CE branch: a genuine failure must keep the
+        // pre-fix behaviour, otherwise the fix would hide real breakage.
+        val result = runBlocking {
+            executeConversationHistoryTool("""{}""", "s") {
+                throw java.io.IOException("disk on fire")
+            }
+        }
+        assertFalse("a real failure must still fail the tool", result.success)
+        assertTrue(result.output.contains("could not read this conversation's history"))
+        assertTrue("the cause must be visible", result.output.contains("disk on fire"))
     }
 }

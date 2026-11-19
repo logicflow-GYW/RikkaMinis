@@ -157,10 +157,13 @@ class MediaHostSourceKeyTest {
         // [r3-c / B09 F-12] MarkdownText's audio block gained `prepareFailed`
         // as a fifth member of the resolved-file-keyed family (player +
         // prepared + isPlaying + positionMs + prepareFailed) so the dead
-        // "prepare threw" state can't outlive a file swap. StreamingMarkdownText
-        // is outside that wave's radius and keeps the original four.
+        // "prepare threw" state can't outlive a file swap.
+        // [fix/r3-data-1119 F-14] StreamingMarkdownText's audio block is the
+        // twin component that wave missed; it now carries the same five
+        // members, so both renderers are 5. This is the fix landing, not a
+        // regression: the count is what proves the new state is keyed too.
         for ((rel, blocks, fileKeyed) in listOf(
-            Triple(STREAM, 3, 4),
+            Triple(STREAM, 3, 5),
             Triple(MARKDOWN, 3, 5),
         )) {
             val src = stripComments(readRepoFile(rel))

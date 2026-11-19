@@ -99,6 +99,7 @@ import coil.compose.SubcomposeAsyncImageContent
 import coil.request.ImageRequest
 import com.rikkaminis.app.ui.DisplayBitmapLimits.limitDisplaySize
 import com.rikkaminis.app.ui.markdown.MarkdownMathHeuristic
+import com.rikkaminis.app.ui.markdown.SerialMediaOps
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.data.ChatTuningPrefs
 import com.rikkaminis.app.ui.theme.ChatColors
@@ -2008,23 +2009,53 @@ private fun RenderMdAudio(block: MdBlock.Audio) {
     val player = remember(resolvedMediaSourceKey(file)) {
         if (file == null) null else MediaPlayer()
     }
+    // [fix/r3-data-1119 F-14] The same SerialMediaOps worker MinisAudioBlock
+    // got in FIX-R3-C F-12, which this twin component was missed by.
+    // `prepare()` runs on Dispatchers.IO while `release()` runs on the main
+    // thread the instant the block leaves composition; coroutine cancellation
+    // cannot interrupt a thread already inside native `prepare()`, so the same
+    // native handle was prepared and released concurrently (JNI crash /
+    // undefined state). Both calls now take turns on one serial worker.
+    val serialOps = remember(player) { player?.let { SerialMediaOps() } }
     var prepared by remember(resolvedMediaSourceKey(file)) { mutableStateOf(false) }
+    // [fix/r3-data-1119 F-14] Whether the last prepare attempt FAILED, as
+    // opposed to not having finished yet. The click gate below is disabled
+    // until `prepared` — which made its own "open in an external player"
+    // fallback unreachable for exactly the files that need it (a container
+    // MediaPlayer cannot decode).
+    var prepareFailed by remember(resolvedMediaSourceKey(file)) { mutableStateOf(false) }
     LaunchedEffect(player, resolvedMediaSourceKey(file)) {
         val p = player ?: return@LaunchedEffect
         val f = file ?: return@LaunchedEffect
-        prepared = withContext(Dispatchers.IO) {
+        val ops = serialOps ?: return@LaunchedEffect
+        val ok = withContext(Dispatchers.IO) {
             runCatching {
-                p.setDataSource(f.absolutePath)
-                p.prepare()
-                true
+                ops.runPreparing {
+                    p.setDataSource(f.absolutePath)
+                    p.prepare()
+                    true
+                }
             }.getOrElse {
                 android.util.Log.w("MdStream", "audio prepare failed: ${it.message}")
                 false
             }
         }
+        prepared = ok
+        prepareFailed = !ok
     }
     DisposableEffect(player) {
-        onDispose { try { player?.release() } catch (_: Throwable) {} }
+        onDispose {
+            val p = player
+            val ops = serialOps
+            if (p != null && ops != null) {
+                // Queued, not called inline: if `prepare()` is still running on
+                // the serial worker, `release()` runs after it returns. Release
+                // must not wait on the main thread, so it cannot take a lock
+                // here instead.
+                ops.enqueue { p.release() }
+                ops.shutdown()
+            }
+        }
     }
     // [dv19-B06] Keyed on the file like `player`/`prepared` above: a reused
     // composition slot otherwise started the next audio in the previous
@@ -2065,7 +2096,13 @@ private fun RenderMdAudio(block: MdBlock.Audio) {
             .clip(RoundedCornerShape(10.dp))
             .background(colors.inlineCodeBg)
             .border(0.5.dp, colors.tableBorder, RoundedCornerShape(10.dp))
-            .clickable(enabled = file != null && (player == null || prepared)) {
+            // [fix/r3-data-1119 F-14] `prepareFailed` is part of the enable gate
+            // on purpose. The gate used to be `prepared` only, while the tap
+            // handler below already had an `!prepared` branch that hands the
+            // file to an external player — so a container MediaPlayer cannot
+            // decode disabled its own fallback and the user was stuck with a
+            // dead card.
+            .clickable(enabled = file != null && (player == null || prepared || prepareFailed)) {
                 if (player == null || !prepared) {
                     file?.let { openMdMediaExternally(context, it, "audio/*") }
                 } else {

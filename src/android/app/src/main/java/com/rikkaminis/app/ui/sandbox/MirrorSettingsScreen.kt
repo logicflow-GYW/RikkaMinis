@@ -737,16 +737,35 @@ object MirrorSpeedTestViewModel {
         val configFile = File(dataDir, category.configPath)
         val bakFile = File(dataDir, category.configPath + ".bak")
 
-        if (!bakFile.exists()) {
-            Log.i(TAG, "No .bak for ${category.configPath}, skipping restore")
-            return
-        }
-        try {
-            if (configFile.exists()) configFile.delete()
-            bakFile.copyTo(configFile, overwrite = true)
-            Log.i(TAG, "Restored ${category.configPath} from .bak")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to restore ${category.configPath}: ${e.message}")
+        // [fix/r3-data-1119 F-16] "No .bak" used to mean "skip", which left a
+        // fresh rootfs — no `root/.npmrc` to back up in the first place —
+        // permanently pinned to the custom registry while the switch showed
+        // official. The decision is a pure function so it is pinned on a JVM.
+        when (decideMirrorRestore(bakExists = bakFile.exists(), configExists = configFile.exists())) {
+            MirrorRestoreAction.RESTORE_FROM_BACKUP -> {
+                try {
+                    if (configFile.exists()) configFile.delete()
+                    bakFile.copyTo(configFile, overwrite = true)
+                    Log.i(TAG, "Restored ${category.configPath} from .bak")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to restore ${category.configPath}: ${e.message}")
+                }
+            }
+            MirrorRestoreAction.OVERWRITE_WITH_OFFICIAL -> {
+                try {
+                    configFile.parentFile?.mkdirs()
+                    configFile.writeText(officialConfigContent(category))
+                    Log.i(
+                        TAG,
+                        "No .bak for ${category.configPath}; rewrote the official " +
+                            "source instead of leaving the custom mirror in place",
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to rewrite ${category.configPath}: ${e.message}")
+                }
+            }
+            MirrorRestoreAction.NOTHING_TO_DO ->
+                Log.i(TAG, "No config for ${category.configPath}, already official")
         }
     }
 }

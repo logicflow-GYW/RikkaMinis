@@ -578,10 +578,23 @@ class ChatRepository(
      *
      * Order matches `messagesLast` (newest first) on both paths — the packer
      * packs newest-first so the most recent context survives the budget.
+     *
+     * [fix/r3-data-1119 F-06] Newest-first is the WHOLE contract: the budget
+     * packer walks this list from the head and `break`s at the first message
+     * that does not fit, so whatever sits at the head is what a truncated
+     * backup keeps. `ChatDao.messagesLast` already orders
+     * `sort_order DESC LIMIT :limit`, and the degraded path below reads
+     * `(total - 1) downTo start` — i.e. DESC too. The fast path used to run an
+     * extra `.asReversed()` on the DAO result, flipping it to ASC only on the
+     * healthy path, so a backup cut short by the byte budget kept the 200
+     * messages it fetched and then dropped the NEWEST ones — irreversibly,
+     * since a restore cannot recover messages the file never carried
+     * (regression from FIX-META1028-D1). The two paths must return the same
+     * direction; do not re-add a reversal here.
      */
     suspend fun loadMessagesTailTolerant(sessionId: String, limit: Int): MessageTailLoad {
         try {
-            return MessageTailLoad(dao.messagesLast(sessionId, limit).asReversed(), unreadableRows = 0)
+            return MessageTailLoad(dao.messagesLast(sessionId, limit), unreadableRows = 0)
         } catch (e: Exception) {
             if (!isCursorWindowFailure(e)) throw e
             android.util.Log.w(
