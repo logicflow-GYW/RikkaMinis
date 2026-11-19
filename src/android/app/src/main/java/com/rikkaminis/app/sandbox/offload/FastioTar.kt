@@ -483,6 +483,16 @@ internal class TarExtractOutcome : EntryBudget {
     var skippedSpecial = 0L
 
     /**
+     * [FULLSCAN-1119 R2 F-03] Declared payload bytes charged against
+     * [PayloadSizePolicy.MAX_FILE_BYTES] by the pre-write gate. Kept apart from [bytes]
+     * on purpose: [bytes] is user-facing ("how much did this archive yield"),
+     * this is the budget reading, and it also counts a member that was charged
+     * and then failed to land.
+     */
+    var declaredBytes = 0L
+
+
+    /**
      * [§6 F2] LNKTYPE members materialised by COPYING the already-unpacked
      * target (`Files.copy`) — the target file appears on disk, as an
      * independent regular file. A hard link cannot be created here anyway:
@@ -510,6 +520,49 @@ internal sealed class TarRefusal {
     data class BadHeader(val detail: String) : TarRefusal()
 }
 
+/** Member types whose payload tarExtract copies to disk. */
+internal fun tarWritesPayload(member: TarMember): Boolean =
+    member.type == '0' || member.type == '\u0000' || member.type == '7'
+
+/**
+ * [FULLSCAN-1119 R2 F-03] Charge one member's declared size against [maxBytes].
+ *
+ * Returns true when the archive is over budget — [out] already holds the
+ * reason, and the caller must refuse (validate) or stop (extract). The check
+ * is `used > max - size`, not `used + size > max`: the latter overflows to a
+ * negative number for a header that declares `Long.MAX_VALUE` and answers
+ * "fits" for a 10 GiB bomb.
+ */
+internal fun chargeExpandedBytes(out: TarExtractOutcome, size: Long, maxBytes: Long): Boolean {
+    val declared = size
+    require(size >= 0 && maxBytes >= 0) { "negative archive byte budget or size" }
+    if (declared > maxBytes || out.declaredBytes > maxBytes - declared) {
+        out.errors.add(
+            "archive expands past the byte budget: " +
+                "used=${out.declaredBytes} next=$declared max=$maxBytes",
+        )
+        return true
+    }
+    out.declaredBytes += declared
+    return false
+}
+
+/** Charge every payload and materialised hard-link copy, including link chains. */
+private fun chargeTarMember(out: TarExtractOutcome, member: TarMember, files: MutableMap<String, Long>, maxBytes: Long): Boolean {
+    if (chargeExpandedBytes(out, member.size, maxBytes)) return true
+    val name = tarNormalizeMember(member.name)?.joinToString("/")
+    when {
+        tarWritesPayload(member) -> if (name != null) files[name] = member.size
+        member.type == '1' -> {
+            val link = tarNormalizeMember(member.linkName)?.joinToString("/")
+            val copyBytes = files[link] ?: return false
+            if (chargeExpandedBytes(out, copyBytes, maxBytes)) return true
+            if (name != null) files[name] = copyBytes
+        }
+    }
+    return false
+}
+
 /** Where a validated member lands, and how. */
 internal data class TarTarget(val path: Path, val member: TarMember)
 
@@ -527,14 +580,24 @@ internal fun tarValidate(
     dest: Path,
     maxEntries: Long,
     out: TarExtractOutcome,
+    maxBytes: Long = PayloadSizePolicy.MAX_FILE_BYTES,
 ): Boolean {
-    val reader = TarReader(source)
+    val reader = TarReader(source, maxBytes)
     val declaredLinks = HashSet<String>()
+    val declaredFiles = HashMap<String, Long>()
     try {
         while (true) {
             val member = reader.next() ?: break
             if (charge(out, maxEntries)) {
                 out.errors.add("entry budget reached while validating; extraction would be partial")
+                return false
+            }
+            // [FULLSCAN-1119 R2 F-03] Charge the DECLARED size here, before a
+            // single payload byte is read: a 30 KB archive whose one member
+            // says 6 GiB is refused in one header parse instead of filling
+            // /data first. Payloads and materialised hard-link copies both
+            // spend the single shared byte ceiling.
+            if (chargeTarMember(out, member, declaredFiles, maxBytes)) {
                 return false
             }
             val refusal = tarEntryTarget(dest, member, declaredLinks)
@@ -568,9 +631,11 @@ internal fun tarExtract(
     force: Boolean,
     maxEntries: Long,
     out: TarExtractOutcome,
+    maxBytes: Long = PayloadSizePolicy.MAX_FILE_BYTES,
 ) {
-    val reader = TarReader(source)
+    val reader = TarReader(source, maxBytes)
     val declaredLinks = HashSet<String>()
+    val declaredFiles = HashMap<String, Long>()
     // [§6 F2] normalized member name -> the regular file actually written for
     // it, so an LNKTYPE member that follows can be materialised by copy.
     // Keyed by the NORMALIZED name: the link target is spelled the way the
@@ -582,6 +647,13 @@ internal fun tarExtract(
         while (true) {
             val member = reader.next() ?: break
             if (charge(out, maxEntries)) break
+
+            // [FULLSCAN-1119 R2 F-03] Same charge as tarValidate, enforced a
+            // second time so an archive that reaches extraction through any
+            // path (a future caller, a validate whose stream differed) still
+            // cannot write past the ceiling. Break, not `continue`: the next
+            // member is exactly as hostile.
+            if (chargeTarMember(out, member, declaredFiles, maxBytes)) break
 
             val refusal = tarEntryTarget(dest, member, declaredLinks)
             if (refusal != null) {
@@ -658,6 +730,8 @@ internal fun tarExtract(
                         if (out.skippedNames.size < MAX_REPORTED_SKIPS) out.skippedNames.add(member.name)
                     }
                 }
+            } catch (e: TarPayloadBudgetExceeded) {
+                throw e
             } catch (e: Exception) {
                 out.errors.add("${member.name}: ${e.message}")
             }
@@ -898,12 +972,27 @@ internal fun permissionsOf(mode: Int): Set<PosixFilePermission> {
  * enforced by tracking how many bytes of the current member are outstanding,
  * so a caller that forgot to consume them cannot silently desynchronize.
  */
-internal class TarReader(private val source: InputStream) {
+internal class TarReader(
+    private val source: InputStream,
+    /**
+     * [FULLSCAN-1119 R2 F-03] Ceiling on ACTUAL payload bytes this reader may
+     * consume. The declared-size gate in [tarValidate]/[tarExtract] already
+     * refuses a bomb from its header alone; this one is the belt for a stream
+     * whose copy request exceeds its header, so "we stop at N bytes" is a property of the reader rather
+     * than of every caller's arithmetic.
+     */
+    private val maxPayloadBytes: Long = PayloadSizePolicy.MAX_FILE_BYTES,
+) {
     private var pendingData = 0L
+    private var declaredPayloadBytes = 0L
     private var longName: String? = null
     private var longLink: String? = null
     private var paxPath: String? = null
     private var paxLink: String? = null
+
+    /** Actual payload bytes consumed so far (copied and skipped alike). */
+    var consumedBytes = 0L
+        private set
 
     /** pax extension headers consumed so far (only path/linkpath are honoured). */
     var paxHeaders = 0L
@@ -920,6 +1009,10 @@ internal class TarReader(private val source: InputStream) {
                 continue
             }
             val member = parseHeader(block)
+            if (member.size > maxPayloadBytes || declaredPayloadBytes > maxPayloadBytes - member.size) {
+                throw TarPayloadBudgetExceeded("archive payload exceeded the byte budget: used=$declaredPayloadBytes next=${member.size} max=$maxPayloadBytes")
+            }
+            declaredPayloadBytes += member.size
             when (member.type) {
                 'L' -> {
                     longName = readText(member.size)
@@ -964,6 +1057,7 @@ internal class TarReader(private val source: InputStream) {
         while (left > 0) {
             val read = source.read(buffer, 0, minOf(buffer.size.toLong(), left).toInt())
             if (read < 0) throw EOFException("archive truncated ${left} bytes into an entry")
+            chargePayload(read.toLong())
             sink.write(buffer, 0, read)
             left -= read
         }
@@ -973,9 +1067,31 @@ internal class TarReader(private val source: InputStream) {
 
     /** Consume the current member's payload without copying it. */
     fun skipData() {
-        skipBytes(pendingData)
+        var left = pendingData
+        val buffer = ByteArray(COPY_BUFFER)
+        while (left > 0) {
+            val read = source.read(buffer, 0, minOf(buffer.size.toLong(), left).toInt())
+            if (read < 0) throw EOFException("archive truncated ${left} bytes into an entry")
+            chargePayload(read.toLong())
+            left -= read
+        }
         skipPadding(pendingData)
         pendingData = 0
+    }
+
+    /**
+     * [FULLSCAN-1119 R2 F-03] Count actual payload bytes and refuse to read past
+     * the ceiling. Thrown (not returned) so every caller — copy, skip, and any
+     * future one — stops at the same boundary; both passes already turn an
+     * exception into a refusal with the message attached.
+     */
+    private fun chargePayload(additional: Long) {
+        if (additional > maxPayloadBytes || consumedBytes > maxPayloadBytes - additional) {
+            throw TarPayloadBudgetExceeded(
+                "archive payload exceeded the byte budget: read=${consumedBytes + additional} max=$maxPayloadBytes",
+            )
+        }
+        consumedBytes += additional
     }
 
     private fun requirePaused() {
@@ -1003,6 +1119,7 @@ internal class TarReader(private val source: InputStream) {
         while (filled < bytes.size) {
             val read = source.read(bytes, filled, bytes.size - filled)
             if (read < 0) throw EOFException("archive truncated in a long-name record")
+            chargePayload(read.toLong())
             filled += read
         }
         skipPadding(size)
@@ -1331,6 +1448,9 @@ private const val PREFIX_OFFSET = 345
 private const val PREFIX_LENGTH = 155
 
 private const val COPY_BUFFER = 64 * 1024
+
+/** [FULLSCAN-1119 R2 F-03] Raised by [TarReader] when actual payload bytes pass the ceiling. */
+internal class TarPayloadBudgetExceeded(message: String) : Exception(message)
 
 /** Names listed in `skipped_names`; the COUNT is always exact. */
 private const val MAX_REPORTED_SKIPS = 20
