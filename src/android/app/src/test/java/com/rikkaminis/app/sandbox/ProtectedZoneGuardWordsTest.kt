@@ -475,9 +475,19 @@ class ProtectedZoneGuardParentZoneTest {
             ProtectedZoneGuard.shellLex("{ rm -rf /var/minis/shared; }").statements[0],
         )
         // `$(` is a substitution marker, not an argument: `echo` keeps no `$`.
+        // Its interior RUNS first, so the interior statement is emitted before
+        // the outer word list resumes ([FIX-3D1119-A] F-02 — the interior no
+        // longer borrows the outer statement's verb, and the outer statement no
+        // longer ends at the `(`).
         assertEquals(
-            listOf(listOf("echo"), listOf("rm", "-rf", "/var/minis/shared")),
+            listOf(listOf("rm", "-rf", "/var/minis/shared"), listOf("echo")),
             ProtectedZoneGuard.shellLex("echo \$(rm -rf /var/minis/shared)").statements,
+        )
+        // `rm -rf <substitution> <zone>` keeps the verb and the target in ONE
+        // statement, which is the P0 this branch used to lose.
+        assertEquals(
+            listOf(listOf("echo", "/tmp/x"), listOf("rm", "-rf", "/var/minis/shared")),
+            ProtectedZoneGuard.shellLex("rm -rf \$(echo /tmp/x) /var/minis/shared").statements,
         )
     }
 
@@ -606,5 +616,231 @@ class ProtectedZoneGuardParentZoneTest {
         )) {
             assertNull("must still allow: $cmd", ProtectedZoneGuard.refuseReason(cmd))
         }
+    }
+}
+
+/**
+ * [FIX-3D1119-A] The five lexical defects the 3D-1119 audit found in the
+ * guard's FINAL state ([ProtectedZoneGuardParentZoneTest] pins the shapes the
+ * 1118C fixes added; these are the spellings that still slipped through it).
+ *
+ * Every expectation is a literal command and a literal boolean. A guard fails
+ * in two directions and neither is tolerable: a bypass loses data, a false
+ * refusal teaches the agent to work around the guard — and the workaround
+ * (`find -delete`) is worse than the bypass it escapes. Both sides are pinned
+ * here, for every change.
+ */
+class ProtectedZoneGuardLexTest {
+
+    // ── F-02 (P0): `$(` and `$((` are NOT statement separators ────────────
+
+    /**
+     * [F-02] A substitution inside a delete must not cut the verb off from the
+     * paths that follow it: the old `(`-is-a-separator reading parsed
+     * `rm -rf $(echo x) <zone>` as three statements and left `<zone>` in one
+     * without a verb.
+     */
+    @Test
+    fun `a substitution does not cut the verb off from its targets`() {
+        for (cmd in listOf(
+            "rm -rf \$(echo /tmp/x) /var/minis/shared",
+            "rm -rf \$(echo /tmp/x) /var/minis/shared/work",
+            "rm -rf \$(echo /tmp/x) /var/minis",
+            "rm -rf \$(cat \$(echo /tmp/x)) /var/minis/shared",
+            "sudo rm -rf \$(echo /tmp/x) /var/minis/shared",
+            "rm -rf \$((1+2)) /var/minis/shared",
+            "rm -rf \$((1+2)) /var/minis",
+        )) {
+            assertNotNull("should refuse: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+        assertEquals(
+            listOf(listOf("echo", "/tmp/x"), listOf("rm", "-rf", "/var/minis/shared")),
+            ProtectedZoneGuard.shellLex("rm -rf \$(echo /tmp/x) /var/minis/shared").statements,
+        )
+    }
+
+    /**
+     * [F-02] The interior of a substitution RUNS, so it is judged as its own
+     * statement; `$((` is an expression, not a command, and stays one opaque
+     * word (it carries `$`, so [ProtectedZoneGuard.absoluteGuestPath] reads it
+     * as a non-literal exactly like `$VAR`).
+     */
+    @Test
+    fun `the interior of a substitution is judged and arithmetic stays opaque`() {
+        assertNotNull(ProtectedZoneGuard.refuseReason("echo \$(rm -rf /var/minis/shared)"))
+        assertEquals(
+            listOf("rm", "-rf", "\$((1+2))", "/var/minis/shared"),
+            ProtectedZoneGuard.shellLex("rm -rf \$((1+2)) /var/minis/shared").statements[0],
+        )    }
+
+    /**
+     * [F-02] The change must not widen the refusal surface: the value a
+     * substitution PRODUCES is not a literal, and moving INTO a zone is not a
+     * delete of it.
+     */
+    @Test
+    fun `the substitution does not widen the refusal surface`() {
+        for (cmd in listOf(
+            "mv \$(echo /tmp/a) /var/minis/shared",
+            "rm -rf \$(echo /tmp/x) /tmp/build",
+            "rm -rf \$(echo /tmp/x)",
+            // The substitution's output is not readable as a path: the same
+            // documented ceiling `$VAR` sits under.
+            "rm -rf \$(echo /var/minis/shared)",
+        )) {
+            assertNull("should allow: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+    }
+
+    /** [F-02] An unclosed substitution is unreadable, so it fails closed. */
+    @Test
+    fun `an unclosed substitution is refused`() {
+        assertNotNull(ProtectedZoneGuard.refuseReason("rm -rf \$(echo /var/minis/shared"))
+        assertNotNull(ProtectedZoneGuard.refuseReason("rm -rf \$(echo /var/minis/shared && echo 'x"))
+    }
+
+    /**
+     * [F-02] The words that follow `)` still belong to the verb that opened
+     * the statement: `rm -rf $(echo x) work` is `rm` with two arguments, not
+     * `rm` with one and a bare `work` statement.
+     */
+    @Test
+    fun `the words after a substitution stay arguments of the outer verb`() {
+        assertNotNull(ProtectedZoneGuard.refuseReason("rm -rf \$(echo /tmp/x) work"))
+        assertEquals(
+            listOf(listOf("echo", "/tmp/x"), listOf("rm", "-rf", "work")),
+            ProtectedZoneGuard.shellLex("rm -rf \$(echo /tmp/x) work").statements,
+        )
+    }
+
+    // ── F-03a: the fail-closed path uses the same delimiters ───────────────
+
+    /**
+     * [F-03a] `(`/`)` must delimit words and path literals in the raw-text scan
+     * too. It did not: the verb arrived as `(rm` and the path as
+     * `<zone>)`, and neither matched, so `(rm -rf <zone>) && <stray quote>`
+     * was allowed.
+     */
+    @Test
+    fun `the fail-closed scan reads parentheses as delimiters`() {
+        for (cmd in listOf(
+            "(rm -rf /var/minis/shared) && echo 'unclosed",
+            "(cd /var/minis/shared && rm -rf work) && echo \"oops",
+            "{ rm -rf /var/minis/shared; } && echo 'unclosed",
+            "true && (rm -rf /var/minis/shared) && echo 'unclosed",
+        )) {
+            assertNotNull("should refuse: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+        assertEquals(
+            "/var/minis/shared",
+            ProtectedZoneGuard.wideDeleteHit("(rm -rf /var/minis/shared) && echo 'unclosed")?.path,
+        )
+        // Only the WIDE targets are refused here: a deep path in a subshell is
+        // ordinary work, and a subshell that only mentions the zone is not a
+        // delete.
+        assertNull(
+            ProtectedZoneGuard.refuseReason("(rm -rf /var/minis/shared/work/batch) && echo 'unclosed"),
+        )
+        assertNull(ProtectedZoneGuard.refuseReason("(ls /var/minis/shared) && echo 'unclosed"))
+    }
+
+    // ── F-01: a zone literal must start at a word boundary ─────────────────
+
+    /**
+     * [F-01] `indexOf` found `/var` inside `/tmp/var` and `/var/minis` inside
+     * `/opt/var/minis`, so an unbalanced line naming an unrelated path was
+     * refused for deleting a zone.
+     */
+    @Test
+    fun `a zone literal must start at a word boundary in the fail-closed scan`() {
+        for (cmd in listOf(
+            "rm -rf /tmp/var && echo 'unclosed",
+            "rm -rf /tmp/var/minis && echo 'unclosed",
+            "rm -rf /opt/var/minis && echo 'unclosed",
+            "rm -rf /var/minis2 && echo 'unclosed",
+            "rm -rf /var/minis2/shared && echo 'unclosed",
+        )) {
+            assertNull("should allow: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+        // The real literals are still caught — bare, quoted, and as a value.
+        for (cmd in listOf(
+            "rm -rf /var && echo 'unclosed",
+            "rm -rf /var/minis && echo 'unclosed",
+            "rm -rf \"/var/minis/shared\" 'unclosed",
+            "DST=/var/minis && rm -rf x 'unclosed",
+        )) {
+            assertNotNull("should refuse: $cmd", ProtectedZoneGuard.refuseReason(cmd))
+        }
+    }
+
+    // ── F-04: the parents must not get a weaker refusal ─────────────────────
+
+    /**
+     * [F-04] `zoneOf` deliberately knows nothing about `ROOT_ONLY_ZONES`, so a
+     * hit that IS one of them used to come out with the weakest text available
+     * — deleting `/var/minis` clears all five zones, which is the shape that
+     * most needs the referent confirmation.
+     */
+    @Test
+    fun `the parent zones get the same referent confirmation as a zone root`() {
+        val zoneRoot = ProtectedZoneGuard.refuseReason("rm -rf /var/minis/shared") ?: ""
+        assertTrue("zone root must ask for the referent", zoneRoot.contains("confirm which files"))
+        assertNotNull(ProtectedZoneGuard.refuseReason("rm -rf /var/minis"))
+        assertNotNull(ProtectedZoneGuard.refuseReason("rm -rf /var"))
+        for (pair in listOf(
+            "rm -rf /var/minis" to "/var/minis",
+            "rm -rf /var" to "/var",
+            "mv /var/minis /tmp/" to "/var/minis",
+        )) {
+            val msg = ProtectedZoneGuard.refuseReason(pair.first) ?: ""
+            assertTrue("must name the path: ${pair.first}", msg.contains(pair.second))
+            assertTrue("must ask for the referent: ${pair.first}", msg.contains("confirm which files"))
+        }
+        // A named child is a real instruction, not a no-referent one: unchanged.
+        val sub = ProtectedZoneGuard.refuseReason("rm -rf /var/minis/shared/work") ?: ""
+        assertFalse(sub.contains("confirm which files"))
+    }
+
+    // ── F-05: `-S` / `--suffix` take a value ────────────────────────────────
+
+    /** [F-05] A bare `S` at the end of the cluster eats the NEXT word. */
+    @Test
+    fun `mv short suffix option consumes its value instead of treating it as a source`() {
+        assertEquals(
+            listOf("/tmp/a"),
+            ProtectedZoneGuard.mvSources(listOf("-S", "/var/minis/shared", "/tmp/a", "/tmp/b")),
+        )
+        assertNull(ProtectedZoneGuard.refuseReason("mv -S /var/minis/shared /tmp/a /tmp/b"))
+        // Same rule when `S` closes a cluster.
+        assertEquals(
+            emptyList<String>(),
+            ProtectedZoneGuard.mvSources(listOf("-fS", "/var/minis/shared", "/tmp/a")),
+        )
+        assertNull(ProtectedZoneGuard.refuseReason("mv -fS /var/minis/shared /tmp/a"))
+        // An attached suffix stays in the same word, so the zone is still a source.
+        assertEquals(
+            listOf("/var/minis/shared"),
+            ProtectedZoneGuard.mvSources(listOf("-S.bak", "/var/minis/shared", "/tmp/a")),
+        )
+        assertNotNull(ProtectedZoneGuard.refuseReason("mv -S.bak /var/minis/shared /tmp/a"))
+    }
+
+    /** [F-05] The long form of the suffix flag takes a value too. */
+    @Test
+    fun `mv long suffix flag consumes its value`() {
+        assertEquals(
+            listOf("/tmp/a"),
+            ProtectedZoneGuard.mvSources(listOf("--suffix", "/var/minis/shared", "/tmp/a", "/tmp/b")),
+        )
+        assertNull(ProtectedZoneGuard.refuseReason("mv --suffix /var/minis/shared /tmp/a /tmp/b"))
+        assertNull(ProtectedZoneGuard.refuseReason("mv --suffix=/var/minis/shared /tmp/a /tmp/b"))
+    }
+
+    /** [F-05] `stdbuf -o` gets its own anchor, not only coverage inside a cluster. */
+    @Test
+    fun `stdbuf -o alone still reaches the verb`() {
+        assertNotNull(ProtectedZoneGuard.refuseReason("stdbuf -o L rm -rf /var/minis/shared"))
+        assertNotNull(ProtectedZoneGuard.refuseReason("stdbuf -o L rm -rf /var/minis"))
+        assertNull(ProtectedZoneGuard.refuseReason("stdbuf -o L ls /var/minis/shared"))
     }
 }

@@ -262,7 +262,7 @@ internal object ProtectedZoneGuard {
     internal data class ShellLex(val statements: List<List<String>>, val parseOk: Boolean)
 
     /**
-     * [F-03] [F-04] The lexical pass over one command line.
+     * [F-02] [F-03] [F-04] The lexical pass over one command line.
      *
      * Handles what `split(Regex("\\s+"))` could not: `'…'` and `"…"` (whitespace
      * inside a quote does not split, and the quote itself is dropped from the
@@ -273,6 +273,9 @@ internal object ProtectedZoneGuard {
      */
     internal fun shellLex(command: String): ShellLex {
         val statements = ArrayList<List<String>>()
+        // [F-02] Outer word lists of the `$(` substitutions currently open.
+        // A stack, because `$(cat $(echo x))` nests.
+        val outerWords = ArrayList<ArrayList<String>>()
         var words = ArrayList<String>()
         var word = StringBuilder()
         var wordStarted = false
@@ -341,16 +344,53 @@ internal object ProtectedZoneGuard {
                 // word `(rm` (not a verb), and `{ rm …; }` opened with a `{`
                 // that was read as the verb, so both spellings fell through.
                 //
-                // `$(` is the command-substitution marker: the `$` is not an
-                // argument (`echo $(rm -rf …)`), so it is dropped rather than
-                // handed on as a one-character word.
-                c == '(' || c == ')' -> {
+                // [F-02] THREE kinds of `(`, and only one of them ends a
+                // statement. The first version treated all of them alike, and
+                // that is the P0 this branch carries: `rm -rf $(echo x) …
+                // <zone>` split at `(` into three statements, so `<zone>`
+                // landed in one with no verb and the delete was allowed.
+                //
+                //   `$((`  arithmetic — nothing runs inside, one opaque word.
+                //   `$(`   substitution — the interior RUNS (its words are
+                //          judged on their own), but what follows `)` still
+                //          belongs to the outer statement.
+                //   `(`    subshell/group — a real statement boundary.
+                c == '(' -> {
                     if (wordStarted && word.length == 1 && word[0] == '$') {
                         word = StringBuilder()
                         wordStarted = false
+                        if (i + 1 < command.length && command[i + 1] == '(') {
+                            // `$((…))`: an expression, not a command. Kept as
+                            // one word that carries `$`, so [absoluteGuestPath]
+                            // refuses to read it as a path — the same treatment
+                            // `$VAR` gets.
+                            val close = arithmeticEnd(command, i)
+                            // Keep the `$` in the word (it is at `i - 1`), so the
+                            // word is visibly a non-literal to
+                            // [absoluteGuestPath] and to the verb scan.
+                            word.append(command, i - 1, close + 1)
+                            wordStarted = true
+                            i = close
+                        } else {
+                            // Save the outer words, lex the interior as its own
+                            // statements, and resume them at the matching `)`.
+                            outerWords.add(words)
+                            words = ArrayList()
+                        }
+                    } else {
+                        endWord()
+                        endStatement()
                     }
-                    endWord()
-                    endStatement()
+                }
+                c == ')' -> {
+                    if (outerWords.isNotEmpty()) {
+                        endWord()
+                        if (words.isNotEmpty()) statements.add(stripRedirections(words))
+                        words = outerWords.removeAt(outerWords.size - 1)
+                    } else {
+                        endWord()
+                        endStatement()
+                    }
                 }
                 // A brace INSIDE a word is brace expansion (`<zone>/{a,b}`),
                 // whose value the guard cannot see — that is the documented
@@ -364,12 +404,41 @@ internal object ProtectedZoneGuard {
             }
             i++
         }
-        if (quote != null) {
+        if (quote != null || outerWords.isNotEmpty()) {
+            // An unclosed `$(`, like an unclosed quote, means the tail of the
+            // line cannot be read as words: fail closed through
+            // [unbalancedFallback] instead of judging a prefix.
             endStatement()
             return ShellLex(statements, parseOk = false)
         }
         endStatement()
         return ShellLex(statements, parseOk = true)
+    }
+
+    /**
+     * [F-02] The index of the `)` that closes the arithmetic expansion opened
+     * at [open] (`$((` — the second `(` sits at `open + 1`).
+     *
+     * Nested parentheses inside the expression are balanced; the terminator is
+     * the `))` pair. An unterminated expansion swallows the rest of the line
+     * (the resulting word carries `$` and is never read as a path).
+     */
+    private fun arithmeticEnd(command: String, open: Int): Int {
+        var level = 0
+        var j = open + 2
+        while (j < command.length) {
+            when (command[j]) {
+                '(' -> level++
+                ')' -> {
+                    if (level == 0) {
+                        return if (j + 1 < command.length && command[j + 1] == ')') j + 1 else j
+                    }
+                    level--
+                }
+            }
+            j++
+        }
+        return command.length - 1
     }
 
     /** Drops redirection operators and the words they target (see [shellLex]). */
@@ -453,6 +522,11 @@ internal object ProtectedZoneGuard {
                     targetForm = true
                     i += if (a.contains('=')) 1 else 2
                 }
+                // [F-05] `--suffix` is the long form of `-S` and takes a value
+                // the same way: without this branch its value is read as a
+                // positional (and then as a source, or as the destination, with
+                // the rest of the command misread behind it).
+                a == "--suffix" || a.startsWith("--suffix=") -> i += if (a.contains('=')) 1 else 2
                 a.startsWith("-") && a.length > 1 -> {
                     // [F-02] `-ft` / `-vtf` / `-tf`: a short option CLUSTER that
                     // contains `t` is the target-directory form too. The old
@@ -473,25 +547,70 @@ internal object ProtectedZoneGuard {
     }
 
     /**
-     * [F-02] What one short option cluster (`-ft`, `-t/tmp`, `-S.bak`, `-T`)
+     * [F-02] [F-05] What one short option cluster (`-ft`, `-t/tmp`, `-S.bak`, `-S`, `-T`)
      * means for `mv`: (is the target-directory form, does it eat the next word).
      *
      * `t` takes a directory — the rest of the cluster is that directory when
      * something follows it (`-t/tmp`), otherwise it is the next word
      * (`-ft /tmp …`). `T` is `--no-target-directory`, the OPPOSITE flag, and a
-     * cluster that reaches an `T` before a `t` is not the target form. `S`
-     * takes a suffix, and everything after it belongs to the suffix, so no
-     * later letter in the same word can be the target flag.
+     * cluster that reaches an `T` before a `t` is not the target form.
+     *
+     * `S` is `--suffix`, and it takes a value too: an attached suffix stays in
+     * the same word (`-S.bak` — every character after `S` is the suffix, so
+     * no later letter in the word can be the target flag), while a bare `S`
+     * at the END of the cluster takes the NEXT word as the suffix
+     * (`-S .bak`). Without the last clause the value was read as a source
+     * (`mv -S <zone> a b` refused to move `a` into `b`).
      */
     private fun mvShortCluster(cluster: String): Pair<Boolean, Boolean> {
         for (index in cluster.indices) {
             when (cluster[index]) {
                 'T' -> return Pair(false, false)
                 't' -> return Pair(true, index == cluster.lastIndex)
-                'S' -> return Pair(false, false)
+                'S' -> return Pair(false, index == cluster.lastIndex)
             }
         }
         return Pair(false, false)
+    }
+
+    /**
+     * The characters that delimit a raw-text word or a raw-text path literal.
+     *
+     * [F-03a] ONE set, shared by both halves of the fail-closed path — the word
+     * split in [unbalancedFallback] and the path scan in [zoneWideLiteral]. Two
+     * differing copies is exactly how `(rm -rf <zone>) && echo 'unclosed`
+     * slipped through it: the word split only knew whitespace, so the verb
+     * arrived as `(rm`, and the path scan did not stop at `)`, so the path
+     * arrived as `<zone>)` — neither matched, and the line was allowed.
+     */
+    private const val RAW_WORD_DELIMITERS = " \t\r\n;&|(){}<>"
+
+    /**
+     * [F-01] True for a character that may legitimately stand in front of a
+     * path literal: nothing (the start of the line), a delimiter, a quote or
+     * an escape (the path is quoted), or `=` (an assignment value).
+     */
+    private fun isRawPathBoundary(c: Char): Boolean =
+        c in RAW_WORD_DELIMITERS || c == '"' || c == '\'' || c == '\\' || c == '='
+
+    /**
+     * The words of a command whose quotes do not balance, split on
+     * [RAW_WORD_DELIMITERS] — the same delimiter set the path scan uses, so a
+     * verb and a path can never disagree about what the line contains.
+     */
+    private fun rawWords(command: String): List<String> {
+        val out = ArrayList<String>()
+        var word = StringBuilder()
+        for (c in command) {
+            if (c in RAW_WORD_DELIMITERS) {
+                if (word.isNotEmpty()) out.add(word.toString())
+                word = StringBuilder()
+            } else {
+                word.append(c)
+            }
+        }
+        if (word.isNotEmpty()) out.add(word.toString())
+        return out
     }
 
     /**
@@ -509,7 +628,7 @@ internal object ProtectedZoneGuard {
         val wide = ALL_ZONES.firstOrNull { zone ->
             command.contains(zone) && zoneWideLiteral(command, zone) != null
         } ?: return null
-        val verbSeen = command.split(Regex("""[\s;&|\n]+""")).any { token ->
+        val verbSeen = rawWords(command).any { token ->
             val word = token.trim('"', '\'', '\\')
             val name = word.substringAfterLast('/')
             name in DESTRUCTIVE || name == "mv"
@@ -530,18 +649,22 @@ internal object ProtectedZoneGuard {
     private fun zoneWideLiteral(command: String, zone: String): String? {
         var start = command.indexOf(zone)
         while (start >= 0) {
-            var end = command.length
-            for (i in start + zone.length until command.length) {
-                val c = command[i]
-                if (c == ' ' || c == '\t' || c == '\n' || c == ';' || c == '|' || c == '&' ||
-                    c == '"' || c == '\'' || c == '\\'
-                ) {
-                    end = i
-                    break
+            // [F-01] The literal must start at a word boundary. Scanning the
+            // raw text without this let `/tmp/var` supply the `/var` of
+            // `/var/minis`: a line that never mentions a zone was refused for
+            // deleting one.
+            if (start == 0 || isRawPathBoundary(command[start - 1])) {
+                var end = command.length
+                for (i in start + zone.length until command.length) {
+                    val c = command[i]
+                    if (c in RAW_WORD_DELIMITERS || c == '"' || c == '\'' || c == '\\') {
+                        end = i
+                        break
+                    }
                 }
+                val guest = absoluteGuestPath(command.substring(start, end), null)
+                if (guest != null && isWideTarget(guest)) return guest
             }
-            val guest = absoluteGuestPath(command.substring(start, end), null)
-            if (guest != null && isWideTarget(guest)) return guest
             start = command.indexOf(zone, start + 1)
         }
         return null
@@ -690,7 +813,12 @@ internal object ProtectedZoneGuard {
         val zone = zoneOf(hit.path)
         val base = "refusing to delete '${hit.path}': it is a protected zone" +
             " (or a whole subdirectory of one) — name the files to remove, or move them aside first."
-        val noReferent = if (zone != null && hit.path == zone) {
+        // [F-04] `zoneOf` deliberately knows nothing about [ROOT_ONLY_ZONES], so
+        // a hit that IS one of them came out with the WEAKEST text available —
+        // deleting `/var/minis` wipes all five zones at once, which is the
+        // shape that most needs the "name the files" confirmation. The parent
+        // zones get the same no-referent sentence, not a quieter one.
+        val noReferent = if ((zone != null && hit.path == zone) || hit.path in ROOT_ONLY_ZONES) {
             " If you were asked to clean this up, confirm which files the user meant before retrying."
         } else {
             ""
