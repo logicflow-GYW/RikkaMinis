@@ -182,6 +182,87 @@ def _swallowing_spans(body):
             spans.append((k, close))
     return spans
 
+def _enclosing_if_header(body, idx):
+    """(open brace index, header text) of the innermost `{` enclosing [idx].
+
+    [F-06] A terminal inside a block is only unconditional when the block is not
+    the body of a conditional. `if (reason.isNotBlank()) { return }` looks
+    terminal to a word search and to a brace-less-only check, yet a failure that
+    does not satisfy the condition still falls out of the `when` into the success
+    path. Returns (None, "") when [idx] is not inside a brace at all.
+    """
+    depth = 0
+    for i in range(idx - 1, -1, -1):
+        c = body[i]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth == 0:
+                start = max(0, i - 160)
+                return i, body[start:i]
+            depth -= 1
+    return None, ""
+
+def _if_has_terminating_else(body, open_idx):
+    """True when the `if (…) { … }` whose body opens at [open_idx] has an
+    `else` arm that itself terminates.
+
+    [F-06] `if (c) { return }` with no `else` leaves the branch standing when `c`
+    is false. Only an `else` that terminates as well makes the pair
+    unconditional; `else if (d) …` recurses through [_statement_is_conditional]
+    by falling through to the same check on the inner `if`.
+    """
+    close = _brace_end(body, open_idx)
+    if close < 0:
+        return False
+    j = close
+    while j < len(body) and body[j] in " \t\r\n":
+        j += 1
+    if not body.startswith("else", j):
+        return False
+    j += 4
+    while j < len(body) and body[j] in " \t\r\n":
+        j += 1
+    if j < len(body) and body[j] == "{":
+        inner = _brace_end(body, j)
+        if inner < 0:
+            return False
+        return _body_has_terminal(body[j + 1:inner])
+    if body.startswith("if", j):
+        # `else if (…)` — the inner `if` is the arm; it terminates when its own
+        # body does AND its own `else` does (the same question, one level in).
+        k = body.find("{", j)
+        if k < 0:
+            return False
+        return _body_has_terminal(body[k + 1:max(k, _brace_end(body, k))]) and \
+            _if_has_terminating_else(body, k)
+    # `else <expression>` — a single-statement arm is not a terminal exit.
+    return False
+
+def _body_has_terminal(body, seen=0):
+    """True when [body] contains a terminal exit on every path it can take.
+
+    [F-06] This is the recursive core: a terminal is real when its own statement
+    is not a brace-less conditional AND it is not inside a conditional block that
+    can be skipped (see [_if_has_terminating_else]). `seen` bounds the recursion
+    so a pathological nesting cannot spin; exceeding it fails CLOSED (not
+    terminal), which is the safe direction for a gate that asserts "this exits".
+    """
+    if seen > 8:
+        return False
+    spans = _swallowing_spans(body)
+    for m in SB_TERMINAL_RE.finditer(body):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        if _statement_is_conditional(body, m.start()):
+            continue
+        open_idx, header = _enclosing_if_header(body, m.start())
+        if open_idx is not None and re.search(r"\bif\s*\([^;]*\)\s*$", header):
+            if not _if_has_terminating_else(body, open_idx):
+                continue
+        return True
+    return False
+
 def _branch_body_is_terminal(body):
     """True when a `when` branch body leaves the enclosing flow for good.
 
@@ -191,14 +272,7 @@ def _branch_body_is_terminal(body):
     standing and the failure falls through into the success path — and the old
     word-level search stayed green on both. The regex only LOCATES the
     candidates; the block structure decides."""
-    spans = _swallowing_spans(body)
-    for m in SB_TERMINAL_RE.finditer(body):
-        if any(a <= m.start() < b for a, b in spans):
-            continue
-        if _statement_is_conditional(body, m.start()):
-            continue
-        return True
-    return False
+    return _body_has_terminal(body)
 
 # [incr1117b-C3.2] Continuation markers used when deciding where a branch body
 # ends: a line ending in one of these, or a next line starting with one of
@@ -1445,6 +1519,27 @@ GOOD_SB_TRY_CATCH_RETURN = _mutate(
         }
 """)
 
+# [F-06] A braced `if/else` whose BOTH arms terminate is an unconditional exit.
+# A criterion that refused every conditional block out of hand would read this
+# correct code as a drop-through.
+GOOD_SB_BRACED_IF_ELSE = _mutate(
+    GOOD_SB,
+    """        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+""",
+    """        is SkillRepository.UpdateResult.Failure -> {
+            if (result.reason.isNotBlank()) {
+                onStateChange(HudState.ERROR, result.reason)
+                return
+            } else {
+                onStateChange(HudState.ERROR, "download failed")
+                return
+            }
+        }
+""")
+
 # [F-06] A `throw` that never leaves the branch: `runCatching` catches it, the
 # HUD still reports the error, and control falls out of the `when` into the
 # success path below. The word-level criterion matched `throw` and stayed green.
@@ -1474,6 +1569,21 @@ DIRTY_SB_TRY_CATCH_THROW = _mutate(
         } catch (t: Throwable) {
             onStateChange(HudState.ERROR, result.reason)
         }
+""")
+
+# [F-06] The same shape with a BRACE-FUL condition and no `else`: the `return`
+# is at brace depth 1 of the branch, so a depth-0-only check (and a plain word
+# search) reads it as terminal while a failure that fails the condition still
+# falls through into the success path.
+DIRTY_SB_BRACED_IF_RETURN = _mutate(
+    GOOD_SB,
+    """            onStateChange(HudState.ERROR, result.reason)
+            return
+""",
+    """            onStateChange(HudState.ERROR, result.reason)
+            if (result.reason.isNotBlank()) {
+                return
+            }
 """)
 
 # [F-06] The F-04 shape: the branch returns only when the condition holds, so a
@@ -1613,6 +1723,7 @@ def selftest():
         # [F-06] the caught-throw shapes: the criterion must not refuse every
         # `try` out of hand.
         ("Failure branch returns from the `catch` arm", GOOD_SB_TRY_CATCH_RETURN),
+        ("Failure branch returns from both arms of an if/else", GOOD_SB_BRACED_IF_ELSE),
     ]:
         f = run(GOOD_SR, GOOD_SM, sb_t)
         print("selftest clean shape %-28s: %s %s"
@@ -1648,6 +1759,8 @@ def selftest():
          DIRTY_SB_TRY_CATCH_THROW, "failed download as terminal"),
         ("browser Failure branch returns inside a brace-less if", GOOD_SR, GOOD_SM,
          DIRTY_SB_CONDITIONAL_RETURN, "failed download as terminal"),
+        ("browser Failure branch returns inside a brace-ful if with no else",
+         GOOD_SR, GOOD_SM, DIRTY_SB_BRACED_IF_RETURN, "failed download as terminal"),
         ("browser Failure branch has two markers", GOOD_SR, GOOD_SM,
          DIRTY_SB_TWO_MARKERS, "cannot tell which one is the refresh path"),
         ("browser import without dedup", GOOD_SR, GOOD_SM, DIRTY_SB_NO_DEDUP,
