@@ -50,7 +50,28 @@ class ComposerClearResidueWiringTest {
      */
     private val code: String get() = maskComments(source)
 
-    /** Blank out line and block comments, keeping every offset and newline. */
+    /**
+     * Blank out line and block comments, keeping every offset and newline.
+     *
+     * [W1119-3D 2-F-02] Three Kotlin lexemes defeated the previous version, and
+     * each failure made this class measure NOTHING while staying green — the
+     * masked view is the input of every other arm, so a blind masker is a blind
+     * suite:
+     *
+     *  · NESTED block comments. Kotlin nests them, so searching for the first
+     *    terminator string closes at the INNER one; the rest of the comment then
+     *    survived into the view as if it were code.
+     *  · CHAR literals. `val c = '"'` was read as the start of a string, which
+     *    swallowed everything up to the next quote — including the real comment
+     *    on the following line.
+     *  · RAW-STRING quote runs. `"""a""""` closes with the LAST three quotes of
+     *    the run; taking the first three left a stray `"` that opened a fake
+     *    string and ate the code after it.
+     *
+     * All three are fixed here rather than worked around at the call sites: a
+     * view that disagrees with the Kotlin lexer turns every anchor in this class
+     * into a scan of the wrong text.
+     */
     private fun maskComments(text: String): String {
         val out = StringBuilder(text.length)
         var i = 0
@@ -66,6 +87,11 @@ class ComposerClearResidueWiringTest {
                     out.append(text, i, end)
                     i = end
                 }
+                text[i] == '\'' -> {
+                    val end = skipCharLiteral(text, i)
+                    out.append(text, i, end)
+                    i = end
+                }
                 text.startsWith("//", i) -> {
                     val nl = text.indexOf('\n', i)
                     val end = if (nl < 0) text.length else nl
@@ -75,8 +101,7 @@ class ComposerClearResidueWiringTest {
                     }
                 }
                 text.startsWith("/*", i) -> {
-                    val close = text.indexOf("*/", i)
-                    val end = if (close < 0) text.length else close + 2
+                    val end = blockCommentEnd(text, i)
                     while (i < end) {
                         out.append(if (text[i] == '\n') '\n' else ' ')
                         i++
@@ -91,9 +116,78 @@ class ComposerClearResidueWiringTest {
         return out.toString()
     }
 
+    /**
+     * End (exclusive) of the raw string opening at [open], or [text].length when
+     * it never closes.
+     *
+     * A run of three or more quotes ENDS the string at its last three characters
+     * — `"""a""""` is the one-character body `a"` plus a delimiter — so the run
+     * is consumed whole. Returning `run`'s first three characters instead left a
+     * stray quote behind, which then opened a fake string over the following
+     * code (see [maskComments]).
+     */
     private fun skipRawString(text: String, open: Int): Int {
-        val end = text.indexOf("\"\"\"", open + 3)
-        return if (end < 0) text.length else end + 3
+        var j = open + 3
+        while (j < text.length) {
+            if (text[j] != '"') {
+                j++
+                continue
+            }
+            var k = j
+            while (k < text.length && text[k] == '"') k++
+            if (k - j >= 3) return k
+            j = k
+        }
+        return text.length
+    }
+
+    /**
+     * End (exclusive) of the block comment opening at [open], or [text].length
+     * when it never closes.
+     *
+     * Kotlin block comments NEST: a complete block comment inside another one is
+     * part of the OUTER comment's body, and the first terminator string does not
+     * end it. Matching only the first terminator left the outer comment's tail in
+     * the masked view — comment text that every arm downstream then read as code.
+     */
+    private fun blockCommentEnd(text: String, open: Int): Int {
+        var depth = 0
+        var j = open
+        while (j < text.length) {
+            if (text.startsWith("/*", j)) {
+                depth++
+                j += 2
+            } else if (text.startsWith("*/", j)) {
+                depth--
+                j += 2
+                if (depth == 0) return j
+            } else {
+                j++
+            }
+        }
+        return text.length
+    }
+
+    /**
+     * End (exclusive) of the char literal opening at [open].
+     *
+     * `val c = '"'` used to be read as a string OPENING quote, so the rest of the
+     * file up to the next `"` — a real `//` comment included — was copied
+     * verbatim and never masked. A char literal is single-line by construction,
+     * so a `'` with no partner before the newline is NOT one: it is returned as a
+     * plain character and the scan moves on.
+     */
+    private fun skipCharLiteral(text: String, open: Int): Int {
+        var j = open + 1
+        while (j < text.length) {
+            when {
+                text[j] == '\n' -> return open + 1
+                text[j] == '\\' -> j += 2
+                text[j] == '\'' -> return j + 1
+                else -> j++
+            }
+        }
+        return open + 1
     }
 
     private fun skipStringLiteral(text: String, open: Int): Int {
@@ -440,6 +534,82 @@ class ComposerClearResidueWiringTest {
                 "(masked: ${masked.replace("\n", "\\n")})",
             masked.contains("val a = 1") && masked.contains("val d"),
         )
+    }
+
+    /**
+     * [W1119-3D 2-F-02] The three lexemes that defeated the previous masker, each
+     * witnessed by the property that makes the masked view usable at all: the
+     * comment text is GONE, the code after it SURVIVES, and the view keeps every
+     * offset and every newline.
+     *
+     * Each shape is a real Kotlin construct, not a synthetic string:
+     *
+     *  1. a block comment with a complete block comment nested inside it — Kotlin
+     *     nests them, so the first terminator is not the end; the old masker left
+     *     the comment's tail in the view as if it were code.
+     *  2. `val c = '"'` — a char literal whose content is a quote; the old masker
+     *     read it as a string opening and swallowed the `//` comment below it.
+     *  3. `"""a""""` — a raw string closing with four quotes; the old masker took
+     *     the first three, leaving a stray `"` that opened a fake string over the
+     *     following code.
+     *
+     * Asserting on the newline count (not just on a substring) is deliberate: a
+     * masker that blanks text but loses or adds a newline silently shifts every
+     * anchor in this class, and every other arm would then measure the wrong
+     * region while staying green.
+     */
+    @Test
+    fun `the comment masker survives nested comments, char literals and quote runs`() {
+        data class Shape(val label: String, val src: String, val comment: String, val live: String)
+
+        val shapes = listOf(
+            Shape(
+                "nested block comment",
+                "/* outer /* inner */ STILL_COMMENT */\nval after = LIVE1()\n",
+                "STILL_COMMENT",
+                "LIVE1",
+            ),
+            Shape(
+                "char literal holding a quote",
+                "val c = '\"'\n// COMMENT_SHOULD_BE_MASKED\nval after = LIVE2()\n",
+                "COMMENT_SHOULD_BE_MASKED",
+                "LIVE2",
+            ),
+            Shape(
+                "raw string closing with four quotes",
+                "val s = \"\"\"a\"\"\"\"\n// COMMENT_SHOULD_BE_MASKED\nval after = LIVE3()\n",
+                "COMMENT_SHOULD_BE_MASKED",
+                "LIVE3",
+            ),
+        )
+        for (shape in shapes) {
+            val masked = maskComments(shape.src)
+            assertEquals(
+                "${shape.label}: the masker must be length preserving",
+                shape.src.length,
+                masked.length,
+            )
+            assertEquals(
+                "${shape.label}: the masker must keep every newline (anchors are line-relative)",
+                shape.src.count { it == '\n' },
+                masked.count { it == '\n' },
+            )
+            assertFalse(
+                "${shape.label}: comment text survived the masking " +
+                    "(masked: ${masked.replace("\n", "\\n")})",
+                masked.contains(shape.comment),
+            )
+            assertTrue(
+                "${shape.label}: the masker ate real code after the comment " +
+                    "(masked: ${masked.replace("\n", "\\n")})",
+                masked.contains(shape.live),
+            )
+            assertEquals(
+                "${shape.label}: offsets shifted, so every anchor in this class moves",
+                shape.src.indexOf("val after"),
+                masked.indexOf("val after"),
+            )
+        }
     }
 
     /**
