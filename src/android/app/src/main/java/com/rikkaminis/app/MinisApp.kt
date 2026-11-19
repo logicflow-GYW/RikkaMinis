@@ -6,6 +6,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Bundle
 import android.util.Log
 import org.acra.ACRA
@@ -32,6 +34,7 @@ import com.rikkaminis.app.data.repository.MCPRepository
 import com.rikkaminis.app.data.repository.SkillRepository
 import com.rikkaminis.app.notification.BackgroundTaskNotifier
 import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.network.ConnectionWarmer
 import com.rikkaminis.app.network.NetworkMonitor
 import com.rikkaminis.app.offload.OffloadPermissionManager
 import com.rikkaminis.app.provider.ModelsDevApi
@@ -287,6 +290,7 @@ class MinisApp : Application(), ImageLoaderFactory {
             // 文件语义与 EffortTierLearner 同）。worker 进程只是被动读；
             // observe 只发生在主进程的引擎循环里。
             com.rikkaminis.app.conversation.ContextCalibration.prime(this)
+            startModelServiceNetworkMonitoring()
             return
         }
 
@@ -1282,6 +1286,21 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
     }
 
+    /** Process-lifetime subscription. Unlike the main monitor, this never touches sandbox DNS. */
+    private fun startModelServiceNetworkMonitoring() {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        runCatching {
+            registerModelServiceNetworkChanges { onChanged ->
+                // Observe the default route for this app, including a VPN, not
+                // churn on secondary interfaces that don't carry these requests.
+                manager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) = onChanged()
+                    override fun onLost(network: Network) = onChanged()
+                })
+            }
+        }.onFailure { Log.w("MinisApp", "Worker network callback registration failed", it) }
+    }
+
     /**
      * [model-exec-service] True when the current process is the isolated
      * `:modelservice` process (see [ModelExecutionService]). Used by
@@ -1529,4 +1548,15 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
     }
 
+}
+
+/** Keep the worker callback independent of the main process's [NetworkMonitor.start]. */
+internal fun registerModelServiceNetworkChanges(
+    notifyWarmer: () -> Unit = { ConnectionWarmer.onNetworkChanged() },
+    register: (() -> Unit) -> Unit,
+) {
+    register {
+        NetworkMonitor.sharedLLMConnectionPool.evictAll()
+        notifyWarmer()
+    }
 }
