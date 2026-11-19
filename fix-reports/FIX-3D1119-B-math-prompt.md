@@ -71,7 +71,11 @@ Global memory (GLOBAL.md — user-owned; edit only with the user's approval). Tr
 | `f({x} + 1)` | math（`{`/`}` 计入嵌套）✓ |
 
 - **字节预算**：被替换句 61 B → 89 B；注入头整体 302 B → 330 B，**+28 B/请求**（预算 ±120 B）。无顺手扩写，其余措辞一字未动。
-- 本轮未做 CI（下一步：push → dispatch）。
+- **分支 CI**：run **#3309**（db `44435423991`）@ `ec578b4c333288c32ec464513623388d1baf2094` = 分支 tip = 远端 tip（逐字符一致），五 job 全 success（build-apk / unit-tests / scan-gate / lint / publish）。
+  - unit-tests：**9830 PASSED 行 / 0 真 FAILED**；本轮 7 条新/改写用例逐条 `PASSED` —— `SystemPromptSegmentOrderTest > theGlobalMemoryInjectionHeaderTreatsApprovedEntriesAsStandingInstructions`、`… > theMemoryHygieneSkillCallsPruningAProposal`，`MarkdownMathProseScopeTest > a call whose argument is a half open interval is math` / `prose outside a call keeps its text verdict under the bracket rule` / `a bracket closer cannot close a call group early` / `an unclosed bracket does not make a call group` / `a call with prose inside and no bracket is still math`。
+  - scan-gate：`Summary: 115 passed, 0 failed`；日志含 `scripts/scan/** untouched in this push — skipping the fixture self-test` ⇒ 本支未动门，**绿不含夹具跑过的证据**（按机制跳过，不是失败）。
+  - publish job success（tag/release 两步受 main 门控）。
+- 本报告随后以**报告提交**更新（`CI 证据` 段），最终 tip 另做一次 head_sha 复核；`git diff f7b671dc..HEAD` 除 `fix-reports/**` 外为空。
 
 ## 5 变异负控（6 臂，全部 RED-PRECISE）
 
