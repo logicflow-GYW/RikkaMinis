@@ -727,7 +727,14 @@ class AnthropicProvider(
                 // with no usable budget is worse than no thinking block — the
                 // legacy path's default is "no thinking", so omitting it is the
                 // honest degradation.
-                val budgetTokens = thinkingBudget(cappedMaxTokens, thinkingLevel)
+                //
+                // [FULLSCAN-1119 F-10] "Actually legal" also includes the
+                // documented 1024 floor: `legalLegacyBudgetTokens` answers 0
+                // when the request cannot host a legal window (max_tokens <=
+                // 1024), which the same guard below reads as "no thinking"
+                // instead of shipping budget_tokens=511 and the 400 that
+                // follows.
+                val budgetTokens = legalLegacyBudgetTokens(thinkingBudget(cappedMaxTokens, thinkingLevel), cappedMaxTokens)
                 if (budgetTokens > 0 && budgetTokens < cappedMaxTokens) {
                     body.put("thinking", JSONObject().apply {
                         put("type", "enabled")
@@ -1385,6 +1392,16 @@ class AnthropicProvider(
         }
 
         /**
+         * [FULLSCAN-1119 F-10] Wire-legal legacy budget, 0 when no legal pair
+         * exists (see [AnthropicLegacyThinkingBudget]).
+         *
+         * 0 is the value `thinkingBudget` already uses for "no thinking", so
+         * the caller keeps ONE predicate for "emit the field or not".
+         */
+        fun legalLegacyBudgetTokens(requested: Int, maxTokens: Int): Int =
+            AnthropicLegacyThinkingBudget.legalBudgetTokens(requested, maxTokens) ?: 0
+
+        /**
          * Map ThinkingLevel onto Anthropic adaptive thinking effort strings (Claude 4.6+).
          * `xhigh` maps to "max" — both 4.6 and 4.7 advertise "max" universally; 4.7 also
          * lists "xhigh" but we standardize on "max" for cross-version compatibility.
@@ -1554,6 +1571,37 @@ class AnthropicProvider(
         if (error is LLMError) return error
         if (error is java.io.IOException) return LLMError.NetworkError(error)
         return LLMError.Unknown(error)
+    }
+}
+
+/**
+ * [FULLSCAN-1119 F-10] The legacy (`thinking.type="enabled"`) budget contract,
+ * in one place so both the provider and the JVM test read the SAME window.
+ *
+ * Anthropic's documented window is `1024 <= budget_tokens < max_tokens`: the
+ * floor is stated as "budget_tokens must be at least 1024", the ceiling is
+ * strict ("must be less than max_tokens"). `thinkingBudget` answers the
+ * per-LEVEL question and only enforces the ceiling, so a request whose
+ * `max_tokens` sits below the floor (a small sub-agent budget, a synthesized
+ * follow-up) used to emit `budget_tokens=511` / `1023` and take a
+ * deterministic 400.
+ *
+ * Both boundaries live here: below the floor is raised to [MIN_BUDGET_TOKENS],
+ * at or above `max_tokens` is pressed down to `max_tokens - 1`. When the two
+ * cannot both hold (`max_tokens <= 1024`) no budget is legal and the answer is
+ * null — the caller omits the thinking field, which for the legacy protocol is
+ * exactly its default ("no thinking"), so that is an honest degradation rather
+ * than a silent feature loss.
+ */
+internal object AnthropicLegacyThinkingBudget {
+
+    /** Documented floor for `thinking.budget_tokens`. */
+    const val MIN_BUDGET_TOKENS = 1024
+
+    /** The wire-legal budget for [requested] under [maxTokens], or null when none exists. */
+    fun legalBudgetTokens(requested: Int, maxTokens: Int): Int? {
+        val bounded = minOf(maxOf(requested, MIN_BUDGET_TOKENS), maxTokens - 1)
+        return if (bounded >= MIN_BUDGET_TOKENS) bounded else null
     }
 }
 

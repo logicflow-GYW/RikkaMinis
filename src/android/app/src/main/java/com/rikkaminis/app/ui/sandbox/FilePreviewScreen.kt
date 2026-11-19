@@ -709,6 +709,24 @@ private fun PdfPreview(item: FileItem) {
 }
 
 /**
+ * [FULLSCAN-1119 F-17] Close [resource] when [open] throws; leave it alone on
+ * success. The caller keeps ownership, so this is `use {}` for the FAILURE
+ * arm only — the success arm's lifetime must not change.
+ *
+ * The close is best-effort: if closing itself throws, the ORIGINAL failure is
+ * the one that propagates (a masked open-failure would read as a different
+ * bug). Pure JVM (a `java.io.Closeable` in, a value out), so the JVM test
+ * drives it with a fake descriptor and a throwing factory.
+ */
+internal inline fun <T : Any> closeOnOpenFailure(resource: java.io.Closeable, open: () -> T): T =
+    try {
+        open()
+    } catch (t: Throwable) {
+        runCatching { resource.close() }
+        throw t
+    }
+
+/**
  * [audit-0909 T10-H1] Byte-bounded, Mutex-serialised PDF page renderer.
  *
  * Evicted bitmaps are deliberately NOT recycled: an Image may still hold a
@@ -733,7 +751,18 @@ private class PdfPageRenderer {
         closeLocked()
         closed.set(false)
         val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-        val pdf = PdfRenderer(pfd)
+        // [FULLSCAN-1119 F-17] The constructor is the only step that can fail
+        // after the descriptor exists (non-PDF bytes, encrypted document,
+        // renderer service unavailable). It used to run BEFORE the descriptor
+        // was stored, so a throwing constructor left the fd owned by nobody —
+        // one leak per attempt, and repeatedly opening an unreadable PDF
+        // exhausts the process descriptor table.
+        //
+        // Ownership: PdfRenderer.close() closes the descriptor it was built
+        // from (AOSP PdfRenderer.doClose() → mInput.close()), and closeLocked()
+        // closes renderer then descriptor; ParcelFileDescriptor.close() is
+        // idempotent, so the success path's close timing is unchanged.
+        val pdf = closeOnOpenFailure(pfd) { PdfRenderer(pfd) }
         descriptor = pfd
         renderer = pdf
         targetWidth = width
