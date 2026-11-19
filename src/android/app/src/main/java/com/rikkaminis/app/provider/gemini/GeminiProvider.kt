@@ -708,14 +708,25 @@ class GeminiProvider(
         val config = JSONObject()
         // Defense-in-depth clamp (see AnthropicProvider) — an over-range
         // maxOutputTokens is a deterministic 400 on Gemini.
-        config.put("maxOutputTokens", clampOutboundMaxTokens(maxTokens, effectiveMaxOutputTokens(model)))
+        val wireMaxOutputTokens = clampOutboundMaxTokens(maxTokens, effectiveMaxOutputTokens(model))
+        config.put("maxOutputTokens", wireMaxOutputTokens)
         if (temperature != null) {
             config.put("temperature", clampOutboundTemperature(temperature))
         }
 
         // Thinking configuration (model-specific)
-        buildThinkingConfig(thinkingLevel)?.let { thinkingConfig ->
-            config.put("thinkingConfig", thinkingConfig)
+        // [FULLSCAN-1119 F-11] The budget comes from the per-family ladder in
+        // ThinkingRuleResolver, which is bounded by each model's own ceiling —
+        // not by THIS request's output budget. A 2.5 Pro at HIGH asks for
+        // 16384 thinking tokens even when the caller sent maxOutputTokens=1024:
+        // Gemini answers 400 for a budget above the output cap, and when it
+        // does accept it, thinking consumes the whole output allowance and the
+        // reply body arrives empty. The wire value is bounded here, next to the
+        // maxOutputTokens it is bounded BY, so the two numbers cannot be
+        // clamped in different places.
+        buildThinkingConfig(thinkingLevel)?.let { rawConfig ->
+            val thinkingConfig = clampGeminiThinkingBudget(rawConfig, wireMaxOutputTokens)
+            if (thinkingConfig != null) config.put("thinkingConfig", thinkingConfig)
         }
 
         // Response modalities — required for Gemini to actually emit inlineData
@@ -1102,6 +1113,43 @@ internal fun geminiGenerateContentVerdict(json: JSONObject): GeminiGenerateConte
         return GeminiGenerateContentVerdict.EmptyCandidates(geminiPromptBlockReason(json))
     }
     return GeminiGenerateContentVerdict.Ok
+}
+
+/**
+ * [FULLSCAN-1119 F-11] Bound a model-family `thinkingConfig` by the output
+ * budget this request actually sends.
+ *
+ * `ThinkingRuleResolver` owns the per-family ladder (2.5 Pro 128-32768, 2.5
+ * Flash 0-16384, 3.x levels) and knows nothing about a single request's
+ * `maxOutputTokens`. Gemini validates the pair: a `thinkingBudget` above
+ * `maxOutputTokens` is a 400, and where a server accepts it thinking simply
+ * eats the whole output allowance, so the visible reply is empty. The clamp
+ * therefore belongs next to the number it is clamped by, on the object that is
+ * put into `generationConfig`.
+ *
+ * Only the numeric `thinkingBudget` shape is touched: the 3.x `thinkingLevel`
+ * string is a discrete level, not a token count, and a config without a budget
+ * (or a null one) is returned unchanged so the model default still applies.
+ *
+ * The input object is never mutated — a clamped result is a copy — so a caller
+ * that reuses the resolver's object across requests cannot inherit one
+ * request's budget.
+ *
+ * Pure `org.json` work (no Android types), so the JVM test pins it directly.
+ */
+internal fun clampGeminiThinkingBudget(config: JSONObject?, wireMaxOutputTokens: Int): JSONObject? {
+    if (config == null || !config.has("thinkingBudget")) return config
+    val requested = config.optInt("thinkingBudget", -1)
+    if (requested < 0) return config
+    val ceiling = wireMaxOutputTokens.coerceAtLeast(0)
+    if (requested <= ceiling) return config
+    return JSONObject().apply {
+        for (key in config.keys()) {
+            if (key == "thinkingBudget") continue
+            put(key, config.get(key))
+        }
+        put("thinkingBudget", ceiling)
+    }
 }
 
 /**

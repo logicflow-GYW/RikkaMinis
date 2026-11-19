@@ -182,4 +182,50 @@ class AnthropicThinkingBudgetWireTest {
         assertNull(beta)
         assertEquals(4_096, body.getInt("max_tokens"))
     }
+
+    // -- [FULLSCAN-1119 F-10] the documented 1024 floor -------------------------
+
+    @Test
+    fun `a max_tokens below the 1024 floor omits thinking instead of shipping an illegal budget`() {
+        // thinkingBudget(HIGH) on 512 answers 511 — below Anthropic's documented
+        // floor. The old guard only checked `budget > 0 && budget < max_tokens`,
+        // so the wire carried thinking.enabled + budget_tokens=511 → 400.
+        val (body, beta) = send(512, ThinkingLevel.HIGH, legacySmallCeiling)
+
+        assertEquals(512, body.getInt("max_tokens"))
+        assertFalse("no thinking field may be emitted: ${body.optJSONObject("thinking")}", body.has("thinking"))
+        assertNull("no legacy thinking beta without a thinking body", beta)
+    }
+
+    @Test
+    fun `a max_tokens exactly at the floor also has no legal budget`() {
+        // 1024 needs budget < 1024 AND budget >= 1024: impossible.
+        val (body, beta) = send(1024, ThinkingLevel.HIGH, legacySmallCeiling)
+
+        assertEquals(1024, body.getInt("max_tokens"))
+        assertFalse("no thinking field may be emitted", body.has("thinking"))
+        assertNull(beta)
+    }
+
+    @Test
+    fun `a legal max_tokens emits a budget inside the documented window`() {
+        val (body, beta) = send(2048, ThinkingLevel.LOW, legacySmallCeiling)
+
+        assertEquals(2048, body.getInt("max_tokens"))
+        val thinking = body.getJSONObject("thinking")
+        assertEquals("enabled", thinking.getString("type"))
+        val budget = thinking.getInt("budget_tokens")
+        assertTrue("budget $budget must be >= 1024", budget >= 1024)
+        assertTrue("budget $budget must be < 2048", budget < 2048)
+        assertTrue("the legacy beta still rides along", beta!!.contains("interleaved-thinking-2025-05-14"))
+    }
+
+    @Test
+    fun `a large max_tokens keeps the ladder value`() {
+        val (body, _) = send(100_000, ThinkingLevel.ULTRA, legacySmallCeiling)
+
+        // The 8k ceiling caps max_tokens, so the budget is pressed down to 8191.
+        assertEquals(8_192, body.getInt("max_tokens"))
+        assertEquals(8_191, body.getJSONObject("thinking").getInt("budget_tokens"))
+    }
 }

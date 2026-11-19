@@ -20,7 +20,7 @@ object FileReadTool {
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Read Python script contents', 'Check system configuration file'). Use the same language as the user."),
             "path" to AgentToolParam("string", "Absolute Linux path to read (e.g. /var/minis/workspace/data.csv)"),
             "offset" to AgentToolParam("integer", "1-based line number to start reading from (default: 1). Ignored when direction is 'tail'."),
-            "lines" to AgentToolParam("integer", "Maximum number of lines to return (default: all lines up to max_length)"),
+            "lines" to AgentToolParam("integer", "Maximum number of lines to return (default: all lines up to max_length; for direction='tail' the default is $DEFAULT_TAIL_LINES lines)"),
             "max_length" to AgentToolParam("integer", "Maximum character length of returned content (default: 15000)"),
             "direction" to AgentToolParam("string", "Read direction: 'head' (from start, default) or 'tail' (from end of file)"),
         ),
@@ -50,6 +50,8 @@ object FileReadTool {
             val MAX_LENGTH_HARD_CAP = 80_000
             val maxLength = args.optInt("max_length", 15000).coerceIn(1, MAX_LENGTH_HARD_CAP)
             val direction = args.optString("direction", "head")
+            // [WAVE-1118 D8-F03] explicit `null` == absent key (see the reader).
+            val requestedLines = args.optArgIntOrNull("lines")
 
             if (path.isBlank()) {
                 return ToolExecutionResult("Error: 'path' is required", false, toolTitle = toolTitle)
@@ -75,82 +77,141 @@ object FileReadTool {
                 )
             }
 
-            val size = file.length()
-
-            // Binary detection: check first 8192 bytes for null bytes
-            val isBinary = file.inputStream().use { input ->
-                val buf = ByteArray(minOf(8192, size.toInt()))
-                val read = input.read(buf)
-                if (read > 0) buf.take(read).any { it == 0.toByte() } else false
-            }
-
-            if (isBinary) {
-                return ToolExecutionResult(
-                    "[$path | $size bytes | binary file — cannot display contents]",
-                    true, toolTitle = toolTitle
-                )
-            }
-
-            // [sweep1014-fix9] Streamed selection: never materializes all lines.
-            // The old path (file.readLines() + subList) built a full
-            // List<String> of the file even for a `lines=100` paged read —
-            // up to the 32 MiB input cap held in memory at once (plus the
-            // joined content string), spiking Java heap past the executor
-            // watermark and triggering innocent PRoot shell reclaims.
-            // Output is byte-identical to the old readLines path.
-            // [WAVE-1118 D8-F03] `has` + `optInt` read `{"lines": null}` as 0 —
-            // "return zero lines" for a caller that asked for no paging. The
-            // reader helper treats an explicit null exactly like an absent key.
-            val requestedLines = args.optArgIntOrNull("lines")
-            val isTail = direction == "tail"
-
-            var totalLines = 0
-            val collected: List<String>
-            if (requestedLines != null && requestedLines < 0) {
-                // Replicate the old subList failure shape byte-for-byte:
-                // ArrayList.subList threw IllegalArgumentException with the
-                // concrete indices, surfaced by the catch below.
-                totalLines = file.bufferedReader().use { countLines(it) }
-                val msg = if (isTail) {
-                    val from = totalLines - requestedLines
-                    "fromIndex($from) > toIndex($totalLines)"
-                } else {
-                    val from = (offset - 1).coerceIn(0, totalLines)
-                    val to = from + requestedLines
-                    "fromIndex($from) > toIndex($to)"
-                }
-                throw IllegalArgumentException(msg)
-            } else if (isTail && requestedLines != null) {
-                // Two-pass: the tail window start depends on totalLines.
-                // Pass 1 counts lines only; pass 2 reads just the window.
-                totalLines = file.bufferedReader().use { countLines(it) }
-                val skip = (totalLines - requestedLines).coerceAtLeast(0)
-                collected = file.bufferedReader().use { streamWindow(it, skip, requestedLines, maxLength).lines }
-            } else {
-                val skip = if (isTail) 0 else offset - 1
-                val limit = if (isTail) null else requestedLines
-                val window = file.bufferedReader().use { streamWindow(it, skip, limit, maxLength) }
-                totalLines = window.totalLines
-                collected = window.lines
-            }
-
-            val bounds = windowBounds(direction, offset, requestedLines, totalLines)
-            val capped = buildCappedContent(collected, maxLength)
-
-            val header = "[$path | $size bytes | $totalLines lines | showing ${bounds.showStart}-${bounds.showEnd} of $totalLines" +
-                // [audit-0917] Tell the agent the range was cut mid-way: the old header
-                // kept claiming "showing X-Y" even when only the capped chars
-                // survived, so a paginating agent silently saw partial content.
-                (if (capped.truncated) " | content truncated by the max_length cap" else "") + "]"
-            val content = if (capped.truncated) capped.content + "\n... (truncated)" else capped.content
-            ToolExecutionResult("$header\n$content", true, toolTitle = toolTitle)
+            // [FULLSCAN-1119 F-13] Everything from here on is pure File work —
+            // extracted so the JVM test can drive a REAL 200-line file through
+            // it with a plain [File] parameter (no Android Context, no PRoot
+            // resolution). Behaviour is unchanged; the tail/default fix lives
+            // inside the extracted function.
+            return readFileText(
+                file = file,
+                displayPath = path,
+                direction = direction,
+                offset = offset,
+                requestedLines = requestedLines,
+                maxLength = maxLength,
+                toolTitle = toolTitle,
+            )
         } catch (e: Exception) {
             ToolExecutionResult("Error reading file: ${e.message}", false, toolTitle = toolTitle)
         }
     }
+
+    /**
+     * [FULLSCAN-1119 F-13] Text half of `file_read`, on a resolved [File].
+     *
+     * `direction="tail"` WITHOUT `lines` used to fall into the head branch
+     * (`skip = 0`, `limit = null`) — the caller asked for the end of the file
+     * and got the beginning. "tail, no explicit count" now means "the last
+     * [DEFAULT_TAIL_LINES] lines": the head branch's `null = read up to
+     * max_length` semantics cannot be inherited, because for a tail that same
+     * unboundedness means the whole file from the top.
+     */
+    internal fun readFileText(
+        file: File,
+        displayPath: String,
+        direction: String,
+        offset: Int,
+        requestedLines: Int?,
+        maxLength: Int,
+        toolTitle: String = "",
+    ): ToolExecutionResult {
+        val size = file.length()
+
+        // Binary detection: check first 8192 bytes for null bytes
+        val isBinary = file.inputStream().use { input ->
+            val buf = ByteArray(minOf(8192, size.toInt()))
+            val read = input.read(buf)
+            if (read > 0) buf.take(read).any { it == 0.toByte() } else false
+        }
+
+        if (isBinary) {
+            return ToolExecutionResult(
+                "[$displayPath | $size bytes | binary file — cannot display contents]",
+                true, toolTitle = toolTitle
+            )
+        }
+
+        // [sweep1014-fix9] Streamed selection: never materializes all lines.
+        // The old path (file.readLines() + subList) built a full
+        // List<String> of the file even for a `lines=100` paged read —
+        // up to the 32 MiB input cap held in memory at once (plus the
+        // joined content string), spiking Java heap past the executor
+        // watermark and triggering innocent PRoot shell reclaims.
+        // Output is byte-identical to the old readLines path.
+        // [WAVE-1118 D8-F03] `has` + `optInt` read `{"lines": null}` as 0 —
+        // "return zero lines" for a caller that asked for no paging. The
+        // reader helper treats an explicit null exactly like an absent key.
+        val lineCount = effectiveLineCount(direction, requestedLines)
+        val isTail = direction == "tail"
+
+        var totalLines = 0
+        val collected: List<String>
+        if (lineCount != null && lineCount < 0) {
+            // Replicate the old subList failure shape byte-for-byte:
+            // ArrayList.subList threw IllegalArgumentException with the
+            // concrete indices, surfaced by the catch below.
+            totalLines = file.bufferedReader().use { countLines(it) }
+            val msg = if (isTail) {
+                val from = totalLines - lineCount
+                "fromIndex($from) > toIndex($totalLines)"
+            } else {
+                val from = (offset - 1).coerceIn(0, totalLines)
+                val to = from + lineCount
+                "fromIndex($from) > toIndex($to)"
+            }
+            throw IllegalArgumentException(msg)
+        } else if (isTail && lineCount != null) {
+            // Two-pass: the tail window start depends on totalLines.
+            // Pass 1 counts lines only; pass 2 reads just the window.
+            totalLines = file.bufferedReader().use { countLines(it) }
+            val skip = (totalLines - lineCount).coerceAtLeast(0)
+            collected = file.bufferedReader().use { streamWindow(it, skip, lineCount, maxLength).lines }
+        } else {
+            // Head only: `lineCount == null` keeps the historical "read until
+            // max_length" semantics.
+            val skip = offset - 1
+            val window = file.bufferedReader().use { streamWindow(it, skip, lineCount, maxLength) }
+            totalLines = window.totalLines
+            collected = window.lines
+        }
+
+        val bounds = windowBounds(direction, offset, lineCount, totalLines)
+        val capped = buildCappedContent(collected, maxLength)
+
+        val header = "[$displayPath | $size bytes | $totalLines lines | showing ${bounds.showStart}-${bounds.showEnd} of $totalLines" +
+            // [audit-0917] Tell the agent the range was cut mid-way: the old header
+            // kept claiming "showing X-Y" even when only the capped chars
+            // survived, so a paginating agent silently saw partial content.
+            (if (capped.truncated) " | content truncated by the max_length cap" else "") + "]"
+        val content = if (capped.truncated) capped.content + "\n... (truncated)" else capped.content
+        return ToolExecutionResult("$header\n$content", true, toolTitle = toolTitle)
+    }
 }
 
 // [sweep1014-fix9] ---- streaming primitives (pure; extracted verbatim for JVM tests) ----
+
+/**
+ * [FULLSCAN-1119 F-13] Window used when `direction="tail"` arrives without an
+ * explicit `lines`.
+ *
+ * A tail request means "show me the end of the file". The head branch answers
+ * `lines == null` with "read until max_length", which for a tail is the WHOLE
+ * file from the top — the exact opposite. 100 lines is the conventional
+ * `tail -n 100` window for "the recent end of a log/text file"; it also fits
+ * inside the 15 KB default `max_length` for typical log lines, so the window
+ * is not silently cut by the character cap.
+ */
+internal const val DEFAULT_TAIL_LINES = 100
+
+/**
+ * [FULLSCAN-1119 F-13] The line count the selection is actually built from.
+ *
+ * `tail` gets [DEFAULT_TAIL_LINES] when the caller gave none; `head` keeps the
+ * historical `null = read until max_length`. Negative values pass through so
+ * the legacy `subList`-shaped failure is preserved by the caller.
+ */
+internal fun effectiveLineCount(direction: String, requestedLines: Int?): Int? =
+    if (direction == "tail") requestedLines ?: DEFAULT_TAIL_LINES else requestedLines
 
 /**
  * Counts lines using [BufferedReader.readLine] semantics — exactly what
