@@ -125,6 +125,155 @@ SB_MSG_IMPORTED = "R.string.skills_browser_success_imported"
 # labeled form and the gate stayed green on a real drop-through.
 SB_TERMINAL_RE = re.compile(r"\breturn\b(?!\s*@)|\bthrow\b")
 
+def _brace_end(text, open_idx):
+    """Index just past the `}` closing the `{` at [open_idx], or -1."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+def _statement_is_conditional(body, idx):
+    """True when the statement containing [idx] is a brace-less
+    `if (…)` / `when (…)` / `while (…)` / `for (…)`.
+
+    [F-06] A `return` at bracket depth 0 is only a terminal when the statement
+    it sits in is not itself conditional: `if (reason.isNotBlank()) return`
+    leaves the branch standing whenever the condition does not hold, so the
+    failure falls through into the success path. Walking back to the start of
+    the statement — skipping a balanced parenthesised condition — is what tells
+    the two apart; a brace-ful `if (c) { … return … }` stops the walk at its own
+    `{`, so a terminal inside it is still read as unconditional."""
+    i, depth = idx - 1, 0
+    while i >= 0:
+        c = body[i]
+        if c == ")":
+            depth += 1
+        elif c == "(":
+            if depth == 0:
+                pass  # the condition's own opening paren: keep walking back
+            else:
+                depth -= 1
+        elif depth == 0 and c in ";{}\n":
+            break
+        i -= 1
+    return re.match(r"\s*(?:if|when|while|for)\s*\(", body[i + 1:idx]) is not None
+
+def _swallowing_spans(body):
+    """Spans of a branch body whose exceptions never leave the enclosing flow.
+
+    [F-06] `runCatching { … }` and the `try` block of `try { … } catch …` catch
+    what is thrown inside them, so a `throw` there is not a terminal exit from
+    the branch: `is Failure -> runCatching { throw … }` reports the error through
+    the caught exception and then falls out of the `when` into the success path
+    below it. Only the `try` BLOCK is a span — the `catch` / `finally` blocks
+    belong to the handler, and a `throw` in them does escape."""
+    spans = []
+    for m in re.finditer(r"\b(?:runCatching|try)\b", body):
+        k = body.find("{", m.end())
+        if k < 0:
+            continue
+        close = _brace_end(body, k)
+        if close > k:
+            spans.append((k, close))
+    return spans
+
+def _enclosing_if_header(body, idx):
+    """(open brace index, header text) of the innermost `{` enclosing [idx].
+
+    [F-06] A terminal inside a block is only unconditional when the block is not
+    the body of a conditional. `if (reason.isNotBlank()) { return }` looks
+    terminal to a word search and to a brace-less-only check, yet a failure that
+    does not satisfy the condition still falls out of the `when` into the success
+    path. Returns (None, "") when [idx] is not inside a brace at all.
+    """
+    depth = 0
+    for i in range(idx - 1, -1, -1):
+        c = body[i]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth == 0:
+                start = max(0, i - 160)
+                return i, body[start:i]
+            depth -= 1
+    return None, ""
+
+def _if_has_terminating_else(body, open_idx):
+    """True when the `if (…) { … }` whose body opens at [open_idx] has an
+    `else` arm that itself terminates.
+
+    [F-06] `if (c) { return }` with no `else` leaves the branch standing when `c`
+    is false. Only an `else` that terminates as well makes the pair
+    unconditional; `else if (d) …` recurses through [_statement_is_conditional]
+    by falling through to the same check on the inner `if`.
+    """
+    close = _brace_end(body, open_idx)
+    if close < 0:
+        return False
+    j = close
+    while j < len(body) and body[j] in " \t\r\n":
+        j += 1
+    if not body.startswith("else", j):
+        return False
+    j += 4
+    while j < len(body) and body[j] in " \t\r\n":
+        j += 1
+    if j < len(body) and body[j] == "{":
+        inner = _brace_end(body, j)
+        if inner < 0:
+            return False
+        return _body_has_terminal(body[j + 1:inner])
+    if body.startswith("if", j):
+        # `else if (…)` — the inner `if` is the arm; it terminates when its own
+        # body does AND its own `else` does (the same question, one level in).
+        k = body.find("{", j)
+        if k < 0:
+            return False
+        return _body_has_terminal(body[k + 1:max(k, _brace_end(body, k))]) and \
+            _if_has_terminating_else(body, k)
+    # `else <expression>` — a single-statement arm is not a terminal exit.
+    return False
+
+def _body_has_terminal(body, seen=0):
+    """True when [body] contains a terminal exit on every path it can take.
+
+    [F-06] This is the recursive core: a terminal is real when its own statement
+    is not a brace-less conditional AND it is not inside a conditional block that
+    can be skipped (see [_if_has_terminating_else]). `seen` bounds the recursion
+    so a pathological nesting cannot spin; exceeding it fails CLOSED (not
+    terminal), which is the safe direction for a gate that asserts "this exits".
+    """
+    if seen > 8:
+        return False
+    spans = _swallowing_spans(body)
+    for m in SB_TERMINAL_RE.finditer(body):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        if _statement_is_conditional(body, m.start()):
+            continue
+        open_idx, header = _enclosing_if_header(body, m.start())
+        if open_idx is not None and re.search(r"\bif\s*\([^;]*\)\s*$", header):
+            if not _if_has_terminating_else(body, open_idx):
+                continue
+        return True
+    return False
+
+def _branch_body_is_terminal(body):
+    """True when a `when` branch body leaves the enclosing flow for good.
+
+    [F-06] "Terminate" is a CONTROL-FLOW fact, not a word. `SB_TERMINAL_RE`
+    matching a `throw` inside `runCatching { … }` (or the `try` block), or a
+    `return` that is the body of a brace-less `if (c)`, leaves the branch
+    standing and the failure falls through into the success path — and the old
+    word-level search stayed green on both. The regex only LOCATES the
+    candidates; the block structure decides."""
+    return _body_has_terminal(body)
+
 # [incr1117b-C3.2] Continuation markers used when deciding where a branch body
 # ends: a line ending in one of these, or a next line starting with one of
 # these, continues the same expression (so `?:\n foo()` / `&&\n bar()` / a
@@ -947,17 +1096,24 @@ def run_checks_text(sr_text, sm_text, sb_text=None):
     # that failed. The anchor is now the branch BODY: it must terminate.
     # [incr1117b-C3.1] "Terminate" excludes labeled returns (`return@withContext`
     # leaves the enclosing lambda only) and includes `throw`.
+    # [F-06] ...and it is a control-flow fact, not a word: a `throw` that
+    # `runCatching { … }` / `try { … }` catches, or a `return` that is the body
+    # of a brace-less `if (c)`, leaves the branch standing and the failure falls
+    # through into the success path. `_branch_body_is_terminal` reads the block
+    # structure; `SB_TERMINAL_RE` only locates the candidates.
     failure_body, failure_problem = branch_body_at(sb_masked, SB_FAILURE_BRANCH)
     if failure_problem is not None:
         check("arm9 browser refresh treats a failed download as terminal",
               False, failure_problem)
     else:
         check("arm9 browser refresh treats a failed download as terminal",
-              SB_TERMINAL_RE.search(failure_body) is not None,
+              _branch_body_is_terminal(failure_body),
               "the '%s' branch has no terminating `return` / `throw` in its "
-              "body (a labeled `return@…` exits the enclosing lambda only) — a "
-              "Failure that falls through re-enters the success path "
-              "(ROT — update this gate)" % SB_FAILURE_BRANCH)
+              "body — a labeled `return@…` leaves the enclosing lambda only, a "
+              "`throw` inside `runCatching { … }` / `try { … }` is caught, and a "
+              "brace-less `if (c) return` is conditional, so in every one of "
+              "those shapes a Failure that falls through re-enters the success "
+              "path (ROT — update this gate)" % SB_FAILURE_BRANCH)
 
     # arm10 [dv22-B6 §1042-B-07]: the browser import judges duplication BEFORE
     # the full-fat import. The dedup variable name is derived from the
@@ -1345,6 +1501,102 @@ GOOD_SB_CHAINED_CONT = _mutate(
         .also { return }
 """)
 
+# [F-06] The mirror image of the dirty shapes below: the `throw` IS caught, but
+# the handler's own `return` is a real terminal exit. A criterion that refused
+# every `try` out of hand would read correct code as a drop-through.
+GOOD_SB_TRY_CATCH_RETURN = _mutate(
+    GOOD_SB,
+    """        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+""",
+    """        is SkillRepository.UpdateResult.Failure -> try {
+            onStateChange(HudState.ERROR, result.reason)
+            throw IllegalStateException(result.reason)
+        } catch (t: Throwable) {
+            return
+        }
+""")
+
+# [F-06] A braced `if/else` whose BOTH arms terminate is an unconditional exit.
+# A criterion that refused every conditional block out of hand would read this
+# correct code as a drop-through.
+GOOD_SB_BRACED_IF_ELSE = _mutate(
+    GOOD_SB,
+    """        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+""",
+    """        is SkillRepository.UpdateResult.Failure -> {
+            if (result.reason.isNotBlank()) {
+                onStateChange(HudState.ERROR, result.reason)
+                return
+            } else {
+                onStateChange(HudState.ERROR, "download failed")
+                return
+            }
+        }
+""")
+
+# [F-06] A `throw` that never leaves the branch: `runCatching` catches it, the
+# HUD still reports the error, and control falls out of the `when` into the
+# success path below. The word-level criterion matched `throw` and stayed green.
+DIRTY_SB_RUNCATCHING_THROW = _mutate(
+    GOOD_SB,
+    """        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+""",
+    """        is SkillRepository.UpdateResult.Failure -> runCatching {
+            throw IllegalStateException(result.reason)
+        }
+""")
+
+# [F-06] The same on the `try` side: the throw is caught by the sibling handler
+# and the branch falls through to the success path.
+DIRTY_SB_TRY_CATCH_THROW = _mutate(
+    GOOD_SB,
+    """        is SkillRepository.UpdateResult.Failure -> {
+            onStateChange(HudState.ERROR, result.reason)
+            return
+        }
+""",
+    """        is SkillRepository.UpdateResult.Failure -> try {
+            throw IllegalStateException(result.reason)
+        } catch (t: Throwable) {
+            onStateChange(HudState.ERROR, result.reason)
+        }
+""")
+
+# [F-06] The same shape with a BRACE-FUL condition and no `else`: the `return`
+# is at brace depth 1 of the branch, so a depth-0-only check (and a plain word
+# search) reads it as terminal while a failure that fails the condition still
+# falls through into the success path.
+DIRTY_SB_BRACED_IF_RETURN = _mutate(
+    GOOD_SB,
+    """            onStateChange(HudState.ERROR, result.reason)
+            return
+""",
+    """            onStateChange(HudState.ERROR, result.reason)
+            if (result.reason.isNotBlank()) {
+                return
+            }
+""")
+
+# [F-06] The F-04 shape: the branch returns only when the condition holds, so a
+# failure that does not satisfy it falls through.
+DIRTY_SB_CONDITIONAL_RETURN = _mutate(
+    GOOD_SB,
+    """            onStateChange(HudState.ERROR, result.reason)
+            return
+""",
+    """            onStateChange(HudState.ERROR, result.reason)
+            if (result.reason.isNotBlank()) return
+""")
+
 # C3.2 — two `Failure` branches in one file: "the first occurrence" is no
 # longer THE refresh path, so the gate must fail closed instead of judging
 # whichever one comes first.
@@ -1468,6 +1720,10 @@ def selftest():
         ("Failure branch returns via `if (…) { … }`", GOOD_SB_MULTILINE_IF),
         ("Failure branch throws", GOOD_SB_THROW),
         ("Failure branch chains on a 1-char continuation", GOOD_SB_CHAINED_CONT),
+        # [F-06] the caught-throw shapes: the criterion must not refuse every
+        # `try` out of hand.
+        ("Failure branch returns from the `catch` arm", GOOD_SB_TRY_CATCH_RETURN),
+        ("Failure branch returns from both arms of an if/else", GOOD_SB_BRACED_IF_ELSE),
     ]:
         f = run(GOOD_SR, GOOD_SM, sb_t)
         print("selftest clean shape %-28s: %s %s"
@@ -1496,6 +1752,15 @@ def selftest():
         # ── [incr1117b-C3] branch-body reader ──
         ("browser Failure branch returns@ a label", GOOD_SR, GOOD_SM,
          DIRTY_SB_LABELED_RETURN, "terminating `return` / `throw`"),
+        # ── [F-06] a "terminal" that is not a control-flow fact ──
+        ("browser Failure branch throws inside runCatching", GOOD_SR, GOOD_SM,
+         DIRTY_SB_RUNCATCHING_THROW, "failed download as terminal"),
+        ("browser Failure branch throws inside try", GOOD_SR, GOOD_SM,
+         DIRTY_SB_TRY_CATCH_THROW, "failed download as terminal"),
+        ("browser Failure branch returns inside a brace-less if", GOOD_SR, GOOD_SM,
+         DIRTY_SB_CONDITIONAL_RETURN, "failed download as terminal"),
+        ("browser Failure branch returns inside a brace-ful if with no else",
+         GOOD_SR, GOOD_SM, DIRTY_SB_BRACED_IF_RETURN, "failed download as terminal"),
         ("browser Failure branch has two markers", GOOD_SR, GOOD_SM,
          DIRTY_SB_TWO_MARKERS, "cannot tell which one is the refresh path"),
         ("browser import without dedup", GOOD_SR, GOOD_SM, DIRTY_SB_NO_DEDUP,
