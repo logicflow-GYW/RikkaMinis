@@ -218,9 +218,29 @@ post {
 
 ## 10 本地装置与门
 
-- JVM 装置 `shared/work/r3full/harness/`（`run.sh` / `extract.py` / `mutate.py` / `stubs/`）：**7 组 69 用例全绿**。
+- JVM 装置 `shared/work/r3full/harness/`（`run.sh` / `extract.py` / `mutate.py` / `stubs/`）：**7 组 77 用例全绿**。
 - 全量门本地：`python3 scripts/scan/scan_parallel.py --root . --jobs 4 --allow-local` ⇒ **115 passed, 0 failed**（`scripts/scan/**` 本支未改动）。
-- 未跑全量单测（任务书 §1 禁跑全量）；单测证据取自分支 CI。
+
+## 10.1 CI 证据（停止节点）
+
+**run #3345 / `44479125062` @ `25098e82eb447d1a527f087ea74889fc45e7110f`**
+本地 HEAD / 远端分支 tip / run `head_sha` **三方逐字符一致**。
+
+| job | 结论 |
+|---|---|
+| unit-tests | success — **9870 PASSED 行 / 0 真 FAILED**，本支新增 44 条逐条 PASSED |
+| scan-gate | success — `115 passed, 0 failed`；`scripts/scan/** untouched in this push — skipping the fixture self-test`（本支未动门，绿不含夹具证据） |
+| lint | success |
+| build-apk | success |
+| publish | 两个发布步骤（Move the rolling tag / Publish to Releases）**skipped**（main 门控生效） |
+
+**#3342 / #3343 的 lint 红是 Maven 依赖抖动，不是代码问题**：两次都失败在 `:app:generateDebugAndroidTestLintModel` 解析 `debugAndroidTestRuntimeClasspath` 时找不到 `hamcrest-integration-1.3.jar` / `hamcrest-library-1.3.jar` / `javawriter-2.1.1.jar`，**编译之前**的依赖解析阶段。三条 URL 实测 HTTP 200；同一代码形态的 #3341 与重跑后的 #3345 lint 均绿；本支未触碰任何构建文件（`git diff --name-only ecb03d92..HEAD` 无 gradle/settings 文件）。
+
+### 10.2 首次 CI 抓到的真问题（已修）
+
+#3341 单测抓到一条真失败：既有 `MediaHostSourceKeyTest` 把 `StreamingMarkdownText` 的「resolved-file-keyed 状态数」钉成**死字面量 4**，注释明写「本渲染器在该波次半径外，保持原有四个」。F-14 让 `prepareFailed` 成为第五个，字面量随之更新为 5，注释改为说明原因。
+这正是该测试存在的意义：一个 keyed 状态族悄悄长大而无人察觉，就是它要挡的 dv19-B06 回归。已作为独立提交 `25098e82`（F-14 follow-up）。
+
 
 ## 11 残留与登记
 
