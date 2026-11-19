@@ -88,7 +88,7 @@ class OffloadBoundsWiringTest {
     // ── F-09: stream reader ceiling + observability ─────────────────────
 
     @Test
-    fun `stream reader ceiling is the protocol poll window, not a fresh literal`() {
+    fun `stream reader ceiling is derived from the inline budget and stays below the poll window`() {
         val src = read("src/main/java/com/rikkaminis/app/sandbox/offload/ChatStreamOffloadHandler.kt")
         assertTrue(
             "reader must be constructed with the derived ceiling",
