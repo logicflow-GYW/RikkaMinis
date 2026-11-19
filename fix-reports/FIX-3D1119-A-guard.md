@@ -197,17 +197,19 @@ ProtectedZoneGuard.shellLex("echo \$(rm -rf /var/minis/shared)").statements
 
 ### 4.5 CI
 
-**代码提交**：`582555ff`（实现 + 测试），**报告提交** `e5134609`。分支 push 不触发 CI（`build-apk.yml` 只认 main），按纪律手动 dispatch。
+**代码提交**：`582555ff`（实现 + 测试）。其后两个提交是**纯报告文本**：`e5134609`、`e7567085`。分支 push 不触发 CI（`build-apk.yml` 只认 main），按纪律手动 dispatch。
 
-**停止节点 = run #3315 / id `44442875147` @ `e51346096021f48e409725c28c51ce7387e6263d`**（= 分支最终 tip = 本地 `git rev-parse HEAD`，**逐字符一致**）。event = `workflow_dispatch`，`status=completed`，`conclusion=success`，五 job 全绿。
+**代码 tip 的 CI**：run **#3313 / `44439038155` @ `582555ff5c82f6c4da5d3e835f885e6b59b33bfe`** —— 与本地 `git rev-parse HEAD`（当时）**逐字符一致**，五 job 全绿。
 
-> 过程说明：代码提交先跑了一次 **#3313 / `44439038155` @ `582555ff5c82f6c4da5d3e835f885e6b59b33bfe`**，同样五 job success、结论完全一致（9835 PASSED / 0 真失败、115 门 0 failed）。报告提交后 tip 变了，按「head_sha 与分支 tip 逐字符一致」的停止节点要求**对最终 tip 再 dispatch 一次**，即 #3315。两次日志逐项比对一致。
+**最终 tip 的 CI**：run **#3319 / `44447240843` @ `e756708525560a2f1e87bbaabe161a8c0b0fe351`**（= 本文件最后一个提交之前的 tip），五 job 全绿。此后只允许再出现**纯报告文本**提交（非报告差异为空，见 §7 核验命令）。
 
-| job | conclusion | 证据（#3315） |
+> 中间有一次**真失败**，原因不在本支：run **#3317** @ `e7567085` 的 lint job 挂在 `:app:generateDebugAndroidTestLintModel` —— `Could not find hamcrest-integration-1.3.jar` / `hamcrest-library-1.3.jar` / `javawriter-2.1.1.jar`（artifacts 解析失败，Maven 侧抖动）。同一棵树的前后两次 run（#3315、#3319）lint 均 success，重跑即恢复。
+
+| job | conclusion | 证据（#3319） |
 |---|---|---|
-| unit-tests | **success** | 含 `PASSED` 的行 **9835** 条；含 `FAILED` 字样的行 **6** 条，逐条看过（`grep FAILED \| grep -v 'PASSED$'` 无输出），**全部是 PASSED 用例名里带 FAILED 字样**（`slot denied produces FAILED without calling provider` 等），**0 真失败**；11 条新用例用 `grep -cF "<用例名> PASSED"` 逐条核对，**11/11 = 1 命中** |
+| unit-tests | **success** | 含 `PASSED` 的行 **9835** 条；含 `FAILED` 字样的行 **6** 条，`grep FAILED \| grep -vc 'PASSED$'` = **0**，全部是 PASSED 用例名里带 FAILED 字样（`slot denied produces FAILED without calling provider` 等）；11 条新用例用 `grep -cF "<用例名> PASSED"` 逐条核对，**11/11 = 1 命中** |
 | scan-gate | **success** | `Summary: 115 passed, 0 failed`；日志明写 `scripts/scan/** untouched in this push — skipping the fixture self-test (~121s); scan.sh ran all 115 gates over this tree`（本支未碰扫描门，夹具按机制跳过，故本次「绿」**不含**夹具证据） |
-| lint | **success** | — |
+| lint | **success** | —（#3317 的失败见上方说明） |
 | build-apk | **success** | — |
 | publish | **success** | main 门控生效：`Move the rolling tag android-latest` / `Publish to Releases` 两步 **skipped**，run 级 conclusion 仍为 success |
 
