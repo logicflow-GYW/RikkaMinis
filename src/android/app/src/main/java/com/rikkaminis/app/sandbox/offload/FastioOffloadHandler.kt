@@ -1148,7 +1148,7 @@ class FastioOffloadHandler(private val context: Context) : NativeOffloadHandler 
         // is 2 threads and a saturated pool stalls every other tool call).
         // 天花板: trees with more than this many entries report
         // `truncated: true` and under-count; 升级触发: a real task hits the cap.
-        private const val DEFAULT_MAX_ENTRIES = 2_000_000L
+        internal const val DEFAULT_MAX_ENTRIES = 2_000_000L
         private const val HARD_MAX_ENTRIES = 50_000_000L
 
         /** Match budget for `find` / `grep` listings — see HARD_MATCH_LIMIT. */
