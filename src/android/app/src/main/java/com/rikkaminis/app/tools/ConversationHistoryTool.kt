@@ -3,6 +3,7 @@ package com.rikkaminis.app.tools
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.AgentToolParam
 import com.rikkaminis.app.provider.openai.stripOrphanThinkClosers
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -389,7 +390,20 @@ internal suspend fun executeConversationHistoryTool(
             toolTitle = toolTitle,
         )
         is ConversationHistoryRequest.Ok -> {
-            val rows = runCatching { loadRows(sessionId) }.getOrElse { e ->
+            // [fix/r3-data-1119 F-13] `runCatching` swallows CancellationException
+            // too, which is NOT a tool failure: the user pressed Stop (or a newer
+            // turn claimed the session) while `loadRows` was reading Room. Catching
+            // it here turned the cancellation into `success = false`, so the caller
+            // reported a tool failure to the trace/reducer and wrote a
+            // `JobCancellationException` block into the session's
+            // `.learnings/ERRORS.md` — a permanent, misleading "this tool is broken"
+            // record created by the user stopping. Cancellation must propagate; only
+            // a real read failure is reported as a failed tool.
+            val rows = try {
+                loadRows(sessionId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 return ToolExecutionResult(
                     output = "Error: could not read this conversation's history: " +
                         "${e.javaClass.simpleName}: ${e.message}",
