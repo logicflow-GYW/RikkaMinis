@@ -1,7 +1,7 @@
 # RikkaMinis — Android
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Android%20arm64-brightgreen.svg)](#install)
+[![Platform](https://img.shields.io/badge/Platform-Android%20arm64-brightgreen.svg)](#安装)
 [![Build](https://github.com/logicflow-GYW/RikkaMinis/actions/workflows/build-apk.yml/badge.svg)](https://github.com/logicflow-GYW/RikkaMinis/actions/workflows/build-apk.yml)
 
 **简体中文** · [English](README_EN.md)
@@ -28,22 +28,20 @@ OpenMinis 核心把领先的模型——Claude、GPT、Gemini 等——带进原
 
 **→ [下载最新 APK](https://github.com/logicflow-GYW/RikkaMinis/releases/tag/android-latest)**
 
-每次推送到 `main` 的**代码改动**（`src/android/**`、`src/shared/**`、`deps/**`
-或 workflow 文件）都会构建一个发布版 APK 并重新发布到该链接——纯文档改动
-（README / 许可证等）不触发构建。所以这个链接上的 APK 资产始终是最新构建。
+只在 `main` 的推送触及 `src/android/**`、`src/shared/**`、`deps/**` 或
+[`build-apk.yml`](.github/workflows/build-apk.yml) 时，才会自动构建并发布 APK。
+纯文档更新不会发新包；只改扫描或诊断脚本时会走独立的静态检查工作流，不会发包。
 
-需要说清一个容易踩的点：`android-latest` 是**滚动 release**——每次构建就地
-替换其中的 APK 资产，release 的 tag 名固定不变（tag 指针停在首次创建 release
-时的提交）。**下载 APK 请点页面上的资产**；页面的 *Source code (zip/tar.gz)*
-是那个旧 tag 的快照，不是这一版构建对应的源码——要源码请从 `main` 拉取。
+`android-latest` 是**滚动发布**：下载链接及资产文件名固定。发布流程把标签移到
+本次构建提交，再替换 APK。**安装请下载页面里的 `.apk` 资产**；要找到该 APK
+的准确源码，认准 Release 说明里的 `Commit`。`main` 可能还有发包后的文档提交。
 
-另一个诚实的边界：`scripts/**`（含 113 道静态门）**不在**触发面内——只改门脚本
-不会自动构建，需要在 Actions 里 `workflow_dispatch` 手动跑一次。要求：
+安装要求：
 
 - **arm64-v8a** 设备（任意现代手机），**Android 8.0+**
-- 设备提示时允许"安装未知来源应用"
-
-构建使用固定的私有 release 密钥签名，因此新 APK 会**覆盖**安装旧版本——你的数据和设置会被保留。（2026-10-27 之前发布的构建用的是另一个密钥：从那一版升到当前版需要先卸载一次，此后的版本可互相覆盖。）
+- 设备提示时允许安装未知来源应用
+- **签名与升级**：同一私有发布密钥签名的新版可以覆盖安装，保留数据和设置。
+  若从 2026-10-27 签名轮换前的旧包升级，先备份，再卸载旧包。
 
 ```
 SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
@@ -56,7 +54,9 @@ SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
 
 ## 这个 fork 改了什么
 
-起初这是一个纯构建 fork，但现在也携带了一小批上游没有的 Android 专属产品改动。
+起初这是一个纯构建 fork，现在也维护 Android 端的功能和可靠性。
+[2026-11-18～19 稳定性复盘](docs/stability/2026-11-19-review.md)记录了最近一轮
+修了什么、哪些验证已经完成、哪些场景仍待真机确认。
 
 ### 应用改动
 
@@ -65,11 +65,11 @@ SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
   环境变量、应用/智能体/聊天默认值、Soul、完整技能（SKILL.md 连同捆绑脚本、
   引用与资源）、持久记忆、MCP 服务器配置，以及聊天历史（纯文本，默认最近
   90 天，窗口可在备份设置中调整）。
-- **WebDAV 远程备份。** 设置 → 存储 → 备份与恢复 还支持把备份推送到任意
-  WebDAV 服务器（Nextcloud、坚果云、Synology、…）——一次配置后即可在
-  多台设备间同步备份，随时上传、列出、恢复或删除远端备份。备份/恢复运行在
-  应用级持久 scope（即使离开设置页也会完成），长任务结束时通过系统托盘
-  通知反馈，并已防止在过程中被误触重复触发。
+- **WebDAV 远程备份。** 设置 → 存储 → 备份与恢复 可将备份推送到
+  WebDAV（Nextcloud、坚果云、Synology 等），并上传、列出、恢复或删除远端备份。
+  公网服务地址须用 HTTPS；明文 HTTP 只允许回环地址和受支持的私网 IPv4 字面量。
+  备份/恢复使用应用级任务，离开设置页后仍可继续，不代表进程被系统回收后也会继续。
+  长任务结束时给出系统通知，并避免重复触发。
 - **每日自动备份。** 备份可以自动进行（设置 → 存储 → 备份与恢复，默认关闭）：
   应用当天首次进入前台时检查一次，把**能力资产**（配置/提供商/思考规则/技能/
   环境变量/MCP）与**产出资产**（`shared/` 产出、持久记忆）打包，
@@ -77,8 +77,8 @@ SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
   保留 7 份，另一台设备可在自己的自动备份区恢复/拉取/删除）。聊天记录**不进**
   自动备份——它是过程副产品，只在手动导出时携带。自动备份默认**不含密钥**
   （`includeSecrets = false`，2026-10-13 产品口径）：无人值守推送到 WebDAV
-  的备份不会携带明文 API 密钥 / OAuth 令牌 / 环境变量值，恢复时需手动重填
-  providers / envVars / MCP（或在手动导出时勾选"包含机密"另存一份）。
+  的备份不会携带明文 API 密钥 / OAuth 令牌 / 环境变量值。在新设备恢复时，
+  按需补填缺少的凭据（也可手动导出时勾选「包含机密」另存一份）。
   [fix/sweep1014-debug-backup D3]
 - **环境变量分组。** 设置 → 环境变量 支持把变量归入自定义分组：列表按组
   分节显示，未分组的排在最后，变量多了也不再是一长条平铺列表；分组随备份
@@ -146,8 +146,14 @@ SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
   `libdatastore_shared_counter.so` 按原样提交；`libjieba_jni.so` 与
   `libminis_crash_handler.so` 由 CI 从 `src/main/cpp/` 重新编译——它们的 JNI
   符号内嵌 Kotlin 包名，上游二进制导出的仍是旧包名。
-- **单元测试与门禁夹具在 CI 中运行。** 完整的 JVM 单元测试套件——含备份/恢复（ConfigBackupPayloadTest 等）、终端消毒、Provider 适配器、LLM 错误处理，以及 agent loop 的 JVM 行为基线（上下文压缩触发 / turn 上限 / 预算停止 / 工具执行中取消）——在 APK 构建之前执行；同一步里还跑 `scripts/scan/test_scan.py` 的 **349 条夹具**，逐门验证「门真的会红」（门被掏空成恒过会被夹具抓住）。任何一条失败都会中止构建（无静默跳过）。
-- **构建前静态扫描门禁（113 道）。** 每次 CI 构建在 Gradle 之前跑 `scripts/scan/scan.sh`：113 道检查定义在数据文件 `scripts/scan/scan_blocks.sh`（每块一段自包含 shell），由 `scan_parallel.py` 并行执行（`--jobs N`，默认 `min(8, cpu)`；`MINIS_SCAN_JOBS=1` 强制串行），输出严格保持 1..113 顺序。覆盖四类：
+
+- **持续集成**：静态扫描、JVM 单测、Android Lint 与 APK 构建并行；四项通过后才可发布。
+  Android 仪器测试在 CI 只编译，不在设备上执行。若 `scripts/scan/` 有改动，或无法
+  证明扫描器未改，才运行对应夹具；也可用独立的 `scan-gate-push.yml` 运行。不改代码
+  的文档更新不发新 APK。详见[构建指南](BUILDING.md#continuous-integration)。
+- **静态扫描门禁**：`scripts/scan/scan.sh` 读取 `scan_blocks.sh`，由 `scan_parallel.py`
+  并行运行、按注册顺序汇总（设 `MINIS_SCAN_JOBS=1` 可串行）。实际数量及运行证据见
+  [稳定性复盘](docs/stability/2026-11-19-review.md#验证证据)。覆盖四类：
   - **数据与资源契约**——四处同步（数据类字段在 Model→Entity→toSnapshot→toProviderConfig
     四层必须同步，缺一层字段会静默蒸发）、i18n 孤儿键（8 份 strings 的 key 集合与代码
     引用必须一致）、备份流式导出、Room 迁移形状；
@@ -158,8 +164,8 @@ SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
     golden 断言工具序列 / 终态 / 禁用工具，schema 见
     [docs/stability/trace-schema-v2.md](docs/stability/trace-schema-v2.md)）、
     压缩决策、UI 状态机 pin（标签页生命周期 / 浏览器销毁唤醒 / 抽屉状态）；
-  - **静态原语自测**——`_kotlin_lexer` / `_kotlin_ast` / `_kotlin_valueflow`
-    共 **125 条自测臂**（门共用的 Kotlin 解析原语，错一处会连带污染所有消费门）。
+  - **静态原语自测**——验证扫描门共用的 `_kotlin_lexer` / `_kotlin_ast` /
+    `_kotlin_valueflow` 等 Kotlin 解析原语。
   任何一条硬失败都会中止构建。
 - **iOS 源码已移除。** `src/ios/` 已删除；本树仅限 Android。
 - **自动发布。** 成功构建会把 APK 发布到 `android-latest` release。
@@ -256,7 +262,7 @@ token 只用于这些显式请求的鉴权。
 
 | | |
 |---|---|
-| **自带模型** | Claude、GPT、Gemini 及其他提供方，使用你自己的 API 密钥或账号登录。 |
+| **自带模型** | 通过 API 密钥和服务地址配置 Claude、GPT、Gemini 及其他兼容服务。 |
 | **真正的 Linux Shell** | 设备上运行沙箱化的 Alpine Linux 环境——智能体可以安装软件包、运行脚本、操作真实文件。 |
 | **设备集成** | 日历、联系人、剪贴板、定位、媒体、闹钟、通知等，作为工具开放给智能体。**无障碍服务**进一步提供读屏 / 点击 / 滑动级的 UI 自动化；**Shizuku** 授权后可执行 `pm` / `am` / `cmd` / `settings` 等特权命令（能力面等同 `adb shell`，需单独安装并授权）。 |
 | **定时任务** | 按计划自动唤起智能体：一次性 / 每天 / 工作日，到点执行预置 prompt，结果写回会话并通过通知告知——触发不要求应用停留在前台。 |
@@ -270,6 +276,8 @@ token 只用于这些显式请求的鉴权。
 
 **→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — 系统全貌与复杂度边界（哪些是继承的、哪些是本 fork 自写的）。
 
+**→ [稳定性复盘](docs/stability/2026-11-19-review.md)** — 最近一轮稳定化、发布状态与验证边界。
+
 **→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — 现成技能。
 为 Claude、Codex、OpenClaw 或 Hermes Agent 构建的技能通常可以直接在 Minis 中运行。
 
@@ -282,19 +290,18 @@ token 只用于这些显式请求的鉴权。
 
 ```sh
 git clone --recurse-submodules https://github.com/logicflow-GYW/RikkaMinis.git
-cd RikkaMinis/src/android
-../../deps/build_proot.sh        # 从源码构建 proot 沙箱引擎
+cd RikkaMinis
+# Release APK 的完整本地构建（NDK r28）
+./deps/build_proot.sh
+./deps/build_crash_handler.sh
+./deps/build_jieba.sh
+cd src/android
 ./gradlew assembleRelease
 ```
 
-需要 **JDK 17**、Android SDK（compileSdk 36）和 **NDK r28**——后者用于
-`deps/build_proot.sh`，它从 `deps/proot` 子模块编译 proot 沙箱引擎（其他原生库
-已 vendored 在树中）。APK 输出在 `app/build/outputs/apk/release/`。
-
-本地构建使用你自己的 `~/.android/debug.keystore` 签名，因此无法覆盖安装 CI
-构建。要对齐 CI，请把相同的 keystore 放到那里。
-
-工具链细节与排障见 [BUILDING.md](BUILDING.md)。
+需要 JDK 17、Android SDK（compileSdk 36）和 NDK r28。构建细节见 [BUILDING.md](BUILDING.md)。
+没有设置 release 签名变量时，本地构建使用 debug 签名，不能覆盖安装官方 release；
+跨签名卸载前先备份本地数据。
 
 ---
 
@@ -360,8 +367,7 @@ src/android/      Android 应用（Kotlin / Compose）
 src/shared/       跨端共享的规则资源（bashism 规则）
 deps/             proot 源码（子模块）+ build_proot.sh（NDK r28 构建）
 scripts/          二进制同步与开发者工具
-scripts/scan/     113 道静态门（scan_blocks.sh 数据文件 + scan_parallel.py 并行 runner）
-                  + 门自身夹具 test_scan.py（349 例）
+scripts/scan/     静态检查注册表、并行 runner 与自测夹具（test_scan.py）
 tests/            trace golden 等独立测试资产
 docs/             架构 / 生命周期 / 同步流程 / 稳定性规范 / 开发档案（dev-history/）
 fix-reports/      各批次修复报告（每批一份，含证据、变异负控与残留登记）

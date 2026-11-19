@@ -32,29 +32,26 @@ persistent memory, and deep system integration.
 
 **→ [Download the latest APK](https://github.com/logicflow-GYW/RikkaMinis/releases/tag/android-latest)**
 
-Every push to `main` with **code changes** (`src/android/**`,
-`src/shared/**`, `deps/**` or workflow files) builds a release APK and
-republishes it to that link — pure doc changes (README / licenses) do
-not trigger a build. So the APK asset on that page is always the newest
-build.
+An APK is built and published automatically when a push to `main` touches
+`src/android/**`, `src/shared/**`, `deps/**`, or
+[`build-apk.yml`](.github/workflows/build-apk.yml). Documentation-only changes
+publish no new APK. Scanner or diagnostics changes alone use a separate
+static-check workflow and do not publish an APK.
 
-One thing that trips people up: `android-latest` is a **rolling release** — each
-build replaces the APK asset in place, and the tag name never moves (its pointer
-stays on the commit that created the release back in 2026-09). **Download the
-asset**, not the page's *Source code (zip/tar.gz)* snapshot — that is the old tag,
-not the tree this build came from. For sources, pull `main`.
+`android-latest` is a **rolling release** with a stable download URL and asset
+filename. The publish job moves the tag to the commit it built, then replaces
+the APK. **Install the `.apk` asset**. For the exact source behind the APK, use
+the `Commit` in the release notes; `main` can have newer documentation commits.
 
-Another honest boundary: `scripts/**` (including the 113 static gates) is **not**
-in the trigger paths — changing only gate scripts builds nothing; run
-`workflow_dispatch` manually to verify such a change. Requirements:
+Requirements:
 
 - **arm64-v8a** device (any modern phone), **Android 8.0+**
 - Enable "install from unknown sources" when your device prompts
 
-Builds are signed with this repository's fixed private release key, so a new
-APK installs **over** the previous one — your data and settings are preserved.
-(Builds published before 2026-10-27 used a different key: upgrading from one of
-those needs a one-time uninstall; everything since then overlays cleanly.)
+An APK signed with the same private release key can update an existing install
+in place, keeping data and settings. For a build from before the 2026-10-27
+signing-key rotation, back up your data before uninstalling it and installing
+the new APK.
 
 ```
 SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
@@ -67,8 +64,10 @@ Verify a download with `python3 scripts/apk_cert_sha256.py <apk>`.
 
 ## What this fork changes
 
-This started as a build-only fork, but it now also carries a small set of
-Android-specific product changes that are not present upstream.
+This started as a build-only fork and now maintains Android features and
+reliability. The [Nov 18–19, 2026 stability review](docs/stability/2026-11-19-review.md)
+(in Chinese) records what changed, what was verified, and what still needs
+on-device confirmation.
 
 ### App changes
 
@@ -79,13 +78,12 @@ Android-specific product changes that are not present upstream.
   (SKILL.md plus bundled scripts, references and assets), persistent memory,
   MCP server configuration, and chat history (text-only, last 90 days by
   default, window adjustable in Backup settings).
-- **WebDAV remote backup.** Settings → Storage → Backup & Restore also lets
-  you push backups to any WebDAV server (Nextcloud, 坚果云, Synology, …) —
-  configure once and sync your backups across devices, with upload, list,
-  restore and delete for remote copies. Backup/restore runs on an app-scoped
-  persistent scope (it completes even if you leave the settings screen),
-  gives you a system tray notification when a long task finishes, and is
-  guarded against accidental double-firing.
+- **WebDAV remote backup.** Settings → Storage → Backup & Restore can push to
+  WebDAV servers such as Nextcloud, 坚果云, and Synology, with upload, list,
+  restore, and delete for remote copies. Public servers require HTTPS; plain
+  HTTP is limited to loopback and supported private IPv4 literals. Transfers
+  can continue after leaving the settings screen, but not after the app process
+  is killed. Long tasks notify on completion and are guarded against duplicate runs.
 - **Daily automatic backup.** Backups can run on their own (Settings → Storage
   → Backup & Restore; off by default): on the first foreground transition of
   each calendar day the app packages its **capability assets** (config,
@@ -97,9 +95,9 @@ Android-specific product changes that are not present upstream.
   Chat transcripts are **excluded**: they are process byproduct and only ride
   along in a manual export. Automatic backups **exclude secrets by default**
   (`includeSecrets = false`, product decision 2026-10-13): an unattended push to
-  WebDAV carries no plaintext API keys, OAuth tokens or environment-variable
-  values; restoring one means re-entering providers / envVars / MCP by hand
-  (or ticking "include secrets" on a manual export to keep a second copy).
+  WebDAV carries no plaintext API keys, OAuth tokens, or environment-variable
+  values. After restoring on a new device, fill in any missing credentials
+  (or export a separate copy with "include secrets" selected).
   [fix/sweep1014-debug-backup D3]
 - **Environment-variable groups.** Settings → Environment Variables lets you
   file variables under custom group labels: the list renders as sections
@@ -194,20 +192,12 @@ See [docs/DEVELOPMENT_LIFECYCLE.md](docs/DEVELOPMENT_LIFECYCLE.md).
   `libjieba_jni.so` and `libminis_crash_handler.so` are rebuilt from
   `src/main/cpp/` by CI, because their JNI symbol names embed the Kotlin
   package and upstream's binaries still export the old one.
-- **Unit tests and gate fixtures run in CI.** The full JVM unit-test suite —
-  backup/restore (ConfigBackupPayloadTest and friends), terminal sanitization,
-  provider adapters, LLM error handling, plus the agent loop's JVM behavioural
-  baseline (compaction trigger / turn ceiling / budget stop / cancel mid-tool) —
-  runs before the APK build. The same step runs the **349 fixtures** in
-  `scripts/scan/test_scan.py`, which verify gate by gate that the gates actually
-  go red (a gate hollowed out to a constant pass is caught). Any failure aborts
-  the build (no silent scoping).
-- **Pre-build static scan gate (113 checks).** Every CI build runs
-  `scripts/scan/scan.sh` before Gradle: the 113 checks live in the data file
-  `scripts/scan/scan_blocks.sh` (one self-contained shell block each) and are
-  executed in parallel by `scan_parallel.py` (`--jobs N`, default
-  `min(8, cpu)`; `MINIS_SCAN_JOBS=1` forces serial), with output kept strictly in
-  1..113 order. Four families:
+- **Continuous integration.** Static scans, JVM unit tests, Android Lint, and the APK build run in parallel; publication requires all four jobs. Android instrumented tests are compiled in CI but not executed on a device. Scanner fixtures run when the scanner changes or that cannot be ruled out; `scan-gate-push.yml` also runs them directly. Documentation-only changes do not publish an APK. See the [build guide](BUILDING.md#continuous-integration).
+- **Static scan gates.** `scripts/scan/scan.sh` reads `scan_blocks.sh` and
+  runs checks in parallel via `scan_parallel.py`, reporting in registration
+  order (`MINIS_SCAN_JOBS=1` forces serial execution). The
+  [stability review](docs/stability/2026-11-19-review.md#验证证据) gives dated
+  counts and links to actual runs. Four families:
   - **Data and resource contracts** — four-way field sync (data-class fields must
     be synced across Model → Entity → toSnapshot → toProviderConfig, or fields
     silently evaporate), i18n orphan keys (the key set across the 8 `strings`
@@ -223,9 +213,8 @@ See [docs/DEVELOPMENT_LIFECYCLE.md](docs/DEVELOPMENT_LIFECYCLE.md).
     [docs/stability/trace-schema-v2.md](docs/stability/trace-schema-v2.md)),
     compaction decisions, UI state-machine pins (tab lifecycle / browser destroy
     wakeup / drawer state);
-  - **Static primitive self-tests** — **125 self-test arms** across
-    `_kotlin_lexer` / `_kotlin_ast` / `_kotlin_valueflow` (the shared Kotlin
-    parsing primitives; a mistake there poisons every consuming gate).
+  - **Static primitive self-tests** — shared Kotlin parsing primitives such as
+    `_kotlin_lexer`, `_kotlin_ast`, and `_kotlin_valueflow`.
 
   Any hard failure aborts the build.
 - **iOS sources removed.** `src/ios/` is gone; this tree is Android only.
@@ -351,7 +340,7 @@ Tokens are only used for authenticating those explicit requests.
 
 | | |
 |---|---|
-| **Bring your own model** | Claude, GPT, Gemini and other providers, via your own API keys or account sign-in. |
+| **Bring your own model** | Configure Claude, GPT, Gemini, and other compatible services with your own API keys and provider endpoints. |
 | **A real Linux shell** | A sandboxed Alpine Linux environment runs on-device — the agent can install packages, run scripts, and work with real files. |
 | **Device integration** | Calendar, Contacts, Clipboard, Location, Media, Alarms, Notifications and more, exposed to the agent as tools. The **accessibility service** adds screen-reading / tap / swipe level UI automation; **Shizuku** (when installed and authorised by you) adds `pm` / `am` / `cmd` / `settings` privileged commands — the same surface as `adb shell`. |
 | **Scheduled tasks** | Wake the agent on a schedule — once, daily or on weekdays — running a preset prompt and writing the result back to the session with a notification. Firing does not require the app to stay in the foreground. |
@@ -362,6 +351,10 @@ Tokens are only used for authenticating those explicit requests.
 | **Local backup & restore** | Export configuration, credentials (optional), skills, memory, MCP servers and chat history (text, last N days) to one portable JSON file. |
 | **Workspaces** | Organise work into separate contexts, addressable via `minis://workspace/`. Workspace, attachment, offload and browser directories are **per-session private** (`minis-sessions/<sid>/`); only `shared/`, `memory/`, `skills/`, `mcp-servers/` and mounted folders are shared across sessions. |
 | **Native offloads** | Heavy or platform-specific work is handed to native code instead of the sandbox. |
+
+**→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System overview and complexity boundaries (what is inherited and what this fork owns).
+
+**→ [Stability review](docs/stability/2026-11-19-review.md)** — Recent hardening, release status, and verification boundaries.
 
 **→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — ready-made
 skills. Skills built for Claude, Codex, OpenClaw or Hermes Agent generally run
@@ -376,20 +369,19 @@ curated collection of use cases and workflows.
 
 ```sh
 git clone --recurse-submodules https://github.com/logicflow-GYW/RikkaMinis.git
-cd RikkaMinis/src/android
-../../deps/build_proot.sh        # build the proot sandbox engine from source
+cd RikkaMinis
+# Complete local release APK build (NDK r28 required)
+./deps/build_proot.sh
+./deps/build_crash_handler.sh
+./deps/build_jieba.sh
+cd src/android
 ./gradlew assembleRelease
 ```
 
-Needs **JDK 17**, the Android SDK (compileSdk 36) and **NDK r28** — the latter
-for `deps/build_proot.sh`, which compiles the proot sandbox engine from the
-`deps/proot` submodule (the other native libs are vendored in the tree). The APK
-lands in `app/build/outputs/apk/release/`.
-
-Local builds are signed with your own `~/.android/debug.keystore`, so they will
-not install over a CI build. To match CI, put the same keystore there.
-
-See [BUILDING.md](BUILDING.md) for toolchain details and troubleshooting.
+Requires JDK 17, Android SDK (compileSdk 36), and NDK r28. See [BUILDING.md](BUILDING.md)
+for toolchain details. Without release signing variables, local builds use a debug
+key and cannot update the public release. Back up local data before uninstalling
+an app that was signed with a different key.
 
 ---
 
@@ -463,8 +455,7 @@ src/android/      Android app (Kotlin / Compose)
 src/shared/       Shared rule assets (bashism rules)
 deps/             proot source (submodule) + build_proot.sh (NDK r28 build)
 scripts/          Binary sync and developer tooling
-scripts/scan/     113 static gates (scan_blocks.sh data file + scan_parallel.py runner)
-                  + the gates' own fixtures, test_scan.py (349 cases)
+scripts/scan/     Static check registry, parallel runner, and fixtures (test_scan.py)
 tests/            Standalone test assets (trace goldens)
 docs/             Architecture / lifecycle / sync procedure / stability specs / dev archive (dev-history/)
 fix-reports/      One report per batch (evidence, mutation negative controls, leftovers)
