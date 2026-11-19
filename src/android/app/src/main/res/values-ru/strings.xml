@@ -24,7 +24,7 @@
     <string name="memory_revoke_result_not_found">Запись не найдена в недавних ежедневных журналах.</string>
     <string name="memory_revoke_result_io_error">Ошибка записи файла: %1$s</string>
     <string name="memory_save_toast">Сохранено</string>
-    <string name="memory_global_footer">Постоянные инструкции и предпочтения, видимые агенту в каждой сессии. Агент не может изменять этот файл.</string>
+    <string name="memory_global_footer">В этом файле хранятся инструкции и настройки, которыми управляете вы. Агент может предложить изменения, но они будут внесены только с вашего согласия.</string>
     <string name="mention_scanning">Сканирование файлов…</string>
     <string name="mention_no_match">Нет совпадающих файлов</string>
     <string name="resume_banner_title">Прервано — нажмите «Продолжить», чтобы возобновить</string>
@@ -66,9 +66,9 @@
     <string name="browser_settings_ua_not_set">Не задано</string>
     <string name="settings_title">Настройки</string>
     <string name="settings_section_llm_providers">Провайдеры LLM</string>
-    <string name="settings_section_llm_providers_footer">Настройте, какие модели использует агент, управляйте ключами API и OAuth для каждого провайдера и создавайте группы моделей для резервирования или балансировки нагрузки.</string>
+    <string name="settings_section_llm_providers_footer">Управляйте ключами API и адресами провайдеров, выбирайте модели для агента и создавайте группы для переключения при сбоях или балансировки нагрузки.</string>
     <string name="settings_manage_providers">Управление провайдерами</string>
-    <string name="settings_manage_providers_subtitle">Ключи API и вход через OAuth</string>
+    <string name="settings_manage_providers_subtitle">Ключи API и настройка моделей</string>
     <string name="settings_model_groups">Группы моделей</string>
     <string name="settings_model_groups_subtitle">Резервирование и балансировка нагрузки</string>
     <string name="settings_token_usage">Расход токенов</string>
@@ -477,7 +477,7 @@
     <string name="perm_a11y_system_ready">Служба включена</string>
     <string name="perm_a11y_system_disabled">Служба не включена</string>
     <string name="perm_allow_minis_config">Разрешить инструмент настройки</string>
-    <string name="perm_minis_config_desc">Когда выключено, агент не может самостоятельно читать или изменять ваши настройки. Прошлые изменения по-прежнему можно посмотреть в Журналы → Изменения настроек.</string>
+    <string name="perm_minis_config_desc">Если отключить эту функцию, агент не сможет читать и менять настройки приложения через minis-config. Вы по-прежнему можете менять их вручную. В приложении нет доступной для просмотра истории изменений.</string>
     <string name="perm_section_privacy">Конфиденциальность</string>
     <string name="perm_section_media">Медиа</string>
     <string name="perm_section_system">Система</string>
@@ -646,13 +646,13 @@
     <string name="rootfs_repair_description">Восстановить отсутствующие/повреждённые bash, readline и ncurses</string>
     <string name="rootfs_install_label">Установить Rootfs</string>
     <string name="rootfs_reset_label">Сбросить Rootfs</string>
-    <string name="rootfs_reset_description">Удалить всё и переустановить</string>
+    <string name="rootfs_reset_description">Сбрасывается только среда Linux shell (rootfs). Настройки приложения, переписки и файлы вне rootfs сохраняются.</string>
     <string name="rootfs_progress_section">Прогресс</string>
     <string name="rootfs_result_section">Результат</string>
     <string name="rootfs_info_section">Информация</string>
     <string name="rootfs_about_title">О Rootfs</string>
     <string name="rootfs_reset_confirm_title">Сбросить Rootfs?</string>
-    <string name="rootfs_reset_confirm_message">Это удалит весь rootfs. Все данные будут потеряны.</string>
+    <string name="rootfs_reset_confirm_message">Среда Linux shell (rootfs) будет переустановлена. Настройки приложения, переписки и файлы вне rootfs сохраняются.</string>
     <string name="provider_list_providers">Провайдеры</string>
     <string name="provider_list_add_provider">Добавить провайдера</string>
     <string name="provider_list_no_providers_configured">Провайдеры не настроены</string>
@@ -705,10 +705,10 @@
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">Метка отображается в списке провайдеров и в выборе моделей.</string>
     <string name="add_provider_credential">Учётные данные</string>
     <string name="add_provider_multi_key_hint">Несколько ключей разделяйте пробелами или запятыми — ротация автоматическая (сначала самый старый).</string>
-    <string name="add_provider_your_key_is_stored_securely_in_encrypted">Ваш ключ надёжно хранится в зашифрованном хранилище и никогда не покидает устройство.</string>
+    <string name="add_provider_your_key_is_stored_securely_in_encrypted">Ключ API хранится на устройстве в зашифрованном виде и отправляется на указанный адрес API для аутентификации.</string>
     <string name="add_provider_endpoint">Эндпоинт</string>
-    <string name="add_provider_endpoint_anthropic_hint">Используйте официальный эндпоинт Anthropic как есть. Для сторонних сервисов, совместимых с Anthropic (например, Mimo), базовый URL может требовать суффикс пути, такой как \"/anthropic\" — сверьтесь с документацией провайдера. URL используется без изменений с добавлением \"/v1/messages\".</string>
-    <string name="add_provider_endpoint_hint">Оставьте пустым, чтобы использовать эндпоинт по умолчанию. «/v1» добавляется автоматически — укажите только базовый хост.</string>
+    <string name="add_provider_endpoint_anthropic_hint">Оставьте поле пустым для официального адреса Anthropic. Для совместимого сервиса (например, Mimo) введите базовый URL с нужным префиксом пути (например, /anthropic), без окончания /v1/messages.</string>
+    <string name="add_provider_endpoint_hint">Оставьте поле пустым для стандартного адреса. Для другого сервиса введите базовый URL с нужным префиксом пути. Если в конце нет /v1, приложение его добавит.</string>
     <string name="add_provider_endpoint_gemini_hint">Оставьте пустым, чтобы использовать стандартный эндпоинт Google. Укажите полный базовый URL, включая путь версии.</string>
     <string name="add_provider_custom_api_base_optional">Свой базовый URL API (необязательно)</string>
     <string name="add_custom_model_model_id">ID модели</string>
@@ -902,7 +902,7 @@
     <string name="mount_add_name_label">Имя подключения</string>
     <string name="mount_add_name_hint">Это будет имя папки в /var/minis/mounts/</string>
     <string name="mount_add_allow_writes">Разрешить запись</string>
-    <string name="mount_add_allow_writes_desc">Если выключено, инструменты file_write/file_edit отклоняют запись; оболочка всё равно может это обойти.</string>
+    <string name="mount_add_allow_writes_desc">Если отключить запись, файловые инструменты RikkaMinis и поддерживаемые команды оболочки не смогут писать в эту папку. Это не режим «только чтение» на уровне ОС; другие способы записи могут не блокироваться.</string>
     <string name="mount_add_confirm">Добавить</string>
     <string name="mount_unmount_title">Отключить эту папку?</string>
     <string name="mount_unmount_message">Исходная папка в «Файлах» не будет удалена — только привязка.</string>
@@ -993,8 +993,8 @@
     <string name="import_zip_no_supported">В архиве нет файлов для импорта</string>
     <string name="import_zip_summary">Импортировано %1$d из %2$d файлов</string>
     <string name="image_budget_compressed">Сжато изображений перед отправкой: %1$d</string>
-    <string name="image_budget_total_exceeded">Общий размер изображений превышает 25 МБ; последующие изображения отброшены</string>
-    <string name="image_budget_request_elided">Старых изображений исключено из запроса для соблюдения лимита 25 МБ: %1$d</string>
+    <string name="image_budget_total_exceeded">Достигнут заданный предел размера изображений; последующие изображения удалены.</string>
+    <string name="image_budget_request_elided">Старые изображения сверх заданного лимита размера запроса пропущены: %1$d.</string>
     <string name="composer_swipe_release_to_send">Отпустите, чтобы отправить</string>
     <string name="composer_swipe_release_to_queue">Отпустите, чтобы поставить в очередь</string>
     <string name="chat_message_large_collapsed_title">Большое содержимое (%1$s)</string>
@@ -1042,7 +1042,7 @@
     <string name="mcp_add">Добавить сервер MCP</string>
     <string name="mcp_edit">Изменить сервер MCP</string>
     <string name="mcp_section_servers">Серверы</string>
-    <string name="mcp_section_footer">Серверы MCP позволяют агенту вызывать внешние инструменты через RikkaMinis-mcp-cli. Конфигурация хранится в /var/minis/mcp-servers/servers.json (совместимо с Claude Desktop).</string>
+    <string name="mcp_section_footer">Через minis-mcp-cli агент может использовать внешние инструменты с MCP-серверов. Настройки серверов хранятся в /var/minis/mcp-servers/servers.json в формате mcpServers.</string>
     <string name="mcp_empty_title">Нет серверов MCP</string>
     <string name="mcp_empty_action">Добавьте сервер кнопкой +.</string>
     <string name="mcp_transport_stdio">STDIO</string>
@@ -1120,7 +1120,7 @@
     <!-- Spoken substitutions for links during read-aloud (TTS) -->
     <!-- [T-android-voice-correction] Consent + correction UI -->
     <string name="voice_provider_system">Система</string>
-    <string name="add_provider_subtitle_kimi">Kimi Coding Plan — войдите с аккаунтом Kimi</string>
+    <string name="add_provider_subtitle_kimi">Используйте ключ API для Kimi Coding Plan</string>
     <string name="browser_downloads_title">Загрузки</string>
     <string name="browser_downloads_clear">Очистить</string>
     <string name="browser_downloads_empty">Нет загрузок</string>
@@ -1152,7 +1152,7 @@
     <string name="webdav_clear_pw_confirm">Удалить и сохранить</string>
     <string name="webdav_uploaded">Резервная копия загружена</string>
     <string name="auto_backup_section_title">Автоматическое резервное копирование</string>
-    <string name="auto_backup_section_footer">Выполняется раз в день при первом открытии приложения. Охватывает возможности (провайдеры, правила мышления, скиллы, переменные окружения, память, MCP) и результаты (файлы shared/ и данные графа знаний) — переписка намеренно исключена (побочный продукт агента). Включает API-ключи; локальные копии хранятся в хранилище приложения, удалённые отправляются на ваш WebDAV-сервер (хранятся последние 3).</string>
+    <string name="auto_backup_section_footer">Запускается раз в день при первом выходе приложения на передний план. Сохраняет настройки, провайдеров, навыки, память, конфигурацию MCP и файлы shared; история чатов и учётные данные (ключи API, OAuth-токены, значения переменных среды и другие секреты) исключены. Локальные копии хранятся в приложении, WebDAV сохраняет 3 последние.</string>
     <string name="auto_backup_enable">Ежедневное автоматическое резервное копирование</string>
     <string name="auto_backup_enable_sub">Автоматически при первом открытии приложения каждый день</string>
     <string name="auto_backup_run_now">Создать резервную копию сейчас</string>
@@ -1171,8 +1171,8 @@
     <string name="backup_restored_notify_body">Восстановлено %1$d провайдеров и %2$d групп.</string>
     <string name="webdav_notify_title_failed">Ошибка операции WebDAV</string>
     <string name="backup_notify_failed">Ошибка резервного копирования</string>
-    <string name="backup_secret_title">Резервная копия содержит ключи API</string>
-    <string name="backup_secret_body">Экспортированный файл содержит ключи API и учётные данные провайдеров и может использоваться любым, кто его получит. Храните его в безопасности и не передавайте другим. Ключи хранятся в виде обычного Base64 (без шифрования) и могут быть прочитаны любым, у кого есть файл.</string>
+    <string name="backup_secret_title">Резервная копия содержит API-ключи и другие секреты</string>
+    <string name="backup_secret_body">В экспортированном JSON содержатся ключи API провайдеров и другие включённые в резервную копию секреты в читаемом незашифрованном виде (Base64-кодирование не является шифрованием). Получивший файл может воспользоваться этими данными. Храните файл безопасно и не передавайте его.</string>
     <string name="backup_secret_confirm">Включить ключи и экспортировать</string>
     <string name="backup_secret_without">Без ключей</string>
     <string name="webdav_notify_title_restored">Восстановление WebDAV</string>
@@ -1221,10 +1221,10 @@
     <string name="backup_err_busy">Резервное копирование или восстановление уже выполняется — дождитесь завершения.</string>
     <!-- 英文兜底 (2026-08-08) -->
     <string name="model_group_name_saved">Name saved</string>
-    <string name="model_group_routing_fallback_footer">Try models in order. If one fails, advance to the next.</string>
+    <string name="model_group_routing_fallback_footer">Модели пробуются по порядку. Условие переключения определяет, когда пробовать следующую доступную модель.</string>
     <string name="model_group_routing_loadbalance_footer">Каждое новое сообщение переключается на следующую модель группы.</string>
-    <string name="model_group_fallback_default_footer">Fall back on rate limits (429) and server errors (5xx) only.</string>
-    <string name="model_group_fallback_always_footer">Advanced: fall back on any error, including network and auth failures. Prefer Default unless you know why you need this.</string>
+    <string name="model_group_fallback_default_footer">При превышении лимита, недействительном ключе API или ошибке провайдера пробуется следующая модель. После повторных попыток переключение возможно и при сетевых или временных ошибках.</string>
+    <string name="model_group_fallback_always_footer">Следующая модель пробуется и при ошибках запроса, не предусмотренных настройкой по умолчанию.</string>
     <string name="model_group_no_models">No models in this group.</string>
     <string name="model_group_model_unavailable">Model no longer available</string>
     <string name="provider_import_success">Imported provider "%1$s"</string>
@@ -1309,8 +1309,8 @@
     <string name="filepreview_truncated_kb">Показаны первые %1$d КБ из %2$s</string>
     <string name="filepreview_truncated_rows">Показаны первые %1$d строк из %2$s</string>
     <string name="filepreview_no_app">Нет приложения для открытия этого файла.</string>
-    <string name="rootfs_explain_body">Rootfs содержит файловую систему Alpine Linux, используемую песочницей. Сброс удалит все данные и вернёт заводское состояние.</string>
-    <string name="rootfs_reset_body">Сброс: удалить всё\nПримечание: постоянные данные хранятся в общей области вне rootfs и сохраняются после сброса.</string>
+    <string name="rootfs_explain_body">Rootfs содержит файловую систему Alpine Linux для оболочки. При сбросе среда переустанавливается; настройки приложения и данные вне rootfs сохраняются.</string>
+    <string name="rootfs_reset_body">При сбросе переустанавливается среда Linux shell (rootfs). Настройки приложения, переписки и файлы вне rootfs сохраняются.</string>
     <string name="config_confirm_effect_warning">Это может повлиять на последующие вызовы инструментов.</string>
     <string name="config_confirm_effect_info">Обратимо, но стоит быстро проверить.</string>
     <string name="chat_copy_code">Копировать код</string>
@@ -1407,10 +1407,10 @@
     <string name="quicktest_empty_reply">(пустой ответ)</string>
     <string name="quicktest_image_unsupported">Провайдер этой модели не поддерживает генерацию изображений через быстрый тест.</string>
     <string name="quicktest_no_image">Изображение не получено.</string>
-    <string name="quicktest_speech_unavailable">Тестирование вывода/транскрибации речи на Android пока недоступно.</string>
+    <string name="quicktest_speech_unavailable">Не удалось запустить этот голосовой тест.</string>
     <string name="model_group_detail_thinking_xhigh">XHigh</string>
     <string name="model_group_detail_thinking_ultra">Ultra</string>
-    <string name="add_provider_subtitle_openai">Работает с Codex, DeepSeek, Moonshot, Groq и другими совместимыми поставщиками</string>
+    <string name="add_provider_subtitle_openai">OpenAI и совместимые сервисы: DeepSeek, Moonshot, Groq и другие</string>
     <string name="add_provider_subtitle_anthropic">Работает с Claude и сервисами, совместимыми с протоколом Anthropic</string>
     <string name="add_provider_subtitle_gemini">Работает с серией Gemini и Google AI Studio</string>
     <string name="add_provider_subtitle_openrouter">Агрегирует GPT, Claude, Gemini, Llama и другие популярные модели</string>
@@ -1490,7 +1490,7 @@
     <string name="chat_tuning_glass_blur_desc">Насколько сильно размывается фон. В rikkahub — 12 dp для размытия и 16 dp для стекла.</string>
     <string name="chat_tuning_glass_tint">Плотность стекла</string>
     <string name="chat_tuning_glass_tint_desc">Насколько цвет карточки перекрывает размытие. 0 % — чистое размытие, 100 % — только цвет карточки (непрозрачно).</string>
-    <string name="chat_tuning_glass_footer">Переключатель находится в разделе Оформление → Внешний вид чата. Когда он выключен, эти два значения ни на что не влияют.</string>    <!-- [feat/chat-tuning-panel-b] Лимиты рантайма — бюджеты контекста/памяти и медиа/инструментов. -->
+    <string name="chat_tuning_glass_footer">Переключатель эффекта стекла находится в разделе «Настройки → Внешний вид» в блоке «Матовое стекло». Если он выключен, параметры размытия и тонировки не действуют.</string>    <!-- [feat/chat-tuning-panel-b] Лимиты рантайма — бюджеты контекста/памяти и медиа/инструментов. -->
     <string name="appearance_glass_title">Поле ввода и верхняя панель</string>    <string name="runtime_limits_section_context">Контекст и память</string>
     <string name="appearance_section_glass">Матовое стекло</string>
     <string name="appearance_glass_footer">Действует для поля ввода и верхней панели. Радиус и плотность — в «Настройке чата»; ниже Android 12 поверхности остаются непрозрачными.</string>    <string name="runtime_limits_compact_tail">Нижний порог хвостовых токенов</string>
@@ -1614,7 +1614,7 @@
     <string name="scheduled_global_switch_subtitle">Главный выключатель; новые задачи создаются выключенными</string>
     <string name="scheduled_list_header">Список задач</string>
     <string name="scheduled_list_footer">Задачи выполняются при первом переходе приложения в передний план в дневном окне; не чаще раза в день, по одной за раз.</string>
-    <string name="scheduled_empty_hint">Задач пока нет. Нажмите «Новая задача» выше — например, ежедневную утреннюю сводку. Задачи по умолчанию выключены.</string>
+    <string name="scheduled_empty_hint">Запланированных задач пока нет. Нажмите «Новая задача» выше. Изначально задачи выключены; включить их можно при создании или позже в списке. Задача выполняется не чаще раза в день при первом открытии приложения в заданном окне.</string>
     <string name="scheduled_resume">Возобновить</string>
     <string name="scheduled_state_suspended">%1$d неудач подряд — приостановлено</string>
     <string name="scheduled_state_ok">Успешно (%1$s)</string>
@@ -1653,12 +1653,12 @@
     <string name="perm_auto_approve_title">Режим автоодобрения</string>
     <string name="perm_auto_approve_desc">Применять обычные изменения настроек без запроса. Чувствительные и разрушительные изменения могут по-прежнему требовать подтверждения.</string>
     <string name="perm_auto_approve_sensitive">Включить чувствительные настройки</string>
-    <string name="perm_auto_approve_sensitive_desc">Также применять учётные данные провайдеров (API-ключи, базовые URL) без запроса. Агент может незаметно их перенаправить.</string>
+    <string name="perm_auto_approve_sensitive_desc">Изменения чувствительных настроек также применяются без подтверждения. Изменения API-ключей и разрушающие действия по-прежнему требуют подтверждения.</string>
     <string name="perm_auto_approve_privileged">Разрешить привилегированные инструменты</string>
     <string name="perm_auto_approve_privileged_desc">Разрешить агенту использовать командные строки специальных возможностей и Shizuku (они управляют другими приложениями и читают экран).</string>
-    <string name="perm_auto_approve_footer">По умолчанию выключено. При включении обычные записи больше не показывают диалог подтверждения, а запросы разрешений инструментов прекращаются. Все изменения по-прежнему записываются в Журнал → Изменения конфигурации.</string>
+    <string name="perm_auto_approve_footer">По умолчанию функция отключена. При включении обычные изменения и разрешённые вызовы инструментов не требуют запроса подтверждения. Для чувствительных настроек есть отдельный параметр; изменения API-ключей и разрушающие действия всегда требуют подтверждения. Проверяйте отчёт агента в чате: в приложении нет истории изменений и списка отмены.</string>
     <string name="perm_auto_approve_confirm_title">Включить автоодобрение?</string>
-    <string name="perm_auto_approve_confirm_text">Обычные изменения настроек будут применяться без запроса, запросы разрешений инструментов прекратятся. Чувствительные настройки (API-ключи провайдеров) и разрушительные изменения по-прежнему требуют подтверждения. Можно отключить в любой момент.</string>
+    <string name="perm_auto_approve_confirm_text">Обычные изменения настроек применяются без запроса, разрешённые вызовы инструментов также не требуют подтверждения. Для чувствительных настроек нужно отдельно включить соответствующую опцию. Изменения API-ключей и разрушающие действия всегда требуют подтверждения.</string>
     <string name="perm_auto_approve_confirm_on">Включить</string>
     <string name="perm_section_zone_delete_guard">Защищённые папки</string>
     <string name="perm_zone_delete_guard_title">Защита папок от удаления целиком</string>

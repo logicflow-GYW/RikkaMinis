@@ -24,7 +24,7 @@
     <string name="memory_revoke_result_not_found">최근 로그에서 항목을 찾을 수 없습니다.</string>
     <string name="memory_revoke_result_io_error">파일 쓰기 오류: %1$s</string>
     <string name="memory_save_toast">저장됨</string>
-    <string name="memory_global_footer">모든 세션에서 에이전트에게 표시되는 영구 지침 및 환경 설정입니다. 에이전트는 이 파일을 수정할 수 없습니다.</string>
+    <string name="memory_global_footer">이 파일에는 사용자가 관리하는 지침과 설정이 저장됩니다. 에이전트가 수정을 제안할 수 있지만, 반영하려면 사용자의 승인이 필요합니다.</string>
     <string name="mention_scanning">파일 스캔 중…</string>
     <string name="mention_no_match">일치하는 파일 없음</string>
     <string name="resume_banner_title">중단됨 — 재개를 눌러 계속하세요</string>
@@ -54,9 +54,9 @@
     <!-- T135 — Settings + About i18n keys -->
     <string name="settings_title">설정</string>
     <string name="settings_section_llm_providers">LLM 제공자</string>
-    <string name="settings_section_llm_providers_footer">에이전트가 사용할 모델을 구성하고 각 제공자의 API 키와 OAuth를 관리하며 폴백 또는 로드 밸런싱용 모델 그룹을 만듭니다.</string>
+    <string name="settings_section_llm_providers_footer">제공자의 API 키와 엔드포인트를 관리하고, 에이전트가 사용할 모델을 선택하고, 폴백이나 로드 밸런싱용 모델 그룹을 만드세요.</string>
     <string name="settings_manage_providers">제공자 관리</string>
-    <string name="settings_manage_providers_subtitle">API 키와 OAuth 로그인</string>
+    <string name="settings_manage_providers_subtitle">API 키 및 모델 설정</string>
     <string name="settings_model_groups">모델 그룹</string>
     <string name="settings_model_groups_subtitle">폴백 및 로드 밸런싱</string>
     <string name="settings_token_usage">토큰 사용량</string>
@@ -300,7 +300,7 @@
     <string name="perm_a11y_system_ready">서비스 활성화됨</string>
     <string name="perm_a11y_system_disabled">서비스 비활성화됨</string>
     <string name="perm_allow_minis_config">설정 도구 허용</string>
-    <string name="perm_minis_config_desc">끄면 에이전트가 스스로 설정을 읽거나 수정할 수 없습니다. 이전 변경 내용은 로그 → 설정 변경에서 계속 확인할 수 있습니다.</string>
+    <string name="perm_minis_config_desc">끄면 에이전트가 minis-config를 통해 앱 설정을 읽거나 변경할 수 없습니다. 설정은 직접 변경할 수 있습니다. 앱에는 설정 변경 내역을 조회하는 기록이 없습니다.</string>
     <string name="perm_section_privacy">개인정보</string>
     <string name="perm_section_media">미디어</string>
     <string name="perm_section_system">시스템</string>
@@ -438,13 +438,13 @@
     <string name="rootfs_repair_description">누락/손상된 bash, readline, ncurses 복원</string>
     <string name="rootfs_install_label">Rootfs 설치</string>
     <string name="rootfs_reset_label">Rootfs 초기화</string>
-    <string name="rootfs_reset_description">모두 삭제 후 재설치</string>
+    <string name="rootfs_reset_description">Linux 셸 환경(rootfs)만 초기화됩니다. 앱 설정, 대화 및 rootfs 외부에 저장된 파일은 유지됩니다.</string>
     <string name="rootfs_progress_section">진행 상황</string>
     <string name="rootfs_result_section">결과</string>
     <string name="rootfs_info_section">정보</string>
     <string name="rootfs_about_title">Rootfs에 대하여</string>
     <string name="rootfs_reset_confirm_title">Rootfs를 초기화하시겠습니까?</string>
-    <string name="rootfs_reset_confirm_message">rootfs 전체가 삭제됩니다. 모든 데이터가 손실됩니다.</string>
+    <string name="rootfs_reset_confirm_message">Linux 셸 환경(rootfs)을 다시 설치합니다. 앱 설정, 대화 및 rootfs 외부의 파일은 유지됩니다.</string>
 
     <!-- T172 — components / onboarding / preview i18n -->
     <string name="common_back">뒤로</string>
@@ -620,7 +620,7 @@
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">라벨은 제공업체 목록과 모델 선택기에 표시됩니다.</string>
     <string name="add_provider_credential">자격 증명</string>
     <string name="add_provider_multi_key_hint">여러 키는 공백 또는 쉼표로 구분할 수 있으며, 자동으로 순환 사용됩니다(가장 오래 미사용 키 우선).</string>
-    <string name="add_provider_your_key_is_stored_securely_in_encrypted">키는 암호화된 저장소에 안전하게 보관되며 기기를 벗어나지 않습니다.</string>
+    <string name="add_provider_your_key_is_stored_securely_in_encrypted">API 키는 이 기기에 암호화하여 저장되며, 인증을 위해 설정한 API 엔드포인트로 전송됩니다.</string>
     <string name="add_provider_endpoint">엔드포인트</string>
     <string name="add_provider_custom_api_base_optional">사용자 정의 API 베이스 (선택 사항)</string>
     <string name="add_custom_model_model_id">모델 ID</string>
@@ -807,7 +807,7 @@
     <string name="mount_add_name_label">마운트 이름</string>
     <string name="mount_add_name_hint">/var/minis/mounts/ 아래의 폴더 이름이 됩니다</string>
     <string name="mount_add_allow_writes">쓰기 허용</string>
-    <string name="mount_add_allow_writes_desc">끄면 file_write/file_edit 도구가 쓰기를 거부하지만 셸은 여전히 우회할 수 있습니다.</string>
+    <string name="mount_add_allow_writes_desc">끄면 RikkaMinis 파일 도구와 지원되는 셸 명령이 이 마운트에 쓰지 못하도록 차단합니다. OS 수준의 읽기 전용 마운트는 아니므로 다른 쓰기 경로는 보호되지 않을 수 있습니다.</string>
     <string name="mount_add_confirm">추가</string>
     <string name="mount_unmount_title">이 폴더를 마운트 해제할까요?</string>
     <string name="mount_unmount_message">바인딩만 해제되며 원본 폴더는 삭제되지 않습니다.</string>
@@ -904,7 +904,7 @@
     <string name="mcp_add">MCP 서버 추가</string>
     <string name="mcp_edit">MCP 서버 편집</string>
     <string name="mcp_section_servers">서버</string>
-    <string name="mcp_section_footer">MCP 서버를 사용하면 에이전트가 RikkaMinis-mcp-cli를 통해 외부 도구를 호출할 수 있습니다. 구성은 /var/minis/mcp-servers/servers.json에 저장됩니다(Claude Desktop 호환).</string>
+    <string name="mcp_section_footer">에이전트는 minis-mcp-cli를 통해 MCP 서버의 외부 도구를 사용할 수 있습니다. 서버 설정은 mcpServers 형식으로 /var/minis/mcp-servers/servers.json에 저장됩니다.</string>
     <string name="mcp_empty_title">MCP 서버 없음</string>
     <string name="mcp_empty_action">+ 버튼으로 서버를 추가하세요.</string>
     <string name="mcp_transport_stdio">STDIO</string>
@@ -982,7 +982,7 @@
     <!-- Spoken substitutions for links during read-aloud (TTS) -->
     <!-- [T-android-voice-correction] Consent + correction UI -->
     <string name="voice_provider_system">시스템</string>
-    <string name="add_provider_subtitle_kimi">Kimi Coding Plan — Kimi 계정으로 로그인</string>
+    <string name="add_provider_subtitle_kimi">Kimi Coding Plan API 키 사용</string>
     <string name="browser_downloads_title">다운로드</string>
     <string name="browser_downloads_clear">지우기</string>
     <string name="browser_downloads_empty">다운로드 없음</string>
@@ -1014,7 +1014,7 @@
     <string name="webdav_clear_pw_confirm">지우고 저장</string>
     <string name="webdav_uploaded">백업이 업로드되었습니다</string>
     <string name="auto_backup_section_title">자동 백업</string>
-    <string name="auto_backup_section_footer">앱을 매일 처음 열 때 1회 실행됩니다. 능력(프로바이더, 사고 규칙, 스킬, 환경 변수, 메모리, MCP)과 산출물(shared/ 파일과 지식 그래프 데이터)을 포함하며 채팅 기록은 의도적으로 제외됩니다(에이전트 작업 부산물). API 키 포함. 로컬 사본은 앱 저장소에, 원격 사본은 본인 WebDAV 서버에 보관(최신 3개 유지).</string>
+    <string name="auto_backup_section_footer">매일 앱이 처음으로 포그라운드에 진입할 때 실행됩니다. 설정, 제공자, 스킬, 메모리, MCP 구성과 shared 파일을 백업하며, 채팅 기록과 API 키·OAuth 토큰·환경 변수 값 등 자격 증명은 포함하지 않습니다. 로컬 사본은 앱 저장소에 보관하고 WebDAV에는 최신 3개를 유지합니다.</string>
     <string name="auto_backup_enable">매일 자동 백업</string>
     <string name="auto_backup_enable_sub">앱을 매일 처음 열 때 자동으로 백업</string>
     <string name="auto_backup_run_now">지금 백업</string>
@@ -1033,8 +1033,8 @@
     <string name="backup_restored_notify_body">%1$d개 제공자와 %2$d개 그룹을 복원했습니다.</string>
     <string name="webdav_notify_title_failed">WebDAV 작업 실패</string>
     <string name="backup_notify_failed">백업 실패</string>
-    <string name="backup_secret_title">백업에 API 키가 포함됩니다</string>
-    <string name="backup_secret_body">내보낸 파일에는 공급자의 API 키와 로그인 자격 증명이 포함되어 있으며, 이를 입수한 사람은 누구나 사용할 수 있습니다. 안전하게 보관하고 공유하지 마세요. 키는 일반 Base64(암호화되지 않음)로 저장되며, 파일을 가진 사람은 누구나 읽을 수 있습니다.</string>
+    <string name="backup_secret_title">백업에 API 키 및 기타 비밀 정보가 포함됩니다</string>
+    <string name="backup_secret_body">내보낸 JSON에는 제공자 API 키와 기타 백업 대상 비밀 정보가 읽을 수 있는 암호화되지 않은 형태로 포함됩니다(일부 값은 Base64로 인코딩될 뿐 암호화되지 않습니다). 파일을 얻은 사람이 해당 인증 정보를 사용할 수 있습니다. 안전하게 보관하고 공유하지 마세요.</string>
     <string name="backup_secret_confirm">키 포함 내보내기</string>
     <string name="backup_secret_without">키 없이</string>
     <string name="webdav_notify_title_restored">WebDAV 복원</string>
@@ -1083,10 +1083,10 @@
     <string name="backup_err_busy">백업 또는 복원이 진행 중입니다. 완료될 때까지 기다려 주세요.</string>
     <!-- 英文兜底 (2026-08-08) -->
     <string name="model_group_name_saved">Name saved</string>
-    <string name="model_group_routing_fallback_footer">Try models in order. If one fails, advance to the next.</string>
+    <string name="model_group_routing_fallback_footer">모델을 순서대로 시도합니다. 다음 사용 가능한 모델로 넘어갈 시점은 폴백 조건에 따라 결정됩니다.</string>
     <string name="model_group_routing_loadbalance_footer">새 메시지마다 그룹 내 다음 모델로 전환됩니다.</string>
-    <string name="model_group_fallback_default_footer">Fall back on rate limits (429) and server errors (5xx) only.</string>
-    <string name="model_group_fallback_always_footer">Advanced: fall back on any error, including network and auth failures. Prefer Default unless you know why you need this.</string>
+    <string name="model_group_fallback_default_footer">요청 한도 초과, 잘못된 API 키, 제공자 오류가 발생하면 다음 모델을 시도합니다. 네트워크 또는 일시적 오류도 재시도 후 해결되지 않으면 폴백이 발생할 수 있습니다.</string>
+    <string name="model_group_fallback_always_footer">기본 조건에 포함되지 않는 요청 오류에도 다음 모델을 시도합니다.</string>
     <string name="model_group_no_models">No models in this group.</string>
     <string name="model_group_model_unavailable">Model no longer available</string>
     <string name="provider_import_success">Imported provider "%1$s"</string>
@@ -1171,8 +1171,8 @@
     <string name="filepreview_truncated_kb">%2$s 중 처음 %1$d KB 표시</string>
     <string name="filepreview_truncated_rows">%2$s 중 처음 %1$d행 표시</string>
     <string name="filepreview_no_app">이 파일을 열 수 있는 앱이 없습니다.</string>
-    <string name="rootfs_explain_body">rootfs에는 샌드박스가 사용하는 Alpine Linux 파일 시스템이 포함되어 있습니다. 초기화하면 모든 데이터가 삭제되고 공장 상태로 복원됩니다.</string>
-    <string name="rootfs_reset_body">초기화: 모든 항목 삭제\n참고: 영구 데이터는 rootfs 외부의 공유 영역에 저장되며 초기화 후에도 유지됩니다.</string>
+    <string name="rootfs_explain_body">rootfs에는 셸이 사용하는 Alpine Linux 파일 시스템이 들어 있습니다. 초기화하면 이 환경이 다시 설치되고 앱 설정과 rootfs 외부 데이터는 유지됩니다.</string>
+    <string name="rootfs_reset_body">초기화하면 Linux 셸 환경(rootfs)이 다시 설치됩니다. 앱 설정, 대화 및 rootfs 외부에 저장된 파일은 유지됩니다.</string>
     <string name="config_confirm_effect_warning">이후 도구 호출에 영향을 줄 수 있습니다.</string>
     <string name="config_confirm_effect_info">되돌릴 수 있지만 빠르게 확인할 가치가 있습니다.</string>
     <string name="chat_copy_code">코드 복사</string>
@@ -1350,8 +1350,8 @@
     <string name="provider_detail_http_endpoint_warning">⚠ 이 엔드포인트는 암호화되지 않은 HTTP를 사용합니다. API 키, 메시지, 도구 결과가 네트워크상에서 누구에게나 노출될 수 있습니다. 신뢰할 수 있는 로컬 서버에서만 HTTP를 사용하세요.</string>
     <string name="provider_detail_custom_user_agent">사용자 지정 User-Agent</string>
     <string name="provider_detail_custom_user_agent_placeholder">기본값을 사용하려면 비워 두세요</string>
-    <string name="add_provider_endpoint_anthropic_hint">공식 Anthropic 엔드포인트를 그대로 사용하세요. 타사 Anthropic 호환 서비스(예: Mimo)의 경우 기본 URL에 \"/anthropic\" 같은 경로 접미사가 필요할 수 있습니다. 제공자의 문서를 확인하세요. URL은 \"/v1/messages\"가 추가된 상태로 그대로 사용됩니다.</string>
-    <string name="add_provider_endpoint_hint">비워 두면 기본 엔드포인트를 사용합니다. “/v1”이 자동으로 추가되므로 베이스 호스트만 입력하세요.</string>
+    <string name="add_provider_endpoint_anthropic_hint">비워 두면 Anthropic 공식 엔드포인트를 사용합니다. Mimo 같은 호환 서비스의 경우 /anthropic 등 필요한 경로 접두사를 포함한 기본 URL을 입력하세요. /v1/messages까지 포함된 전체 요청 URL은 입력하지 마세요.</string>
+    <string name="add_provider_endpoint_hint">비워 두면 기본 엔드포인트를 사용합니다. 맞춤 설정 시 필요한 경로 접두사를 포함한 기본 URL을 입력하세요. 끝에 /v1이 없으면 자동으로 붙습니다.</string>
     <string name="add_provider_endpoint_gemini_hint">비워 두면 Google 기본 엔드포인트를 사용합니다. 버전 경로를 포함한 전체 베이스 URL을 입력하세요.</string>
     <string name="modeldetail_video_output">비디오 출력</string>
     <string name="modeldetail_max_thinking_inherit">모델 기본값 따르기</string>
@@ -1369,7 +1369,7 @@
     <string name="quicktest_empty_reply">(빈 응답)</string>
     <string name="quicktest_image_unsupported">이 모델의 프로바이더는 빠른 테스트를 통한 이미지 생성을 지원하지 않습니다.</string>
     <string name="quicktest_no_image">반환된 이미지가 없습니다.</string>
-    <string name="quicktest_speech_unavailable">Android에서는 음성 출력/전사 테스트를 사용할 수 없습니다.</string>
+    <string name="quicktest_speech_unavailable">이 음성 테스트를 실행할 수 없습니다.</string>
     <string name="model_group_detail_session_defaults">세션 기본값</string>
     <string name="model_group_detail_session_defaults_footer">새 세션이 이 그룹에 바인딩될 때 자동으로 적용됩니다.</string>
     <string name="model_group_detail_enable_reasoning">추론 활성화</string>
@@ -1383,7 +1383,7 @@
     <string name="model_group_detail_limit_context_window">컨텍스트 창 제한</string>
     <string name="model_group_detail_max_context">최대 컨텍스트</string>
     <string name="model_group_detail_unlimited">무제한</string>
-    <string name="add_provider_subtitle_openai">Codex, DeepSeek, Moonshot, Groq 및 기타 호환 공급업체와 작동합니다.</string>
+    <string name="add_provider_subtitle_openai">OpenAI 및 DeepSeek, Moonshot, Groq 등 호환 서비스 지원</string>
     <string name="add_provider_subtitle_anthropic">Claude 및 Anthropic 프로토콜 호환 서비스와 작동합니다.</string>
     <string name="add_provider_subtitle_gemini">Gemini 시리즈 및 Google AI Studio와 작동합니다.</string>
     <string name="add_provider_subtitle_openrouter">GPT, Claude, Gemini, Llama 등 주류 모델을 통합 제공</string>
@@ -1484,8 +1484,8 @@
     <string name="import_zip_no_supported">압축 파일에 가져올 수 있는 파일이 없습니다</string>
     <string name="import_zip_summary">파일 %2$d개 중 %1$d개를 가져왔습니다</string>
     <string name="image_budget_compressed">보내기 전에 이미지 %1$d개를 압축했습니다</string>
-    <string name="image_budget_total_exceeded">이미지 총 크기가 25MB를 초과하여 이후 이미지는 건너뜁니다</string>
-    <string name="image_budget_request_elided">25MB 제한에 맞추기 위해 이전 이미지 %1$d개를 요청에서 생략했습니다</string>
+    <string name="image_budget_total_exceeded">설정된 이미지 크기 한도에 도달하여 이후 이미지는 제외되었습니다.</string>
+    <string name="image_budget_request_elided">요청 크기 제한을 초과한 이전 이미지 %1$d개를 제외했습니다.</string>
     <string name="chat_message_large_collapsed_title">대용량 콘텐츠 (%1$s)</string>
     <string name="chat_message_large_collapse">접기</string>
     <string name="chat_message_large_expand">탭하여 펼치기</string>
@@ -1536,7 +1536,7 @@
     <string name="chat_tuning_glass_blur_desc">배경이 번지는 정도. rikkahub은 블러 12 dp, 글래스 16 dp를 사용합니다.</string>
     <string name="chat_tuning_glass_tint">유리 농도</string>
     <string name="chat_tuning_glass_tint_desc">카드 색이 흐림을 덮는 정도. 0%는 순수 흐림, 100%는 카드 색만(불투명)입니다.</string>
-    <string name="chat_tuning_glass_footer">켜기/끄기 스위치는 모양 → 채팅 모양에 있습니다. 꺼져 있으면 이 두 값은 아무 효과도 없습니다.</string>    <!-- [feat/chat-tuning-panel-b] 런타임 제한 — 컨텍스트/메모리 및 미디어/도구 예산 섹션. -->
+    <string name="chat_tuning_glass_footer">유리 효과 스위치는 설정 → 외관의 반투명 유리 섹션에 있습니다. 끄면 흐림과 색조 설정이 적용되지 않습니다.</string>    <!-- [feat/chat-tuning-panel-b] 런타임 제한 — 컨텍스트/메모리 및 미디어/도구 예산 섹션. -->
     <string name="appearance_glass_title">입력창과 상단 제목 표시줄</string>    <string name="runtime_limits_section_context">컨텍스트와 메모리</string>
     <string name="appearance_section_glass">반투명 유리</string>
     <string name="appearance_glass_footer">입력창과 상단 제목 표시줄에 적용됩니다. 흐림 반경과 농도는 채팅 조정에 있습니다. Android 12 미만에서는 불투명 표면으로 유지됩니다.</string>    <string name="runtime_limits_compact_tail">자동 압축 꼬리 토큰 하한</string>
@@ -1660,7 +1660,7 @@
     <string name="scheduled_global_switch_subtitle">마스터 스위치. 새 작업은 기본적으로 꺼져 있습니다</string>
     <string name="scheduled_list_header">작업 목록</string>
     <string name="scheduled_list_footer">작업은 매일 창 내 처음 포그라운드 전환 시 실행됩니다. 하루 최대 1회, 동시에 1개만.</string>
-    <string name="scheduled_empty_hint">아직 예약 작업이 없습니다. 위의 새 작업에서 만들어 보세요(예: 매일 아침 요약). 작업은 기본적으로 꺼져 있습니다.</string>
+    <string name="scheduled_empty_hint">아직 예약된 작업이 없습니다. 위의 새 작업을 눌러 만드세요. 작업은 기본적으로 꺼져 있으며, 만들 때나 목록에서 나중에 켤 수 있습니다. 작업은 매일 실행 시간대에 앱을 처음 열 때 하루 한 번 실행됩니다.</string>
     <string name="scheduled_resume">재개</string>
     <string name="scheduled_state_suspended">연속 %1$d회 실패 — 일시 중지</string>
     <string name="scheduled_state_ok">마지막 성공(%1$s)</string>
@@ -1699,12 +1699,12 @@
     <string name="perm_auto_approve_title">자동 승인 모드</string>
     <string name="perm_auto_approve_desc">일반 설정 변경을 묻지 않고 적용합니다. 민감하고 파괴적인 변경은 여전히 확인을 요구할 수 있습니다.</string>
     <string name="perm_auto_approve_sensitive">민감한 설정 포함</string>
-    <string name="perm_auto_approve_sensitive_desc">제공자 자격 증명(API 키, 베이스 URL)도 묻지 않고 적용합니다. 에이전트가 조용히 변경할 수 있습니다.</string>
+    <string name="perm_auto_approve_sensitive_desc">민감한 설정도 확인 없이 적용합니다. API 키 변경과 파괴적인 작업은 계속 확인이 필요합니다.</string>
     <string name="perm_auto_approve_privileged">특권 도구 허용</string>
     <string name="perm_auto_approve_privileged_desc">에이전트가 접근성 및 Shizuku 명령줄을 사용하도록 허용합니다(다른 앱을 구동하고 화면을 읽을 수 있습니다).</string>
-    <string name="perm_auto_approve_footer">기본값은 꺼짐입니다. 켜면 일반 쓰기에 확인 대화상자가 표시되지 않고 도구 권한 확인도 중지됩니다. 모든 변경은 로그 → 구성 변경에 기록됩니다.</string>
+    <string name="perm_auto_approve_footer">기본값은 꺼짐입니다. 켜면 일반 설정 변경과 허용된 도구 호출에서 확인을 요청하지 않습니다. 민감한 설정은 별도 옵션으로 제어하며, API 키 변경과 파괴적인 작업은 항상 확인이 필요합니다. 채팅에서 에이전트의 작업 보고를 확인하세요. 앱에는 변경 내역이나 되돌리기 목록이 없습니다.</string>
     <string name="perm_auto_approve_confirm_title">자동 승인을 켜시겠습니까?</string>
-    <string name="perm_auto_approve_confirm_text">일반 설정 변경은 확인 없이 적용되며 도구 권한 확인도 표시되지 않습니다. 민감한 설정(제공자 API 키)과 파괴적인 변경은 여전히 확인합니다. 언제든지 끌 수 있습니다.</string>
+    <string name="perm_auto_approve_confirm_text">일반 설정 변경은 확인 없이 적용되고, 허용된 도구 호출도 확인을 요청하지 않습니다. 민감한 설정은 별도 옵션도 켜야 합니다. API 키 변경과 파괴적인 작업은 항상 확인이 필요합니다.</string>
     <string name="perm_auto_approve_confirm_on">켜기</string>
     <string name="perm_section_zone_delete_guard">보호된 폴더</string>
     <string name="perm_zone_delete_guard_title">폴더 통째로 삭제 방지</string>

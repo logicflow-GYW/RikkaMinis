@@ -24,7 +24,7 @@
     <string name="memory_revoke_result_not_found">在最近的日志中未找到该条目。</string>
     <string name="memory_revoke_result_io_error">写入文件出错：%1$s</string>
     <string name="memory_save_toast">已保存</string>
-    <string name="memory_global_footer">每个会话中对智能体可见的持久指令和偏好。智能体无法修改此文件。</string>
+    <string name="memory_global_footer">此文件保存由你维护的指令和偏好。智能体可以提出修改建议，但须经你同意后才会更改。</string>
     <string name="mention_scanning">正在扫描文件…</string>
     <string name="mention_no_match">没有匹配的文件</string>
     <string name="resume_banner_title">已中断 - 点击「继续」以恢复</string>
@@ -66,9 +66,9 @@
     <!-- T135 — Settings + About i18n keys -->
     <string name="settings_title">设置</string>
     <string name="settings_section_llm_providers">LLM 提供商</string>
-    <string name="settings_section_llm_providers_footer">配置 agent 使用的模型,管理每个提供商的 API key 与 OAuth,并创建模型组用于回退或负载均衡。</string>
+    <string name="settings_section_llm_providers_footer">管理提供商的 API 密钥和接口地址，选择智能体使用的模型，并创建模型组以实现回退或负载均衡。</string>
     <string name="settings_manage_providers">管理提供商</string>
-    <string name="settings_manage_providers_subtitle">API key 与 OAuth 登录</string>
+    <string name="settings_manage_providers_subtitle">API 密钥与模型配置</string>
     <string name="settings_model_groups">模型组</string>
     <string name="settings_model_groups_subtitle">回退与负载均衡</string>
     <string name="settings_token_usage">Token 用量</string>
@@ -353,7 +353,7 @@
     <string name="perm_a11y_system_ready">已启用</string>
     <string name="perm_a11y_system_disabled">未启用</string>
     <string name="perm_allow_minis_config">允许配置工具</string>
-    <string name="perm_minis_config_desc">关闭后，智能体将无法主动读取或修改你的设置。你仍可在 日志 → 配置变更 中查看过往的变更记录。</string>
+    <string name="perm_minis_config_desc">关闭后，智能体无法通过 minis-config 读取或修改应用设置；你仍可在设置页面手动更改。应用内没有配置变更历史可供查看。</string>
     <string name="perm_section_privacy">隐私</string>
     <string name="perm_section_media">媒体</string>
     <string name="perm_section_system">系统</string>
@@ -533,13 +533,13 @@
     <string name="rootfs_repair_description">恢复缺失/损坏的 bash、readline 和 ncurses</string>
     <string name="rootfs_install_label">安装 Rootfs</string>
     <string name="rootfs_reset_label">重置 Rootfs</string>
-    <string name="rootfs_reset_description">删除全部并重新安装</string>
+    <string name="rootfs_reset_description">仅重置 Linux Shell 环境（rootfs）。应用设置、对话和 rootfs 外保存的文件都会保留。</string>
     <string name="rootfs_progress_section">进度</string>
     <string name="rootfs_result_section">结果</string>
     <string name="rootfs_info_section">信息</string>
     <string name="rootfs_about_title">关于 Rootfs</string>
     <string name="rootfs_reset_confirm_title">重置 Rootfs？</string>
-    <string name="rootfs_reset_confirm_message">这将删除整个 rootfs。所有数据将丢失。</string>
+    <string name="rootfs_reset_confirm_message">这将重新安装 Linux Shell 环境（rootfs），应用设置、对话和 rootfs 外的文件都会保留。</string>
 
     <!-- T172 — components / onboarding / preview i18n -->
     <string name="common_back">返回</string>
@@ -736,7 +736,7 @@
     <string name="add_provider_the_label_is_shown_in_the_provider_list_">标签会显示在服务商列表和模型选择器里。</string>
     <string name="add_provider_credential">凭证</string>
     <string name="add_provider_multi_key_hint">多个密钥可用空格或逗号分隔，会自动轮换使用（优先最久未用的）。</string>
-    <string name="add_provider_your_key_is_stored_securely_in_encrypted">你的密钥保存在加密存储中,不会离开设备。</string>
+    <string name="add_provider_your_key_is_stored_securely_in_encrypted">API 密钥在本机加密保存，调用接口时会发送到你配置的 API 地址用于验证身份。</string>
     <string name="add_provider_endpoint">端点</string>
     <string name="add_provider_custom_api_base_optional">自定义 API 地址（可选）</string>
     <!-- T-android-codex-oauth-dns -->
@@ -787,7 +787,7 @@
     <string name="quicktest_empty_reply">（空回复）</string>
     <string name="quicktest_image_unsupported">该模型的供应商不支持通过快速测试进行图像生成。</string>
     <string name="quicktest_no_image">未返回任何图像。</string>
-    <string name="quicktest_speech_unavailable">Android 端暂不支持语音输出/转写测试。</string>
+    <string name="quicktest_speech_unavailable">无法运行此语音测试。</string>
     <string name="modelgroup_speech_output">语音输出</string>
     <string name="modelgroup_speech_transcription">语音转写</string>
     <string name="modelgroup_text_generation">文本生成</string>
@@ -802,10 +802,10 @@
     <string name="model_group_detail_always">始终</string>
     <string name="model_group_detail_unavailable">不可用</string>
     <string name="model_group_name_saved">名称已保存</string>
-    <string name="model_group_routing_fallback_footer">按顺序尝试模型。如果某个失败，则推进到下一个。</string>
+    <string name="model_group_routing_fallback_footer">按顺序尝试模型。何时切换到下一个可用模型，由回退触发条件决定。</string>
     <string name="model_group_routing_loadbalance_footer">每条新消息依次切换到组内的下一个模型。</string>
-    <string name="model_group_fallback_default_footer">仅因限流（429）和服务器错误（5xx）回退。</string>
-    <string name="model_group_fallback_always_footer">高级选项：任何错误都回退，包括网络和认证失败。除非明确需要，否则建议使用默认策略。</string>
+    <string name="model_group_fallback_default_footer">遇到限流、API 密钥无效或提供商错误时，尝试下一个模型。网络或临时故障重试后仍未恢复，也可能触发回退。</string>
+    <string name="model_group_fallback_always_footer">遇到默认策略未涵盖的请求错误，也会尝试下一个模型。</string>
     <string name="model_group_no_models">此组中没有模型。</string>
     <string name="model_group_model_unavailable">模型已不可用</string>
     <string name="model_group_detail_drag_to_reorder">拖动以重新排序</string>
@@ -845,7 +845,7 @@
     <!-- T172-A parameterized strings -->
     <string name="add_custom_model_id_footer">Model ID 是发送到 %1$s 的 API 标识符。显示名称是模型选择器里更友好的标签；留空时回落到 Model ID。</string>
     <string name="add_custom_model_eg_id_placeholder">例如 gpt-4o-custom</string>
-    <string name="add_provider_subtitle_openai">支持 Codex、DeepSeek、Moonshot、Groq 等兼容厂商</string>
+    <string name="add_provider_subtitle_openai">支持 OpenAI 及 DeepSeek、Moonshot、Groq 等兼容服务</string>
     <string name="add_provider_subtitle_anthropic">支持 Claude 及兼容 Anthropic 协议的服务商</string>
     <string name="add_provider_subtitle_gemini">支持 Gemini 系列及 Google AI Studio</string>
     <string name="add_provider_subtitle_openrouter">聚合 GPT、Claude、Gemini、Llama 等主流模型</string>
@@ -980,7 +980,7 @@
     <string name="settings_backup">备份与恢复</string>
     <string name="settings_backup_subtitle">导出或导入设置与提供商</string>
     <string name="auto_backup_section_title">自动备份</string>
-    <string name="auto_backup_section_footer">每天首次打开应用时自动执行。覆盖能力（提供商、思考规则、技能、环境变量、记忆、MCP）与产出（shared/ 文件与知识图谱数据）——聊天记录刻意排除（Agent 工作过程产物）。含 API 密钥；本地副本存于应用存储，远端副本推送到你的 WebDAV 服务器（保留最近 3 份）。</string>
+    <string name="auto_backup_section_footer">每天应用首次进入前台时运行一次。备份设置、提供商、技能、记忆、MCP 配置和共享文件；不含聊天记录及凭据（API 密钥、OAuth 令牌、环境变量值等机密信息）。本地副本保存在应用存储中；WebDAV 保留最近 3 份。</string>
     <string name="auto_backup_enable">每日自动备份</string>
     <string name="auto_backup_enable_sub">每天首次打开应用时自动备份</string>
     <string name="auto_backup_run_now">立即备份</string>
@@ -1051,8 +1051,8 @@
     <string name="backup_done_chat">已恢复 %1$d 个会话、%2$d 条消息</string>
     <string name="backup_saved">备份已保存</string>
     <string name="backup_notify_failed">备份失败</string>
-    <string name="backup_secret_title">备份将包含 API 密钥</string>
-    <string name="backup_secret_body">导出的文件含有提供商的 API 密钥和登录凭据，可被任何拿到该文件的人使用。请妥善保管，不要分享。密钥以明文 Base64 存储（未加密），任何拿到文件的人都能读取。</string>
+    <string name="backup_secret_title">备份将包含 API 密钥和其他机密信息</string>
+    <string name="backup_secret_body">导出的 JSON 含有提供商 API 密钥及其他已纳入备份的机密信息，内容可直接读取且未加密（部分值虽经 Base64 编码，但并未加密）。拿到文件的人可能可以使用这些凭据。请妥善保管，不要分享。</string>
     <string name="backup_secret_confirm">包含密钥并导出</string>
     <string name="backup_secret_without">不含密钥</string>
     <string name="backup_done_title">恢复完成</string>
@@ -1083,7 +1083,7 @@
     <string name="mount_add_name_label">挂载名称</string>
     <string name="mount_add_name_hint">将作为 /var/minis/mounts/ 下的文件夹名</string>
     <string name="mount_add_allow_writes">允许写入</string>
-    <string name="mount_add_allow_writes_desc">关闭后，file_write/file_edit 工具将拒绝写入；但 shell 仍可绕过此限制。</string>
+    <string name="mount_add_allow_writes_desc">关闭后，RikkaMinis 文件工具及受保护的 Shell 命令会拒绝写入此挂载目录。这并非 Android 系统级只读挂载，其他写入方式可能不受此保护。</string>
     <string name="mount_add_confirm">添加</string>
     <string name="mount_unmount_title">取消挂载此文件夹？</string>
     <string name="mount_unmount_message">仅解除绑定，原文件夹不会被删除。</string>
@@ -1175,9 +1175,9 @@
 
     <!-- T-imgsize: composer-side image-budget Snackbar messages -->
     <string name="image_budget_compressed">发送前已压缩 %1$d 张图片</string>
-    <string name="image_budget_total_exceeded">图片总大小超过 25MB，已丢弃后续图片</string>
+    <string name="image_budget_total_exceeded">已达到图片大小限制，后续图片已移除。</string>
     <!-- T-request-imgsize: request-level image-budget Snackbar message -->
-    <string name="image_budget_request_elided">为适配 25MB 请求预算，已省略 %1$d 张历史图片</string>
+    <string name="image_budget_request_elided">较早的图片超出请求大小限制，已省略 %1$d 张。</string>
     <string name="composer_swipe_release_to_send">松开发送</string>
     <string name="composer_swipe_release_to_queue">松开排队</string>
 
@@ -1231,7 +1231,7 @@
     <string name="mcp_add">添加 MCP 服务器</string>
     <string name="mcp_edit">编辑 MCP 服务器</string>
     <string name="mcp_section_servers">服务器</string>
-    <string name="mcp_section_footer">MCP 服务器让 AI 通过 RikkaMinis-mcp-cli 调用外部工具。配置保存在 /var/minis/mcp-servers/servers.json（与 Claude Desktop 兼容）。</string>
+    <string name="mcp_section_footer">智能体通过 minis-mcp-cli 调用 MCP 服务器提供的外部工具。服务器设置以 mcpServers 格式保存在 /var/minis/mcp-servers/servers.json。</string>
     <string name="mcp_empty_title">暂无 MCP 服务器</string>
     <string name="mcp_empty_action">点击 + 按钮添加服务器。</string>
     <string name="mcp_transport_stdio">STDIO</string>
@@ -1317,7 +1317,7 @@
     <!-- Spoken substitutions for links during read-aloud (TTS) -->
     <!-- [T-android-voice-correction] Consent + correction UI -->
     <string name="voice_provider_system">系统</string>
-    <string name="add_provider_subtitle_kimi">Kimi Coding Plan — 使用 Kimi 账号登录</string>
+    <string name="add_provider_subtitle_kimi">使用 Kimi Coding Plan 的 API 密钥</string>
     <string name="browser_downloads_title">下载</string>
     <string name="browser_downloads_clear">清除</string>
     <string name="browser_downloads_empty">暂无下载</string>
@@ -1375,8 +1375,8 @@
     <string name="filebrowser_show_hidden">显示隐藏文件</string>
     <string name="filebrowser_hide_hidden">隐藏隐藏文件</string>
     <string name="filebrowser_sort_by">排序方式</string>
-    <string name="add_provider_endpoint_anthropic_hint">按原样使用官方 Anthropic 端点。对于第三方 Anthropic 兼容服务（如 Mimo），基础 URL 可能需要路径后缀，如 "/anthropic" — 请查阅提供商文档。URL 会被原样使用并追加 "/v1/messages"。</string>
-    <string name="add_provider_endpoint_hint">留空则使用默认端点。会自动追加 “/v1” —— 只需填写基础主机地址。</string>
+    <string name="add_provider_endpoint_anthropic_hint">留空使用 Anthropic 官方接口。连接兼容服务（如 Mimo）时，填写服务商要求的基础 URL（可能包含 /anthropic 等路径前缀），不要填写完整的 /v1/messages 请求地址。</string>
+    <string name="add_provider_endpoint_hint">留空使用默认接口。自定义时填写基础 URL，并保留服务要求的路径前缀。末尾没有 /v1 时会自动添加。</string>
     <string name="add_provider_endpoint_gemini_hint">留空则使用 Google 默认端点。请填写包含版本路径的完整基础 URL。</string>
     <string name="modeldetail_video_output">视频输出</string>
     <string name="modeldetail_max_thinking_inherit">跟随模型默认</string>
@@ -1471,8 +1471,8 @@
     <string name="filepreview_truncated_kb">已显示前 %1$d KB（共 %2$s）</string>
     <string name="filepreview_truncated_rows">已显示前 %1$d 行（共 %2$s）</string>
     <string name="filepreview_no_app">没有可打开此文件的应用。</string>
-    <string name="rootfs_explain_body">rootfs 包含终端环境所用的 Alpine Linux 文件系统。重置将删除所有数据并恢复出厂状态。</string>
-    <string name="rootfs_reset_body">重置：删除全部内容\n注意：持久数据保存在 rootfs 外的共享区域，重置后仍会保留。</string>
+    <string name="rootfs_explain_body">rootfs 是 Shell 使用的 Alpine Linux 文件系统。重置会重新安装此环境；应用设置及保存在 rootfs 外的数据都会保留。</string>
+    <string name="rootfs_reset_body">重置会重新安装 Linux Shell 环境（rootfs）。应用设置、对话及保存在 rootfs 外的文件都会保留。</string>
     <string name="config_confirm_effect_warning">这可能影响后续工具调用。</string>
     <string name="config_confirm_effect_info">可逆操作，建议快速过目。</string>
     <string name="chat_copy_code">复制代码</string>
@@ -1564,7 +1564,7 @@
     <string name="chat_tuning_glass_blur_desc">背景被抹开的程度。rikkahub 的模糊预设是 12 dp，玻璃预设 16 dp。</string>
     <string name="chat_tuning_glass_tint">玻璃浓度</string>
     <string name="chat_tuning_glass_tint_desc">卡片底色覆盖模糊的多少。0% 是纯模糊，100% 只剩卡片底色（实心）。</string>
-    <string name="chat_tuning_glass_footer">开关在 外观 → 聊天外观。关掉时这两个数值不生效。</string>    <!-- [feat/chat-tuning-panel-b] 运行时限制 — 上下文/记忆 与 媒体/工具预算段。 -->
+    <string name="chat_tuning_glass_footer">毛玻璃开关位于 设置 → 外观 页面中的“毛玻璃”区域。关闭时，模糊和色调设置不生效。</string>    <!-- [feat/chat-tuning-panel-b] 运行时限制 — 上下文/记忆 与 媒体/工具预算段。 -->
     <string name="appearance_glass_title">输入栏与顶部标题栏</string>    <string name="runtime_limits_section_context">上下文与记忆</string>
     <string name="appearance_section_glass">毛玻璃</string>
     <string name="appearance_glass_footer">对输入栏和顶部标题栏生效。模糊半径与浓度在「聊天微调」里；Android 12 以下保持实心。</string>    <string name="runtime_limits_compact_tail">自动压缩保留尾部 token</string>
@@ -1687,7 +1687,7 @@
     <string name="scheduled_global_switch_subtitle">总开关；新建任务默认为关闭状态</string>
     <string name="scheduled_list_header">任务列表</string>
     <string name="scheduled_list_footer">任务在当天窗口内、app 进入前台时执行；每天至多一次，同一时间只运行一个任务。</string>
-    <string name="scheduled_empty_hint">还没有定时任务。点「新建任务」创建一个——例如每天早上生成一份摘要。任务默认关闭，创建后需手动开启。</string>
+    <string name="scheduled_empty_hint">还没有定时任务。点上方“新建任务”创建。任务默认关闭，可在创建时选择启用，也可稍后在列表中开启。任务每天最多运行一次，并在每日时间窗口内首次打开应用时触发。</string>
     <string name="scheduled_resume">恢复</string>
     <string name="scheduled_state_suspended">连续失败 %1$d 次，已挂起</string>
     <string name="scheduled_state_ok">上次运行成功（%1$s）</string>
@@ -1726,12 +1726,12 @@
     <string name="perm_auto_approve_title">免确认模式</string>
     <string name="perm_auto_approve_desc">常规设置变更直接生效，不再询问。敏感与破坏性变更仍可保留确认。</string>
     <string name="perm_auto_approve_sensitive">包含敏感配置</string>
-    <string name="perm_auto_approve_sensitive_desc">敏感配置（服务商 API 密钥、接口地址）也直接生效，不再询问。智能体可能静默改动它们。</string>
+    <string name="perm_auto_approve_sensitive_desc">敏感设置也直接生效，无需确认。更改 API 密钥和执行破坏性操作仍须确认。</string>
     <string name="perm_auto_approve_privileged">允许特权工具</string>
     <string name="perm_auto_approve_privileged_desc">允许智能体使用无障碍与 Shizuku 命令行（它们能驱动其他应用、读取屏幕内容）。</string>
-    <string name="perm_auto_approve_footer">默认关闭。开启后，常规写入不再弹出确认框，工具调用不再弹权限询问。所有变更仍会记录在 日志 → 配置变更。</string>
+    <string name="perm_auto_approve_footer">默认关闭。开启后，常规设置变更和获准使用的工具不再弹出询问。敏感设置由单独选项控制；更改 API 密钥和破坏性操作始终需要确认。请在对话中核对智能体的操作结果；应用内没有变更历史或撤销列表。</string>
     <string name="perm_auto_approve_confirm_title">开启免确认模式？</string>
-    <string name="perm_auto_approve_confirm_text">常规设置变更将直接生效，不再弹确认框；工具调用也不再弹权限询问。敏感配置（服务商 API 密钥）与破坏性变更仍会确认。随时可以关掉。</string>
+    <string name="perm_auto_approve_confirm_text">常规设置变更将直接生效，获准使用的工具不再弹出询问。敏感设置还需单独开启对应选项。更改 API 密钥和破坏性操作始终需要确认。</string>
     <string name="perm_auto_approve_confirm_on">开启</string>
     <string name="perm_section_zone_delete_guard">受保护文件夹</string>
     <string name="perm_zone_delete_guard_title">保护文件夹不被整目录删除</string>
