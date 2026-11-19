@@ -29,6 +29,7 @@ import com.rikkaminis.app.util.saveOutcome
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -337,6 +338,32 @@ class BrowserUseManager(
      * begin completing the evicted deferred with a structured error).
      */
     private val asyncJsSlot = AsyncJsSlot<CompletableDeferred<String>>()
+
+    /**
+     * [FIX-DEFERRED-1119 F-05] Terminal signal for "this WebView can never
+     * answer again" — completed once by `onRendererGone` and once by
+     * [destroy], and awaited alongside any *local* `CompletableDeferred` that
+     * is not registered in a slot.
+     *
+     * Why this exists: [AsyncJsSlot] handles the bridge request that runs
+     * through [beginAsyncJsRequest] (there is at most one of those per tab),
+     * But `evaluateJavascript`'s own deferred was never registered anywhere — it
+     * is created per call and disposed with it, and nothing at this level
+     * serialises them (the per-tab action lock is one layer up, in
+     * `BrowserTabPool`). Putting them on the single async-JS slot would let two
+     * callers evict each other, so a plain `CompletableDeferred<Unit>` is the
+     * right shape: any number of waiters can observe one terminal event, and it
+     * never needs a token or a reset because renderer death and `destroy()` are
+     * both terminal for this instance (the tab is never rebuilt — see the
+     * teardown note in `onRendererGone`).
+     *
+     * Deliberately NOT a timeout: the caller-side stall this fixes is not
+     * "slow page", it is "the callback can never arrive". A magic constant
+     * would also cut off a legitimately slow `evaluateJavascript` on a huge
+     * document, and the tool paths already carry their own bound
+     * (`TAB_SERIAL_WAIT_TIMEOUT_MS`).
+     */
+    private val tabDeathSignal = CompletableDeferred<Unit>()
 
     /**
      * [audit2-A2] One-shot credential for the `__minis__.saveBlobDownload`
@@ -782,6 +809,13 @@ class BrowserUseManager(
                 asyncJsSlot.takeCurrent()?.complete(
                     "{\"error\":\"WebView renderer process was killed before the async JS request completed\"}"
                 )
+                // [FIX-DEFERRED-1119 F-05] The signal above only covers a
+                // request that went through `beginAsyncJsRequest`. A local
+                // `evaluateJavascript` await has no slot to be taken out of, so
+                // it is woken through the terminal signal instead — completed
+                // AFTER `rendererDead = true`, because the answer it produces
+                // is derived from that latch.
+                tabDeathSignal.complete(Unit)
                 // Deliberately NOT destroying the instance here (unlike the
                 // rebuild-by-key hosts): this tab is still in BrowserTabPool's
                 // list and the pool keeps handing the same WebView to the next
@@ -2304,10 +2338,12 @@ class BrowserUseManager(
     private suspend fun evaluateJavascript(js: String): String = withContext(Dispatchers.Main) {
         // [r3-B09 F-02] The callback handed to `WebView.evaluateJavascript` runs
         // in the renderer. With the renderer gone (or the view destroyed) it
-        // never runs, and this `deferred.await()` has no timeout — the caller
+        // never runs, so waiting on the result has no wake-up — the caller
         // would sit until the tool deadline. Answer with the bridge's own reject
         // shape so `evaluateAndReturn` / `evaluateJSAndParse` surface an error
-        // instead of a hang.
+        // instead of a hang. This guard covers "already dead on entry"; the
+        // race at the bottom of this function covers "died while waiting"
+        // ([FIX-DEFERRED-1119 F-05]).
         if (webViewInert()) {
             Log.w(TAG, "JS evaluation dropped: the WebView is gone")
             // [F-B-02] Third hand-written literal until now: it blamed the
@@ -2329,7 +2365,19 @@ class BrowserUseManager(
             }
             deferred.complete(unquoted)
         }
-        deferred.await()
+        // [FIX-DEFERRED-1119 F-05] The inertness check above only covers "the
+        // renderer was already dead when we got here". A renderer killed while
+        // this call is waiting produces no callback at all, and unlike
+        // [executeJS] / [fetch] this deferred is not registered in
+        // [asyncJsSlot] — so nothing used to wake it. Race it against the
+        // tab's terminal signal: whichever arrives first answers, and the
+        // death answer is the same `{"error":…}` shape every other teardown
+        // wake-up uses, so [evaluateAndReturn] / [evaluateJSAndParse] surface a
+        // real error instead of a hang. The result clause is listed first so a
+        // genuinely delivered result wins a tie.
+        awaitJsResultOrTabDeath(deferred, tabDeathSignal) {
+            deadTabAsyncJsAnswer(destroyed, rendererDead)!!
+        }
     }
 
     private suspend fun evaluateAndReturn(js: String): BrowserActionResult {
@@ -3077,6 +3125,10 @@ class BrowserUseManager(
             asyncJsSlot.takeCurrent()?.complete(
                 "{\"error\":\"WebView was destroyed before the async JS request completed\"}"
             )
+            // [FIX-DEFERRED-1119 F-05] Wake the per-call `evaluateJavascript`
+            // awaits too — they hold no slot, and after the swap below neither
+            // the callback nor a second teardown event can arrive.
+            tabDeathSignal.complete(Unit)
             // Remove from any parent before destroying — WebView.destroy() on
             // an attached view is undefined behavior on some OEMs and can
             // crash the app (ConnectionTerminated / missing renderer).
@@ -3367,3 +3419,37 @@ internal fun deadTabAsyncJsAnswer(destroyed: Boolean, rendererDead: Boolean): St
     } else {
         null
     }
+
+/**
+ * [FIX-DEFERRED-1119 F-05] Await a per-call JS result, but stop waiting the
+ * moment the tab is declared dead.
+ *
+ * `WebView.evaluateJavascript`'s callback runs inside the renderer: when the
+ * renderer is killed (or the view is destroyed) mid-call it simply never fires.
+ * The async-JS bridge requests survive that because `onRendererGone` /
+ * `destroy()` take their deferred out of [AsyncJsSlot]; a per-call deferred has
+ * no slot, so it needs a terminal event it can observe — [tabDeath], completed
+ * by the same two teardown paths.
+ *
+ * Two properties this pins, both of which a bare `deferred.await()` lacks:
+ *
+ *  - **termination** — the wait ends on the death event, not on a timeout, so
+ *    the caller learns *why* instead of burning its outer budget and then
+ *    blaming the page;
+ *  - **no cross-talk** — several of these can be in flight at once (they are
+ *    not serialised through a single slot), and the death answer is computed by
+ *    [deathAnswer] at wake-up time, i.e. from the latch the teardown set, not
+ *    from a constant captured when the call began.
+ *
+ * [result] is listed first so an already-delivered value wins a tie with an
+ * already-fired death event. Top-level and Android-free so the JVM can hold it
+ * to both properties.
+ */
+internal suspend fun awaitJsResultOrTabDeath(
+    result: CompletableDeferred<String>,
+    tabDeath: CompletableDeferred<Unit>,
+    deathAnswer: () -> String,
+): String = select {
+    result.onAwait { it }
+    tabDeath.onAwait { deathAnswer() }
+}
