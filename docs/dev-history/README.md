@@ -1,15 +1,16 @@
 # RikkaMinis 开发历史档案
 
-本目录是 RikkaMinis 开发过程的**日志合并导出**，从本地 memory 每日日志
-（`/var/minis/memory/`）按时间正序聚合而成，用于开源归档。
+本目录按时间聚合 RikkaMinis 的开发记录。它是面向公开阅读的归档，
+不是私人日志原件；部分条目只记录结论与验收范围。
+最近阶段的概要见[2026-11-18～19 稳定性复盘](../stability/2026-11-19-review.md)。
 
 ## 三个文件，三根轴
 
 | 文件 | 视角 | 回答的问题 |
 |------|------|-----------|
-| `rikkaminis-dev-history.md` | **时间轴** | 这天发生了什么 |
-| `rikkaminis-dev-history-INDEX.md` | **按天索引** | 快速跳到某一天 |
-| `rikkaminis-dev-history-SAGAS.md` | **主题轴** | 这件事的完整历史（跨 107 天） |
+| [开发记录](rikkaminis-dev-history.md) | **时间轴** | 这天发生了什么 |
+| [按天索引](rikkaminis-dev-history-INDEX.md) | **按天索引** | 快速跳到某一天 |
+| [主题索引](rikkaminis-dev-history-SAGAS.md) | **主题轴** | 这件事的完整历史（跨 107 天有记录） |
 
 ### 为什么要第三根轴
 
@@ -27,18 +28,11 @@
 
 ## 说明
 
-- 覆盖范围：2026-08-03 ～ 2026-11-19（107 天有记录，2801 条）。
-- 已剔除与 RikkaMinis 开发无关的条目（其他仓库、用户其他项目如
-  ClashPilot/CMFA/WorkBuddy2API/Android-AI-gateway、账号密钥运营、
-  agent 基建、元讨论等）。
-- 已脱敏：邮箱、API 密钥、Cloudflare 账户 ID、个人域名、代理地址、
-  HF 命名空间、疑似密码等均替换为占位符（`[EMAIL]` / `***CF_ACCOUNT_ID***`
-  / `***DOMAIN***` / `***PROXY_ADDR***` / `***USER***` / `***PASSWORD***`）。
-- 由 `skills/dev-history-sync/` 的脚本生成与脱敏，可重复执行
-  （`rebuild_dev_history.py` → `sanitize_dev_history.py` →
-  `build_sagas.py` → 再次 `sanitize_dev_history.py` 验证）。
-  **注意：脱敏只作用于主文件，`-INDEX.md` 需单独同规则处理**（摘要截断可能
-  产生半截邮箱，需一并检查）。
+- **内容**：当前归档快照截至 2026-11-19 15:39，共 107 天、2,801 条；按天与主题索引均对应这一快照。
+- **晚间记录**：15:39 之后的代码合并与真机验证见[当日晚间稳定性复盘](../stability/2026-11-19-review.md)，目前不在这份归档快照内。
+- **边界**：档案不是对每条历史结论的重新审核。敏感标识按已登记规则处理，但自动探针不是语义内容审查。
+  引用缺陷或测试结论时，以当前源代码、CI 原始运行和正式验证记录为准。
+- **主题索引**：按关键词自动归纳，未归类条目列在文末；它是检索线索，不是判决。
 
 ## 主题索引的可靠性边界
 

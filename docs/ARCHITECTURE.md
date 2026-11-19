@@ -14,22 +14,24 @@
 
 ## 1. 血统与规模基线
 
+仓库规模统计的基准是 **2026-11-19 / `f75cceaa`**，不代表更晚版本。
+
 | 项 | 值 |
 |---|---|
 | 上游 | [OpenMinis/OpenMinis](https://github.com/OpenMinis/OpenMinis)（fork 基线 = 上游 v1.10，`e488b1b1`，2026-07-25） |
-| fork 日期 | 2026-08-01（上游恰好同日停止推送，fork 即接管） |
+| fork 日期 | 2026-08-01 |
 | UI 灵感 | RikkaHub（左滑会话抽屉、极简顶栏、消息流布局；借鉴灵感非代码） |
-| 平台 | Android-only（上游 iOS 树与第三方 C 源码已删除） |
-| iOS 残留引用 | 源码/注释中约 1,400 处 iOS/bundle 相关引用是**有意保留的协议契约**，见下节 |
-| 提交构成 | 全仓 3,733 commits ≈ 上游 12 + fork 后自写 ~3,721（8/1 起 90 天） |
-| Android 代码量 | fork 基线 413 文件 ≈ 146.7K 行 → 当前 684 文件 ≈ 251.3K 行（**净 +271 文件 / +104.6K 行**，另有大量修改） |
-| 测试代码量 | 800 文件 ≈ 168.2K 行；测试/主源码比 **66.9%**（fork 基线 9.5%） |
+| 平台 | Android-only（上游 iOS 树与第三方 C 源码已删除，保留部分兼容字段与注释） |
+| 提交数 | 4,318 个可达提交（`git rev-list --count`，含上游基线与合并记录） |
+| Kotlin 文件（`f75cceaa`） | 主源码 744；单元测试 991；仪器测试 14。 |
+| fork 基线文件数（`e488b1b1`） | 主源码 413；单元测试 33；仪器测试 8。 |
 
-**关键认知**：这个 app 60% 以上的复杂度（沙箱、多进程、offload、浏览器）来自
-上游架构，fork 当天就已存在。本 fork 90 天的工作集中在四块：**功能增量**
-（备份/同步/模型组/平台集成）、**可靠性硬化**（流错误自愈/护栏/审计）、
-**质量基础设施**（scan 门禁/测试/发布链路）、**观测与自述层**（诊断埋点、
-存活度审计、日志治理——见 §10 与 §12）。没有一次"从零重写"。
+只计 `src/android/app/src/` 下 `main/java`、`test`、`androidTest` 对应目录中 Git 跟踪的 `.kt` 文件。
+
+沙箱、多进程、offload 和浏览器结构在 fork 前已经存在。本 fork 主要投入四块：
+**功能增量**（备份/同步/模型组/平台集成）、**可靠性**（流恢复/守卫/审计）、
+**质量基础设施**（静态扫描/测试/发布）与**观测**（诊断/日志治理）。
+最近一轮的范围和验证见[稳定性复盘](stability/2026-11-19-review.md)。
 
 ## 2. 系统形态：一端脑 · 三进程 · 三平台手
 
@@ -44,7 +46,7 @@
 │    ├─ PRoot 沙箱：Alpine minirootfs（8.5MB 随 APK 解包）                   │
 │    │    shell_execute · 文件工具 · 终端 · 每会话私有 workspace             │
 │    ├─ 浏览器自动化：BrowserUseManager + TabPool（≤3 tab，风险控制）        │
-│    └─ NativeOffloadHandler ×20：android-* 能力（日历/相册/剪贴板/闹钟/      │
+│    └─ Android 原生能力（android-* 工具：日历/相册/剪贴板/闹钟/           │
 │         通知/定位/TTS/语音/无障碍/Shizuku/媒体…）                           │
 └───────────────────────────────────────────────────────────────────────────┘
      │ GitHub（CI·发布）  │ Cloudflare（CI 状态桥 Worker）  │ HF（语义记忆）
@@ -53,14 +55,13 @@
 
 ### 2.1 为什么拆三个进程
 
-- **`:modelservice`**：模型请求的**唯一持证进程**——Provider 适配器、API key、
-  流式解析全部隔离在这里，主进程 UI 永不因网络阻塞；跨进程传参有严格序列化
-  纪律（见 §5.3 第五层同步）。
+- **`:modelservice`**：模型请求的独立进程。聊天模型的请求和流式解析在这里执行，
+  主进程负责 UI 和任务编排；跨进程传参见 [§4](#4-数据层双-room-库--四层同步纪律)。
 - **`:toolservice`**：工具执行服务（与沙箱解耦的辅助执行面）。
 - **主进程**：UI + 智能体编排（AgentLoopEngine 状态机）+ 沙箱宿主 + 数据层。
 - 静态扫描门禁守护这条边界：**app 进程代码不得直调 provider 网络入口**。
 
-### 2.1.1 为什么 Android-only 树里保留约 1,400 处 iOS 引用
+### 2.1.1 为什么 Android-only 树里保留 iOS 引用
 
 上游是双平台的，本 fork 删除了 iOS 树与第三方 C 源码，但**保留了 iOS 兼容的
 序列化契约**。这些引用分两类，删掉任何一类都会破坏数据互通：
@@ -80,37 +81,38 @@
 
 ## 3. 包结构地图（com.rikkaminis.app）
 
-| 包 | 职责 | 体量信号 |
-|---|---|---|
-| `ui/chat/` | 聊天主屏 + 智能体循环 + 流式渲染 | 90 文件（最大包）；ChatScreen 5.0K 行、ChatViewModel 3.7K、AgentLoopEngine 2.7K、StreamingMarkdownText 3.1K |
-| `sandbox/` | PRoot 沙箱：RootfsManager（rootfs 解包/恢复/事件日志）、ExecutionCoordinator、PRootKernel | 14 + 44(offload) 文件 |
-| `sandbox/offload/` | NativeOffloadHandler 家族 + ModelExecutionService(:modelservice 宿主) | 43 文件 |
-| `data/` | Room（双库）+ Repository + 路由 + 用量 + 存储 | db 17 / model 14 / repository 11 |
-| `provider/` | Provider 适配器：openai/anthropic/gemini/openrouter/xai/antigravity/voice + thinking 规则 | 14 + 子包 |
-| `tools/` | Agent 工具定义（shell/file/browser/memory/spawn） | 12 文件 |
-| `agent/runtime/` `agent/shell/` | 预算/重试/恢复策略、bashism 纪律 | 7+3 |
-| `config/` | 可配置字段系统 + 内建项 + 确认流程 | 12 文件 |
-| `backup/` | ConfigBackup（JSON 导出）+ WebDAV + 自动备份 | 8 文件 |
-| `browser/` | BrowserUseManager + TabPool | 12 文件 |
-| `mcp/` | MCP 客户端 + OAuth | 5+ |
-| `ui/settings/` `ui/navigation/` `ui/sandbox/` `ui/browser/` `ui/terminal/` | 设置 15+ 屏、导航、文件预览、WebView、终端 | 41+6+6 |
-| `offload/ service/ accessibility/ speech/ share/ webapp/ debug/ crash/ logging/ i18n/ diagnostics/` | 进程边界工具、前台服务、无障碍、语音、分享、WebApp、调试、崩溃、日志、本地化 | — |
+| 包 | 职责 |
+|---|---|
+| `ui/chat/` | 聊天主屏、智能体循环、队列与流式渲染 |
+| `sandbox/` | PRoot 管理、执行协调、rootfs 安装与恢复 |
+| `sandbox/offload/` | 原生设备能力与模型执行服务的 Android 桥接 |
+| `data/` | Room 数据库、Repository、路由、用量与存储 |
+| `provider/` | OpenAI、Anthropic、Gemini 等模型 API 适配及思考档位 |
+| `tools/` | shell、文件、浏览器、记忆与代理派发工具 |
+| `agent/runtime/` `agent/shell/` | 循环预算、重试、恢复策略与 shell 规则 |
+| `config/` | 可配置字段系统、内建设置与确认流程 |
+| `backup/` | JSON 备份、WebDAV 与自动备份 |
+| `browser/` | BrowserUseManager 与标签页生命周期 |
+| `mcp/` | MCP 客户端与 OAuth |
+| `ui/settings/` `ui/navigation/` `ui/sandbox/` `ui/browser/` `ui/terminal/` | Compose 设置、导航、文件预览与终端 |
+| `service/` `accessibility/` `speech/` `share/` `webapp/` `debug/` `crash/` `logging/` `i18n/` `diagnostics/` | 系统服务、可访问性、语音、分享、WebApp、崩溃与诊断基础设施 |
+
+此图描述职责，不列容易过期的文件数；以目录和类名核对当前拆分。
 
 ## 4. 数据层：双 Room 库 + 四层同步纪律
 
-- **ProviderDatabase v10**：ProviderInstance / ModelEntry / ModelGroup /
+- **ProviderDatabase v11**：ProviderInstance / ModelEntry / ModelGroup /
   ThinkingRule / 关联 ID 表——**provider 配置**。
-- **AppDatabase v12**：sessions / messages / compact_markers（压缩标记 v2
+- **AppDatabase v15**：sessions / messages / compact_markers（压缩标记 v2
   锚点模型）/ usage / webapp shortcuts——**会话与聊天**。
-- 迁移全部手写 `MIGRATION_n_(n+1)`；历史上有过加列又 DROP COLUMN 摘除的
-  v8→9→10 记录，minSdk 26 安全。
+- Room 迁移在两个数据库类中显式登记；改 schema 时连同迁移路径一起验证。
 - **持久化四层同步**（Model → Entity → toSnapshot → toProviderConfig）：
   字段少同步任何一层都会**静默蒸发**。这条由 CI 前静态扫描
   （`scripts/scan/scan.sh`）硬性检查，并有 `four-way-sync-check` 技能兜底
   审计——是反复踩坑后固化的纪律。
-- 第五层同步：**worker 进程边界**。dispatcher 序列化 → worker 重建 →
-  providerRouteChanged 三处必须同改（thinking rules / custom fields 均在此
-  翻过车，scan 门禁覆盖到 provider 边界）。
+- 第五层同步：**worker 进程边界**。新增请求字段要核对 dispatcher 序列化、
+  所有消费端和缺字段的默认规则。以 Fast Mode 为例，流式与非流式路径都能接收
+  显式开启或关闭；仅旧请求没有字段时才用本地默认值。
 
 ## 5. 智能体核心（本 fork 投入最重的一层）
 
@@ -190,6 +192,9 @@
   模型 offload（`:modelservice`）、Shizuku/无障碍 offload（特权系统操作）。
 - **目录语义**：workspace/attachments/offloads/browser **每会话私有**
   （`minis-sessions/<sid>/`）；shared/memory/skills/mcp-servers/mounts 跨会话共享。
+- **受保护目录的删除保护**：shell 与 fastio 共用策略，默认开启，独立于免确认模式。
+  这是对危险删除的保护，不改变 Android 的权限边界。文件浏览、会话和技能清理
+  还各自检查目录边界。
 - **终端**：Termux terminal-view 0.118.0（ANSI/CSI/OSC 解析交给上游），
   输出双层截断（PersistentShell 128KB + 消毒层 50KB）。
 
@@ -226,29 +231,20 @@
 
 ## 10. 质量基础设施
 
-- **scan.sh 113 道门禁**（CI 构建前，任一硬失败中止构建；门本身由 349 条
-  夹具反向验证「该红时会红」），分四类：数据与资源契约（四层同步 / i18n
-  孤儿键 / 备份流式导出 / Room 迁移形状）、结构守卫（枚举解析禁裸
-  `valueOf` / provider 进程边界 / 接线门）、行为见证（agent trace 回放对
-  golden 断言工具序列、终态、禁用工具，消费 `AgentTraceRecorder` 的
-  schema 2.0 JSONL——产出侧与消费侧就此闭环）、静态原语自测。
-- **观测与自述层**（2026-09 主线，设计档 `docs/stability/observability.md`）：
-  应用既是执行体又是测量仪器。日志分**直写通道**（AppLogger →
-  `files/logs/`，沙箱内 `/var/minis/logs/`）与 **logcat 捕获通道**（审计
-  必须取两通道并集）；诊断埋点（HangDiag / CompactDiag / RenderPathCensus /
-  StreamPerf / LaunchBeacon / memspike）遵循"让沉默可区分"（首见必报 +
-  窗口汇总携带 0 值）；`scripts/diag/liveness_audit.py` 做"代码声明 × 日志
-  实测"的存活度审计（RARE 登记册有保质期）；日志治理（高频碎片门控到
-  debug + 骨架事件升直写 + attempt 级 timing 锚点）使行数 −59%。
-- **JVM 单测全量先跑**：红 = 红，无静默跳过；沙箱内可用 kotlinc + 桩闭包
-  做纯逻辑预验证（真 Gradle 编译裁决以分支 CI 为准）。
-- **发布链路**：分支 → 分支 CI（head_sha 双核对：Cloudflare 桥 + API）→
-  ff 合并 main → push 自动触发 release CI → 固定密钥签名 APK 发布到
-  `android-latest`（纯 docs 改动经 paths 过滤不触发构建）→ **用户真机验证**。
-- **验证纪律**：CI 绿 ≠ 逻辑对；ground truth 在用户侧（真机安装验证）；
-  装包必验版本。
+- **静态扫描与夹具**：`scan-gate` 运行 `scripts/scan/scan.sh`；扫描器有改动或无法
+  证明未改动时再运行夹具。独立的 `scan-gate-push.yml` 同时跑检查和夹具。四类检查为
+  数据与资源契约、结构与接线、行为见证（含 agent trace golden）及共享解析原语。
+  当前注册数量和近期运行证据见[稳定性复盘](stability/2026-11-19-review.md#验证证据)。
+- **观测与自述层**（设计档：[观测规范](stability/observability.md)）：日志同时走
+  应用直写与 logcat 捕获；诊断埋点让「未执行」和「未采到」有机会区分，
+  `scripts/diag/liveness_audit.py` 对照源码声明和日志实测。
+- **测试与发布**：静态扫描、JVM 单测、Android Lint 与 APK 构建并行；四项通过后，
+  仅 `main` 移动 `android-latest` 标签并发布固定签名的 APK。仪器测试在 CI 只编译。
+  候选分支的 CI 按改动范围选择；纯 Markdown 不发包。见[构建指南](../BUILDING.md#continuous-integration)。
+- **验证纪律**：查 CI 是否运行了所引用的步骤，关键修复做失败侧对照；装包必验
+  版本，真机验证只覆盖实际走到的路径。流程见[开发生命周期](DEVELOPMENT_LIFECYCLE.md#审计与验收)。
 
-## 11. 演进阶段（fork 后 90 天的形态变化）
+## 11. 演进阶段
 
 | 阶段 | 时间 | 主线 | 复杂度性质 |
 |---|---|---|---|
@@ -333,10 +329,8 @@
 
 ### 12.5 演化方向（据既有数据）
 
-40 天的 commit 曲线与审计发现序列显示：**作用对象在递归上移**——功能 →
-可靠性 → 开发过程 → 观测过程 → 应用的自述 → 环本身。环上可外置的部分已
-逐个外置：记忆 → HF dataset；验证 → CI（测试比 9.5% → 25%）；知识/方法 →
-skills（当前 32 个，含"如何与这个用户协作"本身）；观测 → `scripts/diag/`。
+早期提交和审计记录显示，开发重点从功能扩展逐步转向可靠性、验证和观测。团队用
+GitHub Actions 执行构建与测试，用技能沉淀操作方法，用 `scripts/diag/` 保留诊断工具。
 
 结构上不可外置的只剩两个端点：**施压**（定义 ground truth）与**拍板**
 （宣告"够了"）。环的终形不是更大，是更短——中间全段被机器与 agent 承接。
@@ -360,8 +354,8 @@ skills（当前 32 个，含"如何与这个用户协作"本身）；观测 → 
 ## 14. 复杂度边界声明（维护者必读）
 
 - **继承复杂度（别动，除非出 bug）**：三进程架构、PRoot 沙箱、offload 机制、
-  浏览器 TabPool、Provider 适配层、Termux 终端。这些是上游 v1.10 的设计，
-  90 天只做了修补没做重构。
+  浏览器标签页管理和 Provider 适配层来自上游。本 fork 主要做定向修补，并把
+  内置终端的仿真引擎替换为 Termux `terminal-view`。
 - **原创复杂度（你心里有数）**：备份/同步、平台集成、护栏体系、错误自愈、
   scan 门禁、观测/审计体系（census / 存活度审计 / 日志治理）、开发环与
   开发档案。每一条都对应一个真实事故或真实需求。

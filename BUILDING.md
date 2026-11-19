@@ -7,7 +7,10 @@ build:
 ```sh
 git clone --recurse-submodules https://github.com/logicflow-GYW/RikkaMinis.git
 cd RikkaMinis
-./deps/build_proot.sh           # build the PRoot sandbox engine from source
+# Build the native components from source (NDK r28).
+./deps/build_proot.sh
+./deps/build_crash_handler.sh
+./deps/build_jieba.sh
 cd src/android
 ./gradlew assembleRelease
 ```
@@ -26,15 +29,13 @@ If you only want to *install* the app, you do not need any of this — grab the
 | JDK | **17** (Temurin recommended) |
 | Android SDK | **compileSdk 36**, targetSdk 35, minSdk 26 |
 | Gradle | 8.11.1 — provided by the wrapper, do not install separately |
-| NDK | **r28** — required only to build the PRoot sandbox engine via `deps/build_proot.sh` |
+| NDK | **r28** — required to build PRoot, Jieba JNI and the crash handler from source |
 
 Android Studio bundles a suitable JDK and SDK; opening `src/android` as a
 project works out of the box. From the command line, `ANDROID_HOME` (or
-`ANDROID_SDK_ROOT`) must point at your SDK.
-
-**You do not need CMake.** AGP native compilation is disabled — only PRoot is
-built, via its own `deps/build_proot.sh` script (which does need NDK r28). See
-below.
+`ANDROID_SDK_ROOT`) must point at your SDK. Local release builds use a different
+signing identity from the public CI release unless you configure the release
+signing variables listed below.
 
 ---
 
@@ -49,10 +50,11 @@ Prefer `assembleRelease` unless you are actively debugging. A debug APK is
 roughly three times larger because R8 does not run, and it also embeds a local
 JSON-RPC debug server on `127.0.0.1:5321` that release builds compile out.
 
-Both variants are signed with the `debug` signing config — i.e. your
-`~/.android/debug.keystore`, generated automatically on first use. This means a
-locally built APK will **not** install over one downloaded from Releases: the
-signing keys differ. Uninstall first, or install the same keystore CI uses.
+By default, local debug builds use `~/.android/debug.keystore`; local
+`assembleRelease` falls back to that identity when `MINIS_RELEASE_*` is not
+configured. A local debug-signed APK cannot update the public release, which
+uses a different, private key. Back up your data before uninstalling or use a
+separate application ID for local builds.
 
 ---
 
@@ -95,10 +97,10 @@ Three settings in `app/build.gradle.kts` protect the setup:
   executes `libproot.so` as a **binary** from that directory, and that is
   precisely the mechanism that sidesteps W^X.
 
-**Consequence:** changes under `src/android/app/src/main/cpp/` are not
-compiled. To work on native code, restore the `externalNativeBuild` block
-(the removed configuration is documented inline in `build.gradle.kts`) and
-install NDK r28+.
+**Consequence:** Gradle does not compile sources under `src/android/app/src/main/cpp/`.
+To rebuild Jieba or the crash handler locally, run the corresponding `deps/build_*.sh`
+script before running Gradle, as in the example above. CI does this automatically;
+it does not enable CMake.
 
 ---
 
@@ -154,62 +156,48 @@ makes the pairing mandatory.
 
 ---
 
-## Build-time customization
+## Provider configuration
 
-`app/provider-customization.properties.example` is a template for values that
-are not shipped in the public tree. Copy it to
-`app/provider-customization.properties` and fill in what you need:
-
-- `ANTHROPIC_OAUTH_IDENTIFIER_PROMPT` — only required to sign in with Claude
-  **OAuth** credentials. API keys do not need it.
-
-A build with empty values compiles fine and fails at runtime the first time a
-missing value is actually required.
+Configure model provider API keys and endpoints in the app after installation.
+The public app does not offer model-provider account sign-in. Authentication
+for MCP servers is separate.
 
 ---
 
 ## Continuous integration
 
-`.github/workflows/build-apk.yml` runs on every push to `main` that touches
-`src/android/`, `src/shared/`, `deps/` or the workflow itself, and can be
-triggered manually from the Actions tab. It:
+[`build-apk.yml`](.github/workflows/build-apk.yml) runs on pushes to `main` that touch `src/android/`,
+`src/shared/`, `deps/`, or the workflow itself, and can be dispatched manually.
+Its four verification jobs run in parallel:
 
-1. Restores the release signing keystore from the `RELEASE_KEYSTORE_B64` secret
-   (plus `RELEASE_STORE_PASSWORD` / `RELEASE_KEY_ALIAS` / `RELEASE_KEY_PASSWORD`;
-   missing any of the four fails the job instead of falling back)
-2. Runs the pre-build scan gate — `scripts/scan/scan.sh` (**113 checks** in four
-   families: data/resource contracts, structural guards, behavioural witnesses,
-   primitive self-tests) plus `test_scan.py` (**349 fixtures** proving each gate
-   still goes red when it should)
-3. Installs NDK r28 and builds PRoot from source via `./deps/build_proot.sh clean`
-4. Verifies the build products (`libproot.so`, `libproot-loader.so`) exist
-5. Runs the full unit-test suite (`testReleaseUnitTest`) — red means red
-6. Compiles the instrumented tests (`compileDebugAndroidTestKotlin`)
-7. Runs `assembleRelease`
-8. Publishes the APK to the `android-latest` release
+| Job | What it checks |
+|---|---|
+| `scan-gate` | `scripts/scan/scan.sh` runs all registered static checks. `test_scan.py` also runs if `scripts/scan/` changed or the workflow cannot establish that it was unchanged. |
+| `unit-tests` | Runs `testReleaseUnitTest` and compiles instrumented tests with `compileDebugAndroidTestKotlin`; it does not execute them on a device. |
+| `build-apk` | Restores the private release signing key, builds and checks the native libraries using NDK r28, then runs `assembleRelease` and verifies the APK certificate. |
+| `lint` | Runs Android Lint (`:app:lintDebug`). |
+
+The `publish` job requires all four. Only a build of `main` moves the
+`android-latest` tag to its commit and replaces the release APK; branches can
+produce Actions artifacts without changing the public download.
 
 ### Which channel to dispatch
 
-A branch fix has two possible gates. Dispatch the cheapest one that can
-actually fail on this diff:
+| Diff touches | Verification |
+|---|---|
+| Only prose (`docs/**`, repo-root Markdown, or `fix-reports/**`) | Check the document and prove no code changed; no APK rebuild. |
+| Scanner or diagnostics changes only (`scripts/scan/**`, `scripts/diag/**`, or the `scan-gate-push.yml` workflow) | Use `scan-gate-push.yml`; its automatic run is scoped to pushes on `main`. It runs the static checks and scanner fixture suite. |
+| App source, dependencies, Gradle, or other build inputs | Dispatch `build-apk.yml` on the branch. |
 
-| Diff touches | Channel | Cost |
-|---|---|---|
-| `scripts/scan/**`, `scripts/diag/**`, `fix-reports/**`, `docs/**`, repo-root `*.md` | `scan-gate-push.yml` | ~7 min |
-| anything else (`src/**`, `deps/**`, `*.gradle.kts`, other workflows) | `build-apk.yml` | 14–23 min |
-
-`scan-gate-push.yml` self-guards: dispatched on a branch, it first runs
-`scripts/diag/cheap_gate_guard.py` and goes **red** if the diff is not
-apparatus-only (fails closed if it cannot prove it either). That way a green
-from the cheap channel can never be mistaken for build evidence: the branch
-simply cannot get one for code the cheap channel never compiled.
+When dispatched on a branch, `scan-gate-push.yml` first runs
+`scripts/diag/cheap_gate_guard.py`. If it cannot prove the diff is limited to
+verification tooling and documents, the guard fails. A green static-only run
+is not proof of a successful build.
 
 ```sh
-# apparatus-only fix (branch)
+# Scanner or diagnostics branch
 gh workflow run scan-gate-push.yml --ref <branch>
-# -> ~7 min; red at the guard step means the diff is not apparatus-only
-
-# anything touching production source
+# Source or build-input branch
 gh workflow run build-apk.yml --ref <branch>
 ```
 
