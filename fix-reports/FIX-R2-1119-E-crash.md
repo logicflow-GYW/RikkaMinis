@@ -129,6 +129,8 @@ decide(origin, appForeground, hasLiveWork):
 
 **第二次 dispatch（报告提交后的 tip 复核）**：run **#3330 / `44457939700`** @ `a93000c27ccb73a3bbf5219b8ad8bbf10cc71bbb`，五 job 全 success；`git diff 68883327..a93000c2` **只有报告文件**（非报告差异为空）；unit-tests 仍 **9850 PASSED / 0 真 FAILED**、26 条新用例在列，scan-gate 仍 **115 passed / 0 failed** 且夹具按机制跳过。本地 / 远端 / `run.head_sha` 三方逐字符一致。
 
+**收口（本报告最终版）**：run **#3332 / `44459477383`** @ `ef97efed64186053b8bf21450b54e6b27ea62960`，五 job 全 success（`build-apk` / `scan-gate` / `lint` / `unit-tests` / `publish`）；本地 `git rev-parse HEAD` == `git ls-remote origin` == `run.head_sha` **三方逐字符一致**。**停止节点达成，未合 main。**
+
 ## 6 残余与边界
 
 1. **`ToolExecutionService.kt:53` 同样 `return START_STICKY`** —— 不在本支覆盖（报告未点名、且它不在允许改动的文件集内）。已登记 backlog。
