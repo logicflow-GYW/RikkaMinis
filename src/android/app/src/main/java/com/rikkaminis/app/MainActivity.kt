@@ -25,7 +25,9 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.rikkaminis.app.accessibility.AccessibilityRecoveryManager
 import com.rikkaminis.app.offload.OffloadPermissionManager
 import kotlinx.coroutines.flow.filterNotNull
@@ -55,6 +57,7 @@ import com.rikkaminis.app.ui.settings.keepScreenAwakeEnabled
 import com.rikkaminis.app.ui.theme.MinisTheme
 
 private const val KEY_CURRENT_CHAT_SESSION_ID = "minis.current_chat_session_id"
+
 // [P3-crash-recovery] 进程级持久化的 lastSessionId 现在住在 CrashRecoveryStore
 // （独立 prefs 文件 + 写入时间戳）。native SIGABRT 不经过 Activity 生命周期，
 // saved state 会丢；那个文件在每次进入 chat 路由时写入，作为崩溃后「重进即回到
@@ -63,6 +66,15 @@ private const val KEY_CURRENT_CHAT_SESSION_ID = "minis.current_chat_session_id"
 class MainActivity : ComponentActivity() {
 
     private var navController: NavHostController? = null
+
+    /**
+     * [R2 F-11] The permission / a11y-repair dialog currently attached to this
+     * Activity's window, if any. Held so [onDestroy] can dismiss it — a dialog
+     * that is still showing when the window goes away leaks the window, and a
+     * leaked window on the *next* `show()` is one of the ways
+     * `BadTokenException` surfaces.
+     */
+    private var activePermissionDialog: AlertDialog? = null
 
     /**
      * T166: id of the chat the user is currently inside, mirrored from
@@ -389,40 +401,89 @@ class MainActivity : ComponentActivity() {
         // Bridge: in-app "open settings" dialog. Used for already-denied
         // runtime permissions AND for special-access capabilities like
         // Notification Access.
+        //
+        // [R2 F-11] Two changes from the original bare `lifecycleScope.launch`:
+        // `repeatOnLifecycle(STARTED)` re-collects the pending slot on every
+        // return to the foreground (so a prompt that arrives while we cannot
+        // show it is not lost — the StateFlow keeps its value), and the dialog
+        // is only built when the window can legally host it. `lifecycleScope`
+        // alone is cancelled at ON_DESTROY, which is *after* the window token
+        // can already be gone: `.show()` there throws
+        // WindowManager.BadTokenException on the main thread and kills the
+        // process mid-turn. See [DialogShowGate].
         lifecycleScope.launch {
-            OffloadPermissionManager.pendingSettingsGate
-                .filterNotNull()
-                .collect { gate ->
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle(gate.title)
-                        .setMessage(gate.message)
-                        .setCancelable(false)
-                        .setPositiveButton(gate.positiveLabel) { d, _ ->
-                            d.dismiss()
-                            val intent = Intent(gate.settingsAction).apply {
-                                if (gate.requiresPackageUri) {
-                                    data = Uri.fromParts("package", packageName, null)
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                OffloadPermissionManager.pendingSettingsGate
+                    .filterNotNull()
+                    .collect { gate ->
+                        if (!DialogShowGate.shouldShow(
+                                isFinishing = isFinishing,
+                                isDestroyed = isDestroyed,
+                                startedOrBeyond = lifecycle.currentState
+                                    .isAtLeast(Lifecycle.State.STARTED),
+                            )
+                        ) {
+                            // Do NOT answer the slot: the prompt stays pending
+                            // and this collector re-subscribes on the next
+                            // STARTED window, which is the whole point of
+                            // DEFER_KEEPS_PROMPT_PENDING.
+                            AppLogger.info(
+                                "OffloadGate",
+                                "settings gate ${gate.id} deferred — activity not attachable " +
+                                    "(finishing=$isFinishing destroyed=$isDestroyed " +
+                                    "state=${lifecycle.currentState})",
+                            )
+                            return@collect
+                        }
+                        val dialog = AlertDialog.Builder(this@MainActivity)
+                            .setTitle(gate.title)
+                            .setMessage(gate.message)
+                            .setCancelable(false)
+                            .setPositiveButton(gate.positiveLabel) { d, _ ->
+                                d.dismiss()
+                                val intent = Intent(gate.settingsAction).apply {
+                                    if (gate.requiresPackageUri) {
+                                        data = Uri.fromParts("package", packageName, null)
+                                    }
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                 }
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                try {
+                                    settingsLauncher.launch(intent)
+                                } catch (_: Throwable) {
+                                    // Some OEMs don't expose every settings panel.
+                                    // Fall through — the polling loop will time out.
+                                }
+                                OffloadPermissionManager.respondToSettingsGate(
+                                    OffloadPermissionManager.SettingsGateDecision.OPEN
+                                )
                             }
-                            try {
-                                settingsLauncher.launch(intent)
-                            } catch (_: Throwable) {
-                                // Some OEMs don't expose every settings panel.
-                                // Fall through — the polling loop will time out.
+                            .setNegativeButton(gate.negativeLabel) { d, _ ->
+                                d.dismiss()
+                                OffloadPermissionManager.respondToSettingsGate(
+                                    OffloadPermissionManager.SettingsGateDecision.CANCEL
+                                )
                             }
-                            OffloadPermissionManager.respondToSettingsGate(
-                                OffloadPermissionManager.SettingsGateDecision.OPEN
+                            .create()
+                        // Held so onDestroy can dismiss it: a dialog attached to
+                        // a dying window leaks the window even when show()
+                        // succeeded.
+                        activePermissionDialog = dialog
+                        try {
+                            dialog.show()
+                        } catch (t: Throwable) {
+                            // Last line of defence for the token race between
+                            // shouldShow() and show() (the Activity can finish
+                            // on another thread's callback in between).
+                            AppLogger.warning(
+                                "OffloadGate",
+                                "settings gate dialog could not attach " +
+                                    "(${t.javaClass.simpleName}: ${t.message}) — deferring",
                             )
+                            runCatching { dialog.dismiss() }
+                            activePermissionDialog = null
                         }
-                        .setNegativeButton(gate.negativeLabel) { d, _ ->
-                            d.dismiss()
-                            OffloadPermissionManager.respondToSettingsGate(
-                                OffloadPermissionManager.SettingsGateDecision.CANCEL
-                            )
-                        }
-                        .show()
-                }
+                    }
+            }
         }
 
         // [T-android-a11y-force-stop-recovery] Bridge: the accessibility-grant
@@ -437,52 +498,84 @@ class MainActivity : ComponentActivity() {
         // outside tap — resolves the continuation exactly once (respond()
         // no-ops if already resolved, e.g. after a timeout).
         lifecycleScope.launch {
-            AccessibilityRecoveryManager.pendingPrompt
-                .filterNotNull()
-                .collect { prompt ->
-                    val b = AlertDialog.Builder(this@MainActivity)
-                        .setTitle(getString(R.string.a11y_repair_dialog_title))
-                        .setCancelable(true)
-                        .setOnCancelListener {
-                            AccessibilityRecoveryManager.respond(
-                                AccessibilityRecoveryManager.Decision.CANCEL
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                AccessibilityRecoveryManager.pendingPrompt
+                    .filterNotNull()
+                    .collect { prompt ->
+                        // [R2 F-11] Same gate as the settings dialog above —
+                        // this is the sibling call site, and fixing only one of
+                        // the two leaves the crash reachable through the other.
+                        if (!DialogShowGate.shouldShow(
+                                isFinishing = isFinishing,
+                                isDestroyed = isDestroyed,
+                                startedOrBeyond = lifecycle.currentState
+                                    .isAtLeast(Lifecycle.State.STARTED),
                             )
-                        }
-                        .setNegativeButton(R.string.a11y_repair_cancel) { d, _ ->
-                            d.dismiss()
-                            AccessibilityRecoveryManager.respond(
-                                AccessibilityRecoveryManager.Decision.CANCEL
+                        ) {
+                            AppLogger.info(
+                                "A11yRepair",
+                                "repair prompt deferred — activity not attachable " +
+                                    "(finishing=$isFinishing destroyed=$isDestroyed " +
+                                    "state=${lifecycle.currentState})",
                             )
+                            return@collect
                         }
-                    if (prompt.shizukuAvailable) {
-                        b.setMessage(getString(R.string.a11y_repair_dialog_message_shizuku))
-                            .setPositiveButton(R.string.a11y_repair_action_repair) { d, _ ->
-                                d.dismiss()
+                        val b = AlertDialog.Builder(this@MainActivity)
+                            .setTitle(getString(R.string.a11y_repair_dialog_title))
+                            .setCancelable(true)
+                            .setOnCancelListener {
                                 AccessibilityRecoveryManager.respond(
-                                    AccessibilityRecoveryManager.Decision.REPAIR
+                                    AccessibilityRecoveryManager.Decision.CANCEL
                                 )
                             }
-                    } else {
-                        b.setMessage(getString(R.string.a11y_repair_dialog_message_manual))
-                            .setPositiveButton(R.string.a11y_repair_action_open_settings) { d, _ ->
+                            .setNegativeButton(R.string.a11y_repair_cancel) { d, _ ->
                                 d.dismiss()
-                                try {
-                                    startActivity(
-                                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        }
+                                AccessibilityRecoveryManager.respond(
+                                    AccessibilityRecoveryManager.Decision.CANCEL
+                                )
+                            }
+                        if (prompt.shizukuAvailable) {
+                            b.setMessage(getString(R.string.a11y_repair_dialog_message_shizuku))
+                                .setPositiveButton(R.string.a11y_repair_action_repair) { d, _ ->
+                                    d.dismiss()
+                                    AccessibilityRecoveryManager.respond(
+                                        AccessibilityRecoveryManager.Decision.REPAIR
                                     )
-                                } catch (_: Throwable) {
-                                    // Some OEMs hide this panel; the user can
-                                    // still reach it from Settings manually.
                                 }
-                                AccessibilityRecoveryManager.respond(
-                                    AccessibilityRecoveryManager.Decision.OPEN_SETTINGS
-                                )
-                            }
+                        } else {
+                            b.setMessage(getString(R.string.a11y_repair_dialog_message_manual))
+                                .setPositiveButton(R.string.a11y_repair_action_open_settings) { d, _ ->
+                                    d.dismiss()
+                                    try {
+                                        startActivity(
+                                            Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                        )
+                                    } catch (_: Throwable) {
+                                        // Some OEMs hide this panel; the user can
+                                        // still reach it from Settings manually.
+                                    }
+                                    AccessibilityRecoveryManager.respond(
+                                        AccessibilityRecoveryManager.Decision.OPEN_SETTINGS
+                                    )
+                                }
+                        }
+                        val dialog = b.create()
+                        activePermissionDialog = dialog
+                        try {
+                            dialog.show()
+                        } catch (t: Throwable) {
+                            AppLogger.warning(
+                                "A11yRepair",
+                                "repair prompt could not attach " +
+                                    "(${t.javaClass.simpleName}: ${t.message}) — deferring",
+                            )
+                            runCatching { dialog.dismiss() }
+                            activePermissionDialog = null
+                        }
                     }
-                    b.show()
-                }
+            }
         }
 
         // Apply saved language before composing UI
@@ -886,6 +979,15 @@ class MainActivity : ComponentActivity() {
             currentChatSessionId?.let { SessionActivityTracker.setAbsent(it) }
             currentChatSessionId = null
         }
+        // [R2 F-11] Drop any permission dialog still attached to this window.
+        // Without this the dialog outlives the Activity's window (WindowLeaked)
+        // and the next `show()` on the recreated instance can be handed a dead
+        // token. Dismissing here does NOT answer the pending slot: the prompt
+        // stays pending in its StateFlow and the new instance re-collects it.
+        activePermissionDialog?.let { d ->
+            runCatching { if (d.isShowing) d.dismiss() }
+        }
+        activePermissionDialog = null
         super.onDestroy()
     }
 
@@ -1109,4 +1211,44 @@ class MainActivity : ComponentActivity() {
             else -> {}
         }
     }
+}
+
+/**
+ * [R2 F-11] Pure core of "may this Activity window accept a dialog right now?".
+ *
+ * The crash: `onCreate` collected two background-tool prompt flows
+ * (`OffloadPermissionManager.pendingSettingsGate`,
+ * `AccessibilityRecoveryManager.pendingPrompt`) inside a bare
+ * `lifecycleScope.launch` and called `AlertDialog.show()` unconditionally.
+ * `lifecycleScope` is only cancelled at ON_DESTROY, so an event that lands while
+ * the Activity is finishing / already destroyed — or in the window between the
+ * window token dying and the scope being cancelled — reaches `show()` on an
+ * invalid token and the platform throws `WindowManager.BadTokenException` on
+ * the main thread: process death, and (the tool turn was mid-flight) a stalled
+ * agent loop on the next launch.
+ *
+ * "Cannot show right now" must mean *do not consume*: the pending slot keeps
+ * its value and `repeatOnLifecycle(STARTED)` re-collects it when the user
+ * returns, so a deferred prompt is handed back rather than silently dropped.
+ *
+ * Three independent facts have to hold before a dialog is legal, and each is a
+ * plain boolean at the call site, so the decision is a pure function. It lives
+ * in this file (same house pattern as `StreamErrorFlags` in
+ * `SessionActivityTracker.kt`) because only this Activity uses it and a JVM
+ * test cannot instantiate an Activity.
+ */
+internal object DialogShowGate {
+
+    /**
+     * @param isFinishing `Activity.isFinishing` at call time.
+     * @param isDestroyed `Activity.isDestroyed` at call time (API 17+).
+     * @param startedOrBeyond `lifecycle.currentState.isAtLeast(STARTED)` —
+     *   passed in as a plain boolean so this object carries no Android type
+     *   and its truth table is exercisable from a plain JVM.
+     */
+    fun shouldShow(
+        isFinishing: Boolean,
+        isDestroyed: Boolean,
+        startedOrBeyond: Boolean,
+    ): Boolean = !isFinishing && !isDestroyed && startedOrBeyond
 }
