@@ -133,7 +133,10 @@ C1（同一个值两个读者）、C2（双侧守卫）、C5（temperature 挨�
     `scripts/scan/** untouched in this push — skipping the fixture self-test`
     （本支未动门，这份绿不含夹具证据）。
   - publish：`Move the rolling tag` / `Publish to Releases` 两步 skipped（main 门控），符合预期。
-- 报告提交在绿之后单独一条；`git diff 5ae0a28c..HEAD` 只有本报告文件。
+- 报告提交在绿之后单独一条（`80cc850f`）；`git diff 5ae0a28c..80cc850f` 只有本报告文件。
+- 报告提交后又对最终 tip **再 dispatch 一次**做 head_sha 复核：**run 44458248635 @ `80cc850f…`**，
+  五个 job（scan-gate / lint / build-apk / unit-tests / publish）全 success；
+  unit-tests 同样 **9869 PASSED / 0 真 FAILED**，新用例逐条在列。
 - **未合 main。**
 
 ## 8 自证成本与不确定项
