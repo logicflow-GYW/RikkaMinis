@@ -891,7 +891,13 @@ object OpenMinisBackupCompat {
                 if (model.optInt("maxOutputTokens", 0) > 0) {
                     mo.put("maxOutputTokens", model.optInt("maxOutputTokens"))
                 }
-                if (model.has("supportsReasoning")) {
+                // [FULLSCAN-1119 A / F-19] Tri-state: `has()` is true for an
+                // explicit JSON null, and `optBoolean` folds that to `false` —
+                // so a source that never declared reasoning came back as an
+                // explicit "no reasoning", flipping the switch off on the
+                // restored install. Missing key / explicit null both mean
+                // "undeclared" here, matching the two guards right below.
+                if (model.has("supportsReasoning") && !model.isNull("supportsReasoning")) {
                     mo.put("supportsReasoning", model.optBoolean("supportsReasoning"))
                 }
                 model.optString("interleavedReasoningField", "").takeIf { it.isNotEmpty() }
