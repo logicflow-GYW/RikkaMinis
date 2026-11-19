@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.rikkaminis.app.data.model.LLMStreamChunk
+import com.rikkaminis.app.logging.AppLogger
+import com.rikkaminis.app.offload.StreamOversizePolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -32,7 +34,38 @@ object ChatStreamOffloadHandler {
     private const val TAG = "ChatStreamOffload"
     private const val STAGING_ROOT = "model-exec"
     private const val POLL_INTERVAL_MS = 160L
-/** First chunk arrived, then the stream went completely silent (no EOF,
+
+    /** Bytes of a dropped frame read back for the diagnostic summary. */
+    private const val FRAME_HEAD_BYTES = 48
+
+    /**
+     * [FULLSCAN-1119 F-09] Longest single streaming JSONL line this protocol
+     * can legitimately produce.
+     *
+     * Derived from the protocol's own budget instead of being a fresh number:
+     * [PayloadSizePolicy.MAX_INLINE_BINARY_BYTES] is the largest binary this
+     * protocol may inline, Base64-inflated by the same policy's [base64Size].
+     *
+     * Why the old value was wrong: the reader's built-in ceiling was a bare
+     * 256 KiB — *smaller* than the 512 KiB inline budget declared a few files
+     * away — so a legal `{"t":"media","b64":…}` chunk (an image the user
+     * attached, a screenshot the agent took) was "oversized" by construction and
+     * dropped with no trace. The picture silently vanished from the conversation
+     * and an oversized `tu_done` left the tool call never converging.
+     *
+     * Why NOT [PayloadSizePolicy.MAX_POLL_READ_BYTES] (= the read window): at
+     * exactly one window the reader's "no newline AND got > maxLineBytes" test
+     * can never fire, so an over-window line would sit in Partial forever. The
+     * ceiling must stay strictly below the window; Base64(512 KiB) ≈ 683 KiB
+     * leaves ~349 KiB of headroom.
+     *
+     * Memory: raising the DROP threshold costs nothing — the reader still pulls
+     * at most one window per poll and never buffers across polls.
+     */
+    private val maxStreamLineBytes: Int =
+        PayloadSizePolicy.base64Size(PayloadSizePolicy.MAX_INLINE_BINARY_BYTES).toInt()
+
+    /** First chunk arrived, then the stream went completely silent (no EOF,
      * no keep-alive, no new bytes) for this long — the classic "provider sent
      * the first chunk then the connection half-opened" hang. After the first
      * chunk, the worker-death liveness beat only detects worker PROCESS crash;
@@ -194,7 +227,7 @@ object ChatStreamOffloadHandler {
             // max-read / max-line / oversized-line handling; the old implementation
             // had neither and risked pulling a multi-MB single line into memory or
             // splitting a UTF-8 char across poll windows.
-            val lineReader = BoundedLineReader()
+            val lineReader = BoundedLineReader(maxLineBytes = maxStreamLineBytes)
             try { streamFile.createNewFile() } catch (e: Exception) {
                 throw RuntimeException("cannot create stream file", e)
             }
@@ -229,6 +262,14 @@ object ChatStreamOffloadHandler {
                             is BoundedLineReader.ReadResult.Lines -> {
                                 lastGrowAtMs = System.currentTimeMillis()
                                 lastRead = result.newOffset
+                                // [FULLSCAN-1119 F-09] A line dropped INSIDE this
+                                // window used to be reported only in the result and
+                                // then ignored. It is not a curiosity: the dropped
+                                // frame can be the image the user attached or the
+                                // tu_done that ends a tool call.
+                                for (dropped in result.oversizedLines) {
+                                    reportDroppedFrame(streamFile, dropped, emittedChunks)
+                                }
                                 for (line in result.lines) {
                                     if (line.isBlank()) continue
                                     if (ChatStreamJsonl.isDone(line)) {
@@ -267,12 +308,13 @@ object ChatStreamOffloadHandler {
                                 }
                             }
                             is BoundedLineReader.ReadResult.OversizedLine -> {
-                                // A single JSONL line exceeded maxLineBytes (256 KiB). Skip it
-                                // and advance past it so we don't re-read the same giant line
-                                // forever. Log so diagnostics can spot a producer bug.
+                                // A single JSONL line exceeded the protocol's
+                                // per-line ceiling. Skip it and advance past it so we
+                                // don't re-read the same giant line forever — but
+                                // never silently (see reportDroppedFrame).
                                 lastGrowAtMs = System.currentTimeMillis()
                                 lastRead = result.lineStartOffset + result.lineByteLength
-                                Log.w(TAG, "oversized stream line skipped: ${result.lineByteLength} bytes at offset ${result.lineStartOffset}")
+                                reportDroppedFrame(streamFile, result, emittedChunks)
                             }
                             BoundedLineReader.ReadResult.Partial -> {
                                 // No complete line yet — keep polling; lastRead unchanged.
@@ -520,6 +562,48 @@ object ChatStreamOffloadHandler {
             delay(WORKER_EXIT_POLL_MS)
         }
         return ModelExecutionRunDir.workerDrained(dir)
+    }
+
+    /**
+     * [FULLSCAN-1119 F-09] A streaming frame was dropped for exceeding the
+     * protocol's per-line ceiling. Record it LOUDLY and, when nothing has been
+     * delivered yet, fail the stream — see [StreamOversizePolicy] for why the
+     * two cases differ.
+     *
+     * The dropped frame is read back from disk in a bounded head slice only, so
+     * the diagnostic itself cannot become the OOM the ceiling exists to prevent.
+     */
+    private fun reportDroppedFrame(
+        streamFile: File,
+        dropped: BoundedLineReader.ReadResult.OversizedLine,
+        emittedChunks: Boolean,
+    ) {
+        val ceiling = maxStreamLineBytes
+        val head = readFrameHead(streamFile, dropped.lineStartOffset)
+        val summary = StreamOversizePolicy.summary(head)
+        val message = StreamOversizePolicy.message(dropped.lineByteLength, ceiling, dropped.lineStartOffset)
+        Log.e(TAG, "$message | head=[$summary] hadChunks=$emittedChunks")
+        AppLogger.warning(TAG, "$message | head=[$summary] hadChunks=$emittedChunks")
+        if (StreamOversizePolicy.decide(emittedChunks) == StreamOversizePolicy.Action.FAIL_BEFORE_OUTPUT) {
+            // Nothing was emitted, so a resend cannot duplicate anything; the
+            // caller may retry / fall back. Reporting a silent success here
+            // would hand the user an answer built on a lost frame.
+            throw ModelStreamErrorException(message, hadChunks = false)
+        }
+    }
+
+    /** Read at most [FRAME_HEAD_BYTES] of the dropped frame (diagnostics only). */
+    private fun readFrameHead(file: File, offset: Long): ByteArray {
+        return try {
+            java.io.RandomAccessFile(file, "r").use { raf ->
+                raf.seek(offset)
+                val buf = ByteArray(FRAME_HEAD_BYTES)
+                val n = raf.read(buf, 0, buf.size)
+                if (n <= 0) ByteArray(0) else buf.copyOf(n)
+            }
+        } catch (e: Exception) {
+            ByteArray(0)
+        }
     }
 
     /**
