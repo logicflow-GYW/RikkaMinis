@@ -164,7 +164,55 @@ if single is not None and (single == "" or single.startswith("-")):
 
 ## 5 CI
 
-（见 §7 更新表：CI 绿 + head_sha 逐字符一致 = 停止节点，未合 main。）
+**run #3316 / `44443686299` @ `65c4c42dc500da3ffb2c78c25f8fe305f3f11364`（代码态 + 本报告）**
+
+| job | 结论 |
+|---|---|
+| `scan-gate` | **success** |
+| `unit-tests` | **success** |
+| `lint` | success（第 2 次尝试，见下） |
+| `build-apk` | success |
+| `publish` | success（`Move the rolling tag` / `Publish to Releases` 两步 **skipped**，main 门控符合预期） |
+
+`head_sha` 与本地 `git rev-parse HEAD`、远端 `git ls-remote origin refs/heads/fix/gate-truth-1119c` **逐字符一致**（`65c4c42d…`）。
+
+### 夹具数：376 → **387**（+11）
+
+```
+✅ ALL 387 CASES PASS
+Summary: 115 passed, 0 failed          ← 门数不变（本支未增删门）
+```
+
+`scripts/scan/**` 本支有改动，所以 `build-apk` 的夹具自检**没有被跳过**：日志里是
+`##[notice]scanners moved in this push (or the diff was unreadable) — running the fixture self-test`
+（不是 `untouched in this push — skipping`），即 387 是真跑出来的。
+
+**+11 的构成**（本地逐条核对，与 CI 日志一致）：
+
+| 用例 | 前 | 后 |
+|---|---:|---:|
+| `test_gate_body_external_fixtures` | 7 | 11 |
+| `test_scan_parallel_local_refusal` | 15 | 22 |
+
+新增断言在 CI 日志里逐条命中（各 1 次）：`subagent_dispatch_check external dispatch-call tree red`、`skill_frontmatter_roundtrip_check external polarity tree red`、`truncated_call_guard_check external engine-flag tree red`、`` `--single` (space form) runs exactly the named fixture ``、`` `--single` (equals form) … ``、四条 `… is refused before any fixture runs`、`the driver refuses outside CI with exit 3`。
+
+### unit-tests
+
+**9825 PASSED 行 / 0 真 FAILED**（用 `^\S*Z\s+\S+ > .* FAILED$` 逐行匹配，零命中；含 `FAILED` 字样的行全是 PASSED 的用例名，如 `reason PERSISTENCE_FAILED maps to persistence_failed PASSED`）。新用例 `ComposerClearResidueWiringTest > the comment masker survives nested comments, char literals and quote runs PASSED` 在列。
+
+### 第一次跑红过一次：**不是本支的问题**
+
+首跑 `lint` job 在 `:app:generateDebugAndroidTestLintModel` 失败：
+
+```
+Could not find hamcrest-integration-1.3.jar (org.hamcrest:hamcrest-integration:1.3)
+Could not find hamcrest-library-1.3.jar (org.hamcrest:hamcrest-library:1.3)
+Could not find javawriter-2.1.1.jar (com.squareup:javawriter:2.1.1)
+Searched in the following locations:
+    https://repo.maven.apache.org/maven2/…
+```
+
+判据：本支**零 gradle / 零依赖声明改动**（`git diff ecb03d92 --stat` 只有四个文件，全在 `scripts/scan/**` 与一个测试类）；三个坐标当时在 Maven Central 直接 404，事后用 `curl -o /dev/null -w '%{http_code}'` 复核同一 URL **均 200**。结论是上游仓库瞬时不可用，与本支无关。`rerun-failed-jobs` 重跑后五个 job 全绿。
 
 ## 6 未修与取舍
 
