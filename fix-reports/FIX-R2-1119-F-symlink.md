@@ -168,6 +168,22 @@ share_dir_prune_check                  rc=0
 
 > 注：这些脚本用相对 `--root .` 会静默 0 文件（`ROT — the guard can no longer see what it is supposed to check`），必须传绝对路径；`readonly_mount_write_guard` 的 `EXTRA_GUARDS` 仍要求 `deleteItem` 内含 `isLinuxPathUnderReadOnlySharedDir(`——本支保留全部原有字符串守卫，未触发。
 
+### 6.1 云端证据（停止节点）
+
+- **run** `#3335` / `44459803760`，`head_sha = c1aa9d4fbf1ca5345c020cd7cdc75ee7172ffbcf`
+- **三源逐字符一致**：本地 `git rev-parse HEAD` = 远端 `git ls-remote origin refs/heads/fix/symlink-escape-1119` = 该 run 的 `head_sha`
+- **五个 job 全 success**：scan-gate / build-apk / lint / unit-tests / publish
+- **unit-tests**：`9870` 条 `PASSED`，真 `FAILED` 0 条。新用例逐条 PASSED 已核：
+  `SharedUriAdmissionTest` 13 条、`SymlinkBoundaryTest` 19 条、`SessionFileStoreSymlinkTest` 11 条、
+  `SandboxPathGuardWiringTest` 新增 3 条（`the browser delete consults the canonical verdict before removing anything` /
+  `the browser resolution arms all bound their answer` / `no session delete site bypasses the no-follow guarded helper`）
+- **scan-gate**：`Summary: 115 passed, 0 failed`，日志含
+  `scripts/scan/** untouched in this push — skipping the fixture self-test`（本支未动门 ⇒ 绿不含夹具证据，按机制跳过）
+- **publish**：只跑了 checkout，tag / release 两步 **skipped**（main 门控）——分支绿不代表有可装 APK
+
+**未合 main。** 报告本节的补提交只改 `fix-reports/*.md`，代码 tip 仍是 `c1aa9d4f`；`git diff c1aa9d4f..HEAD -- src/` 为空。
+
+
 ---
 
 ## 7. 已知残留（不在本支范围，已登记）
