@@ -138,7 +138,7 @@ object MCPOAuthStore {
             val o = JSONObject(raw)
             StoredTokens(
                 accessToken = o.getString("access_token"),
-                refreshToken = o.optString("refresh_token", "").ifBlank { null },
+                refreshToken = o.optStringOrNull("refresh_token"),
                 expiresAtMs = o.optLong("expires_at_ms", 0L),
             )
         }.onFailure { AppLogger.warning(TAG, "corrupt tokens for $server: ${it.message}") }
@@ -333,7 +333,7 @@ object MCPOAuthStore {
             val o = JSONObject(file.readText())
             BridgeTokenSnapshot(
                 accessToken = o.optString("access_token", ""),
-                refreshToken = o.optString("refresh_token", "").ifBlank { null },
+                refreshToken = o.optStringOrNull("refresh_token"),
                 expiresAtSeconds = o.optLong("expires_at", 0L),
             )
         }.onFailure {

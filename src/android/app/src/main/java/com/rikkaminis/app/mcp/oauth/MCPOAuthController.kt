@@ -167,7 +167,7 @@ class MCPOAuthController(private val context: Context) {
                     context, server,
                     MCPOAuthStore.StoredTokens(
                         accessToken = access,
-                        refreshToken = json.optString("refresh_token", "").ifBlank { null },
+                        refreshToken = json.optStringOrNull("refresh_token"),
                         expiresAtMs = expiresAt,
                     ),
                 )
@@ -178,7 +178,7 @@ class MCPOAuthController(private val context: Context) {
                     context, server,
                     MCPOAuthStore.BridgePayload(
                         accessToken = access,
-                        refreshToken = json.optString("refresh_token", "").ifBlank { null },
+                        refreshToken = json.optStringOrNull("refresh_token"),
                         expiresAtSeconds = if (expiresAt > 0) expiresAt / 1000 else 0L,
                         tokenEndpoint = oauth.tokenEndpoint,
                         clientId = oauth.clientId,
