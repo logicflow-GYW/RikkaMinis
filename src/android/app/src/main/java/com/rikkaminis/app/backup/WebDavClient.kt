@@ -134,17 +134,32 @@ class WebDavClient(
      * a public `http://` endpoint is REFUSED instead of guessed at, with the
      * reason in the message (surfaced to the user via WebDavException →
      * webDavErrorMessage's IOException branch).
+     *
+     * [fix/r2-backup-1119 F-22] Only strict IPv4 literals may match the private
+     * ranges. Numeric DNS labels (e.g. 10.example.com) are not private; never
+     * resolve domains here. localhost and IPv6 loopback are explicit exceptions.
      */
     internal fun isLoopbackOrPrivateHost(host: String): Boolean {
         val h = host.lowercase()
-        if (h == "localhost" || h.endsWith(".localhost") || h.startsWith("127.")) return true
-        if (h.startsWith("10.")) return true
-        if (h.startsWith("192.168.")) return true
-        // 172.16.0.0/12
-        if (h.startsWith("172.")) {
-            val second = h.removePrefix("172.").substringBefore('.').toIntOrNull()
-            if (second != null && second in 16..31) return true
+        if (h == "localhost" || h.endsWith(".localhost")) return true
+        // IPv6 loopback only; other IPv6 literals stay "not private".
+        if (h == "::1" || h == "[::1]") return true
+        val parts = h.split('.')
+        if (parts.size != 4) return false
+        val octets = IntArray(4)
+        for (i in 0 until 4) {
+            val part = parts[i]
+            if (part.isEmpty() || part.length > 3) return false
+            if (!part.all { c -> c in '0'..'9' }) return false
+            val v = part.toIntOrNull() ?: return false
+            if (v !in 0..255) return false
+            octets[i] = v
         }
+        if (octets[0] == 127) return true
+        if (octets[0] == 10) return true
+        if (octets[0] == 192 && octets[1] == 168) return true
+        // 172.16.0.0/12
+        if (octets[0] == 172 && octets[1] in 16..31) return true
         return false
     }
 
@@ -156,8 +171,8 @@ class WebDavClient(
             throw WebDavException(
                 "Refusing to send credentials over plain HTTP to ${base.host}: " +
                     "WebDAV uses HTTP Basic auth, so non-HTTPS servers are only allowed " +
-                    "for loopback or private hosts (localhost, 127.x, 10.x, 172.16-31.x, " +
-                    "192.168.x). Use an https:// server URL.",
+                    "for loopback or private hosts (localhost, or a private IPv4 literal: " +
+                    "127.x, 10.x, 172.16-31.x, 192.168.x). Use an https:// server URL.",
                 -1,
             )
         }

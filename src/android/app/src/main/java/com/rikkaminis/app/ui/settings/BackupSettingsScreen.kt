@@ -485,11 +485,19 @@ fun BackupSettingsScreen(
                 }
                 withContext(Dispatchers.Main) {
                     importReport = report
-                    restoredMsg = context.getString(
-                        R.string.backup_restored_notify_body,
-                        report?.providersImported ?: 0,
-                        report?.groupsImported ?: 0,
+                    // [fix/r2-backup-1119 F-20] A partial import returns fatal
+                    // instead of throwing; the tray must offer the rollback too.
+                    val outcome = restoreNotifyOutcome(
+                        summary = context.getString(
+                            R.string.backup_restored_notify_body,
+                            report?.providersImported ?: 0,
+                            report?.groupsImported ?: 0,
+                        ),
+                        fatalHeadline = context.getString(R.string.backup_done_fatal),
+                        fatal = report?.fatal,
                     )
+                    restoredOk = outcome.ok
+                    restoredMsg = outcome.body
                 }
             } catch (t: Throwable) {
                 withContext(Dispatchers.Main) {
@@ -2733,6 +2741,26 @@ private fun formatSize(bytes: Long): String = when {
 }
 
 private fun formatInstant(instant: Instant): String = INSTANT_FORMATTER.format(instant)
+
+/**
+ * [fix/r2-backup-1119 F-20] A non-null fatal (even an empty exception message)
+ * means a partial write. Replace the success summary with the localized
+ * rollback hint and the reason; a null fatal keeps the success summary.
+ */
+internal fun restoreNotifyOutcome(
+    summary: String,
+    fatalHeadline: String,
+    fatal: String?,
+): RestoreNotifyOutcome {
+    return if (fatal == null) {
+        RestoreNotifyOutcome(ok = true, body = summary)
+    } else {
+        RestoreNotifyOutcome(ok = false, body = "$fatalHeadline $fatal".trim())
+    }
+}
+
+/** [fix/r2-backup-1119 F-20] See [restoreNotifyOutcome]. */
+internal data class RestoreNotifyOutcome(val ok: Boolean, val body: String)
 
 /** [fix-minisbak-import] .minisbak 嗅探的两路结果（在 IO 线程上判定）。 */
 private sealed interface MinisbakImport {
