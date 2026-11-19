@@ -61,16 +61,32 @@ class AgentForegroundService : Service() {
 
         /**
          * Starts or updates the foreground service with current status.
+         *
+         * [R2 F-10] `startForegroundService()` itself throws
+         * ForegroundServiceStartNotAllowedException on Android 12+ when the
+         * process is backgrounded. The tracker already refuses background
+         * starts, but that check and this call are not atomic — the app can go
+         * invisible in between. Swallowing it here keeps the caller's IO thread
+         * alive; the service simply is not running, and the next foreground
+         * transition re-starts it through the same path.
          */
         fun startService(context: Context, sessionCount: Int, toolStatus: String) {
             val intent = Intent(context, AgentForegroundService::class.java).apply {
                 putExtra(EXTRA_SESSION_COUNT, sessionCount)
                 putExtra(EXTRA_TOOL_STATUS, toolStatus)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (t: Throwable) {
+                Log.w(
+                    TAG,
+                    "startForegroundService refused (${t.javaClass.simpleName}: ${t.message}) " +
+                        "— the service stays down until the next foreground transition",
+                )
             }
         }
 
@@ -317,11 +333,74 @@ class AgentForegroundService : Service() {
             satisfyForegroundDeadlineThenStop()
             return START_NOT_STICKY
         }
+        // [R2 F-10] The sticky-restart crash loop.
+        //
+        // A `START_STICKY` service killed by the LMK is re-created by the
+        // system **in the background** with `intent == null`. This method used
+        // to fall straight through to an unguarded `startForeground(...)` and
+        // return START_STICKY again: Android 12+ throws
+        // ForegroundServiceStartNotAllowedException, the process dies, the
+        // system re-creates it, and the loop repeats until the app is unusable
+        // (and CrashFrequencyDetector drags the next launch into safe mode).
+        // Long agent turns are exactly what the LMK reclaims, so this was a
+        // daily-path defect, not an edge case.
+        //
+        // ForegroundStartPolicy is the Android-free decision: an explicit app
+        // start always attaches; a system restart attaches only when the user
+        // is looking at the app AND this process still holds a live turn
+        // (OEM service kill — the row is still meaningful); anything else
+        // unwinds through the deadline-satisfying stub exit.
+        val hasLiveWork = SessionActivityTracker.activeSessions.value.isNotEmpty()
+        val appForeground = (application as? MinisApp)?.isAppForeground() ?: false
+        val decision = ForegroundStartPolicy.decide(
+            origin = ForegroundStartPolicy.origin(intentPresent = intent != null),
+            appForeground = appForeground,
+            hasLiveWork = hasLiveWork,
+        )
+        if (decision == ForegroundStartPolicy.Decision.STUB_THEN_STOP) {
+            Log.w(
+                TAG,
+                "not attaching a foreground row (origin=" +
+                    ForegroundStartPolicy.origin(intentPresent = intent != null) +
+                    ", appForeground=$appForeground, hasLiveWork=$hasLiveWork) " +
+                    "— satisfying the startForeground deadline with a stub and unwinding",
+            )
+            satisfyForegroundDeadlineThenStop()
+            return START_NOT_STICKY
+        }
+
         val sessionCount = intent?.getIntExtra(EXTRA_SESSION_COUNT, 0) ?: 0
         val toolStatus = intent?.getStringExtra(EXTRA_TOOL_STATUS) ?: "Idle"
 
-        val notification = buildNotification(sessionCount, toolStatus)
+        // [R2 F-10] Even a legal attach can be refused: the app can go
+        // invisible between the tracker's foreground check and this call, and
+        // an OEM build may apply its own policy. Unprotected, that exception
+        // kills the process — which is the same crash, just a narrower window.
+        if (!attachForegroundOrGiveUp(buildNotification(sessionCount, toolStatus))) {
+            return START_NOT_STICKY
+        }
+        // [R4-U F-04] From here on the notification exists and may be refreshed
+        // from the background (see refreshIfRunning).
+        foregroundStarted = true
 
+        // [R2 F-10] START_STICKY was the fuel for the loop: every kill
+        // re-armed a background restart that could not legally attach. The
+        // app re-starts this service itself whenever it needs it
+        // (SessionActivityTracker.startServiceIfNeeded on the foreground
+        // path), so there is nothing to reclaim by asking the system to.
+        return START_NOT_STICKY
+    }
+
+    /**
+     * [R2 F-10] Attach [notification] as the foreground row, absorbing the
+     * platform's refusal instead of letting it kill the process.
+     *
+     * @return true when the row is attached (the caller may set
+     *   [foregroundStarted]); false when the platform refused and the caller
+     *   must unwind — the service is then stopped by the caller, and the next
+     *   real user action re-creates it.
+     */
+    private fun attachForegroundOrGiveUp(notification: Notification): Boolean = try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -331,11 +410,22 @@ class AgentForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-        // [R4-U F-04] From here on the notification exists and may be refreshed
-        // from the background (see refreshIfRunning).
-        foregroundStarted = true
-
-        return START_STICKY
+        true
+    } catch (t: Throwable) {
+        // ForegroundServiceStartNotAllowedException (API 31+, no SDK-gated
+        // symbol needed) and any OEM variant land here. Logged so a device log
+        // answers "why is there no status row" instead of the previous
+        // process-death-then-silence.
+        Log.w(
+            TAG,
+            "startForeground refused by the platform (${t.javaClass.simpleName}: ${t.message}) " +
+                "— unwinding instead of crashing",
+        )
+        try {
+            stopSelf()
+        } catch (_: Throwable) {
+        }
+        false
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -376,14 +466,13 @@ class AgentForegroundService : Service() {
             SessionActivityTracker.activeSessions.value.size,
             SessionActivityTracker.currentToolStatus.value,
         )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        // [R2 F-10] Same protection as onStartCommand: the task removal tears
+        // the app's window down, so this re-attach is exactly the
+        // "start a foreground service from the background" shape Android 12+
+        // rejects. Unprotected, the swipe-from-recents path could kill the
+        // process at the moment the user dismissed the app.
+        if (!attachForegroundOrGiveUp(notification)) {
+            satisfyForegroundDeadlineThenStop()
         }
     }
 
@@ -901,5 +990,93 @@ class AgentForegroundService : Service() {
         "conversation_history" -> android.R.drawable.ic_menu_search
         "web_search" -> android.R.drawable.ic_menu_search
         else -> android.R.drawable.ic_menu_manage
+    }
+}
+
+/**
+ * [R2 F-10] Pure core of "may this invocation of `onStartCommand` attach a
+ * foreground notification, or must it unwind?"
+ *
+ * Lives beside the service (same house pattern as `StreamErrorFlags` at the
+ * bottom of `SessionActivityTracker.kt`) because it is only meaningful to this
+ * caller, and because the whole decision has to be exercisable from a JVM test
+ * — a `Service` cannot be instantiated there.
+ *
+ * The crash loop this exists for: `onStartCommand` ended in an unconditional
+ * `startForeground(...)` and returned `START_STICKY`. When the process is
+ * reclaimed (LMK on a long turn is the *normal* path, not an edge case) the
+ * system re-creates the service **in the background** with `intent == null`;
+ * Android 12+ then throws `ForegroundServiceStartNotAllowedException` from
+ * `startForeground`, the exception kills the process, and the sticky restart
+ * immediately starts the cycle again. Each round also feeds
+ * `CrashFrequencyDetector`, so the user lands in safe mode over a service that
+ * had nothing to show.
+ *
+ * Two facts make the decision decidable without any Android state:
+ *
+ *  1. **Who asked.** A null intent can only come from the system re-creating a
+ *     sticky service — every app-side start goes through
+ *     `AgentForegroundService.startService`, which always sets extras.
+ *  2. **Is there anything to show.** This service exists to *display* an
+ *     in-process agent turn (status row, wake lock, overlay). After a process
+ *     death the tracker's in-memory sets are empty by construction, so a
+ *     restart has nothing to attach — a row for it is pure cost.
+ *
+ * A background restart with no live work therefore unwinds through the same
+ * deadline-satisfying stub exit the swipe-from-recents path uses, and reports
+ * `START_NOT_STICKY` so the cycle cannot re-arm. A restart that finds live work
+ * *and* a foreground app is legal and useful — that is the OEM-service-kill
+ * case (the process survived, only the service died) and it keeps its row.
+ */
+internal object ForegroundStartPolicy {
+
+    /** Where the current `onStartCommand` invocation came from. */
+    enum class Origin {
+        /** An explicit start from the app — extras present, a turn to show. */
+        APP_START,
+
+        /** The system re-creating the service after the process died. */
+        SYSTEM_RESTART,
+    }
+
+    /** What `onStartCommand` must do with the foreground attach. */
+    enum class Decision {
+        /** Attach the real status row and stay in the foreground. */
+        ATTACH_STATUS,
+
+        /** Discharge the 5 s deadline with a stub row, then stop. */
+        STUB_THEN_STOP,
+    }
+
+    /**
+     * A null intent can only be a system restart: `startService` above always
+     * builds an intent with extras for app-side starts.
+     */
+    fun origin(intentPresent: Boolean): Origin =
+        if (intentPresent) Origin.APP_START else Origin.SYSTEM_RESTART
+
+    /**
+     * @param appForeground whether an Activity of this app is currently
+     *   started — a background attach is the exception this whole object
+     *   exists to avoid.
+     * @param hasLiveWork whether any session still has a stream in flight in
+     *   *this* process. A fresh process after LMK has none; an OEM service
+     *   kill leaves the turn running.
+     */
+    fun decide(
+        origin: Origin,
+        appForeground: Boolean,
+        hasLiveWork: Boolean,
+    ): Decision = when {
+        // The caller (`SessionActivityTracker`) already refuses background
+        // starts; if the app went invisible between that check and the call,
+        // the attach itself is protected by `attachForegroundOrGiveUp`.
+        origin == Origin.APP_START -> Decision.ATTACH_STATUS
+        // Sticky restart with a surviving turn and the user looking at the
+        // app: legal (foreground) and meaningful (there is a row to show).
+        appForeground && hasLiveWork -> Decision.ATTACH_STATUS
+        // Everything else: no user in sight, nothing to display. Unwind
+        // without ever calling startForeground for a real row.
+        else -> Decision.STUB_THEN_STOP
     }
 }
