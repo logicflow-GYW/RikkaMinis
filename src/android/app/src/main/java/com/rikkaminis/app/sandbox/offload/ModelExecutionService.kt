@@ -1001,6 +1001,15 @@ class ModelExecutionService : Service() {
             (provider as? com.rikkaminis.app.provider.anthropic.AnthropicProvider)
                 ?.enhancedCache = true
         }
+        // [fix/r2-fastmode-1119 / F-19] Tri-state, non-streaming site. `has()` not
+        // `optBoolean(…, false)`: an ABSENT key means an older caller, which must
+        // fall back to this process's FastModePrefs cache instead of being read as
+        // an explicit OFF. A present key is the main process's current answer and
+        // outranks the cache.
+        if (req.has("fast_mode")) {
+            (provider as? com.rikkaminis.app.provider.openai.OpenAIProvider)
+                ?.fastModeOverride = req.optBoolean("fast_mode")
+        }
 
         // ── Passthrough extras ──
         val inputJson = req.optString("input_json", "")
@@ -1447,6 +1456,16 @@ class ModelExecutionService : Service() {
             if (req.optBoolean("enhanced_cache", false)) {
                 (provider as? com.rikkaminis.app.provider.anthropic.AnthropicProvider)
                     ?.enhancedCache = true
+            }
+            // [fix/r2-fastmode-1119 / F-19] Tri-state, streaming site — deliberately
+            // a SECOND, independent assembly point (see the non-streaming site in
+            // executeRun). Fixing only one of them leaves the other silently sending
+            // the stale tier, which is exactly why the previous branch registered
+            // this finding instead of half-fixing it. `has()` keeps an absent key
+            // meaning "old caller → use this process's cache".
+            if (req.has("fast_mode")) {
+                (provider as? com.rikkaminis.app.provider.openai.OpenAIProvider)
+                    ?.fastModeOverride = req.optBoolean("fast_mode")
             }
             ModelExecutionRunLog.log(dir, android.os.Process.myPid(), ModelExecutionRunLog.Phase.PROVIDER_BUILT, "provider=${instance.providerType}", runId = runIdOf(dir))
             kotlinx.coroutines.runBlocking {
