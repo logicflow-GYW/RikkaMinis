@@ -286,14 +286,32 @@ fun KaTeXRenderView(
                                 // AndroidView with an Image). Nothing past this
                                 // point is meaningful on a released renderer.
                                 if (!releaseLatch.canRunDeferred()) return
+                                // [fix/r3-data-1119 F-15] This callback arrives on
+                                // Chromium's JavaBridge thread, NOT the main thread.
+                                // The three error early-returns below used to write
+                                // the Compose MutableState `renderError` directly
+                                // from that thread — a write racing snapshot commit /
+                                // recomposition (IllegalStateException at worst, a
+                                // silently lost error at best, which leaves the row
+                                // stuck on the blank placeholder Box forever). The
+                                // success path below already hops with `post { }`;
+                                // the failures now take the same hop, and each hop
+                                // re-checks the latch because the row may be gone by
+                                // the time it runs.
                                 if (error.isNotEmpty()) {
                                     AppLogger.warning(TAG, "KaTeX render failed: $error · latex=${latex.take(80)}")
-                                    renderError = error
+                                    post {
+                                        if (!releaseLatch.canRunDeferred()) return@post
+                                        renderError = error
+                                    }
                                     return
                                 }
                                 if (width <= 0 || height <= 0) {
                                     AppLogger.warning(TAG, "KaTeX render produced zero dimensions · latex=${latex.take(80)}")
-                                    renderError = "zero dimensions"
+                                    post {
+                                        if (!releaseLatch.canRunDeferred()) return@post
+                                        renderError = "zero dimensions"
+                                    }
                                     return
                                 }
                                 // Scale for device density
@@ -308,7 +326,13 @@ fun KaTeXRenderView(
                                 val fit = internalFitCaptureSize(bitmapW, bitmapH)
                                 if (!fit.ok) {
                                     AppLogger.warning(TAG, "KaTeX capture size rejected ${bitmapW}x$bitmapH · latex=${latex.take(80)}")
-                                    renderError = "capture size"
+                                    // [fix/r3-data-1119 F-15] Same main-thread hop as
+                                    // the two early returns above (this runs on the
+                                    // JavaBridge thread).
+                                    post {
+                                        if (!releaseLatch.canRunDeferred()) return@post
+                                        renderError = "capture size"
+                                    }
                                     return
                                 }
                                 if (fit.scale < 1f) {
