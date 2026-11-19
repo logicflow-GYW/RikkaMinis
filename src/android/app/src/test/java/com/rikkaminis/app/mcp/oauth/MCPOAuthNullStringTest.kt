@@ -212,9 +212,22 @@ class MCPOAuthNullStringTest {
             "src/android/app/src/main/java/com/rikkaminis/app/mcp/oauth/MCPOAuthStore.kt"
         )
         assertEquals(
-            "both store sites (tokens() and the bridge snapshot) must use the helper",
-            2,
+            "tokens() reads the encrypted store through the helper",
+            1,
             Regex("""optStringOrNull\("refresh_token"\)""").findAll(store).count(),
+        )
+        // The bridge reader keeps the literal `optString("<key>"` shape because
+        // mcp_oauth_lifecycle_check derives the snapshot's field names from it
+        // (C2) and this branch may not touch scripts/scan/**. Null-safety is in
+        // the chain: takeUnless(isNull) before the blank fold.
+        assertTrue(
+            "the bridge reader must stay derivable for the gate AND reject a JSON null:\n" +
+                store,
+            Regex(
+                """refreshToken = o\.optString\("refresh_token", ""\)\s*""" +
+                    """\.takeUnless \{ o\.isNull\("refresh_token"\) \}\s*""" +
+                    """\?\.ifBlank \{ null \}"""
+            ).containsMatchIn(store),
         )
     }
 

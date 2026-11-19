@@ -333,7 +333,16 @@ object MCPOAuthStore {
             val o = JSONObject(file.readText())
             BridgeTokenSnapshot(
                 accessToken = o.optString("access_token", ""),
-                refreshToken = o.optStringOrNull("refresh_token"),
+                // [R3-B F-17] This site keeps the literal `optString("<key>"`
+                // read because the `mcp_oauth_lifecycle_check` gate derives the
+                // snapshot's FIELD NAMES from exactly that shape (C2), and this
+                // branch may not touch `scripts/scan/**`. The null-safety lives
+                // in the chain instead: on Android `optString` answers the
+                // literal "null" for a JSON null, and takeUnless(isNull) is
+                // what keeps it out of the promoted token triple.
+                refreshToken = o.optString("refresh_token", "")
+                    .takeUnless { o.isNull("refresh_token") }
+                    ?.ifBlank { null },
                 expiresAtSeconds = o.optLong("expires_at", 0L),
             )
         }.onFailure {
