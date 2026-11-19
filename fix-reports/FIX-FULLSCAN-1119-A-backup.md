@@ -133,3 +133,8 @@ openminis-compat-parity: OK (53 keys pinned)
 - **publish job**：`success`，但 tag / release 两步受 main 门控，分支构建不产出可装 APK
 
 **停止节点**：分支 CI 绿 + head_sha 一致 ⇒ 已完成。**未合 main。**
+
+最终 tip（报告提交）复核：**#3328 / `44457207860` @ `f6f8007e9cec34044172f232176fcfcbf1b8e184`**，五 job 全 success，
+unit-tests **9,853 PASSED / 0 真 FAILED**，新用例逐条 PASSED。三源 SHA 一致：本地 HEAD = 远端 `ls-remote` = CI `head_sha`。
+报告提交与代码提交之间的**非报告差异为空**（`git diff --stat HEAD~1 HEAD -- . ':!fix-reports'` 无输出）。
+
