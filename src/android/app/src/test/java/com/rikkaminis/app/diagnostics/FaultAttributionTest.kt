@@ -233,17 +233,99 @@ class FaultAttributionTest {
                 code.contains("\" $code3\""),
             )
         }
-        // And the pattern itself must carry the boundaries it exists for.
-        val declAt = body.indexOf("STATUS_CODE_PATTERN = Regex(")
-        val patternText = body.substring(declAt, minOf(body.length, declAt + 400))
+        // And the pattern itself must carry the boundaries it exists for — judged on
+        // the stripped copy, so a KDoc that quotes a boundary cannot satisfy it.
+        val declAt = code.indexOf("STATUS_CODE_PATTERN = Regex(")
+        val patternText = code.substring(declAt, minOf(code.length, declAt + 600))
         assertTrue(
-            "the pattern must reject a preceding digit (left boundary): $patternText",
-            patternText.contains("(?<![\\\\d.])"),
+            "the pattern must reject a preceding letter or digit (left boundary): $patternText",
+            patternText.contains("(?<![A-Za-z0-9._])"),
         )
         assertTrue(
-            "the pattern must reject a duration unit on the right: $patternText",
-            patternText.contains("(?!\\\\s*ms)"),
+            "the pattern must reject a trailing letter or digit (right boundary): $patternText",
+            patternText.contains("(?![A-Za-z0-9._])"),
         )
+        assertTrue(
+            "the pattern must reject every duration unit, not just ms: $patternText",
+            patternText.contains("milliseconds"),
+        )
+        assertTrue(
+            "the pattern must reject a CJK duration unit as well: $patternText",
+            patternText.contains("毫秒"),
+        )
+    }
+
+    /**
+     * A letter BEFORE the digits. These samples carry connection vocabulary, so the only
+     * thing that can move them to SERVICE is the status arm — and the digit run is followed
+     * by a space, so the RIGHT boundary cannot be what saves them. Without the left class
+     * they are a 500/503 and the user's own TLS failure is reported as the relay's.
+     */
+    @Test
+    fun `a letter before the digits keeps it off the status-code class`() {
+        val connection = FaultAttribution.Layer.CONNECTION
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("SSLHandshakeException: x500 mismatch").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("TLS failure: x503 mismatch").layer,
+        )
+    }
+
+    /**
+     * A letter AFTER the digits — the sample from the main session's own probe, where the
+     * run is glued to `Principal`. Same defect, other boundary; a test that only covered
+     * one side would pass while the other one regressed (measured: the left-arm mutation
+     * left this sample green, because the right class already caught it).
+     */
+    @Test
+    fun `a letter after the digits keeps it off the status-code class`() {
+        val connection = FaultAttribution.Layer.CONNECTION
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("SSLHandshakeException: X500Principal mismatch").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("TLS failure: code 502cert").layer,
+        )
+    }
+
+    @Test
+    fun `every duration unit keeps the token off the status-code class`() {
+        val connection = FaultAttribution.Layer.CONNECTION
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out after 500 milliseconds").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("read timed out after 504 seconds").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out after 500 ms").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("connect timed out after 500 s").layer,
+        )
+        assertEquals(
+            connection,
+            FaultAttribution.attribute("socket timeout 504 秒").layer,
+        )
+    }
+
+    @Test
+    fun `the unit arm does not swallow a real status code`() {
+        // The point of the class extension is the duration, not the status: real codes
+        // keep matching, including one whose message mentions a time unit elsewhere.
+        val service = FaultAttribution.Layer.SERVICE
+        assertEquals(service, FaultAttribution.attribute("HTTP 503").layer)
+        assertEquals(service, FaultAttribution.attribute("status=500 after 500 milliseconds").layer)
+        assertEquals(service, FaultAttribution.attribute("first chunk timeout: 504").layer)
     }
 
     /** Order probe over the real `attribute()` body. */

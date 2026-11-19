@@ -410,10 +410,32 @@ object EffortTierLearner {
      *
      * 升级前的条目没有 `shape` 字段：按 ENUM 处理（不放宽也不收窄，行为等于修前），
      * 下一次 400 会用带 shape 的新记录覆盖它——自愈，不需要迁移。
+     *
+     * 调用方若**在 learned 之后还有别的退路**（实测表、目录天花板），请读
+     * [learnedWithinOrNull]：它把「没学到」返回 null，不会被 [declared] 顶掉，
+     * 否则那些退路会被本函数短路（[fix/effort-truth-1119b]）。
      */
-    fun learnedWithin(scope: String, modelId: String, declared: List<String>?): List<String>? {
-        val entry = entryFor(scope, modelId) ?: return declared
-        val tiers = tiersOf(entry, System.currentTimeMillis()) ?: return declared
+    fun learnedWithin(scope: String, modelId: String, declared: List<String>?): List<String>? =
+        learnedWithinOrNull(scope, modelId, declared) ?: declared
+
+    /**
+     * [fix/effort-truth-1119b] 4 F-02 / 4 F-01：**「没学到」必须是一个能被调用方看见的
+     * 返回值**，不能伪装成 [declared]。
+     *
+     * [learnedWithin] 把「没学到」折成 [declared] 是为了让 wire 侧那次替换（
+     * `learned ?: declared`）逐字节不变——它只有一层来历，declared 就是它该退到的地方。
+     * 但凡是**在 learned 之后还有别的来源**的调用方，这个折法会把它们全部短路：
+     * [GatewayEffortTruth.resolveTier] 的实测表 `tiersFor`，以及 UI 侧
+     * `ChatViewModel.withLearnedCeiling` 的「什么也没学到就原样返回目录天花板」。
+     * 两处都因此读过一次 `learned(`（拿到「有没有」）再读一次 `learnedWithin(`
+     * （拿到「有多宽」）——两个问题两次磁盘快照，且规则分家。
+     *
+     * 所以这里只回答一个问题：**有（可用的）学习条目 → 收窄后的集合；没有 → null**。
+     * 调用方自己决定 null 之后退到哪张表。
+     */
+    fun learnedWithinOrNull(scope: String, modelId: String, declared: List<String>?): List<String>? {
+        val entry = entryFor(scope, modelId) ?: return null
+        val tiers = tiersOf(entry, System.currentTimeMillis()) ?: return null
         val shape = shapeOf(entry)
         return if (shape == Shape.CEILING) {
             ThinkingEffortLadder.learnedWithinDeclared(tiers, declared)
