@@ -185,6 +185,7 @@ class ProviderKeySaveSnapshotWiringTest {
         assertTrue("Save must capture the mutable editor before launching IO", saveBody.contains("val keyToSave = editKeyValue"))
         assertTrue("the write must receive the captured snapshot", saveBody.contains("keySaver.save(") && saveBody.contains("keyToSave = keyToSave"))
         assertFalse("the IO write must not re-read the mutable draft", saveBody.contains("saveApiKey(instanceId, editKeyValue)"))
+        assertTrue("saveApiKey must stay inside a literal withContext(Dispatchers.IO) block", saveBody.contains("withContext(Dispatchers.IO) {"))
         assertTrue("Save must be gated while another save is active", saveBody.contains("if (keySaveActionAllowed(keySaver.isSavingNow()))"))
 
         val cancelBody = code.substring(cancelAt, saveAt)

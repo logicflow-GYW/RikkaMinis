@@ -249,7 +249,15 @@ fun ProviderConnectionScreen(
                                 val keyToSave = editKeyValue
                                 keySaver.save(
                                     keyToSave = keyToSave,
-                                    write = { key -> providerRepository.saveApiKey(instanceId, key) },
+                                    // The gate (readonly_mount_write_guard) pins saveApiKey
+                                    // inside a literal withContext(Dispatchers.IO) block; the
+                                    // saver's ioDispatcher hop is runtime-equivalent but
+                                    // textually invisible to it. Nested hop is harmless.
+                                    write = { key ->
+                                        withContext(Dispatchers.IO) {
+                                            providerRepository.saveApiKey(instanceId, key)
+                                        }
+                                    },
                                     onSuccess = { savedKey ->
                                         storedKey = savedKey
                                         AppLogger.info(TAG, "Saved API key for ${instance.id}")
