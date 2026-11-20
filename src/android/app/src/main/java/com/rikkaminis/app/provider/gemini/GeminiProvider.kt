@@ -464,6 +464,12 @@ class GeminiProvider(
                     "[F-177] stream cancelled by consumer: ${e.causeChainSummary()}",
                 )
                 cancel(consumerCancel)
+            } else if (e is LLMError.ProviderError) {
+                // Close WITH the typed failure rather than cancelling the
+                // channel: buffered partial text must drain before the error.
+                // The collector still throws, so no failed turn is dispatched
+                // or reported as a successful Finished.
+                channel.close(e)
             } else {
                 cancel("Stream error", mapError(e))
             }
@@ -861,7 +867,13 @@ class GeminiProvider(
         val candidates = json.optJSONArray("candidates") ?: return null
         val first = candidates.optJSONObject(0) ?: return null
         val reason = first.safeOptString("finishReason", "").ifEmpty { return null }
+        // Both wire paths read this parser. A declared tool-protocol failure
+        // must reach the existing typed error / worker JSONL fallback path,
+        // never Finished(SUCCESS). Calls are dispatched only after collect;
+        // this does not replay tools already executed in earlier turns.
         return when (reason) {
+            "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL" ->
+                throw LLMError.ProviderError("Gemini tool protocol failure: $reason")
             "STOP" -> "end_turn"
             "MAX_TOKENS" -> "max_tokens"
             else -> reason.lowercase()
