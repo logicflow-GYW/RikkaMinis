@@ -275,26 +275,34 @@ class NativeOffloadCancelTest {
     fun `the model-use handler waits on the dispatch through the offload context`() {
         val src = sourceOf("sandbox/offload/ModelUseOffloadHandler.kt")
         assertTrue(
-            "the remote dispatch must go through the cancellable wrapper:\n$src",
-            src.contains("dispatchCancellable(remoteRequestJson"),
+            "both dispatch sites must go through the cancellable wrapper:\n$src",
+            src.contains("dispatchCancellable {"),
+        )
+        // The CALL SITE keeps the literal dispatch shape the existing wiring
+        // tests pin (the current instance key must travel with the request):
+        // the wrapper takes the dispatch as a lambda, so the call itself stays
+        // exactly where it was.
+        assertTrue(
+            "the standard dispatch must still carry the current instance key:\n$src",
+            src.contains(
+                "ModelExecutionDispatcher.dispatch(context, remoteRequestJson, " +
+                    "apiKey = WorkerKeyHandoff.keyFor(context, instance.id))",
+            ),
         )
         assertTrue(
-            "the passthrough dispatch must go through the same wrapper:\n$src",
-            src.contains("dispatchCancellable(ptRequestJson"),
+            "the passthrough dispatch must still carry the current instance key:\n$src",
+            src.contains(
+                "ModelExecutionDispatcher.dispatch(context, ptRequestJson, " +
+                    "apiKey = WorkerKeyHandoff.keyFor(context, instance.id))",
+            ),
         )
-        // The ONLY bare dispatch may live inside the wrapper's own
-        // "no context" fallback (a handler invoked outside the socket path).
         val bare = src.lines().mapIndexedNotNull { i, line ->
             val t = line.trim()
             if (t.contains("ModelExecutionDispatcher.dispatch(") && !t.startsWith("//")) i + 1 to t else null
         }
-        val outsideWrapper = bare.filter { (line, _) ->
-            line < (src.substringIndexOf("private fun dispatchCancellable") / 1).coerceAtLeast(0) ||
-                line > src.substringIndexOf("private fun cmdList")
-        }
         assertTrue(
-            "every bare dispatch must live inside dispatchCancellable: $bare",
-            outsideWrapper.isEmpty(),
+            "both dispatch sites must exist (the standard one and the passthrough one): $bare",
+            bare.size == 2,
         )
         assertTrue(
             "the wrapper must read the socket's context:\n$src",

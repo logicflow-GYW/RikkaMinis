@@ -94,18 +94,12 @@ class ModelUseOffloadHandler(
      * only guarantees the CALLER stops waiting and the cancellation request is
      * delivered, not that an arbitrary native call can be killed.
      */
-    private fun dispatchCancellable(requestJson: String, instanceId: String): String? {
-        val context = NativeOffloadServer.currentCallContext()
-        if (context == null) {
-            return runBlocking {
-                ModelExecutionDispatcher.dispatch(
-                    context = this@ModelUseOffloadHandler.context,
-                    requestJson = requestJson,
-                    apiKey = WorkerKeyHandoff.keyFor(this@ModelUseOffloadHandler.context, instanceId),
-                )
-            }
+    private fun dispatchCancellable(dispatchCall: suspend () -> String?): String? {
+        val callContext = NativeOffloadServer.currentCallContext()
+        if (callContext == null) {
+            return runBlocking { dispatchCall() }
         }
-        if (context.isCancelled) return null
+        if (callContext.isCancelled) return null
         return runBlocking {
             // A supervisor job keeps the dispatch's cancellation from tearing
             // down this runBlocking (the handler must still answer, just with
@@ -114,25 +108,19 @@ class ModelUseOffloadHandler(
             // `cancel` to :modelservice and settles its run dir.
             val supervisor = kotlinx.coroutines.SupervisorJob()
             val dispatch = kotlinx.coroutines.CoroutineScope(supervisor + coroutineContext)
-                .async {
-                    ModelExecutionDispatcher.dispatch(
-                        context = this@ModelUseOffloadHandler.context,
-                        requestJson = requestJson,
-                        apiKey = WorkerKeyHandoff.keyFor(this@ModelUseOffloadHandler.context, instanceId),
-                    )
-                }
+                .async { dispatchCall() }
             val listener = { dispatch.cancel(CancellationException("offload request cancelled")) }
-            context.addCancellationListener(listener)
+            callContext.addCancellationListener(listener)
             try {
                 withContext(NonCancellable) {
                     try {
                         dispatch.await()
                     } catch (c: CancellationException) {
-                        if (context.isCancelled) null else throw c
+                        if (callContext.isCancelled) null else throw c
                     }
                 }
             } finally {
-                context.removeCancellationListener(listener)
+                callContext.removeCancellationListener(listener)
                 supervisor.cancel()
             }
         }
@@ -511,7 +499,9 @@ class ModelUseOffloadHandler(
                 outputExt = outputExt,
                 passthroughRequest = ModelUseProtocol.buildPassthroughWireRequest(ptSpec, ptBody),
             )
-            val ptRemote = dispatchCancellable(ptRequestJson, instance.id)
+            val ptRemote = dispatchCancellable {
+                ModelExecutionDispatcher.dispatch(context, ptRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id))
+            }
             return shapeRawPassthrough(
                 spec = ptSpec,
                 warnings = ptWarnings,
@@ -590,7 +580,9 @@ class ModelUseOffloadHandler(
             inputJson = inputText,
             outputExt = outputExt,
         )
-        val remoteResult = dispatchCancellable(remoteRequestJson, instance.id)
+        val remoteResult = dispatchCancellable {
+            ModelExecutionDispatcher.dispatch(context, remoteRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id))
+        }
         if (remoteResult != null) {
             val remote = try { JSONObject(remoteResult) } catch (e: Throwable) { null }
             if (remote != null) {
