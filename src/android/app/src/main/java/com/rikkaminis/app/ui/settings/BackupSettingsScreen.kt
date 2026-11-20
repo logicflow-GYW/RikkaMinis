@@ -510,6 +510,7 @@ fun BackupSettingsScreen(
                 return@snapshotBeforeRestore
             }
             var restoredOk = true
+            var restoredDegraded = false
             var restoredMsg: String? = null
             try {
                 val report = withContext(Dispatchers.Default) {
@@ -552,11 +553,14 @@ fun BackupSettingsScreen(
                         ),
                         fatalHeadline = context.getString(R.string.backup_done_fatal),
                         fatal = report?.fatal,
+                        providerPersistenceWarning = report?.providerPersistenceWarning,
                     )
                     restoredOk = outcome.ok
+                    restoredDegraded = outcome.degraded
                     restoredMsg = outcome.body
                 }
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 withContext(Dispatchers.Main) {
                     errorMessage = t.message ?: errImport
                     restoredOk = false
@@ -570,8 +574,11 @@ fun BackupSettingsScreen(
             notifier.notifyWorkCompleted(
                 tag = "webdav-restore",
                 title = context.getString(
-                    if (restoredOk) R.string.webdav_notify_title_restored
-                    else R.string.webdav_notify_title_failed,
+                    when {
+                        restoredDegraded -> R.string.backup_import
+                        restoredOk -> R.string.webdav_notify_title_restored
+                        else -> R.string.webdav_notify_title_failed
+                    },
                 ),
                 body = restoredMsg ?: "",
             )
@@ -2032,7 +2039,13 @@ fun BackupSettingsScreen(
     importReport?.let { report ->
         AlertDialog(
             onDismissRequest = { importReport = null; snapshotNote = null },
-            title = { Text(stringResource(R.string.backup_done_title)) },
+            title = {
+                Text(stringResource(when {
+                    report.fatal != null -> R.string.backup_err_import
+                    report.providerPersistenceWarning != null -> R.string.backup_import
+                    else -> R.string.backup_done_title
+                }))
+            },
             text = {
                 Column {
                     snapshotNote?.let { note ->
@@ -2043,18 +2056,23 @@ fun BackupSettingsScreen(
                             modifier = Modifier.padding(bottom = 8.dp),
                         )
                     }
-                    Text(
-                        stringResource(
-                            R.string.backup_done_summary,
-                            report.fieldsApplied,
-                            report.providersImported,
-                        )
-                    )
-                    if (report.groupsImported > 0) {
+                    report.providerPersistenceWarning?.let { warning ->
+                        Text(warning, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    if (report.fatal == null && report.providerPersistenceWarning == null) {
                         Text(
-                            stringResource(R.string.backup_done_groups, report.groupsImported),
-                            style = MaterialTheme.typography.bodyMedium,
+                            stringResource(
+                                R.string.backup_done_summary,
+                                report.fieldsApplied,
+                                report.providersImported,
+                            )
                         )
+                        if (report.groupsImported > 0) {
+                            Text(
+                                stringResource(R.string.backup_done_groups, report.groupsImported),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
                     }
                     if (report.envVarsImported > 0) {
                         Text(
@@ -2784,24 +2802,27 @@ private fun formatSize(bytes: Long): String = when {
 private fun formatInstant(instant: Instant): String = INSTANT_FORMATTER.format(instant)
 
 /**
- * [fix/r2-backup-1119 F-20] A non-null fatal (even an empty exception message)
- * means a partial write. Replace the success summary with the localized
- * rollback hint and the reason; a null fatal keeps the success summary.
+ * [fix/r2-backup-1119 F-20] Fatal (including a blank reason) takes precedence over
+ * one-copy degradation. Neither should display the unqualified success summary.
  */
 internal fun restoreNotifyOutcome(
     summary: String,
     fatalHeadline: String,
     fatal: String?,
+    providerPersistenceWarning: String? = null,
 ): RestoreNotifyOutcome {
-    return if (fatal == null) {
-        RestoreNotifyOutcome(ok = true, body = summary)
-    } else {
-        RestoreNotifyOutcome(ok = false, body = "$fatalHeadline $fatal".trim())
+    return when {
+        fatal != null -> RestoreNotifyOutcome(
+            ok = false,
+            body = listOfNotNull("$fatalHeadline $fatal".trim(), providerPersistenceWarning).joinToString("\n"),
+        )
+        providerPersistenceWarning != null ->
+            RestoreNotifyOutcome(ok = false, body = providerPersistenceWarning, degraded = true)
+        else -> RestoreNotifyOutcome(ok = true, body = summary)
     }
 }
 
-/** [fix/r2-backup-1119 F-20] See [restoreNotifyOutcome]. */
-internal data class RestoreNotifyOutcome(val ok: Boolean, val body: String)
+internal data class RestoreNotifyOutcome(val ok: Boolean, val body: String, val degraded: Boolean = false)
 
 /** [fix-minisbak-import] .minisbak 嗅探的两路结果（在 IO 线程上判定）。 */
 private sealed interface MinisbakImport {

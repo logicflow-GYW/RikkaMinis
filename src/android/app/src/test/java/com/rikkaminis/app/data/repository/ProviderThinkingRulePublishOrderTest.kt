@@ -274,17 +274,13 @@ class ProviderThinkingRulePublishOrderTest {
             "fun reorderThinkingRules(",
         )
         for (header in headers) {
-            val body = stripComments(bodyOf(src, header))
-            val dao = body.indexOf("providerDao.replaceThinkingRules(")
-            val assign = body.indexOf("persistedRules =")
-            assertTrue("$header no longer writes through the DAO", dao > 0)
-            assertTrue("$header no longer assigns persistedRules", assign > 0)
-            assertTrue(
-                "$header assigns persistedRules BEFORE the DAO write — a failed " +
-                    "write would publish unpersisted rules",
-                assign > dao,
-            )
+            assertTrue("$header must use the shared writer", src.substringAfter(header).substringBefore("\n\n").contains("mutateThinkingRules("))
         }
+        val body = stripComments(bodyOf(src, "fun mutateThinkingRules("))
+        val dao = body.indexOf("providerDao.replaceThinkingRules(")
+        val assign = body.indexOf("persistedRules =")
+        val publish = body.indexOf("republishThinkingCache(instanceId, persistedRules)")
+        assertTrue("the shared writer must persist, then publish those rows", dao > 0 && dao < assign && assign < publish)
     }
 
     @Test

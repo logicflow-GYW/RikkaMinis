@@ -796,14 +796,21 @@ object OpenMinisBackupCompat {
             }
         }
         val typeToLabel = HashMap<String, Pair<String, String>>()
+        val seenSourceIds = HashSet<String>()
 
         val out = JSONArray()
         for (i in 0 until instances.length()) {
             val inst = instances.optJSONObject(i) ?: continue
+            val source = inst.opt("id") as? String
             val ptype = inst.optString("providerType", "")
             val label = inst.optString("label", "")
+            // Count declarations before filtering bad provider records. A
+            // duplicate with a missing label still makes this id ambiguous.
+            if (!source.isNullOrBlank()) {
+                if (!seenSourceIds.add(source)) typeToLabel.remove(source)
+                else if (ptype.isNotBlank() && label.isNotBlank()) typeToLabel[source] = ptype to label
+            }
             if (ptype.isEmpty() || label.isEmpty()) continue
-            typeToLabel[inst.optString("id", "")] = ptype to label
 
             val obj = JSONObject()
             obj.put("providerType", ptype)
@@ -954,6 +961,10 @@ object OpenMinisBackupCompat {
             }
             obj.put("models", models)
             obj.put("_entryIds", entryIds)
+            // [SURGERY-W4 B01] Same stable source identity the native export
+            // writes: the rules section is sparse (one group per provider that
+            // HAS rules), so Stage 1.5 must pair by identity, not by position.
+            obj.put("_sourceInstanceId", inst.optString("id", ""))
             if (skippedLegacyHidden > 0) {
                 // 丢弃是可解释的（与迁移规则一致），但不许无声：用户在旧包
                 // 「全部拉取、默认隐藏」时代攒下的目录副本在恢复后不再出现，
@@ -985,7 +996,13 @@ object OpenMinisBackupCompat {
             // 它当成「没有这条记录」——规则少了几条，界面上看不出任何异常。
             val d = shapes.objOrNull(rec, "d", "data/thinking_rules.jsonl 的 ThinkingRuleV1")
                 ?: continue
-            val instId = d.optString("instanceId", "")
+            val instId = (d.opt("instanceId") as? String).orEmpty()
+            if (instId !in typeToLabel) {
+                shapes.custom("thinkingRuleOwner") { n ->
+                    "thinking rules: skipped $n rule(s) without a unique declared source provider"
+                }
+                continue
+            }
             val arr = byInstance.getOrPut(instId) { JSONArray() }
             val r = JSONObject()
             r.put("id", d.optString("id", ""))
@@ -1015,6 +1032,11 @@ object OpenMinisBackupCompat {
                 JSONObject()
                     .put("providerType", pair.first)
                     .put("providerLabel", pair.second)
+                    // [SURGERY-W4 B01] The converted document is consumed by the
+                    // same ConfigBackup importer, so it must carry the same
+                    // source identity or a sparse conversion would re-introduce
+                    // the positional mismatch.
+                    .put("_sourceInstanceId", instId)
                     .put("rules", rules),
             )
         }

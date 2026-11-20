@@ -430,6 +430,22 @@ class OpenMinisBackupCompatTest {
     }
 
     @Test
+    fun `conversion does not attach rules when a malformed duplicate provider is filtered out`() {
+        val pc = providerConfig()
+        pc.getJSONArray("instances").put(JSONObject().put("id", "inst-1").put("providerType", "anthropic"))
+        val pkg = zipOf(
+            "manifest.json" to jsonEntry(plainManifest()),
+            "data/provider_config.json" to jsonEntry(pc),
+            "data/thinking_rules.jsonl" to textEntry(thinkingRulesLine() + "\n"),
+        )
+        val root = JSONObject(OpenMinisBackupCompat.convert(pkg))
+        assertEquals(1, root.getJSONArray("providers").length())
+        assertEquals(0, root.getJSONArray("thinkingRules").length())
+        assertTrue(ConfigBackup.conversionNotes(root.optJSONArray("conversionNotes"))
+            .any { it.contains("without a unique declared source") })
+    }
+
+    @Test
     fun convertsPlaintextPackageEndToEnd() {
         val out = OpenMinisBackupCompat.convert(plainPackage())
         val root = JSONObject(out)

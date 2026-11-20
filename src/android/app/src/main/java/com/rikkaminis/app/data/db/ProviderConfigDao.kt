@@ -271,10 +271,140 @@ interface ProviderConfigDao {
     @Query("DELETE FROM provider_thinking_rules WHERE provider_instance_id = :instanceId")
     suspend fun deleteThinkingRulesForInstance(instanceId: String)
 
-    /** Atomic reorder/replace of an instance's whole rule set (drag-reorder + add/edit). */
+    /**
+     * Atomic replace of an instance's whole rule set (restore path).
+     *
+     * [SURGERY-W4 B02] The table's PK is the rule id alone, so a plain
+     * `INSERT OR REPLACE` silently MOVES a still-live rule from another
+     * provider onto the restored one. The id resolution is delegated to
+     * [resolveThinkingRuleIds] (the single source both this method and the
+     * JVM test use), which re-mints any id owned by a different live owner.
+     *
+     * @return the exact rows persisted, in the same order as [rows].
+     */
     @Transaction
-    suspend fun replaceThinkingRules(instanceId: String, rows: List<ProviderThinkingRuleEntity>) {
+    suspend fun replaceThinkingRules(
+        instanceId: String,
+        rows: List<ProviderThinkingRuleEntity>,
+    ): List<ProviderThinkingRuleEntity> {
+        val occupied = loadAllThinkingRules().associate { it.id to it.providerInstanceId }
+        val out = resolveThinkingRuleIds(rows = rows, occupiedOwnerById = occupied, instanceId = instanceId)
         deleteThinkingRulesForInstance(instanceId)
-        rows.forEach { upsertThinkingRule(it) }
+        out.forEach { upsertThinkingRule(it) }
+        return out
     }
+
+    /**
+     * Atomic read-modify-replace of an instance's rule set (edit / delete /
+     * reorder).
+     *
+     * [SURGERY-W4 B04] The mutation is expressed as DATA so the whole
+     * read → modify → replace can run inside this one transaction: the
+     * caller's list is read INSIDE the transaction, so two interleaved
+     * writers can no longer commit a stale snapshot over a newer one (the
+     * repository-level lock could not do this — a suspend call may not sit
+     * inside a `synchronized` block).
+     *
+     * @return the exact rows persisted, in their new order.
+     */
+    @Transaction
+    suspend fun replaceThinkingRules(
+        instanceId: String,
+        mutation: ThinkingRuleMutation,
+    ): List<ProviderThinkingRuleEntity> {
+        val current = loadThinkingRules(instanceId).sortedBy { it.sortOrder }
+        val next = when (mutation) {
+            is ThinkingRuleMutation.Upsert -> {
+                val idx = current.indexOfFirst { it.id == mutation.entity.id }
+                if (idx >= 0) {
+                    // Update in place at its current sort_order.
+                    current.toMutableList().also {
+                        it[idx] = mutation.entity.copy(sortOrder = current[idx].sortOrder)
+                    }
+                } else {
+                    // New rule at the top; everything else shifts down.
+                    current.toMutableList().also {
+                        it.add(0, mutation.entity.copy(sortOrder = 0))
+                    }
+                }
+            }
+            is ThinkingRuleMutation.Delete -> current.filterNot { it.id == mutation.id }
+            is ThinkingRuleMutation.Reorder -> {
+                val byId = current.associateBy { it.id }
+                // Reorder is a permutation, not an import of multiple rule rows.
+                val ids = mutation.orderedIds.toSet()
+                ids.mapNotNull { byId[it] } + current.filter { it.id !in ids }
+            }
+        }.mapIndexed { i, e -> e.copy(sortOrder = i) }
+        val occupied = loadAllThinkingRules().associate { it.id to it.providerInstanceId }
+        val out = resolveThinkingRuleIds(rows = next, occupiedOwnerById = occupied, instanceId = instanceId)
+        deleteThinkingRulesForInstance(instanceId)
+        out.forEach { upsertThinkingRule(it) }
+        return out
+    }
+
+}
+
+/**
+ * [SURGERY-W4 B02] Resolve the ids a rule set will be written under.
+ *
+ * The rule table's primary key is the rule id alone, so an id that another
+ * LIVE provider already owns must never be re-used: `INSERT OR REPLACE` would
+ * move that provider's rule onto this one. Such an id is re-minted here.
+ *
+ * Rules of the SAME owner keep their ids (a re-save of one's own rules must
+ * not churn identity), and a duplicate id INSIDE [rows] keeps one occurrence
+ * and re-mints the rest so no user content is dropped.
+ *
+ * Pure and side-effect free: the caller does the writes. [mintId] exists so
+ * the JVM test can pin the re-minted id instead of a random UUID.
+ */
+internal fun resolveThinkingRuleIds(
+    rows: List<ProviderThinkingRuleEntity>,
+    occupiedOwnerById: Map<String, String>,
+    instanceId: String,
+    mintId: () -> String = { java.util.UUID.randomUUID().toString() },
+): List<ProviderThinkingRuleEntity> {
+    val used = occupiedOwnerById.keys.toMutableSet()
+    val emitted = HashSet<String>()
+    val out = ArrayList<ProviderThinkingRuleEntity>(rows.size)
+    for (row in rows) {
+        val owner = occupiedOwnerById[row.id]
+        val safe = if ((owner == null || owner == instanceId) && row.id !in emitted) {
+            row
+        } else {
+            var fresh: String
+            do {
+                fresh = mintId()
+            } while (fresh in used || fresh in emitted)
+            row.copy(id = fresh)
+        }
+        if (safe.id !in used) used.add(safe.id)
+        emitted.add(safe.id)
+        out.add(safe)
+    }
+    return out
+}
+
+/**
+ * [SURGERY-W4 B04] An owner-scoped rule mutation, expressed as data.
+ *
+ * Public because it appears in the signature of a public DAO method (Kotlin
+ * forbids a public member exposing an internal type). It carries no behaviour
+ * and no persistence semantics of its own.
+ *
+ * The DAO applies it inside one transaction (read the owner's rules → apply →
+ * replace), which is what makes save/delete/reorder/restore safe against each
+ * other: no caller can read a list, be pre-empted, and then write a stale
+ * snapshot back.
+ */
+sealed interface ThinkingRuleMutation {
+    /** Insert the rule at the top, or update it in place when the id exists. */
+    data class Upsert(val entity: ProviderThinkingRuleEntity) : ThinkingRuleMutation
+
+    /** Remove the rule with this id. */
+    data class Delete(val id: String) : ThinkingRuleMutation
+
+    /** Apply this id order; ids the caller omitted are appended. */
+    data class Reorder(val orderedIds: List<String>) : ThinkingRuleMutation
 }
