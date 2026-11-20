@@ -954,6 +954,10 @@ object OpenMinisBackupCompat {
             }
             obj.put("models", models)
             obj.put("_entryIds", entryIds)
+            // [SURGERY-W4 B01] Same stable source identity the native export
+            // writes: the rules section is sparse (one group per provider that
+            // HAS rules), so Stage 1.5 must pair by identity, not by position.
+            obj.put("_sourceInstanceId", inst.optString("id", ""))
             if (skippedLegacyHidden > 0) {
                 // 丢弃是可解释的（与迁移规则一致），但不许无声：用户在旧包
                 // 「全部拉取、默认隐藏」时代攒下的目录副本在恢复后不再出现，
@@ -1015,6 +1019,11 @@ object OpenMinisBackupCompat {
                 JSONObject()
                     .put("providerType", pair.first)
                     .put("providerLabel", pair.second)
+                    // [SURGERY-W4 B01] The converted document is consumed by the
+                    // same ConfigBackup importer, so it must carry the same
+                    // source identity or a sparse conversion would re-introduce
+                    // the positional mismatch.
+                    .put("_sourceInstanceId", instId)
                     .put("rules", rules),
             )
         }

@@ -101,6 +101,72 @@ object ConfigBackup {
     // throws "No active session" and the reader returns empty/null. Carrying
     // them only produced guaranteed skip entries on every restore.
 
+    /**
+     * [SURGERY-W4 B01] How a thinking-rules GROUP maps onto a restored provider.
+     *
+     * The rules section is SPARSE — one group per provider that HAS rules — so
+     * pairing by array position put B's rules on A when A had none. New backups
+     * carry the source provider's instance id (`_sourceInstanceId`), which maps
+     * through Stage 1's source→restored table.
+     *
+     * A legacy backup (no source id) still restores when the (type, label) pair
+     * is unique. When several restored providers share that pair the sparse
+     * section carries no way to say which group belonged to which provider, so
+     * the group is REFUSED with a visible note instead of being guessed onto the
+     * wrong owner.
+     */
+    internal object ThinkingRuleGroupPairing {
+        sealed interface Decision {
+            /** The restored instance that owns this group. */
+            data class Owner(val instanceId: String) : Decision
+
+            /** [reason]: "ambiguous" / "unknown-source" / "no-provider". */
+            data class Refused(val reason: String) : Decision
+        }
+
+        fun decide(
+            sourceInstanceId: String,
+            restoredBySource: Map<String, String>,
+            idsForKey: List<String>,
+            lastIdForKey: String?,
+            groupCountForKey: Int = 0,
+        ): Decision {
+            if (sourceInstanceId.isNotEmpty()) {
+                val owner = restoredBySource[sourceInstanceId]
+                return if (owner != null) Decision.Owner(owner) else Decision.Refused("unknown-source")
+            }
+            // Legacy backup (no source id): position is the only signal.
+            //  - ONE provider for this key → unambiguous.
+            //  - SEVERAL providers for this key AND the backup carries exactly
+            //    as many rule groups as providers → the groups line up one to
+            //    one (the pre-annotation format), so position is safe.
+            //  - SEVERAL providers but FEWER groups than providers → the
+            //    sparse section cannot say which group belongs to which
+            //    provider, so refuse instead of guessing.
+            if (idsForKey.size > 1 && groupCountForKey < idsForKey.size) {
+                return Decision.Refused("ambiguous")
+            }
+            // Position-safe legacy path: the FIRST id still waiting for this
+            // key owns the group (the caller consumes that slot afterwards), so
+            // several groups for one key keep their provider order.
+            return when {
+                idsForKey.isNotEmpty() -> Decision.Owner(idsForKey.first())
+                lastIdForKey != null -> Decision.Owner(lastIdForKey)
+                else -> Decision.Refused("no-provider")
+            }
+        }
+
+        /** Human-readable skip line for a refused group (kept in one place). */
+        fun refusalNote(label: String, reason: String): String = when (reason) {
+            "ambiguous" ->
+                "thinking rules for \"$label\": backup has no source identity and " +
+                    "more than one provider shares this type/label — rules not restored"
+            "unknown-source" ->
+                "thinking rules for \"$label\": source provider was not restored — rules not restored"
+            else -> "thinking rules for \"$label\" (provider not restored)"
+        }
+    }
+
     /** Outcome of an import: what landed, and what needs the user's attention. */
     data class ImportResult(
         val fieldsApplied: Int,
@@ -706,6 +772,11 @@ object ConfigBackup {
             val entryIds = JSONArray()
             for (id in orderedEntryIds(providerRepo, instance.id)) entryIds.put(id)
             obj.put("_entryIds", entryIds)
+            // [SURGERY-W4 B01] Stable source identity of THIS provider entry.
+            // Stage 1 maps it to the instance the entry becomes, and the
+            // thinking-rules groups carry the SAME id, so a sparse rules
+            // section can be paired by identity instead of array position.
+            obj.put("_sourceInstanceId", instance.id)
             providers.put(obj)
         }
 
@@ -730,6 +801,13 @@ object ConfigBackup {
             thinkingRules.put(JSONObject().apply {
                 put("providerType", instance.providerType.name)
                 put("providerLabel", instance.label)
+                // [SURGERY-W4 B01] Stable source identity for THIS group. The
+                // section used to be sparse (one group per provider that HAD
+                // rules), and the importer paired groups to providers by array
+                // position — so A(0 rules)/B(1 rule) landed B's rules on A.
+                // The annotation is additive: old readers ignore unknown keys,
+                // and old backups simply lack it (handled explicitly below).
+                put("_sourceInstanceId", instance.id)
                 put("rules", rows)
             })
         }
@@ -1328,6 +1406,11 @@ object ConfigBackup {
         var chatSessionsImported = 0
         var chatMessagesImported = 0
         var thinkingRulesImported = 0
+        // [SURGERY-W4 B05] Provider/Group saves stay async for ordinary UI use,
+        // but a restore must not report success before this batch's writes have
+        // actually landed. This barrier observes exactly the snapshots queued
+        // from here on; it does NOT claim cross-database atomicity.
+        val persistence = providerRepo.beginPersistenceBatch()
         var artifactFilesImported = 0
         var webdavConfigImported = false
         var scheduledTasksImported = false
@@ -1341,6 +1424,16 @@ object ConfigBackup {
         // `thinkingRules` groups share. Consumed front-first by Stage 1.5 so a
         // duplicate label no longer loses one instance's whole rules group.
         val idsByProviderKey = HashMap<String, MutableList<String>>()
+        // [SURGERY-W4 B01] Source instance id (`_sourceInstanceId`, written on
+        // both the provider entry and its rules group) -> the instance that
+        // entry became. Identity instead of position: a provider with no rules
+        // no longer shifts the next provider's rules onto the wrong owner.
+        val restoredInstanceIdBySource = HashMap<String, String>()
+        // [SURGERY-W4 B01] How many rule groups the backup carries per
+        // (providerType, providerLabel). A legacy backup with several
+        // providers under one key is only position-safe when the group count
+        // matches the provider count.
+        val groupCountByKey = HashMap<String, Int>()
         // [FIX-R3-D / F-08] Instance ids Stage 1 already created or merged into
         // during THIS run. A backup legitimately carries two providers with the
         // same (providerType, label) — e.g. the user duplicated an OpenAI
@@ -1443,6 +1536,15 @@ object ConfigBackup {
                         // into is off the table as a merge target for the REST
                         // of this document.
                         claimedInstanceIds.add(instId)
+                        // [SURGERY-W4 B01] Stable identity for THIS backup
+                        // entry. The rules section annotates its groups with the
+                        // SOURCE instance id, so Stage 1.5 can pair a group to
+                        // the provider it actually came from — even when the
+                        // provider before it carried no rules at all.
+                        val sourceInstanceId = obj.optString("_sourceInstanceId", "")
+                        if (sourceInstanceId.isNotEmpty()) {
+                            restoredInstanceIdBySource[sourceInstanceId] = instId
+                        }
                         // [da1031-A] Key by the BACKUP's original label, not the
                         // possibly auto-renamed one: Stage 1.5 looks rules up by
                         // the (providerType, providerLabel) pair the rules export
@@ -1484,6 +1586,14 @@ object ConfigBackup {
         // restore, and the pre-restore snapshot is the rollback safety net.
         val thinkingRules = root.optJSONArray("thinkingRules")
         if (thinkingRules != null) {
+            // Count the groups per key FIRST: the legacy policy below compares
+            // the total group count with the number of restored providers, and a
+            // count taken while iterating would only see the groups seen so far.
+            for (i in 0 until thinkingRules.length()) {
+                val g = thinkingRules.optJSONObject(i) ?: continue
+                val key = g.optString("providerType", "") + "\u0000" + g.optString("providerLabel", "")
+                groupCountByKey[key] = (groupCountByKey[key] ?: 0) + 1
+            }
             for (i in 0 until thinkingRules.length()) {
                 val group = thinkingRules.optJSONObject(i) ?: continue
                 val type = group.optString("providerType", "")
@@ -1494,22 +1604,55 @@ object ConfigBackup {
                 // key from the arrival-order list; the single slot (the LAST
                 // instance that took the key) is the fallback for a payload that
                 // carries more groups than providers.
+                // [SURGERY-W4 B01] Identity first, position second:
+                //  - New backups annotate each group with `_sourceInstanceId`,
+                //    so it maps through Stage 1's source→restored map.
+                //  - Old backups have only (type, label). That pair is unique
+                //    in the normal case and the arrival-order queue still
+                //    resolves duplicates. When an old backup is AMBIGUOUS (the
+                //    same pair was restored more than once) the sparse array
+                //    gives no way to say which group belonged to which
+                //    provider — guessing by array index is exactly the
+                //    data-loss bug this task exists to stop, so refuse and
+                //    report instead of silently writing rules to the wrong
+                //    provider.
+                val sourceInstanceId = group.optString("_sourceInstanceId", "")
                 val pendingForThisKey = idsByProviderKey["$type\u0000$label"]
-                val nextInOrder = if (pendingForThisKey.isNullOrEmpty()) {
-                    null
-                } else {
-                    pendingForThisKey.removeAt(0)
+                val lastIdForKey = providerKeyToId["$type\u0000$label"]
+                val hadWaitingProvider = !pendingForThisKey.isNullOrEmpty()
+                // [SURGERY-W4 B01] The pairing decision lives in one pure
+                // function (ThinkingRuleGroupPairing) so both the identity path
+                // and the legacy/ambiguous policy are unit-testable.
+                val decision = ThinkingRuleGroupPairing.decide(
+                    sourceInstanceId = sourceInstanceId,
+                    restoredBySource = restoredInstanceIdBySource,
+                    idsForKey = pendingForThisKey?.toList() ?: emptyList(),
+                    lastIdForKey = lastIdForKey,
+                    groupCountForKey = groupCountByKey["$type\u0000$label"] ?: 0,
+                )
+                val instId = when (decision) {
+                    is ThinkingRuleGroupPairing.Decision.Owner -> decision.instanceId
+                    is ThinkingRuleGroupPairing.Decision.Refused -> {
+                        skipped.add(ThinkingRuleGroupPairing.refusalNote(label, decision.reason))
+                        continue
+                    }
                 }
-                val instId = nextInOrder ?: providerKeyToId["$type\u0000$label"]
-                if (instId == null) {
-                    skipped.add("thinking rules for \"$label\" (provider not restored)")
-                    continue
-                }
-                if (nextInOrder == null && pendingForThisKey != null) {
-                    skipped.add(
-                        "thinking rules for \"$label\": more rule groups than restored " +
-                            "providers for this key, applied to its last instance"
-                    )
+                // Legacy path only: the arrival-order queue is consumed so a
+                // backup with several groups for one key still maps them in
+                // order. With a source id the queue is NOT consumed (identity
+                // decides, so a sparse section cannot shift later groups).
+                if (sourceInstanceId.isEmpty()) {
+                    if (hadWaitingProvider) {
+                        pendingForThisKey?.removeAt(0)
+                    } else {
+                        // More rule groups than restored providers for this key:
+                        // the extra group went to the last instance — say so
+                        // instead of leaving it implicit.
+                        skipped.add(
+                            "thinking rules for \"$label\": more rule groups than restored " +
+                                "providers for this key, applied to its last instance"
+                        )
+                    }
                 }
                 try {
                     thinkingRulesImported += providerRepo.restoreThinkingRules(instId, rules)
@@ -2243,6 +2386,19 @@ object ConfigBackup {
             fatal = t.message ?: "import failed"
             Log.e(TAG, "import FATAL — partial restore left on disk: ${t.message}", t)
         }
+        // [SURGERY-W4 B05] Do not release the owner / announce "restored" while
+        // this batch's Provider+Group snapshots are still queued on the persist
+        // executor. A failed write is surfaced as a skipped note (the DB/mirror
+        // are stale until the next save; the in-memory state did change).
+        if (!persistence.await()) {
+            skipped.add(
+                "providers/groups: at least one configuration write failed to persist; " +
+                    "reload after fixing storage before relying on this restore"
+            )
+        }
+        // [SURGERY-W4 B02] A rule id owned by another provider was re-minted
+        // during the restore — say so instead of silently changing identity.
+        skipped.addAll(providerRepo.drainRestoreIdentityNotes())
         return ImportResult(
             fieldsApplied = applied,
             providersImported = providersImported,

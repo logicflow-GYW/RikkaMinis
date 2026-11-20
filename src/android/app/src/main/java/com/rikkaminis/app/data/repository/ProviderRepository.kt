@@ -317,6 +317,49 @@ class ProviderRepository(private val context: Context) {
         }
 
     /**
+     * [SURGERY-W4 B05] Completion barrier for a restore batch.
+     *
+     * [saveConfig] stays fire-and-forget for ordinary UI edits (the 50–160 ms
+     * disk span must not move onto the click thread), but a restore caller has
+     * to know whether the Provider/Group writes it just applied actually
+     * landed before it reports success or lets the owner go. [beginPersistence]
+     * opens a batch; [ConfigPersistenceBarrier.await] waits for the LAST queued
+     * snapshot (the single-thread executor is FIFO, so that covers every job
+     * submitted before the call) and reports the batch's persisted status.
+     *
+     * Scope: this proves "the snapshots queued by this batch finished", NOT
+     * cross-database atomicity. A failure in an EARLIER batch that has not
+     * drained yet is also caught by the same FIFO wait.
+     */
+    private val persistFailures = java.util.concurrent.atomic.AtomicLong(0)
+    @Volatile
+    private var latestPersistJob: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    inner class ConfigPersistenceBarrier internal constructor(
+        private val failuresAtStart: Long,
+    ) {
+        /**
+         * Suspend until every Provider snapshot queued so far has been written.
+         * Returns false when any write in/under this batch failed — the caller
+         * must surface that instead of reporting the restore as complete.
+         */
+        suspend fun await(): Boolean {
+            // FIFO executor: the newest queued job finishing means every job
+            // submitted before it has finished too.
+            latestPersistJob?.await()
+            return persistFailures.get() == failuresAtStart
+        }
+
+        /** The failure count observed when this batch began (for diagnostics). */
+        fun failuresAtStart(): Long = failuresAtStart
+
+    }
+
+    /** Begin a restore batch whose completion [ConfigPersistenceBarrier.await] can observe. */
+    fun beginPersistenceBatch(): ConfigPersistenceBarrier =
+        ConfigPersistenceBarrier(persistFailures.get())
+
+    /**
      * [fix/p1028-provider-corrupt-row] `provider_model_entries.id` values the
      * last DB load could not decode, and which the in-memory [ProviderConfig]
      * therefore does not contain. Kept here so every save can hand them to
@@ -833,10 +876,13 @@ class ProviderRepository(private val context: Context) {
                 revision = config.revision + 1,
             )
             _config.value = published
+            val job = kotlinx.coroutines.CompletableDeferred<Unit>()
+            latestPersistJob = job
             persistExecutor.execute {
                 try {
                     runBlocking { persistToDbAndMirror(published) }
                 } catch (e: Exception) {
+                    persistFailures.incrementAndGet()
                     // In-memory state is already emitted; the next successful
                     // save resyncs mirror + DB (same contract as the old
                     // catch path — fire-and-forget callers never see this).
@@ -845,6 +891,8 @@ class ProviderRepository(private val context: Context) {
                         "[ProviderStore] async persist failed; DB+mirror stale until next save: ${e.message}",
                         e,
                     )
+                } finally {
+                    job.complete(Unit)
                 }
             }
         }
@@ -1323,39 +1371,29 @@ class ProviderRepository(private val context: Context) {
      * list (position 0) — a rule overriding a built-in is useless below it; existing
      * rules shift down. A non-null [id] updates in place, preserving position.
      * Returns the rule id.
+     *
+     * [SURGERY-W4 B04] Rule-set mutations (save / delete / reorder / restore)
+     * are read-modify-replace over one owner's list. Two of them interleaved
+     * at the DAO level (read A, read B, write A, write B) both "succeed" and
+     * the second silently restores the first one's stale snapshot.
+     *
+     * The atomicity therefore lives in the DAO: [ProviderConfigDao.replaceThinkingRules]
+     * reads the owner's rules, applies the mutation and replaces the set in ONE
+     * Room transaction. A repository-level lock cannot do this — a suspend call
+     * may not sit inside a `synchronized` block — and the publish of the
+     * resolver cache STILL happens after the committed write.
      */
     fun saveThinkingRule(instanceId: String, rule: ThinkingRule, id: String? = null): String = runBlocking {
         val ruleId = id ?: java.util.UUID.randomUUID().toString()
-        // [T-thinking-rules-single-query] Persisted rows are reused for the
-        // resolver cache (republish takes nullable rows — on failure it
-        // falls back to a fresh DB query so the cache never holds stale data).
         var persistedRules: List<ThinkingRule>? = null
-        // [audit-0909 T4-H1] These DAO writes used to be bare. A provider.db
-        // that failed to open (e.g. a migration abort on API ≤ 33 — see
-        // ProviderDatabase.MIGRATION_9_10) threw an uncaught SQLiteException
-        // straight into the settings editor. Mirror the read paths above
-        // (runCatching) but log loudly instead of silently dropping.
         runCatching {
-            val existing = providerDao.loadThinkingRules(instanceId).toMutableList()
-            val idx = existing.indexOfFirst { it.id == ruleId }
-            if (idx >= 0) {
-                // Update in place at its current sort_order.
-                existing[idx] = ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, existing[idx].sortOrder)
-            } else {
-                // New rule at the top; everything else shifts down.
-                existing.add(0, ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0))
-            }
-            val renumbered = existing.mapIndexed { i, e -> e.copy(sortOrder = i) }
-            providerDao.replaceThinkingRules(instanceId, renumbered)
-            // [fix/dv23-a1 A-01] Assigned ONLY AFTER the DAO write returned.
-            // Before, this assignment sat in front of replaceThinkingRules: a
-            // write that threw (disk full / SQLite lock / IO error) left
-            // persistedRules non-null, so republishThinkingCache took the
-            // "persisted" fast path and published rules that never reached
-            // provider.db into ThinkingRuleResolver + bumped
-            // customRulesRevision. Null ⇒ the no-arg overload re-reads the
-            // DB, so the cache can only ever hold disk truth.
-            persistedRules = renumbered.map { ThinkingRuleCoding.toRule(it) }
+            val written = providerDao.replaceThinkingRules(
+                instanceId,
+                com.rikkaminis.app.data.db.ThinkingRuleMutation.Upsert(
+                    ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0),
+                ),
+            )
+            persistedRules = written.map { ThinkingRuleCoding.toRule(it) }
         }.onFailure { e ->
             android.util.Log.e("ProviderRepo", "[audit-0909] saveThinkingRule persistence failed ($instanceId/$ruleId)", e)
         }
@@ -1364,19 +1402,13 @@ class ProviderRepository(private val context: Context) {
     }
 
     fun deleteThinkingRule(instanceId: String, id: String) = runBlocking {
-        // [audit-0909 T4-H1] same bare-DAO hardening as saveThinkingRule.
         var persistedRules: List<ThinkingRule>? = null
         runCatching {
-            providerDao.deleteThinkingRule(id)
-            // Renumber survivors so sort_order stays dense.
-            val survivors = providerDao.loadThinkingRules(instanceId)
-                .sortedBy { it.sortOrder }
-                .mapIndexed { i, e -> e.copy(sortOrder = i) }
-            providerDao.replaceThinkingRules(instanceId, survivors)
-            // [fix/dv23-a1 A-01] assigned only after the DAO write returned —
-            // see the note in saveThinkingRule. A failed write leaves
-            // persistedRules null ⇒ the cache is re-read from provider.db.
-            persistedRules = survivors.map { ThinkingRuleCoding.toRule(it) }
+            val written = providerDao.replaceThinkingRules(
+                instanceId,
+                com.rikkaminis.app.data.db.ThinkingRuleMutation.Delete(id),
+            )
+            persistedRules = written.map { ThinkingRuleCoding.toRule(it) }
         }.onFailure { e ->
             android.util.Log.e("ProviderRepo", "[audit-0909] deleteThinkingRule persistence failed ($instanceId/$id)", e)
         }
@@ -1385,18 +1417,13 @@ class ProviderRepository(private val context: Context) {
 
     /** Reorder an instance's custom rules to match [orderedIds] (a permutation). */
     fun reorderThinkingRules(instanceId: String, orderedIds: List<String>) = runBlocking {
-        // [audit-0909 T4-H1] same bare-DAO hardening as saveThinkingRule.
         var persistedRules: List<ThinkingRule>? = null
         runCatching {
-            val byId = providerDao.loadThinkingRules(instanceId).associateBy { it.id }
-            val reordered = orderedIds.mapNotNull { byId[it] }
-                .mapIndexed { i, e -> e.copy(sortOrder = i) }
-            // Keep any id the caller omitted (defensive against a partial list) appended.
-            val omitted = byId.values.filter { it.id !in orderedIds }.map { it }
-            providerDao.replaceThinkingRules(instanceId, reordered + omitted)
-            // [fix/dv23-a1 A-01] assigned only after the DAO write returned —
-            // see the note in saveThinkingRule.
-            persistedRules = (reordered + omitted).map { ThinkingRuleCoding.toRule(it) }
+            val written = providerDao.replaceThinkingRules(
+                instanceId,
+                com.rikkaminis.app.data.db.ThinkingRuleMutation.Reorder(orderedIds),
+            )
+            persistedRules = written.map { ThinkingRuleCoding.toRule(it) }
         }.onFailure { e ->
             android.util.Log.e("ProviderRepo", "[audit-0909] reorderThinkingRules persistence failed ($instanceId)", e)
         }
@@ -1465,26 +1492,39 @@ class ProviderRepository(private val context: Context) {
             )
         }
         if (entities.isEmpty()) return@runBlocking 0
-        // [fix/dv22-a1 §1042-A-01] Same bare-DAO hardening as the nine
-        // sibling functions above ([audit-0909 T4-H1]): a provider.db that
-        // failed to open threw here straight into the backup importer.
-        // Failure is logged and reported as 0 rules restored — the truth:
-        // no rows landed. The republish below only runs on success, so the
-        // resolver cache keeps matching what is actually on disk (on
-        // failure the DB still holds the pre-restore rows).
-        val persisted = runCatching {
+        synchronized(restoreIdentityNotes) { restoreIdentityNotes.clear() }
+        // [SURGERY-W4 B02/B04] One transaction over the WHOLE rule table decides
+        // id ownership: an id already owned by a different live provider is
+        // re-minted, never REPLACE-moved onto this restore target. The same lock
+        // as save/delete/reorder keeps a concurrent UI edit from handing this
+        // restore a half-applied snapshot.
+        val persistedRows = runCatching {
             providerDao.replaceThinkingRules(instanceId, entities)
         }.onFailure { e ->
             android.util.Log.e(
                 "ProviderRepo",
                 "[ProviderStore] restoreThinkingRules persistence failed " +
-                    "($instanceId, ${entities.size} rules) — reporting 0 restored: ${e.message}",
+                    "($instanceId, ${entities.size} rules) \u2014 reporting 0 restored: ${e.message}",
                 e,
             )
-        }.isSuccess
-        if (!persisted) return@runBlocking 0
+        }.getOrNull() ?: return@runBlocking 0
+        for (i in persistedRows.indices) {
+            if (persistedRows[i].id != entities[i].id) {
+                restoreIdentityNotes.add("thinking rules \"$instanceId\": a rule id was owned by another provider; restored under a new id")
+            }
+        }
         republishThinkingCache(instanceId)
-        entities.size
+        persistedRows.size
+    }
+
+    /** [SURGERY-W4 B02] Identity notes from the most recent rule restore. */
+    private val restoreIdentityNotes = java.util.Collections.synchronizedList(ArrayList<String>())
+
+    /** Drain notes produced by [restoreThinkingRules] (id re-minted because another owner held it). */
+    fun drainRestoreIdentityNotes(): List<String> = synchronized(restoreIdentityNotes) {
+        val out = restoreIdentityNotes.toList()
+        restoreIdentityNotes.clear()
+        out
     }
 
     /**
