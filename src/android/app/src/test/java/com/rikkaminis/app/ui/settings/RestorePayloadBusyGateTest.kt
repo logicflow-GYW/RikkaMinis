@@ -48,7 +48,7 @@ class RestorePayloadBusyGateTest {
         )
         assertTrue(
             "the claim helper must set the shared operationBusy gate",
-            braced(code, code.indexOf("val claimRestorePayload")).contains("operationBusy = true"),
+            braced(code, code.indexOf("val claimRestorePayload")).contains("val token = backupTaskOwner.claim()"),
         )
     }
 
@@ -97,7 +97,7 @@ class RestorePayloadBusyGateTest {
     @Test
     fun saflImportClaimsBeforeTheDecode() {
         assertClaimsBeforePayload(
-            "restoreWithSnapshot(String(bytes, Charsets.UTF_8), true)",
+            "val bytes = withContext(Dispatchers.IO)",
             "the SAF import must hand the payload over with the claim it took first",
         )
     }
@@ -113,7 +113,7 @@ class RestorePayloadBusyGateTest {
         )
         assertTrue(
             "the recheck must be skipped for a pre-claimed restore",
-            code.contains("if (!preClaimed && operationBusy)"),
+            code.contains("val token = backupTaskOwner.transfer(preClaimed)"),
         )
     }
 
@@ -125,7 +125,7 @@ class RestorePayloadBusyGateTest {
         for (c in calls) {
             assertTrue(
                 "every payload restore must hand off the claim, got: $c",
-                c.endsWith(", true)"),
+                c.endsWith(", token)"),
             )
         }
     }
@@ -134,7 +134,7 @@ class RestorePayloadBusyGateTest {
     fun aFailedPayloadReleasesTheGate() {
         assertTrue(
             "an un-handoff'd payload must lower the gate again (releaseRestorePayload)",
-            code.contains("releaseRestorePayload()"),
+            code.contains("releaseRestorePayload(token)"),
         )
     }
 
