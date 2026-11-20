@@ -1,7 +1,7 @@
 ---
 name: github-ops
 description: Trigger on ANY Git/GitHub op, workflow, or 'how to use GitHub' — clone/branch/commit/push/pull/merge/rebase/tag, issues/labels/releases/actions/PRs/forks, CI, delete/restore. Not pure browsing.
-version: 1.0.3
+version: 1.0.4
 ---
 ## Objectives
 
@@ -67,7 +67,7 @@ Codify GitHub/Git "basic operations" and common collaboration workflows into:
 |10| `gh-actions-list --repo <owner/repo>` | List workflows |
 |11| `gh-actions-dispatch --repo <owner/repo> --workflow <id_or_file> [--ref <branch>] [--inputs <json>]` | Manually trigger workflow_dispatch |
 |12| `gh-actions-runs [--repo <owner/repo>] (--workflow <file> --branch <b> [--expect <sha>] [--status <s>] \| --run-id <id> [--expect <sha>]) [--summary]` | **Default per-job readout**: shows each job's `status`/`conclusion` + failed step + running step. This is what "did the scan gate fail while others still run" actually means. Add `--summary` to list only recent runs (no job details, 1 API call each). |
-|13| `gh_ci_wait.sh --repo <owner/repo> --workflow <id_or_file> --ref <branch> [--expect <sha>] [--timeout <s>] [--poll <s>] [--no-dispatch] [--fail-fast]` | **Dispatch (optional) + watch per-job + verify head_sha + final verdict in one shot.** Prints the same per-job snapshot every poll; `--fail-fast` exits the moment any parallel job turns red, without waiting for its siblings. `--job-detail` is accepted for backwards compatibility but job detail is now the default. |
+|13| `gh_ci_wait.sh --repo <owner/repo> --workflow <id_or_file> --ref <branch> [--expect <sha>] [--timeout <s>] [--poll <s>] [--no-dispatch] [--fail-fast]` | **Dispatch (optional) + watch per-job + verify head_sha + final verdict in one shot.** Prints the same per-job snapshot every poll; `--fail-fast` exits on the first hard-failed job, without waiting for siblings. Default still waits for the overall workflow verdict. `--job-detail` is accepted for backwards compatibility but job detail is now the default. |
 
 ## CI waits: use gh_ci_wait.sh (not hand-rolled loops)
 

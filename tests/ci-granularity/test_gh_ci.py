@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).with_name("scripts")))
+sys.path.insert(0, str(Path(__file__).parents[2] / "src/android/app/src/main/assets/skills/github-ops/scripts"))
 import gh_ci
 
 

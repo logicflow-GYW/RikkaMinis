@@ -10,7 +10,7 @@ import tempfile
 import time
 from urllib.parse import urlencode
 
-HARD_FAILURE = {"failure", "timed_out", "action_required", "stale", "startup_failure"}
+HARD_FAILURE = {"failure", "timed_out", "action_required", "stale", "startup_failure", "cancelled"}
 ACTIVE = {"queued", "in_progress", "requested", "waiting", "pending"}
 
 
@@ -38,29 +38,33 @@ def curl_json(method, url, payload=None):
         "max-time = 30",
         f'request = "{method}"',
     ])
-    # A separate temporary body prevents the request payload and curl's
-    # configuration from competing for stdin. The final command uses
-    # --upload-file, so the temporary file's contents remain the POST body.
-    body_fd, body_path = tempfile.mkstemp(prefix="minis-gh-body.")
-    with os.fdopen(body_fd, "w") as body:
-        body.write(json.dumps(payload))
-    config += '\nheader = "Content-Type: application/json"\n'
-    # curl reads the request body from a separate temporary file; stdin carries
-    # only the configuration so neither argv nor stdin can expose the bearer token.
-    cmd = ["curl", "-sS", "--config", "-", "--upload-file", body_path, url]
-    result = subprocess.run(cmd, input=config, capture_output=True, text=True)
-    try:
+    if method == "GET":
+        cmd = ["curl", "-sS", "--config", "-", url]
+        result = subprocess.run(cmd, input=config, capture_output=True, text=True)
         if result.returncode:
             first_line = (result.stderr.splitlines() or [f"curl exit {result.returncode}"])[-1]
             raise QueryError(first_line.replace(token, "[REDACTED]"))
-        if method == "POST" and not result.stdout.strip():
-            return {}
         try:
             return json.loads(result.stdout)
         except (json.JSONDecodeError, ValueError) as exc:
             raise QueryError(f"响应不是合法 JSON: {exc}") from None
+    body_fd, body_path = tempfile.mkstemp(prefix="minis-gh-body.")
+    try:
+        with os.fdopen(body_fd, "w") as body:
+            body.write(json.dumps(payload))
+        config += '\nheader = "Content-Type: application/json"\n'
+        # A separate body file avoids letting curl's stdin config consume the POST body.
+        cmd = ["curl", "-sS", "--config", "-", "--upload-file", body_path, url]
+        result = subprocess.run(cmd, input=config, capture_output=True, text=True)
+        if result.returncode:
+            first_line = (result.stderr.splitlines() or [f"curl exit {result.returncode}"])[-1]
+            raise QueryError(first_line.replace(token, "[REDACTED]"))
+        return json.loads(result.stdout) if result.stdout.strip() else {}
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise QueryError(f"响应不是合法 JSON: {exc}") from None
     finally:
-        os.unlink(body_path)
+        if os.path.exists(body_path):
+            os.unlink(body_path)
 
 
 def api(repo, path, params=None, payload=None):
