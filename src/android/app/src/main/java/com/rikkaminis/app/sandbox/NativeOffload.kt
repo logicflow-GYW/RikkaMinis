@@ -3,6 +3,9 @@ package com.rikkaminis.app.sandbox
 import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.os.Process
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
 import android.util.Log
 import com.rikkaminis.app.BuildConfig
 import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
@@ -99,6 +102,165 @@ data class NativeOffloadResult(
     val output: String,
 )
 
+/**
+ * Request-scoped cancellation/ownership token.
+ *
+ * One instance belongs to one accepted socket, from accept until its response
+ * is written or the socket is closed. [isCancelled] is the single fact every
+ * participant reads: the socket watcher flips it on EOF, server shutdown flips
+ * it for pending work, and a handler's inner dispatch (model-use) polls it.
+ * Doing the work and reporting the result are therefore governed by the same
+ * token instead of two separate "stopped the client" paths.
+ *
+ * The accepted context is the single queue/handler/response ownership token.
+ * Cancellation wins atomically against work admission and response admission.
+ * Listeners only signal an inner dispatch or close this request's own socket;
+ * they never wait for handler completion on the monitor thread.
+ */
+class OffloadCallContext internal constructor(
+    val requestId: Long,
+    val ownerSessionId: String?,
+) {
+    private val state = java.util.concurrent.atomic.AtomicInteger(ACCEPTED)
+    private val listenerLock = Any()
+    private val listeners = mutableListOf<() -> Unit>()
+
+    val isCancelled: Boolean get() = state.get() == CANCELLED
+
+    fun addCancellationListener(listener: () -> Unit) {
+        val notify = synchronized(listenerLock) {
+            when (state.get()) {
+                CANCELLED -> true
+                ACCEPTED, RUNNING, HANDLER_DONE, RESPONDING -> { listeners.add(listener); false }
+                else -> false
+            }
+        }
+        if (notify) runCatching { listener() }
+    }
+
+    fun removeCancellationListener(listener: () -> Unit) {
+        synchronized(listenerLock) { listeners.remove(listener) }
+    }
+
+    /** HUP cancels queued work or a result whose path has not been sent. */
+    fun cancel(): Boolean = transitionToCancelled(includeResponse = false)
+
+    /** Shutdown additionally interrupts a still-blocked socket response write. */
+    fun cancelForShutdown(): Boolean = transitionToCancelled(includeResponse = true)
+
+    private fun transitionToCancelled(includeResponse: Boolean): Boolean {
+        val notify = synchronized(listenerLock) {
+            while (true) {
+                val old = state.get()
+                if (old == CANCELLED || old == COMPLETED || (old == RESPONDING && !includeResponse)) return false
+                if (state.compareAndSet(old, CANCELLED)) break
+            }
+            val snapshot = listeners.toList()
+            listeners.clear()
+            snapshot
+        }
+        notify.forEach { listener -> runCatching { listener() } }
+        return true
+    }
+
+    /** Worker atomically claims a queued request before decoding/dispatching it. */
+    fun beginWork(): Boolean = state.compareAndSet(ACCEPTED, RUNNING)
+
+    fun handlerFinished(): Boolean = state.compareAndSet(RUNNING, HANDLER_DONE)
+
+    /** Response send has an explicit owner; normal client close after reply is not cancellation. */
+    fun beginResponse(): Boolean = state.compareAndSet(HANDLER_DONE, RESPONDING)
+
+    fun complete(): Boolean {
+        val completed = state.compareAndSet(RESPONDING, COMPLETED)
+        if (completed) synchronized(listenerLock) { listeners.clear() }
+        return completed
+    }
+
+    private companion object {
+        const val ACCEPTED = 0
+        const val RUNNING = 1
+        const val CANCELLED = 2
+        const val HANDLER_DONE = 3
+        const val RESPONDING = 4
+        const val COMPLETED = 5
+    }
+}
+
+/**
+ * Socket-level abandonment watcher: ONE daemon thread for the whole server
+ * generation, never one thread per connection.
+ *
+ * The request frame is the only thing [NativeOffloadServer.handleClient]
+ * reads; this watcher must not consume a byte or it would steal the frame it
+ * is watching. It only asks "is this descriptor still connected" through the
+ * injected [probe] (Android glue in [socketPeerAlive]), and a disconnected
+ * request is cancelled through its [OffloadCallContext]. A live, simply-slow
+ * handler has no hang-up, so nothing is cancelled merely for taking long.
+ *
+ * The monitor holds the public descriptor obtained from LocalSocket; tests can
+ * supply a synthetic descriptor and injected probe without creating a socket.
+ */
+internal class OffloadSocketMonitor(
+    private val pollMillis: Long = OFFLOAD_SOCKET_POLL_MS,
+    private val probe: (java.io.FileDescriptor) -> Boolean = ::socketPeerAlive,
+) {
+    private class Entry(val fd: java.io.FileDescriptor?, val context: OffloadCallContext)
+    private val entries = java.util.concurrent.CopyOnWriteArrayList<Entry>()
+    private val lock = Any()
+    private var thread: Thread? = null
+    @Volatile private var running = false
+    fun start() {
+        synchronized(lock) {
+            if (running) return
+            running = true
+            thread = thread(name="native-offload-monitor", isDaemon=true) {
+                while (running) {
+                    for (entry in entries.toList()) {
+                        if (!running) break
+                        val peerAlive = entry.fd?.let(probe) ?: true
+                        if (!peerAlive && entry.context.cancel()) Log.i(TAG,"socket EOF/error -> request ${entry.context.requestId} cancelled")
+                    }
+                    try { Thread.sleep(pollMillis) } catch (_: InterruptedException) { return@thread }
+                }
+            }
+        }
+    }
+    fun stop() {
+        val (worker, watched) = synchronized(lock) {
+            running=false; val current=thread; thread=null; val copy=entries.toList(); entries.clear(); current to copy
+        }
+        watched.forEach { it.context.cancelForShutdown() }; worker?.interrupt(); worker?.join(500)
+    }
+    fun watch(fd: java.io.FileDescriptor?, context: OffloadCallContext) {
+        val added = synchronized(lock) {
+            if (!running) false else { entries.add(Entry(fd, context)); true }
+        }
+        if (!added) context.cancelForShutdown()
+    }
+    fun forget(context: OffloadCallContext) { synchronized(lock) { entries.removeAll { it.context === context } } }
+    internal fun watchedCount(): Int = entries.size
+    companion object { private const val TAG="OffloadSocketMonitor" }
+}
+
+internal fun socketPeerAlive(fd: java.io.FileDescriptor): Boolean {
+    if (!fd.valid()) return false
+    return try {
+        val pfd=StructPollfd().apply { this.fd=fd; events=(OsConstants.POLLHUP or OsConstants.POLLERR).toShort() }
+        val count=Os.poll(arrayOf(pfd),0)
+        val terminal=OsConstants.POLLHUP or OsConstants.POLLERR or OsConstants.POLLNVAL
+        !isTerminalSocketPollResult(count,pfd.revents,terminal)
+    } catch (_: android.system.ErrnoException) { fd.valid() } catch (_: Exception) { true }
+}
+internal fun localSocketDescriptor(socket: LocalSocket): java.io.FileDescriptor? = runCatching { socket.fileDescriptor?.takeIf { it.valid() } }.getOrNull()
+internal fun isTerminalSocketPollResult(count:Int,revents:Short,terminalMask:Int):Boolean = count>0 && (revents.toInt() and terminalMask)!=0
+
+internal const val OFFLOAD_SOCKET_POLL_MS = 250L
+/** A worker that cannot read its bounded frame within this window is abandoned. */
+internal const val OFFLOAD_FRAME_READ_TIMEOUT_MS = 10_000
+/** Granularity at which a running handler observes its own cancellation. */
+internal const val OFFLOAD_HANDLER_CANCEL_POLL_MS = 200L
+
 fun interface NativeOffloadHandler {
     fun handle(request: NativeOffloadRequest): NativeOffloadResult
 }
@@ -135,6 +297,20 @@ object NativeOffloadServer {
     private val counter = AtomicLong(0)
     private var serverSocket: LocalServerSocket? = null
     private var acceptThread: Thread? = null
+
+    // One watcher for the whole server generation. It holds no per-connection
+    // thread; see [OffloadSocketMonitor].
+    private var socketMonitor: OffloadSocketMonitor? = null
+    // The current generation's pool, kept only so [stop] can drain queued
+    // sockets. Null before start() and after stop().
+    private var workerPool: BoundedWorkerPool<LocalSocket>? = null
+
+    // Requests accepted but not yet claimed by a worker. Bounded by the same
+    // permit count as the worker pool: a queued LocalSocket is cheap, but the
+    // queue is not free — without a bound a misbehaving guest can park an
+    // unbounded number of fds (and their contexts) in the main process.
+    @Volatile
+    private var pendingQueueLimit = MAX_CONCURRENT_WORKERS
 
     // [T-offload-tmpfile-leak] Response tmpfiles written to rootfs /tmp,
     // tracked by a bounded ledger ([OffloadTmpFileLedger], audit-RC7) instead
@@ -189,6 +365,7 @@ object NativeOffloadServer {
         // aligned with the shell coordinator + session slot cap.
         val workers = com.rikkaminis.app.data.ConcurrencyPrefs.maxConcurrentSessions()
         workerConcurrency = java.util.concurrent.Semaphore(workers, true)
+        pendingQueueLimit = workers
 
         // [meta1028-B04 F-11] Close the two ledger gaps that survive a knob
         // change and a process death:
@@ -227,6 +404,12 @@ object NativeOffloadServer {
                 "previous process holding the namespace?",
             )
         serverSocket = s
+        // One watcher for the whole generation: it detects a guest that hung up
+        // before/while its request was queued, and cancels that request's
+        // context instead of waiting out the worker slot.
+        val monitor = OffloadSocketMonitor()
+        socketMonitor = monitor
+        monitor.start()
         // [ISSUE-12b] Thread creation for this generation is owned by the pool:
         // it spawns a worker only while a permit is free (non-blocking
         // tryAcquire) and the worker returns the permit when it drains empty —
@@ -238,16 +421,19 @@ object NativeOffloadServer {
             spawnThread = { name, body -> thread(name = name, isDaemon = true) { body() } },
             handler = { client, queueMs ->
                 try {
-                    handleClient(client, queueMs)
+                    handleClient(client, queueMs, File(rootfsDir, "tmp"))
                 } catch (e: Exception) {
                     Log.w(TAG, "worker error: ${e.message}", e)
                 } finally {
+                    contextBySocket.remove(client)?.let { it.cancelForShutdown(); monitor.forget(it) }
                     try { client.close() } catch (_: Exception) {}
                 }
             },
         )
+        pool.setMaxPending(pendingQueueLimit)
+        workerPool = pool
         acceptThread = thread(name = "native-offload-accept", isDaemon = true) {
-            runAcceptLoop(s, pool)
+            runAcceptLoop(s, pool, monitor)
         }
         Log.i(TAG, "listening on abstract socket '$SOCKET_NAME' " +
             "handlers=${handlers.keys.sorted()} tmpDir=${rootfsTmpDir?.absolutePath}")
@@ -272,13 +458,26 @@ object NativeOffloadServer {
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
         acceptThread = null
+        val pool = workerPool
+        workerPool = null
+        val monitor = socketMonitor
+        socketMonitor = null
+        pool?.drainPending { client -> contextBySocket.remove(client)?.cancelForShutdown(); runCatching { client.close() } }
+        monitor?.stop()
         // [audit-RC7] Server is going away — no guest will ever cat the
         // tracked tmpfiles again. Reclaim them now instead of leaking RAM
         // until the next rootfs reset.
         tmpLedger.clearAll()
     }
 
-    private fun runAcceptLoop(s: LocalServerSocket, pool: BoundedWorkerPool<LocalSocket>) {
+    /** Diagnostics/tests: how many accepted clients are waiting for a worker. */
+    internal fun pendingRequestCount(): Int = workerPool?.pendingCount ?: 0
+
+    private fun runAcceptLoop(
+        s: LocalServerSocket,
+        pool: BoundedWorkerPool<LocalSocket>,
+        monitor: OffloadSocketMonitor,
+    ) {
         while (true) {
             val client = try {
                 s.accept()
@@ -295,13 +494,49 @@ object NativeOffloadServer {
             // thread costs a ~1 MB native stack, a queued socket entry
             // effectively nothing. Arrival order, the concurrency cap and the
             // back-pressure measurement are unchanged.
-            pool.submit(client)
+            //
+            // One context per accepted socket, created BEFORE the frame exists
+            // (the worker reads it) so a hang-up cannot arrive without an
+            // owner. Its id is the accept counter; the owner session comes from
+            // the decoded frame.
+            val context = OffloadCallContext(counter.incrementAndGet(), ownerSessionId = null)
+            val descriptor = localSocketDescriptor(client)
+            // Each generation owns only its accepted sockets. Stop/HUP closes
+            // this socket, interrupting a queued/frame-reading request as well.
+            context.addCancellationListener { runCatching { client.close() } }
+            contextBySocket[client] = context
+            monitor.watch(descriptor, context)
+            // Queueing is bounded too: past the pool's pending limit the client
+            // is closed immediately instead of becoming another parked fd.
+            if (!pool.submit(client)) {
+                Log.w(TAG, "offload queue full — rejecting client")
+                monitor.forget(context)
+                contextBySocket.remove(client)
+                context.cancel()
+                runCatching { client.close() }
+            }
         }
     }
 
-    private fun handleClient(client: LocalSocket, queueMs: Long) {
+    private val contextBySocket = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<LocalSocket, OffloadCallContext>(),
+    )
+
+    private fun handleClient(client: LocalSocket, queueMs: Long, responseDir: File) {
+        val context = contextBySocket[client] ?: return
+        // Claim the accepted request before decoding. A queued HUP or server
+        // stop wins the same state transition and makes this worker skip it.
+        if (!context.beginWork()) {
+            Log.i(TAG, "request ${context.requestId} abandoned in queue — skipped")
+            return
+        }
         val input = DataInputStream(client.inputStream)
         val output = DataOutputStream(client.outputStream)
+        // Bound the frame read: a peer that connects and then sends nothing
+        // must not occupy a worker permit forever. The frame is small and the
+        // guest writes it in one go, so this is a stall detector, not a
+        // throughput limit.
+        runCatching { client.soTimeout = OFFLOAD_FRAME_READ_TIMEOUT_MS }
 
         // Bounded frame decode: every byte read (header, argv, env, cwd)
         // is charged against MAX_REQUEST_BYTES and aborts the request the
@@ -337,8 +572,19 @@ object NativeOffloadServer {
         val cwd = input.readLEString(budget)
 
         val name = argv.firstOrNull().orEmpty().substringAfterLast('/')
-        Log.d(TAG, "recv pid=$pid name='$name' argc=$argc argv=$argv cwd=$cwd envc=$envc")
+        // [C-01] The old line printed the FULL argv and cwd before the handler
+        // — or the permission gate — ran. `minis-config set providers.<id>.apiKey
+        // <value>` takes the secret as a positional argument, so that line wrote
+        // it to logcat → the AppLogger daily log → the share sheet, defeating the
+        // business layer's own write-only redaction. Keep the low-sensitivity
+        // shape (handler, arg count, sizes) and nothing that can carry a value.
+        Log.d(
+            TAG,
+            "recv pid=$pid name='$name' argc=$argc envc=$envc " +
+                "argvChars=${argv.sumOf { it.length }} cwdChars=${cwd.length}",
+        )
 
+        if (context.isCancelled) return
         val t0 = System.nanoTime()
         val handler = handlers[name]
 
@@ -353,6 +599,7 @@ object NativeOffloadServer {
             NativeOffloadResult(exitCode = 127, output = "native_offload: no handler for '$name'\n")
         } else {
             try {
+                NativeOffloadServer.requestContext.set(context)
                 handler.handle(NativeOffloadRequest(
                     pid = pid,
                     argv = argv,
@@ -363,7 +610,13 @@ object NativeOffloadServer {
             } catch (e: Exception) {
                 Log.w(TAG, "handler '$name' threw: ${e.message}", e)
                 NativeOffloadResult(exitCode = 1, output = "native_offload: ${e.message}\n")
+            } finally {
+                NativeOffloadServer.requestContext.remove()
             }
+        }
+        if (!context.handlerFinished()) {
+            Log.i(TAG, "request ${context.requestId} cancelled before response delivery")
+            return
         }
         val rssAfterKb = OffloadRssProbe.rssKb()
         if (handler != null) {
@@ -380,8 +633,7 @@ object NativeOffloadServer {
         }
         val elapsedMs = (System.nanoTime() - t0) / 1_000_000
 
-        // [audit-cs0913] Back-pressure report. The worker pool blocks on
-        // Semaphore.acquire() with no timeout, so a saturated pool (or one long
+        // [audit-cs0913] Back-pressure report. A saturated pool (or one long
         // handler) silently stalls later tool calls until the shell-level stall
         // watchdog kills them 180s later — indistinguishable from a broken tool.
         // Recorded, NOT enforced: measure first, then decide on a guardrail and
@@ -401,7 +653,7 @@ object NativeOffloadServer {
         // failure is logged with its cause instead of vanishing as EOF.
         val delivered = deliverResponseFile(
             result.output,
-            rootfsTmpDir ?: throw IllegalStateException("server not started"),
+            responseDir,
             pid,
             counter.incrementAndGet(),
             tmpLedger,
@@ -410,15 +662,43 @@ object NativeOffloadServer {
             throw IllegalStateException("response delivery failed: ${cause.message}", cause)
         }
         val tmpGuest = delivered.guestPath
-
+        // A disconnect can win while the handler is returning or while its
+        // result file is being written. Claim the send state atomically; if the
+        // peer already closed, reclaim the file and do not advertise its path.
+        if (!context.beginResponse()) {
+            tmpLedger.reclaim(File(delivered.hostPath))
+            return
+        }
         Log.d(TAG, "reply name='$name' exit=${result.exitCode} outBytes=${result.output.length} " +
             "tmpGuest=$tmpGuest elapsed=${elapsedMs}ms")
+        try {
+            output.writeLEInt(MAGIC_RSP)
+            output.writeLEInt(result.exitCode)
+            output.writeLEString(tmpGuest)
+            output.flush()
+        } catch (t: Throwable) {
+            tmpLedger.reclaim(File(delivered.hostPath))
+            throw t
+        }
+        // The native client closes only after the full frame is flushed. This
+        // makes normal HUP inert without racing the write with the state commit.
+        if (!context.complete()) tmpLedger.reclaim(File(delivered.hostPath))
 
-        output.writeLEInt(MAGIC_RSP)
-        output.writeLEInt(result.exitCode)
-        output.writeLEString(tmpGuest)
-        output.flush()
     }
+
+    /**
+     * The context of the request whose handler is running on this thread.
+     *
+     * Set around the single [NativeOffloadHandler.handle] call and read by a
+     * handler that wants to bind an inner await (model-use's dispatch) to the
+     * same cancellation source. It is a ThreadLocal rather than a parameter on
+     * [NativeOffloadRequest] on purpose: changing that constructor would put
+     * every handler file in this branch's blast radius, and the ones that do
+     * not opt in must not get a new cancellation interface invented for them.
+     */
+    private val requestContext: ThreadLocal<OffloadCallContext> = ThreadLocal()
+
+    internal fun currentCallContext(): OffloadCallContext? = requestContext.get()
 
     // ---- little-endian helpers ----
 
@@ -554,16 +834,50 @@ internal class BoundedWorkerPool<T>(
 
     private val lock = Any()
     private val pending = java.util.ArrayDeque<Entry<T>>()
+    private var closed = false
+
+    /**
+     * Number of entries that may wait for a worker. `null` keeps the original
+     * unbounded FIFO (the default used by existing unit fixtures); the
+     * production server passes its permit count so a burst cannot park an
+     * unbounded number of accepted sockets.
+     */
+    private var maxPending: Int? = null
+
+    fun setMaxPending(limit: Int?) {
+        synchronized(lock) { maxPending = limit }
+    }
 
     /** FIFO enqueue; spawns a worker only when a permit is free. */
-    fun submit(item: T) {
+    fun submit(item: T): Boolean {
         val spawn = synchronized(lock) {
+            if (closed) return@synchronized null
+            val limit = maxPending
+            if (limit != null && pending.size >= limit) return@synchronized null
             pending.addLast(Entry(item, System.nanoTime()))
             permits.tryAcquire()
-        }
+        } ?: return false
         if (spawn) {
             spawnThread(threadName) { drain() }
         }
+        return true
+    }
+
+    /**
+     * Drop every queued entry and hand its removal to [onDropped].
+     *
+     * [stop] uses this to close queued sockets instead of leaving their fds
+     * parked until a future start() generation drains them; a queued item has
+     * not begun work, so dropping it never interrupts a handler.
+     */
+    fun drainPending(onDropped: (T) -> Unit) {
+        val dropped = synchronized(lock) {
+            closed = true
+            val copy = pending.map { it.item }
+            pending.clear()
+            copy
+        }
+        dropped.forEach { runCatching { onDropped(it) } }
     }
 
     private fun drain() {

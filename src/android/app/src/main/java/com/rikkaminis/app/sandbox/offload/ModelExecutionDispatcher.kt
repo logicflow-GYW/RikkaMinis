@@ -3,6 +3,7 @@ package com.rikkaminis.app.sandbox.offload
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.rikkaminis.app.sandbox.NativeOffloadServer
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.LLMMessage
@@ -335,6 +336,7 @@ object ModelExecutionDispatcher {
      * fall back to the in-process path.
      */
     suspend fun dispatch(context: Context, requestJson: String, apiKey: String = ""): String? {
+        val offloadContext = NativeOffloadServer.currentCallContext()
         // [fix/audit-s3l2] A TIMEOUT is never retried: dispatchOnce also returns
         // null on timeout — where the worker may STILL be executing the
         // provider call (slow image/long-text generation). Re-dispatching then
@@ -367,6 +369,7 @@ object ModelExecutionDispatcher {
                         "re-dispatching in ${delayMs}ms",
                 )
             },
+            shouldContinue = { offloadContext?.isCancelled != true },
         )
         return outcome.resultJson
     }

@@ -1,5 +1,8 @@
 package com.rikkaminis.app.sandbox.offload
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
@@ -163,7 +166,10 @@ internal suspend fun dispatchWithRetry(
     attempt: suspend () -> ModelDispatchAttempt,
     waitBeforeRetry: suspend (Long) -> Unit = { if (it > 0L) delay(it) },
     onRetry: (attemptsMade: Int, errorCode: String?, delayMs: Long) -> Unit = { _, _, _ -> },
+    shouldContinue: () -> Boolean = { true },
 ): ModelDispatchAttempt {
+    currentCoroutineContext().ensureActive()
+    if (!shouldContinue()) throw CancellationException("model dispatch cancelled before first attempt")
     var attemptsMade = 1
     // Confirmed worker deaths so far (this first attempt included when it died).
     // Separate from [attemptsMade]: see [ModelExecutionRetryPolicy.decide].
@@ -184,6 +190,8 @@ internal suspend fun dispatchWithRetry(
             is ModelExecutionRetryPolicy.Decision.RetryAfter -> {
                 onRetry(attemptsMade, code, d.delayMs)
                 waitBeforeRetry(d.delayMs)
+                currentCoroutineContext().ensureActive()
+                if (!shouldContinue()) throw CancellationException("model dispatch cancelled before retry")
                 outcome = attempt()
                 attemptsMade++
                 // Count the death of the attempt we just made — otherwise the

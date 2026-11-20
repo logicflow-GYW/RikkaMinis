@@ -9,7 +9,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -94,9 +93,9 @@ data class RootfsHealth(
  */
 class RootfsManager private constructor(private val context: Context) {
 
-    // Singleton manager: one lock covers install, reset AND in-place repair.
-    // Locked implementations call one another without trying to reacquire it.
     private val lifecycleMutex = Mutex()
+    /** All public lifecycle routes, including the first reset, share this mutex. */
+    private val bootTransaction = BootTransaction(lifecycleMutex)
 
     val rootfsDir: File = File(context.filesDir, "alpine-rootfs")
     val prootBinary: File = File(context.applicationInfo.nativeLibraryDir, "libproot.so")
@@ -107,6 +106,22 @@ class RootfsManager private constructor(private val context: Context) {
     val isInstalled: Boolean
         get() = rootfsDir.exists() && archFile.exists() &&
                 archFile.readText().trim() == ARCH
+
+    /** Holds lifecycleMutex across the entire boot, including all dispatcher hops. */
+    internal suspend fun <T> runBootTransaction(block: suspend (BootTransaction.Permit) -> T): T =
+        bootTransaction.runExclusive(block)
+
+    /** Boot passes its explicit, non-ambient mutex permit; never reacquire it. */
+    internal suspend fun installIfNeededWithinBootTransaction(permit: BootTransaction.Permit) {
+        bootTransaction.requirePermit(permit)
+        installIfNeededLocked(false)
+    }
+
+    /** Stage 3 stays on autoRepairLocked -> resetLocked -> installIfNeededLocked. */
+    internal suspend fun autoRepairWithinBootTransaction(permit: BootTransaction.Permit): Boolean {
+        bootTransaction.requirePermit(permit)
+        return autoRepairLocked()
+    }
 
     /**
      * Observable install progress. UI layers (OnboardingScreen,
@@ -125,11 +140,22 @@ class RootfsManager private constructor(private val context: Context) {
      * Progress is published to [installState] (Preparing → Extracting(f) →
      * Finalizing → Installed / Failed).
      */
-    suspend fun installIfNeeded(forceReinstall: Boolean = false): Unit = lifecycleMutex.withLock {
+    suspend fun installIfNeeded(forceReinstall: Boolean = false): Unit = bootTransaction.runInstall { _ ->
         installIfNeededLocked(forceReinstall)
     }
 
-    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    /**
+     * The auto-repair path is also a destructive operation: its Stage 3
+     * falls back to a full reset, and its Stage 1/2 run `apk` inside the very
+     * tree a concurrent boot would be unpacking. It therefore takes the same
+     * boot transaction as [installIfNeeded] — otherwise a repair could race a
+     * boot exactly like the reset did.
+     */
+    suspend fun autoRepair(): Boolean = bootTransaction.runExclusive { _ ->
+        autoRepairLocked()
+    }
+
+    /** Internal implementation; caller holds lifecycleMutex. */
     internal suspend fun installIfNeededLocked(forceReinstall: Boolean): Unit = withContext(Dispatchers.IO) {
         if (!forceReinstall && isInstalled) {
             Log.d(TAG, "Rootfs already installed at $rootfsDir")
@@ -420,10 +446,6 @@ class RootfsManager private constructor(private val context: Context) {
      *
      * Returns true when the rootfs is healthy after the attempt.
      */
-    suspend fun autoRepair(): Boolean = lifecycleMutex.withLock {
-        autoRepairLocked()
-    }
-
     /** Internal implementation; caller MUST hold lifecycleMutex. */
     internal suspend fun autoRepairLocked(): Boolean = withContext(Dispatchers.IO) {
         val initial = verifyIntegrity()
@@ -542,7 +564,7 @@ class RootfsManager private constructor(private val context: Context) {
      * the restore (the apk database is ignored — restoring it would discard
      * user package records).
      */
-    suspend fun restoreCriticalFromAssets(): Boolean = lifecycleMutex.withLock {
+    suspend fun restoreCriticalFromAssets(): Boolean = bootTransaction.runExclusive { _ ->
         restoreCriticalFromAssetsLocked()
     }
 
@@ -1035,11 +1057,11 @@ class RootfsManager private constructor(private val context: Context) {
     /** Called after a rootfs wipe and reinstall completed. */
     var afterRootfsReinstalled: (suspend () -> Unit)? = null
 
-    suspend fun reset(): Unit = lifecycleMutex.withLock {
+    suspend fun reset(): Unit = bootTransaction.runReset { _ ->
         resetLocked()
     }
 
-    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    /** Stage 3 invokes this locked implementation directly; it must not re-take lifecycleMutex. */
     internal suspend fun resetLocked(): Unit = withContext(Dispatchers.IO) {
         // [Refactor-apk-world] Snapshot user packages BEFORE the wipe — the
         // boot path also dumps, but a manual reset can happen mid-session

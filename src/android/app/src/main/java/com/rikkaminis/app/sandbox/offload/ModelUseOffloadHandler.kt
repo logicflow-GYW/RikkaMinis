@@ -12,9 +12,15 @@ import com.rikkaminis.app.debug.LLMRequestLog
 import com.rikkaminis.app.sandbox.NativeOffloadHandler
 import com.rikkaminis.app.sandbox.NativeOffloadRequest
 import com.rikkaminis.app.sandbox.NativeOffloadResult
+import com.rikkaminis.app.sandbox.NativeOffloadServer
 import com.rikkaminis.app.sandbox.PRootKernel
 import com.rikkaminis.app.sandbox.hasDotDotSegment
 import com.rikkaminis.app.sandbox.normalizeLinuxPath
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -54,6 +60,15 @@ class ModelUseOffloadHandler(
                 "run" -> cmdRun(args, request)
                 else -> NativeOffloadResult(2, "minis-model-use: unknown subcommand '$sub'\n$HELP")
             }
+        } catch (e: CancellationException) {
+            // The transport said "the caller is gone"; answer the cancelled
+            // shape instead of a generic failure, and never retry it.
+            Log.i(TAG, "model-use cancelled by the offload transport")
+            NativeOffloadResult(
+                1,
+                JSONObject().put("error", "model_use_cancelled")
+                    .put("message", "The offload request was cancelled.").toString() + "\n",
+            )
         } catch (e: Throwable) {
             Log.w(TAG, "uncaught: ${e.message}", e)
             NativeOffloadResult(
@@ -61,6 +76,61 @@ class ModelUseOffloadHandler(
                 JSONObject().put("error", "model_use_failed")
                     .put("message", e.message ?: "unknown").toString() + "\n",
             )
+        }
+    }
+
+    /**
+     * Awaits the remote dispatch with the SOCKET's cancellation source.
+     *
+     * Before this, `minis-model-use run` was a `runBlocking` that could not be
+     * stopped: the client could disconnect (or the app could stop the shell)
+     * and the provider request kept running until its own timeout, holding a
+     * worker permit the whole time. The worker's existing `finally` already
+     * writes `cancel` and runs the bounded settle when its coroutine is
+     * cancelled, so cancelling here tears down the :modelservice worker
+     * instead of only abandoning the client.
+     *
+     * Non-cancellable providers (a blocking ContentProvider/native call inside
+     * the worker) are still bounded by that worker's own timeout; this method
+     * only guarantees the CALLER stops waiting and the cancellation request is
+     * delivered, not that an arbitrary native call can be killed.
+     */
+    private fun dispatchCancellable(dispatchCall: suspend () -> String?): String? {
+        val callContext = NativeOffloadServer.currentCallContext()
+        if (callContext == null) {
+            return runBlocking { dispatchCall() }
+        }
+        if (callContext.isCancelled) throw CancellationException("offload request cancelled")
+        return runBlocking {
+            // A supervisor job keeps the dispatch's cancellation from tearing
+            // down this runBlocking (the handler must still answer, just with
+            // the "cancelled" JSON below). The dispatch is a real child, so
+            // cancelling it runs dispatchOnce's `finally` — that is what writes
+            // `cancel` to :modelservice and settles its run dir.
+            val supervisor = kotlinx.coroutines.SupervisorJob()
+            val dispatch = kotlinx.coroutines.CoroutineScope(coroutineContext + supervisor)
+                .async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if (callContext.isCancelled) throw CancellationException("offload request cancelled")
+                    dispatchCall()
+                }
+            val listener = { dispatch.cancel(CancellationException("offload request cancelled")) }
+            callContext.addCancellationListener(listener)
+            try {
+                // Registration precedes start: cancellation cannot miss the
+                // child while it is queued to begin on runBlocking's event loop.
+                dispatch.start()
+                withContext(NonCancellable) {
+                    try {
+                        dispatch.await()
+                    } catch (c: CancellationException) {
+                        throw c
+                    }
+                }
+            } finally {
+                callContext.removeCancellationListener(listener)
+                supervisor.cancel()
+            }
         }
     }
 
@@ -437,7 +507,9 @@ class ModelUseOffloadHandler(
                 outputExt = outputExt,
                 passthroughRequest = ModelUseProtocol.buildPassthroughWireRequest(ptSpec, ptBody),
             )
-            val ptRemote = runBlocking { ModelExecutionDispatcher.dispatch(context, ptRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id)) }
+            val ptRemote = dispatchCancellable {
+                ModelExecutionDispatcher.dispatch(context, ptRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id))
+            }
             return shapeRawPassthrough(
                 spec = ptSpec,
                 warnings = ptWarnings,
@@ -516,7 +588,9 @@ class ModelUseOffloadHandler(
             inputJson = inputText,
             outputExt = outputExt,
         )
-        val remoteResult = runBlocking { ModelExecutionDispatcher.dispatch(context, remoteRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id)) }
+        val remoteResult = dispatchCancellable {
+            ModelExecutionDispatcher.dispatch(context, remoteRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id))
+        }
         if (remoteResult != null) {
             val remote = try { JSONObject(remoteResult) } catch (e: Throwable) { null }
             if (remote != null) {
