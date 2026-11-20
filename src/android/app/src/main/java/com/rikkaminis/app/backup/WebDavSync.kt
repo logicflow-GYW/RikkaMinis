@@ -185,15 +185,16 @@ object WebDavSync {
         // no real last-modified — are never victims.
         val stale = BackupRotation.rotationVictims(
             items = listAutoBackupEntries(config, client).filter { it.subdir == AUTO_SUBDIR },
-            name = { it.item.displayName },
+            name = { it.item.resourceName },
             key = { autoBackupStampMillis(it.item) },
             keep = keep,
-            protect = { protectName != null && it.item.displayName == protectName },
+            protect = { protectName != null && it.item.resourceName == protectName },
         )
         var deleted = 0
         for (entry in stale) {
-            val path = "${entry.subdir}/${entry.item.displayName}"
-            if (runCatching { dav.delete(path) }.isSuccess) deleted++
+            if (runCatching {
+                dav.delete(dav.resourcePathFromHref(entry.item.href, expectedSubdir = entry.subdir))
+            }.isSuccess) deleted++
         }
         return deleted
     }
@@ -224,9 +225,9 @@ object WebDavSync {
                         !it.displayName.startsWith(AUTO_BACKUP_PREFIX) &&
                         it.displayName.endsWith(BACKUP_SUFFIX)
                 }
-                .map { resourceToBackupItem(it) }
+                .map { resourceToBackupItem(it, dav) }
                 .let { items ->
-                    BackupRotation.newestFirst(items, name = { it.displayName }, key = { manualBackupStampMillis(it) })
+                    BackupRotation.newestFirst(items, name = { it.resourceName }, key = { manualBackupStampMillis(it) })
                 }
         } catch (e: WebDavException) {
             // [T-backup-list-nomkcol] A read operation must not create the
@@ -261,7 +262,7 @@ object WebDavSync {
                         it.displayName.startsWith(AUTO_BACKUP_PREFIX) &&
                         it.displayName.endsWith(BACKUP_SUFFIX)
                 }
-                .map { AutoBackupEntry(resourceToBackupItem(it), AUTO_SUBDIR) }
+                .map { AutoBackupEntry(resourceToBackupItem(it, dav, AUTO_SUBDIR), AUTO_SUBDIR) }
         } catch (e: WebDavException) {
             if (e.statusCode == 404) emptyList() else throw e
         }
@@ -272,7 +273,7 @@ object WebDavSync {
                         it.displayName.startsWith(AUTO_BACKUP_PREFIX) &&
                         it.displayName.endsWith(BACKUP_SUFFIX)
                 }
-                .map { AutoBackupEntry(resourceToBackupItem(it), "") }
+                .map { AutoBackupEntry(resourceToBackupItem(it, dav), "") }
         } catch (e: WebDavException) {
             if (e.statusCode == 404) emptyList() else throw e
         }
@@ -283,7 +284,7 @@ object WebDavSync {
         // arbitrary copy, not the oldest one.
         return BackupRotation.newestFirst(
             inAuto + legacyInRoot,
-            name = { it.item.displayName },
+            name = { it.item.resourceName },
             key = { autoBackupStampMillis(it.item) },
         )
     }
@@ -292,17 +293,17 @@ object WebDavSync {
      *  `getlastmodified`. [resourceToBackupItem] maps a missing property to
      *  `Instant.EPOCH`, so `<= 0` means "the server did not tell us" — null,
      *  not "the beginning of time". */
-    private fun autoBackupStampMillis(item: WebDavBackupItem): Long? =
-        BackupRotation.stampMillis(item.displayName, AUTO_BACKUP_PREFIX)
+    private fun autoBackupStampMillis(item: WebDavBackupItem): Long? {
+        val resourceName = item.resourceName
+        return BackupRotation.stampMillis(resourceName, AUTO_BACKUP_PREFIX)
             ?: item.lastModified.toEpochMilli().takeIf { it > 0L }
+    }
 
-    /** [FIX-1028 / B-12] Same key for the manual list (display order only:
-     *  manual copies are never pruned). Accepts both the pre-rename and the
-     *  current prefix, plus the minute-precision name [ConfigBackup.suggestedFileName]
-     *  gives a local export. */
+    /** [FIX-1028 / B-12] Same key for manual listing order, derived from the
+     *  validated resource leaf rather than the server's display label. */
     private fun manualBackupStampMillis(item: WebDavBackupItem): Long? =
-        BackupRotation.stampMillis(item.displayName, BACKUP_PREFIX)
-            ?: BackupRotation.stampMillis(item.displayName, LEGACY_BACKUP_PREFIX)
+        BackupRotation.stampMillis(item.resourceName, BACKUP_PREFIX)
+            ?: BackupRotation.stampMillis(item.resourceName, LEGACY_BACKUP_PREFIX)
             ?: item.lastModified.toEpochMilli().takeIf { it > 0L }
 
     /** Download a remote automatic backup (see [listAutoBackupEntries]) and
@@ -313,20 +314,25 @@ object WebDavSync {
         entry: AutoBackupEntry,
         client: OkHttpClient = WebDavClient.defaultClient(),
     ): String {
-        val path = if (entry.subdir.isBlank()) entry.item.displayName
-        else "${entry.subdir}/${entry.item.displayName}"
         return WebDavClient(config, client)
-            .get(path)
+            .getHref(entry.item.href, expectedSubdir = entry.subdir)
             .toString(Charsets.UTF_8)
     }
 
-    private fun resourceToBackupItem(it: WebDavResourceInfo): WebDavBackupItem =
-        WebDavBackupItem(
+    private fun resourceToBackupItem(
+        it: WebDavResourceInfo,
+        dav: WebDavClient,
+        expectedSubdir: String = "",
+    ): WebDavBackupItem {
+        val resourcePath = dav.resourcePathFromHref(it.href, expectedSubdir)
+        return WebDavBackupItem(
             href = it.href,
             displayName = it.displayName,
             size = it.contentLength,
             lastModified = it.lastModified ?: Instant.EPOCH,
+            resourceName = resourcePath.substringAfterLast('/'),
         )
+    }
 
     /** Download a remote backup and return its JSON document, ready for
      *  [ConfigBackup.import]. */
@@ -335,9 +341,9 @@ object WebDavSync {
         item: WebDavBackupItem,
         client: OkHttpClient = WebDavClient.defaultClient(),
     ): String {
-        return WebDavClient(config, client)
-            .get(item.displayName)
-            .toString(Charsets.UTF_8)
+        val bytes = WebDavClient(config, client)
+            .getHref(item.href)
+        return String(bytes, Charsets.UTF_8)
     }
 
     /** Remove a remote backup. [subdir] scopes the delete to a child folder
@@ -349,7 +355,8 @@ object WebDavSync {
         client: OkHttpClient = WebDavClient.defaultClient(),
         subdir: String = "",
     ) {
-        val path = if (subdir.isBlank()) item.displayName else "$subdir/${item.displayName}"
-        WebDavClient(config, client).delete(path)
+        val dav = WebDavClient(config, client)
+        val expectedSubdir = if (subdir.isBlank()) "" else subdir
+        dav.delete(dav.resourcePathFromHref(item.href, expectedSubdir))
     }
 }

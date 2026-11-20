@@ -8,8 +8,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.ResponseBody
+import org.json.JSONObject
+import org.json.JSONTokener
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.StringReader
 import java.net.URLDecoder
@@ -71,6 +75,11 @@ class WebDavNonDavResponse(
     val statusCode: Int,
 ) : IOException(message)
 
+/** A GET body exceeded the configured byte budget and was closed unread. */
+class WebDavDownloadTooLargeException(
+    val maxBytes: Long,
+) : IOException("WebDAV download exceeds the maximum of $maxBytes bytes")
+
 /** One entry returned by a PROPFIND. */
 data class WebDavResourceInfo(
     val href: String,
@@ -86,6 +95,8 @@ data class WebDavBackupItem(
     val displayName: String,
     val size: Long,
     val lastModified: Instant,
+    /** Validated leaf of the actual href resource; never a UI label. */
+    val resourceName: String = displayName,
 )
 
 /**
@@ -102,8 +113,33 @@ data class WebDavBackupItem(
 class WebDavClient(
     private val config: WebDavConfig,
     private val client: OkHttpClient,
+    private val maxDownloadBytes: Long = MAX_DOWNLOAD_BYTES,
 ) {
     companion object {
+        /** Keep remote restore bytes within the importer's 64 MiB ceiling. */
+        const val MAX_DOWNLOAD_BYTES = 64L * 1024 * 1024
+
+        /** Current backup wire format marker; kept here for side-effect-free preflight. */
+        private const val BACKUP_FORMAT = "openminis.config.backup"
+        private const val MAX_BACKUP_FORMAT_VERSION = 1
+
+        fun isSupportedBackupPayload(bytes: ByteArray, maxBytes: Long = MAX_DOWNLOAD_BYTES): Boolean {
+            if (maxBytes < 0L || bytes.size.toLong() > maxBytes) return false
+            return try {
+                val tokener = JSONTokener(String(bytes, Charsets.UTF_8))
+                val root = tokener.nextValue() as? JSONObject ?: return false
+                if (root.optString("format") != BACKUP_FORMAT ||
+                    root.optInt("version", 0) > MAX_BACKUP_FORMAT_VERSION
+                ) return false
+                while (tokener.more()) {
+                    if (!tokener.next().isWhitespace()) return false
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
         private val PROPFIND_BODY = """<?xml version="1.0" encoding="utf-8"?>
             |<D:propfind xmlns:D="DAV:">
             |  <D:prop>
@@ -209,6 +245,92 @@ class WebDavClient(
         }
         return builder.build()
     }
+
+    /**
+     * Convert a PROPFIND href to the relative resource path under the expected
+     * configured collection (and optional child directory). The href is data,
+     * never an authority: reject foreign origins, traversal, encoded separators,
+     * and paths outside the exact collection before constructing any request.
+     */
+    internal fun resourcePathFromHref(href: String, expectedSubdir: String = ""): String {
+        val collection = buildUrl(expectedSubdir)
+        val expectedSegments = collection.pathSegments.filter { it.isNotEmpty() }
+        val uri = try {
+            java.net.URI(href)
+        } catch (e: Exception) {
+            throw WebDavException("Refusing an invalid WebDAV href", -1)
+        }
+        if (uri.rawQuery != null || uri.rawFragment != null || uri.rawUserInfo != null) {
+            throw WebDavException("Refusing a WebDAV href with query, fragment, or user info", -1)
+        }
+
+        val rawPath = if (uri.isAbsolute) {
+            val target = href.toHttpUrlOrNull()
+                ?: throw WebDavException("Refusing a non-HTTP WebDAV href", -1)
+            val origin = buildUrl()
+            if (uri.isOpaque || uri.rawAuthority == null ||
+                !target.scheme.equals(origin.scheme, ignoreCase = true) ||
+                !target.host.equals(origin.host, ignoreCase = true) || target.port != origin.port
+            ) {
+                throw WebDavException("Refusing a foreign-origin WebDAV href", -1)
+            }
+            uri.rawPath?.takeIf { it.isNotEmpty() }
+                ?: throw WebDavException("Refusing a WebDAV href without a path", -1)
+        } else {
+            if (uri.rawAuthority != null) {
+                throw WebDavException("Refusing a network-path WebDAV href", -1)
+            }
+            val relative = uri.rawPath?.takeIf { it.isNotEmpty() }
+                ?: throw WebDavException("Refusing a WebDAV href without a path", -1)
+            if (relative.startsWith('/')) relative
+            else collection.encodedPath.trimEnd('/') + "/" + relative
+        }
+
+        val rawSegments = rawPath.removePrefix("/").split('/')
+        if (rawSegments.isEmpty() || rawSegments.any { it.isEmpty() }) {
+            throw WebDavException("Refusing an empty WebDAV href path segment", -1)
+        }
+        val decodedSegments = rawSegments.map { raw ->
+            val decoded = decodeHrefPathSegment(raw)
+            if (isUnsafeHrefSegment(decoded)) {
+                throw WebDavException("Refusing an unsafe WebDAV href path segment", -1)
+            }
+            rejectNestedUnsafeHrefEncoding(decoded)
+            decoded
+        }
+        if (decodedSegments.size != expectedSegments.size + 1 ||
+            decodedSegments.take(expectedSegments.size) != expectedSegments
+        ) {
+            throw WebDavException("Refusing a WebDAV href outside the expected collection", -1)
+        }
+        val leaf = decodedSegments.last()
+        return if (expectedSubdir.isBlank()) leaf else "$expectedSubdir/$leaf"
+    }
+
+    private fun rejectNestedUnsafeHrefEncoding(firstDecoded: String) {
+        var current = firstDecoded
+        repeat(8) {
+            if (!Regex("%[0-9a-fA-F]{2}").containsMatchIn(current)) return
+            current = decodeHrefPathSegment(current)
+            if (isUnsafeHrefSegment(current)) {
+                throw WebDavException("Refusing a multiply-encoded unsafe WebDAV href segment", -1)
+            }
+        }
+        if (Regex("%[0-9a-fA-F]{2}").containsMatchIn(current)) {
+            throw WebDavException("Refusing a deeply encoded WebDAV href segment", -1)
+        }
+    }
+
+    private fun decodeHrefPathSegment(raw: String): String = try {
+        URLDecoder.decode(raw.replace("+", "%2B"), Charsets.UTF_8.name())
+    } catch (e: Exception) {
+        throw WebDavException("Refusing an invalid encoded WebDAV href segment", -1)
+    }
+
+    private fun isUnsafeHrefSegment(decoded: String): Boolean =
+        decoded == "." || decoded == ".." || decoded.contains('/') ||
+            decoded.contains('\\') || decoded.contains(':') ||
+            decoded.any { it.code < 0x20 || it.code == 0x7F }
 
     private fun Request.Builder.auth(): Request.Builder {
         if (config.username.isNotBlank()) {
@@ -362,15 +484,40 @@ class WebDavClient(
         }
     }
 
+    /** Convert a server href to a validated path, then stream a bounded GET. */
+    fun getHref(href: String, expectedSubdir: String = ""): ByteArray =
+        get(resourcePathFromHref(href, expectedSubdir))
+
+    private fun readDownloadBody(body: ResponseBody?): ByteArray {
+        if (maxDownloadBytes < 0L || maxDownloadBytes > Int.MAX_VALUE) {
+            throw IllegalArgumentException("maxDownloadBytes must be between 0 and ${Int.MAX_VALUE}")
+        }
+        if (body == null) return ByteArray(0)
+        val declared = body.contentLength()
+        if (declared > maxDownloadBytes) throw WebDavDownloadTooLargeException(maxDownloadBytes)
+        val out = ByteArrayOutputStream(minOf(declared.coerceAtLeast(0L), maxDownloadBytes).toInt())
+        val buffer = ByteArray(8 * 1024)
+        var total = 0L
+        val input = body.byteStream()
+        while (true) {
+            val remainingWithProbe = (maxDownloadBytes - total).coerceAtLeast(0L) + 1L
+            val requestBytes = minOf(buffer.size.toLong(), remainingWithProbe).toInt()
+            val read = input.read(buffer, 0, requestBytes)
+            if (read == -1) break
+            if (read == 0) continue
+            if (read.toLong() > maxDownloadBytes - total) {
+                throw WebDavDownloadTooLargeException(maxDownloadBytes)
+            }
+            out.write(buffer, 0, read)
+            total += read
+        }
+        return out.toByteArray()
+    }
+
     /**
-     * Download [path] as raw bytes. Callers feed this to
-     * [ConfigBackup.import], so the body is judged, not just the status:
-     * [fix/webdav-method-judgement] a captive portal answers GET with 200 +
-     * an HTML login page (redirects land there too), and the old code handed
-     * that page to the importer, which reported a misleading JSON parse
-     * error. An empty 200 body is refused as well — a real backup document
-     * is never zero bytes, so an empty answer means the server did not
-     * actually serve the file.
+     * Download [path] as raw bytes, enforcing the byte ceiling while consuming
+     * the stream. Content-Length is only an early-reject hint; the streaming
+     * counter also protects unknown/chunked bodies before returning a byte array.
      */
     fun get(path: String): ByteArray {
         val url = buildUrl(path)
@@ -380,7 +527,7 @@ class WebDavClient(
             if (!response.isSuccessful) {
                 throw WebDavException("Download failed (HTTP $code)", code)
             }
-            val bytes = response.body?.bytes() ?: ByteArray(0)
+            val bytes = readDownloadBody(response.body)
             if (bytes.isEmpty()) {
                 throw WebDavNonDavResponse(
                     "Download returned HTTP $code with an empty body — the " +
