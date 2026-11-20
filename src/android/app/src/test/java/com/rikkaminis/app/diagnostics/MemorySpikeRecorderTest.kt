@@ -213,6 +213,173 @@ class MemorySpikeRecorderTest {
     }
 
     @Test
+    fun `previewOf masks short password flag values`() {
+        assertEquals(
+            "tool --password *** --output result.txt",
+            MemorySpikeRecorder.previewOf("tool --password local-test-only --output result.txt"),
+        )
+    }
+
+    @Test
+    fun `previewOf masks short equals values and preserves flag names`() {
+        for (flag in listOf("--password", "--secret", "--token", "--api-key")) {
+            assertEquals("tool $flag=*** --ok", MemorySpikeRecorder.previewOf("tool $flag=x --ok"))
+            assertEquals("tool $flag *** --ok", MemorySpikeRecorder.previewOf("tool $flag x --ok"))
+        }
+    }
+
+    @Test
+    fun `previewOf masks single and double quoted multiword values`() {
+        assertEquals(
+            "tool --secret \"***\" --api-key='***' --out public",
+            MemorySpikeRecorder.previewOf("tool --secret \"two words\" --api-key='x' --out public"),
+        )
+        assertEquals(
+            "tool --password '***' --token=\"***\"",
+            MemorySpikeRecorder.previewOf("tool --password 'some words' --token=\"p q\""),
+        )
+    }
+
+    @Test
+    fun `previewOf recognizes credential aliases without case dependence`() {
+        for (flag in listOf(
+            "--PASSWORD", "--passwd", "--api_key", "--apikey", "--API-KEY",
+            "--access-token", "--access_token", "--refresh-token", "--client-secret",
+        )) {
+            assertEquals("tool $flag=***", MemorySpikeRecorder.previewOf("tool $flag=short"))
+        }
+    }
+
+    @Test
+    fun `previewOf masks quoted concatenation and escaped whitespace as one value`() {
+        for ((rawValue, expectedValue) in listOf(
+            "ab'c d'ef" to "***",
+            "a\\ b" to "***",
+            "\"a\\\" b\"" to "\"***\"",
+            "'a'\\''b'" to "'***'",
+        )) {
+            assertEquals(
+                "tool --secret $expectedValue --out public",
+                MemorySpikeRecorder.previewOf("tool --secret $rawValue --out public"),
+            )
+        }
+    }
+
+    @Test
+    fun `previewOf masks wrapped commands and newline separated values`() {
+        assertEquals(
+            "sh -c 'tool --password \"***\" --out public'",
+            MemorySpikeRecorder.previewOf("sh -c 'tool --password \"two words\" --out public'"),
+        )
+        assertEquals(
+            "tool --password  '***'  --token\t***",
+            MemorySpikeRecorder.previewOf("tool --password\r\n'local-only'\n --token\tx"),
+        )
+    }
+
+    @Test
+    fun `previewOf masks all repeated sensitive flags`() {
+        assertEquals(
+            "tool --password *** --password=*** --secret '***' --token *** --api-key=***",
+            MemorySpikeRecorder.previewOf(
+                "tool --password a --password=b --secret 'c d' --token e --api-key=f",
+            ),
+        )
+    }
+
+    @Test
+    fun `previewOf masks the complete value before a limit cuts through it`() {
+        val command = "tool --password local-test-only --out " + "x ".repeat(100)
+        assertEquals("tool --password *** --out…", MemorySpikeRecorder.previewOf(command, limit = 25))
+        assertEquals("tool --password *…", MemorySpikeRecorder.previewOf(command, limit = 17))
+    }
+
+    @Test
+    fun `previewOf keeps similar non credential flags and ordinary arguments`() {
+        val command = "tool --password-file /tmp/pw --tokenize text --token-count 3 " +
+            "--secretary q --api-key-file key.txt --client-secret-file client.txt"
+        assertEquals(command, MemorySpikeRecorder.previewOf(command, limit = 300))
+        assertEquals("echo x--password word", MemorySpikeRecorder.previewOf("echo x--password word"))
+        assertEquals("ls -la /tmp", MemorySpikeRecorder.previewOf("ls -la /tmp"))
+    }
+
+    @Test
+    fun `previewOf leaves shell operators and adjacent public commands intact`() {
+        assertEquals(
+            "tool --password ***;echo public|cat && tool --token=*** >out",
+            MemorySpikeRecorder.previewOf("tool --password x;echo public|cat && tool --token=y >out"),
+        )
+    }
+
+    @Test
+    fun `previewOf masks unterminated quoted values through the end`() {
+        assertEquals("tool --secret ***", MemorySpikeRecorder.previewOf("tool --secret 'two words"))
+        assertEquals("tool --token=***", MemorySpikeRecorder.previewOf("tool --token=\"two words"))
+    }
+
+    @Test
+    fun `previewOf keeps valueless flags without hiding the next sensitive flag`() {
+        assertEquals("tool --password", MemorySpikeRecorder.previewOf("tool --password"))
+        assertEquals("tool --password=", MemorySpikeRecorder.previewOf("tool --password="))
+        assertEquals(
+            "tool --password --token *** --out public",
+            MemorySpikeRecorder.previewOf("tool --password --token x --out public"),
+        )
+        assertEquals("tool --secret '***'", MemorySpikeRecorder.previewOf("tool --secret ''"))
+    }
+
+    @Test
+    fun `previewOf masks quoted flag shaped values and shell continuations`() {
+        assertEquals(
+            "tool --secret '***' --out public",
+            MemorySpikeRecorder.previewOf("tool --secret '--looks-like-a-flag' --out public"),
+        )
+        assertEquals(
+            "tool --password *** --out public",
+            MemorySpikeRecorder.previewOf("tool --password \\\n'local only' --out public"),
+        )
+    }
+
+    @Test
+    fun `previewOf handles long quoted input without regex recursion overflow`() {
+        assertEquals(
+            "tool --secret '***' --out public",
+            MemorySpikeRecorder.previewOf("tool --secret '" + "a b ".repeat(10_000) + "' --out public"),
+        )
+    }
+
+    @Test
+    fun `command start sample and end share the sanitized command context`() {
+        val written = mutableListOf<String>()
+        MemorySpikeRecorder.sink = { written.add(it) }
+        MemorySpikeRecorder.snapshotProvider = { snap(600L) }
+        MemorySpikeRecorder.onCommandStart("s", "LIGHT", "tool --password local-only")
+        assertEquals("tool --password ***", MemorySpikeRecorder.currentCommand()!!.preview)
+        assertTrue(MemorySpikeRecorder.sampleOnce(MemorySpikeRecorder.LoopState()))
+        MemorySpikeRecorder.onCommandEnd(durationMs = 3L, rssBeforeKb = 599L * 1024L)
+
+        assertEquals(3, written.size)
+        assertTrue(written[0].contains("[cmd-start]"))
+        assertTrue(written[2].contains("[cmd-end]"))
+        for (line in written) {
+            assertTrue(line.contains("tool --password ***"))
+            assertFalse(line.contains("local-only"))
+        }
+    }
+
+    @Test
+    fun `refusal event uses the same sanitized preview at its shorter limit`() {
+        val written = mutableListOf<String>()
+        MemorySpikeRecorder.sink = { written.add(it) }
+        val command = "tool --password 'local-only' --path " + "x ".repeat(100)
+        MemorySpikeRecorder.onEvent("reject-anon", ":: ${MemorySpikeRecorder.previewOf(command, 60)}")
+        assertEquals(1, written.size)
+        assertTrue(written.single().contains("[reject-anon]"))
+        assertTrue(written.single().contains("tool --password '***' --path"))
+        assertFalse(written.single().contains("local-only"))
+    }
+
+    @Test
     fun `formatSample carries rss delta, breakdown and command context`() {
         val line = MemorySpikeRecorder.formatSample(
             tsMs = 0L,

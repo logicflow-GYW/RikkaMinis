@@ -185,12 +185,26 @@ object MemorySpikeRecorder {
             "cfat_[A-Za-z0-9_\\-]{8,}|[A-Za-z0-9_\\-]{32,})",
     )
 
-    /** 命令预览：打码凭据 → 压平换行 → 截断，保证单行可 grep。 */
+    // One shell word is a concatenation of bare, quoted and backslash-escaped
+    // pieces. Possessive runs avoid recursive backtracking on large commands;
+    // an unterminated quote consumes the remaining input rather than leaking it.
+    // File-path flags (--password-file / --api-key-file) are deliberately kept.
+    private val SENSITIVE_ARGUMENT_VALUE = Regex(
+        """(?i)(?<![\w-])(--(?:password|passwd|secret|token|api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret))(=|\s+(?!--))((?:"(?:\\[\s\S]|[^"\\])*+(?:"|$)|'[^']*+(?:'|$)|\\[\s\S]|[^\s'"\\;|&<>]++)++)""",
+    )
+
+    /** 命令预览：参数值与长 token 先脱敏，再压平换行与截断，避免泄漏值的前半段。 */
     fun previewOf(command: String, limit: Int = 120): String {
-        val flat = SENSITIVE_RUN.replace(
-            command.replace('\n', ' ').replace('\r', ' ').trim(),
-            "***",
-        )
+        val argumentMasked = SENSITIVE_ARGUMENT_VALUE.replace(command) { match ->
+            val value = match.groupValues[3]
+            val quote = value.first()
+            val masked = if (
+                value.length >= 2 && (quote == '\'' || quote == '"') && value.last() == quote
+            ) "$quote***$quote" else "***"
+            match.groupValues[1] + match.groupValues[2] + masked
+        }
+        val flat = SENSITIVE_RUN.replace(argumentMasked, "***")
+            .replace('\n', ' ').replace('\r', ' ').trim()
         return if (flat.length <= limit) flat else flat.take(limit) + "…"
     }
 
