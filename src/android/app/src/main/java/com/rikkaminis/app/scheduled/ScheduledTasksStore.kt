@@ -422,10 +422,20 @@ object ScheduledTasksStore {
         )
     }
 
-    /** A run settled (or was reaped). Applies transitions and clears the marker. */
+    /**
+     * A run settled (or was reaped). Applies transitions and clears the marker.
+     *
+     * [A03 late settlement] [run] is the settling run's identity — the
+     * decision whether this document may be credited lives in the pure
+     * [ScheduledTaskTransitions.completeRun], which compares it with the
+     * `running` marker. A stale settle (task deleted / backup-restored /
+     * re-created with the same id, or a newer run of the same task holding the
+     * marker) comes back as the SAME document instance, so nothing is written
+     * and the caller's result carries `task = null`.
+     */
     suspend fun completeRun(
         context: Context,
-        taskId: String,
+        run: ScheduledRunRef,
         outcome: String,
         today: String,
     ): ScheduledTaskTransitions.Result = withContext(Dispatchers.IO) {
@@ -438,7 +448,35 @@ object ScheduledTasksStore {
                 AppLogger.warning(TAG, "settlement refused: scheduled-tasks.json is unreadable")
                 return@withLock ScheduledTaskTransitions.Result(current, null, fuseTripped = false)
             }
-            val result = ScheduledTaskTransitions.completeRun(current, taskId, outcome, today)
+            val result = ScheduledTaskTransitions.completeRun(current, run, outcome, today)
+            if (result.file !== current) writeLocked(context, result.file)
+            result
+        }
+    }
+
+    /**
+     * [A03] Settlement for a dispatch that never produced a run identity (the
+     * fire pass threw before `prepareSession` returned, so no `running` marker
+     * was ever written for it).
+     *
+     * The credit is allowed only while the document carries NO marker at all —
+     * see [ScheduledTaskTransitions.completeUnstartedRun]. Callers pass a
+     * failure outcome, so this can count one failure but can never fake a
+     * successful run.
+     */
+    suspend fun completeUnstartedRun(
+        context: Context,
+        taskId: String,
+        outcome: String,
+        today: String,
+    ): ScheduledTaskTransitions.Result = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val current = loadLocked(context)
+            if (unreadable) {
+                AppLogger.warning(TAG, "settlement refused: scheduled-tasks.json is unreadable")
+                return@withLock ScheduledTaskTransitions.Result(current, null, fuseTripped = false)
+            }
+            val result = ScheduledTaskTransitions.completeUnstartedRun(current, taskId, outcome, today)
             if (result.file !== current) writeLocked(context, result.file)
             result
         }
@@ -454,14 +492,20 @@ object ScheduledTasksStore {
      * DISABLE the task. Refuses while the file is unreadable (every other
      * read-modify-write does), which is fine: there is nothing to rewrite there.
      *
+     * [A03 late settlement] Scoped to [run]: only the marker this run
+     * wrote may be dropped, never one a newer run of the same task owns.
+     *
      * @return true when a matching marker was removed from the document.
      */
-    suspend fun clearRunningMarker(context: Context, taskId: String): Boolean =
+    suspend fun clearRunningMarker(
+        context: Context,
+        run: ScheduledRunRef,
+    ): Boolean =
         withContext(Dispatchers.IO) {
             lock.withLock {
                 val current = loadLocked(context)
                 if (unreadable) return@withLock false
-                val next = ScheduledTaskTransitions.clearRunningMarker(current, taskId)
+                val next = ScheduledTaskTransitions.clearRunningMarker(current, run)
                 if (next === current) return@withLock false
                 writeLocked(context, next)
             }

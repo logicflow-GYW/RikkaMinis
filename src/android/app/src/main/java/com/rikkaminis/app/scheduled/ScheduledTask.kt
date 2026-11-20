@@ -56,6 +56,30 @@ data class ScheduledRunMarker(
 )
 
 /**
+ * The identity of ONE scheduled run: which task it ran, and the session it
+ * ran in.
+ *
+ * [A03 late settlement] A task id alone does not identify a run: the same task
+ * id can be deleted, restored from a backup, re-created and dispatched again
+ * while the previous run is still in flight, and every one of those documents
+ * uses the SAME id. The session id does identify it — a scheduled dispatch
+ * always mints a FRESH session ([com.rikkaminis.app.debug.HeadlessChatRunner.ensureSession]
+ * inserts a new row with a random UUID) and never reuses one — so
+ * (taskId, sessionId) is the run's identity, and it is what the settlement
+ * presents to the document.
+ *
+ * It is a value object on purpose: the settlement funnels through ONE store
+ * call whose argument list is fixed by `scripts/scan/schedule_date_source_check.py`
+ * (app, run, outcome, gateDate), so the run's identity travels as ONE
+ * argument instead of two positional ones that could be swapped.
+ */
+data class ScheduledRunRef(
+    val taskId: String,
+    /** `null` when the run never got a session (it never reached the document). */
+    val sessionId: String?,
+)
+
+/**
  * Whole `scheduled-tasks.json` document. [globalEnabled] is the master switch
  * (§5.4, factory-off); [running] is the crash-recovery marker above.
  */

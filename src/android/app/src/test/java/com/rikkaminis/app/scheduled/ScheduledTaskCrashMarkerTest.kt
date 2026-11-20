@@ -38,7 +38,7 @@ class ScheduledTaskCrashMarkerTest {
             tasks = listOf(task("t1", streak = 2)),
             running = ScheduledRunMarker(taskId = "t1", sessionId = "s1", startedAt = 1_000L),
         )
-        val cleared = ScheduledTaskTransitions.clearRunningMarker(doc, "t1")
+        val cleared = ScheduledTaskTransitions.clearRunningMarker(doc, ScheduledRunRef("t1", "s1"))
         assertEquals("the marker must be gone", null, cleared.running)
         assertEquals("run state must not be credited or bumped", 2, cleared.tasks.single().failStreak)
     }
@@ -52,14 +52,14 @@ class ScheduledTaskCrashMarkerTest {
         assertSame(
             "a foreign marker must come back as the same instance (nothing to write)",
             doc,
-            ScheduledTaskTransitions.clearRunningMarker(doc, "t1"),
+            ScheduledTaskTransitions.clearRunningMarker(doc, ScheduledRunRef("t1", "s1")),
         )
     }
 
     @Test
     fun `an absent marker is a no-op`() {
         val doc = ScheduledTasksFile(tasks = listOf(task("t1")))
-        assertSame(doc, ScheduledTaskTransitions.clearRunningMarker(doc, "t1"))
+        assertSame(doc, ScheduledTaskTransitions.clearRunningMarker(doc, ScheduledRunRef("t1", "s1")))
     }
 
     /**
@@ -80,7 +80,7 @@ class ScheduledTaskCrashMarkerTest {
             phantom.task?.failStreak,
         )
 
-        val compensated = ScheduledTaskTransitions.clearRunningMarker(doc, "t1")
+        val compensated = ScheduledTaskTransitions.clearRunningMarker(doc, ScheduledRunRef("t1", "s1"))
         val after = ScheduledTaskTransitions.crashFailure(compensated, "t1")
         assertEquals("with the marker cleared there is no crash to recover", null, after.task)
         assertEquals(0, compensated.tasks.single().failStreak)
@@ -98,7 +98,7 @@ class ScheduledTaskCrashMarkerTest {
     fun `negative control - dropping the compensation is caught`() {
         val source = runnerSource()
         val mutated = source.replace(
-            "ScheduledTasksStore.clearRunningMarker(app, taskId)",
+            "ScheduledTasksStore.clearRunningMarker(app, run)",
             "Unit",
         )
         assertTrue("the negative control must actually mutate the source", mutated != source)
@@ -115,11 +115,11 @@ class ScheduledTaskCrashMarkerTest {
         val catchAt = body.indexOf("catch (t: Throwable)")
         if (catchAt < 0) return false
         val tail = body.substring(catchAt)
-        val call = tail.indexOf("ScheduledTasksStore.clearRunningMarker(app, taskId)")
+        val call = tail.indexOf("ScheduledTasksStore.clearRunningMarker(app, run)")
         if (call < 0) return false
         // The compensation must land BEFORE the in-memory lock is released, or
         // the next beat can still observe "no run + marker" in its window.
-        val release = tail.indexOf("if (runningTaskId == taskId) runningTaskId = null")
+        val release = tail.indexOf("releaseActiveRun(run)")
         return release < 0 || call < release
     }
 

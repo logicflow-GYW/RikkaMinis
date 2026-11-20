@@ -99,6 +99,49 @@ object ScheduledTaskPolicy {
     }
 }
 
+object ScheduledTaskRunOwnership {
+
+    /**
+     * Whether [marker] names the exact run that is settling.
+     *
+     * Identity = task id + the run's session id. A scheduled dispatch mints a
+     * FRESH session ([com.rikkaminis.app.debug.HeadlessChatRunner.ensureSession]
+     * inserts a new row with a random UUID) and never reuses one, so the
+     * session id is the run id: two runs of the same task never share it, and
+     * a deleted/re-created or restored task with the same id cannot inherit it.
+     * The marker is persisted, so the comparison survives the failure paths
+     * that read the document back from disk.
+     *
+     * A null/blank session id is never an identity: a settlement that cannot
+     * name its run writes nothing (fail-closed).
+     */
+    fun ownsMarker(
+        marker: ScheduledRunMarker?,
+        run: ScheduledRunRef,
+    ): Boolean = marker != null &&
+        !run.sessionId.isNullOrBlank() &&
+        marker.taskId == run.taskId &&
+        marker.sessionId == run.sessionId
+
+    /**
+     * Whether the in-process reservation ([activeTaskId] / [activeSessionId])
+     * belongs to the run that is settling — i.e. whether a settle may clear it.
+     *
+     * Same identity as [ownsMarker], applied to the runner's memory instead of
+     * the document: an old run's late finalize must not drop the lock a newer
+     * run of the same task holds. A reservation that never got a session
+     * (fire failed before `prepareSession` returned) matches only a settle that
+     * also carries no session.
+     */
+    fun ownsActiveRun(
+        activeTaskId: String?,
+        activeSessionId: String?,
+        run: ScheduledRunRef,
+    ): Boolean = activeTaskId != null &&
+        activeTaskId == run.taskId &&
+        activeSessionId == run.sessionId
+}
+
 /**
  * [feat/scheduled-tasks-l0] Pure state transitions applied to the whole file
  * document. Every function is total: unknown task ids pass the document
@@ -119,8 +162,34 @@ object ScheduledTaskTransitions {
      * run leaves lastRunDate untouched so the task retries on the next eligible
      * foreground beat inside the same window (brief §3 crash semantics share
      * this shape). The persisted run marker is cleared either way.
+     *
+     * [A03 late settlement] The write is gated on run IDENTITY: only the run
+     * [file]'s `running` marker names may be credited — see
+     * [ScheduledTaskRunOwnership.ownsMarker]. A delete, a backup restore, or a
+     * re-created task with the same id leaves no marker carrying this session,
+     * so the late settle returns [file] UNCHANGED (identity: the store skips the
+     * write) and cannot stamp `lastRunDate` / `result` / `failStreak` onto a
+     * task this run never ran. A newer run of the same task holds the marker
+     * under a different session id, so the stale settle leaves it alone too.
      */
     fun completeRun(
+        file: ScheduledTasksFile,
+        run: ScheduledRunRef,
+        outcome: String,
+        today: String,
+    ): Result {
+        if (!ScheduledTaskRunOwnership.ownsMarker(file.running, run)) {
+            return Result(file, null, fuseTripped = false)
+        }
+        return settleRun(file, run.taskId, outcome, today)
+    }
+
+    /**
+     * The crediting body behind [completeRun]. The caller has already
+     * established that the settling run is the one the document names (or, for
+     * [crashFailure], that the marker has no in-process owner at all).
+     */
+    private fun settleRun(
         file: ScheduledTasksFile,
         taskId: String,
         outcome: String,
@@ -161,13 +230,40 @@ object ScheduledTaskTransitions {
     }
 
     /**
+     * A dispatch that never got as far as a session (session creation or the
+     * scheduled-title write threw). It wrote no `running` marker, so it has no
+     * identity to prove itself with — see [ScheduledTaskRunOwnership].
+     *
+     * The credit is therefore allowed only when the document carries NO marker
+     * at all: under the single-flight gate a marker at this instant belongs to
+     * some other run, and crediting through it would be the very defect this
+     * change removes. Callers pass [ScheduledTask.RESULT_ERROR] only — a run
+     * that never started cannot have succeeded — so the worst a stale credit
+     * can do is count one failure, never fake a successful run or advance
+     * [ScheduledTask.lastRunDate].
+     */
+    fun completeUnstartedRun(
+        file: ScheduledTasksFile,
+        taskId: String,
+        outcome: String,
+        today: String,
+    ): Result {
+        if (file.running != null) return Result(file, null, fuseTripped = false)
+        return settleRun(file, taskId, outcome, today)
+    }
+
+    /**
      * The persisted marker has no matching in-process run: the previous process
      * died mid-run. Counts one failure (brief §3 "并计 failStreak") and clears
      * the marker. No-op when the marker does not match [taskId].
+     *
+     * Deliberately takes the non-gated [settleRun]: a crash has no settling
+     * session to name itself with — the marker IS the evidence, and the check
+     * just above ("no in-process run owns it") is what authorises the credit.
      */
     fun crashFailure(file: ScheduledTasksFile, taskId: String): Result {
         if (file.running?.taskId != taskId) return Result(file, null, fuseTripped = false)
-        return completeRun(file, taskId, ScheduledTask.RESULT_ERROR, today = "")
+        return settleRun(file, taskId, ScheduledTask.RESULT_ERROR, today = "")
     }
 
     /** Manual resume from the settings UI: clears the fuse and re-enables. */
@@ -258,11 +354,21 @@ object ScheduledTaskTransitions {
      * failed settlement: `lastRunDate` stays empty and the task may retry inside
      * its window), which is recoverable; a phantom failure is not.
      *
-     * Identity when the marker names another task (or there is none): the
-     * document is returned unchanged so a caller can detect "nothing to do".
+     * [A03 late settlement] The clear is identity-scoped ([sessionId]): an old
+     * run's compensation must not erase the marker a NEWER run of the same task
+     * wrote. Identity when the marker names another task/session (or there is
+     * none) means the document is returned unchanged, so a caller can detect
+     * "nothing to do".
      */
-    fun clearRunningMarker(file: ScheduledTasksFile, taskId: String): ScheduledTasksFile =
-        clearMarker(file, taskId)
+    fun clearRunningMarker(
+        file: ScheduledTasksFile,
+        run: ScheduledRunRef,
+    ): ScheduledTasksFile =
+        if (ScheduledTaskRunOwnership.ownsMarker(file.running, run)) {
+            file.copy(running = null)
+        } else {
+            file
+        }
 
     /**
      * [deep-audit-1046 S-11] Refresh the RUN half of an editor's snapshot.
