@@ -1473,12 +1473,12 @@
     <string name="chat_menu_settings_always_last">Always last</string>
     <string name="back_to_exit_press_again">Press back again to exit</string>
     <string name="backup_snapshot_section_title">Local snapshots</string>
-    <string name="backup_snapshot_section_footer">Snapshots are saved automatically before every restore. Tap one to roll the configuration back.</string>
+    <string name="backup_snapshot_section_footer">A local snapshot is saved before each restore. Import a snapshot to recover settings; later additions can remain.</string>
     <string name="backup_snapshot_empty">No local snapshots yet.</string>
-    <string name="backup_snapshot_restore_confirm_title">Restore this snapshot?</string>
-    <string name="backup_snapshot_restore_confirm_text">The current configuration is replaced by the snapshot from %1$s. A new snapshot of the current config is saved first.</string>
-    <string name="backup_snapshot_restore">Restore</string>
-    <string name="backup_done_fatal">Restore failed mid-way — the configuration is only partially restored. Roll back from a snapshot.</string>
+    <string name="backup_snapshot_restore_confirm_title">Import this snapshot?</string>
+    <string name="backup_snapshot_restore_confirm_text">Settings from the snapshot %1$s will be merged into the current configuration. This is not an exact rollback: later additions can remain. A new snapshot of the current configuration is saved first.</string>
+    <string name="backup_snapshot_restore">Import snapshot</string>
+    <string name="backup_done_fatal">Restore did not complete. Some changes may already have been applied. You can import a local snapshot to recover settings, but this will not undo every change.</string>
     <string name="browser_ua_default">Default (auto by UA)</string>
     <string name="browser_ua_custom">Custom</string>
     <string name="browser_ua_custom_hint">Set your own width × height</string>

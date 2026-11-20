@@ -1082,12 +1082,12 @@
     <string name="chat_menu_settings_always_last">Always last</string>
     <string name="back_to_exit_press_again">Press back again to exit</string>
     <string name="backup_snapshot_section_title">ローカルスナップショット</string>
-    <string name="backup_snapshot_section_footer">復元のたびに現在の設定のスナップショットが自動保存されます。タップで設定をロールバックします。</string>
+    <string name="backup_snapshot_section_footer">復元の前に毎回、ローカルにスナップショットを保存します。設定を戻すにはスナップショットをインポートしてください。後から追加した項目は残る場合があります。</string>
     <string name="backup_snapshot_empty">ローカルスナップショットはまだありません。</string>
-    <string name="backup_snapshot_restore_confirm_title">このスナップショットを復元しますか？</string>
-    <string name="backup_snapshot_restore_confirm_text">現在の設定は %1$s のスナップショットに置き換わります。現在の設定は先に新しいスナップショットとして保存されます。</string>
-    <string name="backup_snapshot_restore">復元</string>
-    <string name="backup_done_fatal">復元が途中で失敗しました — 設定は部分的に復元されています。スナップショットからロールバックしてください。</string>
+    <string name="backup_snapshot_restore_confirm_title">このスナップショットをインポートしますか？</string>
+    <string name="backup_snapshot_restore_confirm_text">スナップショット %1$s の設定を現在の設定に統合します。完全なロールバックではなく、後から追加した項目は残る場合があります。先に現在の設定を新しいスナップショットに保存します。</string>
+    <string name="backup_snapshot_restore">スナップショットをインポート</string>
+    <string name="backup_done_fatal">復元が完了しませんでした。一部の変更はすでに適用されている可能性があります。ローカルのスナップショットをインポートして設定を戻すことはできますが、すべての変更を元に戻すわけではありません。</string>
     <string name="backup_err_busy">バックアップまたは復元が進行中です。完了するまでお待ちください。</string>
     <!-- 英文兜底 (2026-08-08) -->
     <string name="model_group_name_saved">Name saved</string>

@@ -1075,12 +1075,12 @@
     <string name="chat_menu_settings_always_last">Always last</string>
     <string name="back_to_exit_press_again">Press back again to exit</string>
     <string name="backup_snapshot_section_title">Lokale Snapshots</string>
-    <string name="backup_snapshot_section_footer">Vor jeder Wiederherstellung wird automatisch ein Snapshot gespeichert. Tippen Sie, um die Konfiguration zurückzurollen.</string>
+    <string name="backup_snapshot_section_footer">Vor jeder Wiederherstellung wird lokal ein Snapshot gespeichert. Durch Import lassen sich Einstellungen wiederherstellen; spätere Ergänzungen können erhalten bleiben.</string>
     <string name="backup_snapshot_empty">Noch keine lokalen Snapshots.</string>
-    <string name="backup_snapshot_restore_confirm_title">Diesen Snapshot wiederherstellen?</string>
-    <string name="backup_snapshot_restore_confirm_text">Die aktuelle Konfiguration wird durch den Snapshot vom %1$s ersetzt. Zuvor wird ein neuer Snapshot der aktuellen Konfiguration gespeichert.</string>
-    <string name="backup_snapshot_restore">Wiederherstellen</string>
-    <string name="backup_done_fatal">Wiederherstellung fehlgeschlagen — die Konfiguration wurde nur teilweise wiederhergestellt. Stellen Sie über einen Snapshot wieder her.</string>
+    <string name="backup_snapshot_restore_confirm_title">Diesen Snapshot importieren?</string>
+    <string name="backup_snapshot_restore_confirm_text">Die Einstellungen aus dem Snapshot %1$s werden mit der aktuellen Konfiguration zusammengeführt. Dies ist kein vollständiges Zurücksetzen: Spätere Ergänzungen können erhalten bleiben. Zuvor wird ein neuer Snapshot der aktuellen Konfiguration gespeichert.</string>
+    <string name="backup_snapshot_restore">Snapshot importieren</string>
+    <string name="backup_done_fatal">Die Wiederherstellung wurde nicht abgeschlossen. Einige Änderungen wurden möglicherweise schon übernommen. Durch Import eines lokalen Snapshots lassen sich Einstellungen wiederherstellen, aber nicht alle Änderungen rückgängig machen.</string>
     <string name="backup_err_busy">Eine Sicherung oder Wiederherstellung läuft bereits — bitte warten Sie, bis sie abgeschlossen ist.</string>
     <!-- 英文兜底 (2026-08-08) -->
     <string name="model_group_name_saved">Name saved</string>
