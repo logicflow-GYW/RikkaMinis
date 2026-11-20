@@ -220,6 +220,11 @@ object MirrorSpeedTestViewModel {
     val selectedMirrorId: SnapshotStateMap<MirrorCategory, String> = mutableStateMapOf()
     val useCustomMirror: SnapshotStateMap<MirrorCategory, Boolean> = mutableStateMapOf()
 
+    // Main-thread user intent, including an explicit OFF with no selected id.
+    // Keep it for this process: first-boot convenience must not undo a choice
+    // made before or during detection, even if that choice leaves no map entry.
+    private val userIntentCategories = mutableSetOf<MirrorCategory>()
+
     var isTesting by mutableStateOf(false)
         private set
     var testProgress by mutableStateOf(0f)
@@ -493,6 +498,7 @@ object MirrorSpeedTestViewModel {
     // -- Selection & Apply --
 
     fun selectMirror(context: Context, mirror: MirrorEntry) {
+        userIntentCategories += mirror.category
         selectedMirrorId[mirror.category] = mirror.id
         // [RC-U04] Tapping a row IS the choice. The check mark appeared on the
         // tapped row immediately, but the flag stayed off, so the page's own
@@ -510,6 +516,7 @@ object MirrorSpeedTestViewModel {
     }
 
     fun setUseCustom(context: Context, category: MirrorCategory, enabled: Boolean) {
+        userIntentCategories += category
         useCustomMirror[category] = enabled
         persist(context, category)
         // T10-L7: both branches touch the rootfs config files; keep them off
@@ -591,9 +598,13 @@ object MirrorSpeedTestViewModel {
                 // First-boot detection is a convenience, not a decision: a
                 // category the user already picked keeps its mirror — the same
                 // "prior selection wins" predicate the user-initiated path hands
-                // to autoSelectFastest. `alreadySelected` is the snapshot taken
-                // before the speed test (F-03), not a read of the settled map.
-                for ((cat, fastest) in decideAutoApply(results.toMap(), alreadySelected)) {
+                // to autoSelectFastest. Keep the pre-test snapshot (F-03), but
+                // also protect choices made while probes were suspended. The
+                // intent set covers OFF even when no mirror id exists. Merge
+                // and write without suspension on Main so user input cannot
+                // land between the check and the id/custom/prefs writes.
+                val protectedCategories = alreadySelected + selectedMirrorId.keys + userIntentCategories
+                for ((cat, fastest) in decideAutoApply(results.toMap(), protectedCategories)) {
                     selectedMirrorId[cat] = fastest.mirror.id
                     useCustomMirror[cat] = true
                     persist(context, cat)
