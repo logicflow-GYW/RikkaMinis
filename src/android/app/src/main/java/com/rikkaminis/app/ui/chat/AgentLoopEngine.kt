@@ -4929,6 +4929,20 @@ internal class AgentLoopEngine(
             // the queue switch handler depends on it).
             throw e
         } catch (e: Exception) {
+            // A continuation may fail before producing another usable segment
+            // (or exhaust the normal retries). Its earlier kept text still owes
+            // the DB a row before the caller attaches the terminal error banner.
+            // Restrict this to continuation runs; ordinary abort semantics stay
+            // unchanged and a user stop above never starts recovery or a write.
+            if (loopState.eofStubContinues > 0) {
+                currentCoroutineContext().ensureActive()
+                try {
+                    flushUnpersistedTurnRow(loopState, lastSegmentUsage, lastSegmentReasoning)
+                } catch (persistError: Exception) {
+                    if (persistError is CancellationException) throw persistError
+                    AppLogger.warning(TAG_STREAM, "failed to preserve interrupted continuation: ${persistError.javaClass.simpleName}")
+                }
+            }
             // T9: log the unexpected error, then rethrow
             runCatching {
                 traceObserver.agentTraceRecorder.error(turn = traceObserver.activeTraceTurn, phase = "exception", message = "${e.javaClass.simpleName}: ${e.message}")

@@ -160,6 +160,30 @@ class AgentLoopStreamRecoveryTest {
         }
     }
 
+    @Test fun `kept partial text is persisted if the continuation then fails permanently`() = runTest(dispatcher) {
+        val h = FakeAgentLoopHost()
+        h.scripts.add(partialFailure("Keep this complete partial segment"))
+        h.scripts.add(TurnScript(listOf(LLMStreamChunk.Started), throwAfter = error("invalid_key")))
+        try { engine(h).runAgentLoop(provider(), null); fail("permanent failure must surface") }
+        catch (_: ModelStreamErrorException) { }
+        assertEquals(2, h.streamRequests.size)
+        assertEquals(1, h.persistedTurns.size)
+        assertEquals(listOf("text"), h.persistedTurns.single().partKinds)
+        assertEquals("Keep this complete partial segment", h.finalAssistantText)
+    }
+
+    @Test fun `kept partial text survives when later blank retries are exhausted`() = runTest(dispatcher) {
+        val h = FakeAgentLoopHost()
+        h.scripts.add(partialFailure("Never lose this"))
+        repeat(4) { h.scripts.add(TurnScript(listOf(LLMStreamChunk.Started), throwAfter = error())) }
+        try { engine(h).runAgentLoop(provider(), null); fail("bounded retries must stop") }
+        catch (_: ModelStreamErrorException) { }
+        assertEquals(5, h.streamRequests.size)
+        assertEquals(1, h.persistedTurns.size)
+        assertEquals(listOf("text"), h.persistedTurns.single().partKinds)
+        assertEquals("Never lose this", h.finalAssistantText)
+    }
+
     @Test fun `partial continuation policy refuses reasoning blanks and any tool activity`() {
         assertTrue(ChatStreamErrorPolicy.shouldContinuePartialReply(true, "answer", false))
         assertFalse(ChatStreamErrorPolicy.shouldContinuePartialReply(false, "answer", false))
