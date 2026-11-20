@@ -794,7 +794,8 @@ class ShareReceiverActivity : ComponentActivity() {
         signal: android.os.CancellationSignal,
         cancellation: SharedStreamCancellation,
     ): java.io.InputStream? {
-        val descriptor = contentResolver.openAssetFileDescriptor(uri, "r", signal) ?: return null
+        val descriptor = contentResolver.openAssetFileDescriptor(uri, "r", signal)
+        if (descriptor == null) return null
         cancellation.own(descriptor)
         return descriptor.createInputStream()
     }
