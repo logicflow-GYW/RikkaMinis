@@ -390,12 +390,16 @@ internal fun resolveThinkingRuleIds(
 /**
  * [SURGERY-W4 B04] An owner-scoped rule mutation, expressed as data.
  *
+ * Public because it appears in the signature of a public DAO method (Kotlin
+ * forbids a public member exposing an internal type). It carries no behaviour
+ * and no persistence semantics of its own.
+ *
  * The DAO applies it inside one transaction (read the owner's rules → apply →
  * replace), which is what makes save/delete/reorder/restore safe against each
  * other: no caller can read a list, be pre-empted, and then write a stale
  * snapshot back.
  */
-internal sealed interface ThinkingRuleMutation {
+sealed interface ThinkingRuleMutation {
     /** Insert the rule at the top, or update it in place when the id exists. */
     data class Upsert(val entity: ProviderThinkingRuleEntity) : ThinkingRuleMutation
 
