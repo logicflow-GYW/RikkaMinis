@@ -59,7 +59,7 @@ class XAIVoiceProvider(providerId: String, baseURL: String, apiKey: String?) :
     override fun defaultVoiceOutputVoice() = "eve"
 }
 
-// -- MiniMax (TTS only, distinct body, base64-nested response) ----------------
+// -- MiniMax (TTS only, native hex response) --------------------------------
 
 class MiniMaxVoiceProvider(providerId: String, baseURL: String, apiKey: String?) :
     VoiceProvider(providerId, baseURL, apiKey) {
@@ -85,18 +85,22 @@ class MiniMaxVoiceProvider(providerId: String, baseURL: String, apiKey: String?)
 
     override fun buildVoiceOutputRequest(request: VoiceOutputRequest): Request {
         val url = composedUrlString(voiceOutputEndpointPath())
-        // MiniMax-specific shape: speed becomes an integer 0~200.
-        val speedInt = ((request.speed ?: 1.0f) * 100).toInt()
+        // MiniMax uses a 0.5x–2x multiplier, unlike the wider generic UI range.
+        val speed = request.speed ?: 1.0f
+        if (!speed.isFinite() || speed < 0.5f || speed > 2.0f) {
+            throw VoiceProviderException.Parse("MiniMax speed must be between 0.5 and 2.0")
+        }
         val body = JSONObject().apply {
             put("model", request.model ?: defaultVoiceOutputModel())
             put("text", request.input)
             put("stream", false)
+            put("output_format", "hex")
             put(
                 "voice_setting",
                 JSONObject()
                     .put("voice_id", request.voice ?: defaultVoiceOutputVoice())
-                    .put("speed", speedInt)
-                    .put("vol", 100)
+                    .put("speed", speed.toDouble())
+                    .put("vol", 1.0)
                     .put("pitch", 0),
             )
             put(
@@ -114,24 +118,33 @@ class MiniMaxVoiceProvider(providerId: String, baseURL: String, apiKey: String?)
         return builder.build()
     }
 
-    // Response: { "audio": { "audio": "base64..." }, "base_resp": { status_code, status_msg } }
+    // MiniMax's synchronous success response carries data.audio as hexadecimal.
     override suspend fun synthesize(request: VoiceOutputRequest): ByteArray {
         val raw = executeRequest(buildVoiceOutputRequest(request))
         val json = runCatching { JSONObject(String(raw, Charsets.UTF_8)) }.getOrNull()
-        // Surface MiniMax's own error (base_resp) instead of a generic parse
-        // failure — on failure t2a_v2 returns NO audio, only base_resp.
-        json?.optJSONObject("base_resp")?.let { base ->
-            val code = base.optInt("status_code", 0)
+            ?: throw VoiceProviderException.Parse("Unexpected MiniMax TTS response format")
+        json.optJSONObject("base_resp")?.let { base ->
+            if (!base.has("status_code")) {
+                throw VoiceProviderException.Parse("Missing MiniMax TTS status code")
+            }
+            val code = base.optInt("status_code", Int.MIN_VALUE)
             if (code != 0) {
                 val msg = base.optString("status_msg").ifBlank { "unknown error" }
                 throw VoiceProviderException.Parse("MiniMax TTS error [$code]: $msg")
             }
-        }
-        val b64 = json?.optJSONObject("audio")?.optString("audio")
+        } ?: throw VoiceProviderException.Parse("Missing MiniMax TTS base response")
+        val audioHex = json.optJSONObject("data")?.optString("audio")
             ?.takeIf { it.isNotEmpty() }
             ?: throw VoiceProviderException.Parse("Unexpected MiniMax TTS response format")
-        return runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-            ?: throw VoiceProviderException.Parse("Unexpected MiniMax TTS response format")
+        if (audioHex.length % 2 != 0 || !audioHex.all {
+                it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F'
+            }
+        ) {
+            throw VoiceProviderException.Parse("Invalid MiniMax TTS hex audio")
+        }
+        return ByteArray(audioHex.length / 2) { index ->
+            audioHex.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
     }
 }
 
