@@ -9,8 +9,8 @@ import org.junit.Test
  * [feat/provider-exec-concurrency] JVM tests for the concurrency semantics
  * the ModelExecutionService changes rely on:
  *
- *  1. Slot policy exports a bounded pool (2) — the serialized-mutex era is
- *     over but the native-heap containment rationale caps it.
+ *  1. Slot policy exports a bounded pool (6 by default, configurable up to 12)
+ *     — the serialized-mutex era is over, while the native-heap risk remains.
  *  2. Queue admission bound (6) — the slot pool bounds execution, the
  *     admission bound bounds the queue itself.
  *  3. Lifecycle reap under concurrent finishers: with the TF-H generation
@@ -22,13 +22,16 @@ import org.junit.Test
 class ProviderExecConcurrencyTest {
 
     @Test
-    fun `slot pool allows two concurrent provider runs`() {
-        assertEquals(2, ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS)
+    fun `slot pool compatibility constant follows the runtime default`() {
+        assertEquals(6, ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS)
+        assertEquals(ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS,
+            com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.PROVIDER_SLOTS_DEFAULT)
+        assertEquals(12, com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.PROVIDER_SLOTS_MAX)
         assertEquals(6, ProviderExecSlotPolicy.MAX_QUEUED_REQUESTS)
     }
 
     @Test
-    fun `lifecycle stays active while either of two concurrent runs is in flight`() {
+    fun `lifecycle stays active while another concurrent run is in flight`() {
         // Run A finishes (active 2->1) while B still streams: the finisher
         // re-evaluates quiescence and must NOT transition to STOPPING.
         val q = ModelExecutionQuiescenceInput(
@@ -85,7 +88,7 @@ class ProviderExecConcurrencyTest {
 
     @Test
     fun `queued slot-waiter blocks the reap while a holder streams`() {
-        // Slot pool saturated (2 holders) + 1 waiter queued: any finisher
+        // Slot pool saturated (the default has 6 holders) + 1 waiter queued: any finisher
         // path that evaluates quiescence must see queued>0 and stay ACTIVE.
         val q = ModelExecutionQuiescenceInput(
             activeRequests = 2,

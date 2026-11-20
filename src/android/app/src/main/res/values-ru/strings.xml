@@ -125,7 +125,7 @@
     <string name="runtime_limits_sessions_footer">Переключатель суб-агентов действует сразу; лимит сессий — при следующем запуске. Повышение лимита увеличивает пиковую память — последняя линия защиты остаётся сторожем процесса.</string>
     <string name="runtime_limits_budget_footer">Все бюджеты обязательны: при достижении выполнение приостанавливается (контент сохраняется, Resume для продолжения) — никогда не тихая остановка. Значения по умолчанию откалиброваны по полю; повышение ослабляет защиту от зацикливания — застрявший цикл сожжёт больше токенов до остановки.</string>
     <string name="runtime_limits_recovery_footer">Параметры восстановления — компромисс устойчивости и расхода токенов: больше продолжений/повторов переживает нестабильную сеть, но тарифицируется заново; меньше — быстрее показывает ошибки. 0 отключает путь восстановления.</string>
-    <string name="runtime_limits_network_footer">Жёсткий предел генерации и слоты worker применяются к СЛЕДУЮЩЕМУ процессу model-service (текущие запросы завершаются по старым лимитам). Занижение предела рискует убить здоровую медленную генерацию. Слоты выше 2 умножают пик native-кучи — риск по памяти.</string>
+    <string name="runtime_limits_network_footer">Жёсткий предел генерации и слоты worker применяются к СЛЕДУЮЩЕМУ процессу model-service (текущие запросы завершаются по старым лимитам). Занижение предела рискует убить здоровую медленную генерацию. Более высокое число слотов worker умножает пик native-кучи — риск по памяти.</string>
     <string name="runtime_limits_turns">Лимит ходов</string>
     <string name="runtime_limits_turns_desc">Макс. ходов за запуск (по умолчанию 256)</string>
     <string name="runtime_limits_provider_attempts">Вызовы провайдера</string>
@@ -157,7 +157,7 @@
     <string name="runtime_limits_first_chunk_proxy">Первый чанк, прокси</string>
     <string name="runtime_limits_first_chunk_proxy_desc">Секунд, прокси/шлюз (по умолчанию 45)</string>
     <string name="runtime_limits_provider_slots">Слоты worker</string>
-    <string name="runtime_limits_provider_slots_desc">Параллельных вызовов провайдера на worker (по умолчанию 2, выше — рискованно)</string>
+    <string name="runtime_limits_provider_slots_desc">Параллельных вызовов провайдера на worker (по умолчанию 6, диапазон 1–12; увеличение повышает риск нехватки памяти)</string>
     <string name="runtime_limits_queue_admission">Допуск в очередь</string>
     <string name="runtime_limits_queue_admission_desc">Макс. в очереди до отказа (по умолчанию 6)</string>
     <string name="settings_section_storage">Хранилище</string>

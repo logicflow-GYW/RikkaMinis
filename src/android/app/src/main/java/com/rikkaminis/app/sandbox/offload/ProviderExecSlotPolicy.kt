@@ -16,19 +16,18 @@ package com.rikkaminis.app.sandbox.offload
  *
  * ## Change
  * The mutex becomes a bounded slot pool ([MAX_CONCURRENT_PROVIDER_RUNS]).
- * Two sessions may now stream concurrently; a third queues (and the queue
- * is now OBSERVABLE — see [QueueStatus] chunks).
+ * Six provider calls may stream concurrently by default; further requests
+ * queue (the queue is OBSERVABLE — see [QueueStatus] chunks). Users may
+ * configure 1..12 slots through AgentRuntimeLimitsPrefs.
  *
- * ## Why 2 and not more
+ * ## Memory trade-off
  * The original isolation argument still holds per-process: N concurrent
  * provider streams in one process multiply the native-heap peak (SSE decode
  * buffers, DirectByteBuffer, JSON) by N — the exact leak surface the
- * short-lived worker exists to contain. 2 slots doubles throughput (the
- * "two sessions" case) while keeping the native budget within the range
- * the self-reap design already tolerates (a stream + a title/compact
- * request already coexisted legally during the ack-barrier window).
- * Raising this further should be driven by memory measurements, not
- * optimism.
+ * short-lived worker exists to contain. The default was raised from 2 to 6
+ * at the user's request, not as a claim of measured memory safety. Raising
+ * the slot count increases memory risk; the worker lifetime and queue
+ * admission guards remain unchanged.
  *
  * ## Semantics kept identical
  * The slot pool guards exactly the region the old mutex guarded: the
@@ -41,14 +40,14 @@ object ProviderExecSlotPolicy {
 
     /**
      * Maximum provider calls executing concurrently in one `:modelservice`
-     * process. 1 reproduces the old serialized behavior; 2 is the shipped
-     * default (see class KDoc for the sizing rationale).
+     * process. 1 reproduces the old serialized behavior; 6 is the shipped
+     * default (see class KDoc for the memory trade-off).
      * [feat/runtime-limits-panel] runtime truth is
-     * AgentRuntimeLimitsPrefs.providerSlots() (default 2 == this, user-
-     * tunable 1..4); the const stays as the documented default and the
-     * worker-process floor used before prefs are primed.
+     * AgentRuntimeLimitsPrefs.providerSlots() (default 6, user-tunable
+     * 1..12). Keep this compatibility constant tied to that single source.
      */
-    const val MAX_CONCURRENT_PROVIDER_RUNS: Int = 2
+    const val MAX_CONCURRENT_PROVIDER_RUNS: Int =
+        com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.PROVIDER_SLOTS_DEFAULT
 
     /**
      * Upper bound on queued (slot-waiting) requests before a new dispatch
