@@ -2,6 +2,67 @@ package com.rikkaminis.app.share
 
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.Closeable
+import java.io.InterruptedIOException
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+
+/** At most two unresponsive providers can occupy copy workers process-wide. */
+private val sharedCopyWorkers = Semaphore(2)
+
+/** Owns the open request and every descriptor until a copy completes or expires. */
+internal class SharedStreamCancellation(private val cancelOpen: () -> Unit = {}) {
+    private val lock = Any()
+    private val handles = mutableListOf<Closeable>()
+    @Volatile var cancelled = false
+        private set
+    @Volatile private var worker: Thread? = null
+
+    fun checkActive() {
+        if (cancelled || Thread.currentThread().isInterrupted) throw InterruptedIOException("share copy cancelled")
+    }
+
+    fun attach(thread: Thread) = synchronized(lock) {
+        checkActive()
+        worker = thread
+    }
+
+    fun <T : Closeable> own(handle: T): T = synchronized(lock) {
+        if (cancelled) {
+            runCatching { handle.close() }
+            throw InterruptedIOException("share copy cancelled")
+        }
+        handles.add(handle)
+        handle
+    }
+
+    // The local destination factory is serialized with cancellation: it must
+    // never create a new partial file after the timeout owner has deleted it.
+    fun destination(factory: () -> OutputStream): OutputStream = synchronized(lock) {
+        checkActive()
+        own(factory())
+    }
+
+    fun cancel() {
+        val closing = synchronized(lock) {
+            if (cancelled) return
+            cancelled = true
+            handles.toList().also { handles.clear() }
+        }
+        runCatching { cancelOpen() }
+        worker?.interrupt()
+        closing.asReversed().forEach { runCatching { it.close() } }
+    }
+
+    fun close() {
+        val closing = synchronized(lock) { handles.toList().also { handles.clear() } }
+        closing.asReversed().forEach { runCatching { it.close() } }
+    }
+}
 
 /** Bytes per read in [copySharedStream]. 8 KiB matches the pre-§1044-A08 inline
  *  copy and the rest of the repo's stream loops; large enough that a multi-MB
@@ -85,24 +146,93 @@ internal fun copySharedStream(
     maxTotalBytes: Long,
     ioTimeoutMs: Long,
     now: () -> Long,
+    cancellation: SharedStreamCancellation = SharedStreamCancellation(),
+): SharedStreamCopy {
+    if (!sharedCopyWorkers.tryAcquire()) {
+        runCatching { deleteDest() }
+        return SharedStreamCopy.Failed(SharedStreamFailure.ReadFailed, "share copy workers busy")
+    }
+    val task = FutureTask(Callable {
+        try {
+            copySharedStreamOwned(openStream, openDest, stagedBytesNow, maxFileBytes, maxTotalBytes,
+                ioTimeoutMs, now, cancellation)
+        } finally {
+            cancellation.close()
+        }
+    })
+    val worker = Thread({
+        try { task.run() } finally { sharedCopyWorkers.release() }
+    }, "ShareStreamCopy").apply { isDaemon = true }
+    var success = false
+    try {
+        cancellation.attach(worker)
+        worker.start()
+        val outcome = task.get(ioTimeoutMs.coerceAtLeast(1L), TimeUnit.MILLISECONDS)
+        if (outcome is SharedStreamCopy.Staged) {
+            cancellation.checkActive()
+            synchronized(sharedCopyWorkers) {
+                if (stagedBytesNow() + outcome.bytes > maxTotalBytes) {
+                    return SharedStreamCopy.Failed(SharedStreamFailure.ExceededCumulative)
+                }
+                credit(outcome.bytes)
+            }
+            success = true
+        }
+        return outcome
+    } catch (_: TimeoutException) {
+        return SharedStreamCopy.Failed(SharedStreamFailure.TimedOut)
+    } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        return SharedStreamCopy.Failed(SharedStreamFailure.ReadFailed, "share copy interrupted")
+    } catch (e: Exception) {
+        return SharedStreamCopy.Failed(SharedStreamFailure.ReadFailed,
+            (if (e is ExecutionException) e.cause else e)?.message)
+    } finally {
+        if (!success) {
+            cancellation.cancel()
+            task.cancel(true)
+            runCatching { deleteDest() }
+        }
+        // Cooperative open cancellation/close reclaims the worker. A hostile
+        // provider ignoring both cannot grow an unbounded pool (two permits).
+        if (worker.state == Thread.State.NEW) {
+            sharedCopyWorkers.release()
+        } else if (!Thread.currentThread().isInterrupted) {
+            try { worker.join(100L) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+        }
+    }
+}
+
+private fun copySharedStreamOwned(
+    openStream: () -> InputStream?,
+    openDest: () -> OutputStream,
+    stagedBytesNow: () -> Long,
+    maxFileBytes: Long,
+    maxTotalBytes: Long,
+    ioTimeoutMs: Long,
+    now: () -> Long,
+    cancellation: SharedStreamCancellation,
 ): SharedStreamCopy {
     var total = 0L
     fun abort(reason: SharedStreamFailure, detail: String? = null): SharedStreamCopy {
         // The destination may already exist (partial write, or a name reuse) —
         // every failure path leaves the staging dir exactly as it found it.
-        runCatching { deleteDest() }
         return SharedStreamCopy.Failed(reason, detail)
     }
     return try {
+        val deadline = now() + ioTimeoutMs
+        cancellation.checkActive()
         val input = openStream()
             ?: return abort(SharedStreamFailure.OpenStreamNull)
-        input.use { source ->
-            openDest().use { output ->
+        cancellation.own(input).use { source ->
+            cancellation.destination(openDest).use { output ->
                 val buf = ByteArray(COPY_BUFFER_BYTES)
-                val deadline = now() + ioTimeoutMs
                 while (true) {
+                    cancellation.checkActive()
                     if (now() > deadline) return abort(SharedStreamFailure.TimedOut)
                     val n = source.read(buf)
+                    cancellation.checkActive()
+                    if (now() > deadline) return abort(SharedStreamFailure.TimedOut)
                     if (n < 0) break
                     total += n
                     if (total > maxFileBytes) return abort(SharedStreamFailure.ExceededPerFile)
@@ -113,7 +243,7 @@ internal fun copySharedStream(
                 }
             }
         }
-        credit(total)
+        cancellation.checkActive()
         SharedStreamCopy.Staged(total)
     } catch (e: Exception) {
         abort(SharedStreamFailure.ReadFailed, e.message)

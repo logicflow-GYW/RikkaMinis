@@ -9,6 +9,7 @@ import com.rikkaminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
 import java.io.File
 import java.util.UUID
 
@@ -97,55 +98,59 @@ class ShareReceiverActivity : ComponentActivity() {
     }
 
     /**
-     * [FIX-R3-E F-14] Items staged by THIS instance (or restored from a
-     * previous one). Saved in [onSaveInstanceState] so a configuration-change
-     * rebuild reuses the already-staged files instead of re-running the
-     * extraction against the same intent — which used to write a SECOND copy
-     * of every attachment (`shared-<newid>`), credit its bytes a second time,
-     * and leave the first copy orphaned: no item ever referenced it, so no
-     * cleanup path could reach it, and its bytes stayed in the process-lifetime
-     * ledger until the 500 MB budget falsely tripped.
-     *
-     * [R5-A3 C-09①] Appended IN PLACE, one item per staged file, instead of
-     * being assigned once after `extractItems()` returned. The old shape had a
-     * hole exactly as wide as the extraction itself: a rotation (or a
-     * low-memory Activity death) landing while attachment 3 of 10 was copying
-     * saved an EMPTY list, so the rebuilt instance re-extracted the same intent
-     * — re-staging every file (`shared-<newid>`, a second copy AND a second
-     * ledger credit) while the files already copied lost their only reference.
-     * Now whatever has landed on disk is already in this list when
-     * `onSaveInstanceState` runs, so the rebuild hands those files off instead
-     * of redoing them.
-     *
-     * A synchronized wrapper because the writers are on Dispatchers.IO (the
-     * extraction) while the reader is the main thread (`onSaveInstanceState`):
-     * `toList()` under the list's own monitor yields a consistent snapshot.
+     * Incremental compatibility accumulator passed to the existing handlers.
+     * [extractionProgress] owns saved state: one slot per original input, with
+     * terminal failures distinct from unfinished copies. A successful file's
+     * result and byte credit commit under its checkpoint lock, so a snapshot
+     * cannot save the credit without its corresponding input identity.
      */
     private val extractedItems: MutableList<PendingShare.Item> =
         java.util.Collections.synchronizedList(mutableListOf())
 
+    private lateinit var extractionProgress: ShareExtractionProgress
+    @Volatile private var activeCopy: SharedStreamCancellation? = null
+    private var extractionJob: kotlinx.coroutines.Job? = null
+    private var inputIndex = 0
+    private var providerPromptVisible = false
+
+    /** Input identity includes its original position, never the count of successes. */
+    private fun inputIdentities(): List<String> = when (intent?.action) {
+        Intent.ACTION_SEND_MULTIPLE ->
+            getParcelableArrayListExtra<Uri>(intent, Intent.EXTRA_STREAM).orEmpty()
+                .take(MAX_ATTACHMENTS).mapIndexed { index, uri -> "multiple:$index:$uri" }
+        Intent.ACTION_VIEW -> listOf("view:${intent.data}")
+        Intent.ACTION_SEND -> listOf("send:${intent.type}:${intent.getStringExtra(Intent.EXTRA_TEXT)}:" +
+            "${getParcelableExtra<Uri>(intent, Intent.EXTRA_STREAM)}")
+        else -> emptyList()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // [FIX-R3-E F-14] A rebuild arrives with a non-null savedInstanceState
-        // and the SAME intent — re-extracting it would re-stage (and re-credit)
-        // everything. Restore the item list instead; the staged files behind
-        // the ATTACHMENT values are untouched by a rebuild, so the values stay
-        // valid. Process death mid-dialog loses the dialog, not the staged
-        // files: the restored flow re-offers them.
-        val restoredItems = savedInstanceState?.getString(STATE_ITEMS)?.let { raw ->
-            runCatching { PendingShare.fromJson(org.json.JSONObject(raw))?.items }.getOrNull()
-        }.orEmpty()
+        // Match the original inputs before restoring their per-slot results.
+        // Completed A is reused while unfinished B/C are still extracted.
+        val checkpoint = savedInstanceState?.getString(STATE_ITEMS)?.let { raw ->
+            runCatching { org.json.JSONObject(raw) }.getOrNull()
+        }
+        extractionProgress = ShareExtractionProgress.restore(inputIdentities(), checkpoint)
+        val restoredItems = extractionProgress.items()
         if (restoredItems.isNotEmpty()) restoreStagedItems(restoredItems)
         // Extract share items on the IO dispatcher so the main thread is
         // never blocked by potentially slow ContentResolver reads.
-        lifecycleScope.launch(Dispatchers.IO) {
-            // [R5-A3 C-09①] extractItems() appends into [extractedItems] as each
-            // file lands; a rebuild that already restored the list skips it.
-            if (restoredItems.isEmpty()) extractItems()
+        startExtraction()
+    }
+
+    private fun startExtraction() {
+        if (extractionJob?.isActive == true || stagedHandedOff || extractionProgress.paused) return
+        extractionJob = lifecycleScope.launch(Dispatchers.IO) {
+            // Resume every unfinished original slot, even when A is already staged.
+            extractItems()
+            if (extractionProgress.paused) return@launch
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
             val items = stagedItemsSnapshot()
             // Provider-JSON detection also reads the staged file — keep on IO.
             val providerJson = items.singleOrNull()?.let { providerExportJsonOrNull(it) }
             withContext(Dispatchers.Main) {
+                if (extractionProgress.paused) return@withContext
                 if (providerJson != null) {
                     promptProviderImportOrAttach(providerJson, items)
                 } else {
@@ -157,29 +162,36 @@ class ShareReceiverActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        // [R5-A3 C-09①] Snapshot, never the live list: the extraction is still
-        // appending on Dispatchers.IO while this runs on the main thread.
-        val staged = stagedItemsSnapshot()
-        if (staged.isNotEmpty()) {
-            outState.putString(
-                STATE_ITEMS,
-                PendingShare(staged, System.currentTimeMillis()).toJson().toString(),
-            )
-            // [W1118-T6 D11 F-02] A rebuild will re-own exactly these files —
-            // the destroy that precedes it must not delete them.
-            stateSavedForRestore = true
+        // Freeze even an empty/failed batch; do not let the old producer
+        // finish and credit a file that this checkpoint cannot restore.
+        val checkpoint = extractionProgress.pauseAndSnapshot()
+        activeCopy?.cancel()
+        outState.putString(STATE_ITEMS, checkpoint.toString())
+        stateSavedForRestore = true
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::extractionProgress.isInitialized && extractionProgress.paused) {
+            lifecycleScope.launch {
+                extractionJob?.join()
+                if (!isDestroyed && !stagedHandedOff) {
+                    extractionProgress.resume()
+                    stateSavedForRestore = false
+                    if (!providerPromptVisible) startExtraction()
+                }
+            }
         }
     }
 
     /** Consistent copy of the items staged so far (see [extractedItems]). */
-    private fun stagedItemsSnapshot(): List<PendingShare.Item> =
-        synchronized(extractedItems) { extractedItems.toList() }
+    private fun stagedItemsSnapshot(): List<PendingShare.Item> = extractionProgress.items()
 
     /**
-     * Seed [extractedItems] from a saved-state restore. The files are already
-     * on disk and already accounted in the process-lifetime ledger, so they are
-     * re-registered as in-flight: until this instance hands them off they have
-     * no pending-share entry, and a concurrent
+     * Seed [extractedItems] from a saved-state restore. Existing process claims
+     * retain their committed state without another credit; a cold-process
+     * restore accounts the surviving file once. Until hand-off these files
+     * have no pending-share entry, and a concurrent
      * [SharedShareStore.cleanSharedFiles] would otherwise treat them as orphans
      * of an earlier share.
      */
@@ -191,6 +203,11 @@ class ShareReceiverActivity : ComponentActivity() {
         for (item in items) {
             if (item.kind == PendingShare.Item.Kind.ATTACHMENT) {
                 StagedInFlightFiles.begin(item.value)
+                claimedNames.add(item.value)
+                val file = File(SharedShareStore.sharedFileDirectory(this), item.value)
+                if (file.isFile) StagedInFlightFiles.restoreCommitted(item.value, file.length()) {
+                    stagedBytes.credit(file.length())
+                }
             }
         }
     }
@@ -258,6 +275,8 @@ class ShareReceiverActivity : ComponentActivity() {
             isChangingConfigurations = isChangingConfigurations,
             stateSavedForRestore = stateSavedForRestore,
         )
+        extractionProgress.pauseAndSnapshot()
+        activeCopy?.cancel()
         super.onDestroy()
         if (!releaseUncommitted) return
         releaseUncommittedStagedFiles()
@@ -306,9 +325,17 @@ class ShareReceiverActivity : ComponentActivity() {
         val items = extractedItems
         try {
             when (intent?.action) {
-                Intent.ACTION_SEND -> handleSingleSend(intent, items)
+                Intent.ACTION_SEND -> if (!extractionProgress.isComplete(0) && !extractionProgress.paused) {
+                    inputIndex = 0
+                    handleSingleSend(intent, items)
+                    extractionProgress.complete(0, items.lastOrNull())
+                }
                 Intent.ACTION_SEND_MULTIPLE -> handleMultipleSend(intent, items)
-                Intent.ACTION_VIEW -> handleView(intent, items)
+                Intent.ACTION_VIEW -> if (!extractionProgress.isComplete(0) && !extractionProgress.paused) {
+                    inputIndex = 0
+                    handleView(intent, items)
+                    extractionProgress.complete(0, items.lastOrNull())
+                }
                 else -> AppLogger.warning(TAG, "unhandled action: ${intent?.action}")
             }
         } catch (e: Throwable) {
@@ -395,6 +422,7 @@ class ShareReceiverActivity : ComponentActivity() {
         json: String,
         items: List<PendingShare.Item>,
     ) {
+        providerPromptVisible = true
         android.app.AlertDialog.Builder(this)
             .setTitle(getString(com.rikkaminis.app.R.string.share_provider_json_title))
             .setMessage(getString(com.rikkaminis.app.R.string.share_provider_json_message))
@@ -444,6 +472,7 @@ class ShareReceiverActivity : ComponentActivity() {
                 // the dropped file still lands somewhere useful.
                 finishWithAttachmentFlow(items)
             }
+            .setOnDismissListener { providerPromptVisible = false }
             .show()
     }
 
@@ -518,14 +547,16 @@ class ShareReceiverActivity : ComponentActivity() {
      */
     private fun releaseStagedFiles(names: Collection<String>) {
         val dir = SharedShareStore.sharedFileDirectory(this)
-        for (name in names) {
-            val f = File(dir, name)
-            val len = f.length()
-            if (runCatching { f.delete() }.getOrDefault(false) && len > 0) {
-                debitStagedBytes(len)
+        StagedInFlightFiles.withLock {
+            for (name in names) {
+                val f = File(dir, name)
+                val len = f.length()
+                if (runCatching { f.delete() }.getOrDefault(false) && len > 0) {
+                    debitStagedBytes(len)
+                }
+                StagedInFlightFiles.end(name)
+                claimedNames.remove(name)
             }
-            StagedInFlightFiles.end(name)
-            claimedNames.remove(name)
         }
     }
 
@@ -601,8 +632,15 @@ class ShareReceiverActivity : ComponentActivity() {
                             false
                         }
                         if (staged) {
-                            stagedBytes.credit(textBytes)
-                            out += PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, name)
+                            val item = PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, name)
+                            val committed = extractionProgress.complete(inputIndex, item) {
+                                StagedInFlightFiles.credit(name, textBytes) { stagedBytes.credit(textBytes) }
+                            }
+                            if (committed) out += item else {
+                                dest.delete()
+                                StagedInFlightFiles.end(name)
+                                claimedNames.remove(name)
+                            }
                         }
                     }
                 }
@@ -620,11 +658,15 @@ class ShareReceiverActivity : ComponentActivity() {
     private fun handleMultipleSend(intent: Intent, out: MutableList<PendingShare.Item>) {
         val type = intent.type ?: ""
         val uris = getParcelableArrayListExtra<Uri>(intent, Intent.EXTRA_STREAM) ?: return
-        for (uri in uris.take(MAX_ATTACHMENTS)) {
-            if (out.size >= MAX_ATTACHMENTS) break
-            copyUriToStaging(uri, type)?.let {
-                out += PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, it)
+        for ((index, uri) in uris.take(MAX_ATTACHMENTS).withIndex()) {
+            if (extractionProgress.paused) break
+            if (extractionProgress.isComplete(index)) continue
+            inputIndex = index
+            val item = copyUriToStaging(uri, type)?.let {
+                PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, it)
             }
+            if (item != null) out += item
+            extractionProgress.complete(index, item)
         }
     }
 
@@ -708,17 +750,28 @@ class ShareReceiverActivity : ComponentActivity() {
         StagedInFlightFiles.begin(name)
         claimedNames.add(name)
         val dest = File(SharedShareStore.sharedFileDirectory(this), name)
-        return when (
+        val signal = android.os.CancellationSignal()
+        val cancellation = SharedStreamCancellation { signal.cancel() }
+        activeCopy = cancellation
+        if (extractionProgress.paused) cancellation.cancel()
+        return try { when (
             val outcome = copySharedStream(
-                openStream = { contentResolver.openInputStream(uri) },
+                openStream = { openInputStream(uri, signal, cancellation) },
                 openDest = { dest.outputStream() },
                 deleteDest = { dest.delete() },
                 stagedBytesNow = { stagedBytes.current() },
-                credit = { stagedBytes.credit(it) },
+                credit = { bytes ->
+                    val item = PendingShare.Item(PendingShare.Item.Kind.ATTACHMENT, name)
+                    val committed = extractionProgress.complete(inputIndex, item) {
+                        StagedInFlightFiles.credit(name, bytes) { stagedBytes.credit(bytes) }
+                    }
+                    if (!committed) throw java.io.InterruptedIOException("share checkpoint paused")
+                },
                 maxFileBytes = MAX_FILE_BYTES,
                 maxTotalBytes = MAX_TOTAL_BYTES,
                 ioTimeoutMs = IO_TIMEOUT_MS,
-                now = { System.currentTimeMillis() },
+                now = { android.os.SystemClock.elapsedRealtime() },
+                cancellation = cancellation,
             )
         ) {
             is SharedStreamCopy.Staged -> name
@@ -730,7 +783,21 @@ class ShareReceiverActivity : ComponentActivity() {
                 AppLogger.warning(TAG, "copyUriToStaging($uri): ${outcome.describe()}")
                 null
             }
+        } } finally {
+            activeCopy = null
         }
+    }
+
+    /** Unlike the resolver convenience overload, this open has a cancellation signal. */
+    private fun openInputStream(
+        uri: Uri,
+        signal: android.os.CancellationSignal,
+        cancellation: SharedStreamCancellation,
+    ): java.io.InputStream? {
+        val descriptor = contentResolver.openAssetFileDescriptor(uri, "r", signal)
+        if (descriptor == null) return null
+        cancellation.own(descriptor)
+        return descriptor.createInputStream()
     }
 
     /** Human-readable reason for a failed staging copy. Keeps the log lines the
@@ -920,4 +987,61 @@ internal fun isPathUnder(path: String?, root: String?): Boolean {
     val base = root.trimEnd('/')
     if (base.isEmpty()) return false
     return path == base || path.startsWith("$base/")
+}
+
+/** Per-input checkpoint: failed inputs are terminal too, interrupted ones are retryable. */
+internal class ShareExtractionProgress(
+    val inputIds: List<String>,
+    private val completed: MutableSet<Int> = mutableSetOf(),
+    private val results: MutableMap<Int, PendingShare.Item> = mutableMapOf(),
+) {
+    private val lock = Any()
+    @Volatile var paused: Boolean = false
+        private set
+
+    fun isComplete(index: Int): Boolean = synchronized(lock) { index in completed }
+    fun isFinished(): Boolean = synchronized(lock) { completed.size == inputIds.size }
+    fun items(): List<PendingShare.Item> = synchronized(lock) { results.toSortedMap().values.toList() }
+
+    fun complete(index: Int, item: PendingShare.Item?, commit: () -> Unit = {}): Boolean = synchronized(lock) {
+        if (paused || index in completed) return@synchronized false
+        require(index in inputIds.indices)
+        commit()
+        if (item != null) results[index] = item
+        completed.add(index)
+        true
+    }
+
+    fun resume() = synchronized(lock) { paused = false }
+
+    /** Freeze BEFORE snapshotting so an old producer cannot credit after this state was saved. */
+    fun pauseAndSnapshot(): org.json.JSONObject = synchronized(lock) {
+        paused = true
+        val slots = org.json.JSONArray()
+        for (index in inputIds.indices) {
+            val slot = org.json.JSONObject().put("input", inputIds[index]).put("done", index in completed)
+            results[index]?.let { slot.put("kind", it.kind.wire).put("value", it.value) }
+            slots.put(slot)
+        }
+        org.json.JSONObject().put("slots", slots).put("finished", completed.size == inputIds.size)
+    }
+
+    companion object {
+        fun restore(inputIds: List<String>, state: org.json.JSONObject?): ShareExtractionProgress {
+            val fresh = ShareExtractionProgress(inputIds)
+            val slots = state?.optJSONArray("slots") ?: return fresh
+            if (slots.length() != inputIds.size) return fresh
+            for (i in inputIds.indices) {
+                if (slots.optJSONObject(i)?.optString("input") != inputIds[i]) return fresh
+            }
+            for (i in inputIds.indices) {
+                val slot = slots.getJSONObject(i)
+                if (!slot.optBoolean("done", false)) continue
+                val kind = PendingShare.Item.Kind.entries.firstOrNull { it.wire == slot.optString("kind") }
+                val value = slot.optString("value")
+                fresh.complete(i, if (kind != null && value.isNotEmpty()) PendingShare.Item(kind, value) else null)
+            }
+            return fresh
+        }
+    }
 }

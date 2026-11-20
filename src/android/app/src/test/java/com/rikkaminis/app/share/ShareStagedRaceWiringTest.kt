@@ -60,7 +60,7 @@ class ShareStagedRaceWiringTest {
         )
         assertTrue(
             "ACTION_SEND must append into that live list",
-            activity.contains("Intent.ACTION_SEND -> handleSingleSend(intent, items)"),
+            activity.contains("handleSingleSend(intent, items)"),
         )
         assertTrue(
             "ACTION_SEND_MULTIPLE must append into that live list",
@@ -68,7 +68,7 @@ class ShareStagedRaceWiringTest {
         )
         assertTrue(
             "ACTION_VIEW must append into that live list",
-            activity.contains("Intent.ACTION_VIEW -> handleView(intent, items)"),
+            activity.contains("handleView(intent, items)"),
         )
         // extractItems must no longer build a private list to return.
         val extract = activity.substringAfter("private suspend fun extractItems()")
@@ -86,17 +86,17 @@ class ShareStagedRaceWiringTest {
     fun `saved state stores a snapshot taken under the list monitor`() {
         val save = activity.substringAfter("override fun onSaveInstanceState")
         assertTrue(
-            "onSaveInstanceState must snapshot via stagedItemsSnapshot()",
-            save.contains("val staged = stagedItemsSnapshot()"),
+            "onSaveInstanceState must freeze all input slots before serializing",
+            save.contains("val checkpoint = extractionProgress.pauseAndSnapshot()"),
         )
         assertTrue(
-            "the pending share must be built from the snapshot, not the live list",
-            save.contains("PendingShare(staged, System.currentTimeMillis())"),
+            "the complete checkpoint, including failures and unfinished slots, must be saved",
+            save.contains("outState.putString(STATE_ITEMS, checkpoint.toString())"),
         )
         val snapshot = activity.substringAfter("private fun stagedItemsSnapshot()")
         assertTrue(
-            "the snapshot must copy under synchronized(extractedItems)",
-            snapshot.contains("synchronized(extractedItems) { extractedItems.toList() }"),
+            "the snapshot must use the ordered per-input checkpoint, not a success count",
+            snapshot.substringBefore("\n").contains("extractionProgress.items()"),
         )
     }
 
@@ -174,7 +174,8 @@ class ShareStagedRaceWiringTest {
         )
         assertTrue(
             "the per-entry decision must go through the shared keep rule",
-            clean.contains("shouldKeepStagedFile(f.name, referenced, inFlight)"),
+            clean.contains("cleanStagedDirectory(listed, referenced, inFlight)") &&
+                store.contains("shouldKeepStagedFile(f.name, referenced, inFlight)"),
         )
         // The old unconditional `f.name in referenced` branch must be gone: it
         // is the exact shape that deleted in-flight files.
@@ -235,13 +236,13 @@ class ShareStagedRaceWiringTest {
         )
         assertTrue(
             "the registry must be thread-safe — producers run on Dispatchers.IO",
-            ledger.contains("ConcurrentHashMap.newKeySet"),
+            ledger.contains("private val lock = Any()") && ledger.contains("synchronized(lock)"),
         )
         val snapshot = ledger.substringAfter("fun snapshot(): Set<String>")
         assertEquals(
             "the snapshot must copy (a live view would mutate during the walk)",
             true,
-            snapshot.substringBefore("\n").contains("names.toSet()"),
+            snapshot.substringBefore("\n").contains("states.keys.toSet()"),
         )
     }
 
