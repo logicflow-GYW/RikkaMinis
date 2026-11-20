@@ -242,7 +242,19 @@ class MCPServerProcess:
         # stderr, survives timeouts (unlike the old per-request thread).
         self._reader = _StdioReader(self.proc)
         log.info("[%s] spawned pid=%s", self.name, self.proc.pid)
-        self._handshake()
+        try:
+            self._handshake()
+        except BaseException:
+            # start() owns the child until the handshake completes.  A failed
+            # start never reaches MCPPool, so no later pool eviction can clean
+            # up this process or its resident reader.
+            try:
+                self.stop()
+            except BaseException:
+                # Preserve the handshake MCPError even if best-effort cleanup
+                # encounters an unrelated platform/process error.
+                log.exception("[%s] cleanup after failed handshake failed", self.name)
+            raise
         log.info("[%s] initialized", self.name)
 
     def _send(self, method, params=None, notify=False, want_id=None):
