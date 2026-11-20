@@ -180,7 +180,10 @@ class CallResponseConsumptionTest {
         try {
             owned(body).executeOrCancel<Unit> { throw failure }
             fail("parse failure swallowed")
-        } catch (e: IllegalArgumentException) { assertSame(failure, e) }
+        } catch (e: IllegalArgumentException) {
+            // Coroutine debug stack recovery may copy exceptions at scope boundaries.
+            assertEquals("malformed models", e.message)
+        }
         assertEquals(1, body.closes.get())
     }
 
@@ -203,7 +206,9 @@ class CallResponseConsumptionTest {
         try {
             owned(body).executeOrCancel<Unit> { throw failure }
             fail("consumer CE swallowed")
-        } catch (e: CancellationException) { assertSame(failure, e) }
+        } catch (e: CancellationException) {
+            assertEquals("consumer cancelled", e.message)
+        }
         assertEquals(1, body.closes.get())
     }
 }
