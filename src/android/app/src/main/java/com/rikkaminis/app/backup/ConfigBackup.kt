@@ -399,8 +399,9 @@ object ConfigBackup {
      *     outright. This is the family's restore-is-restore rule (providers /
      *     groups behave the same way).
      *  2. backup carries no (or a blank) password, this install has one →
-     *     keep the local password, take url/username/path from the backup.
-     *     Nothing is lost and nothing is cleared.
+     *     reuse it only for the same server root and username. A changed
+     *     service/subject keeps the complete local connection and emits a
+     *     reconfiguration notice; a backup-directory change alone is safe.
      *  3. backup carries no password and this install has none (fresh
      *     reinstall — the deadlock case) → store the three non-secret fields
      *     and tell the user the password still has to be typed. That is the
@@ -424,6 +425,10 @@ object ConfigBackup {
         }
         val keptPassword = existing?.password.orEmpty()
         return if (keptPassword.isNotEmpty()) {
+            if (existing!!.username != username || !McpCredentialFields.sameEndpoint(url, existing.url)) {
+                return WebDavRestorePlan(existing,
+                    "webdav: 目的地或账号变化且备份未包含密钥，保留本机完整连接；迁移需重新填写密码")
+            }
             WebDavRestorePlan(
                 config = WebDavConfig(url, username, keptPassword, path),
                 notice = "webdav: 密码沿用本机现有配置（备份未包含密钥）",
@@ -710,18 +715,7 @@ object ConfigBackup {
         // them through the per-provider old→new entry map before creating groups.
         val groups = JSONArray()
         for (group in providerRepo.config.value.modelGroups) {
-            groups.put(JSONObject().apply {
-                put("id", group.id)
-                put("name", group.name)
-                put("memberEntryIds", JSONArray().apply {
-                    for (eid in group.memberEntryIds) put(eid)
-                })
-                put("strategy", group.strategy.name)
-                put("fallbackStrategy", group.fallbackStrategy.name)
-                group.defaultThinkingLevel?.let { put("defaultThinkingLevel", it.name) }
-                group.contextLimitTokens?.let { put("contextLimitTokens", it) }
-                group.lastContextLimitTokens?.let { put("lastContextLimitTokens", it) }
-            })
+            groups.put(encodeBackupGroup(group))
         }
 
         // [T-auto-backup-assets] Custom thinking rules: per-provider user data
@@ -776,6 +770,7 @@ object ConfigBackup {
                             val sel = ArtifactBackupScope.select(
                                 root,
                                 allowedExtensions = allowed,
+                                rejectFileSymlinks = isMcpRoot && !includeSecrets,
                             )
                             val prefix = if (isMcpRoot) "mcp" else "shared"
                             artifactSkipped += sel.oversizedSkipped + sel.nonTextSkipped
@@ -1017,6 +1012,7 @@ object ConfigBackup {
         // not to carry this", these mean "we could not look at it". Both have to
         // reach the user, otherwise a damaged read looks like a clean backup.
         var chatReadFailures = 0
+        var chatLimitDropped = 0
         if (chatRepo != null && chatWindowDays > 0) {
             // Serialize the non-chat skeleton ONCE to measure its exact
             // serialized cost IN UTF-8 BYTES (the unit the import side
@@ -1112,8 +1108,13 @@ object ConfigBackup {
                     // export reported success. Route through the tolerant tail
                     // read and ACCOUNT for what it could not read.
                     val tail = try {
-                        chatRepo.loadMessagesTailTolerant(
-                            sessions[index].id, MAX_CHAT_MESSAGES_PER_SESSION,
+                        readBackupMessageTail(
+                            totalRows = chatRepo.dao.messageCountForSession(sessions[index].id),
+                            limit = MAX_CHAT_MESSAGES_PER_SESSION,
+                            read = {
+                                val loaded = chatRepo.loadMessagesTailTolerant(sessions[index].id, it)
+                                loaded.messages to loaded.unreadableRows
+                            },
                         )
                     } catch (e: Exception) {
                         runCatching {
@@ -1126,7 +1127,10 @@ object ConfigBackup {
                         null
                     }
                     if (tail == null) chatReadFailures += 1
-                    else chatReadFailures += tail.unreadableRows
+                    else {
+                        chatReadFailures += tail.unreadableRows
+                        chatLimitDropped += tail.limitDropped
+                    }
                     val messages = tail?.messages ?: emptyList()
                     messages.map { m ->
                         BudgetChatMessage(
@@ -1146,10 +1150,11 @@ object ConfigBackup {
             for (s in packed.sessions) chatSessionList.add(s)
             for (m in packed.messages) chatMessageList.add(m)
 
-            if (packed.sessionsDropped > 0 || packed.messagesDropped > 0 || chatReadFailures > 0) {
+            if (packed.sessionsDropped > 0 || packed.messagesDropped > 0 || chatReadFailures > 0 || chatLimitDropped > 0) {
                 chatTruncated = JSONObject().apply {
                     put("sessionsDropped", packed.sessionsDropped)
                     put("messagesDropped", packed.messagesDropped)
+                    if (chatLimitDropped > 0) put("messagesLimitDropped", chatLimitDropped)
                     // [fix/meta1028-d1 F-04] "could not read" is not "trimmed to
                     // fit" — see chatTruncationNotes.
                     if (chatReadFailures > 0) put("messagesUnreadable", chatReadFailures)
@@ -1391,6 +1396,7 @@ object ConfigBackup {
                     val merged = if (shouldMergeIntoExisting(matchedLiveId, claimedInstanceIds)) {
                         providerRepo.mergeImportInstanceJSON(
                             obj.toString(), srcEntryIds,
+                            onCredentialConflict = { skipped.add(it) },
                         )
                     } else {
                         null
@@ -1843,7 +1849,13 @@ object ConfigBackup {
                                 s.optString("id", "").takeIf { it.isNotEmpty() },
                                 SkillRepository.ImportSource.from(s.optString("importSource", "file")),
                                 s.optString("sourceURL", "").takeIf { it.isNotEmpty() },
+                                manifestComplete = s.optBoolean("archiveComplete", true),
                             )
+                            .also {
+                                if (!s.optBoolean("archiveComplete", true)) {
+                                    skipped.add("skill \"$name\": incomplete archive merged without deleting local files")
+                                }
+                            }
                         }
                     } else {
                         val body = s.optString("body", "")
@@ -1998,7 +2010,9 @@ object ConfigBackup {
                         // no-op, which leaves the redacted entry to import
                         // exactly as before.
                         if (localJson != null) {
-                            McpCredentialFields.mergeRedactedMcpServerPayload(srv, localJson)
+                            if (!McpCredentialFields.mergeRedactedMcpServerPayload(srv, localJson)) {
+                                skipped.add("MCP server \"$id\": destination changed without credentials; kept local connection, reconfigure to migrate")
+                            }
                         }
                     }
                     val imported = mcpRepo.importJSON(srv.toString())
@@ -2293,6 +2307,13 @@ object ConfigBackup {
             out.add(
                 "chat history was budget-trimmed at export: " +
                     "$m message(s) and $s session(s) not carried (full history stays on the source device)"
+            )
+        }
+        val limitDropped = tr.optInt("messagesLimitDropped", 0)
+        if (limitDropped > 0) {
+            out.add(
+                "chat history was limited to the newest 200 messages per session at export: " +
+                    "$limitDropped older message(s) not carried (full history stays on the source device)"
             )
         }
         val shards = tr.optInt("shardsMissing", 0)
@@ -2753,6 +2774,8 @@ object ConfigBackup {
         src: java.io.File,
         dst: java.io.File,
         dropPrestagedServerList: Boolean = false,
+        maxFileBytes: Long = ArtifactBackupScope.MAX_FILE_BYTES,
+        maxTotalBytes: Long = 2 * ArtifactBackupScope.MAX_ARCHIVE_BYTES,
     ): RestoreEntryFilterResult {
         // [da1034-A1] Both operands are private temp files this process just
         // created, so this refusal is unreachable today — it is here because
@@ -2767,6 +2790,7 @@ object ConfigBackup {
         }
         var oauthDropped = 0
         var prestagedDropped = 0
+        val expansionBudget = ArtifactArchiver.ExpansionBudget(maxFileBytes, maxTotalBytes)
         java.io.FileOutputStream(dst).use { fos ->
             java.util.zip.ZipOutputStream(fos.buffered()).use { zos ->
                 java.util.zip.ZipFile(src).use { zf ->
@@ -2774,15 +2798,17 @@ object ConfigBackup {
                     while (entries.hasMoreElements()) {
                         val entry = entries.nextElement()
                         if (isMcpOAuthEntryName(entry.name)) {
+                            zf.getInputStream(entry).use { ArtifactArchiver.copyBounded(it, null, expansionBudget) }
                             oauthDropped++
                             continue
                         }
                         if (dropPrestagedServerList && isMcpServerListEntryName(entry.name)) {
+                            zf.getInputStream(entry).use { ArtifactArchiver.copyBounded(it, null, expansionBudget) }
                             prestagedDropped++
                             continue
                         }
                         zos.putNextEntry(java.util.zip.ZipEntry(entry.name))
-                        zf.getInputStream(entry).use { it.copyTo(zos) }
+                        zf.getInputStream(entry).use { ArtifactArchiver.copyBounded(it, zos, expansionBudget) }
                         zos.closeEntry()
                     }
                 }
@@ -3628,8 +3654,36 @@ internal data class GroupRunConfigSnapshot(
  * unchanged either way (a backup from a newer build must not sink the whole
  * import); the point is that the drop stops being silent.
  */
+internal data class BackupMessageTail<T>(
+    val messages: List<T>,
+    val unreadableRows: Int,
+    val limitDropped: Int,
+)
+
+/** Pairs the count with the existing bounded tolerant reader without changing
+ * the DAO/ChatRepository contract owned by another branch. */
+internal suspend fun <T> readBackupMessageTail(
+    totalRows: Int,
+    limit: Int,
+    read: suspend (Int) -> Pair<List<T>, Int>,
+): BackupMessageTail<T> {
+    val (messages, unreadable) = read(limit)
+    return BackupMessageTail(messages, unreadable, (totalRows - limit).coerceAtLeast(0))
+}
+
+internal fun encodeBackupGroup(group: ModelGroup): JSONObject = JSONObject().apply {
+    put("id", group.id)
+    put("name", group.name)
+    put("memberEntryIds", JSONArray(group.memberEntryIds))
+    put("strategy", group.strategy.name)
+    put("fallbackStrategy", group.fallbackStrategy.name)
+    put("defaultThinkingLevel", group.defaultThinkingLevel?.name ?: JSONObject.NULL)
+    put("contextLimitTokens", group.contextLimitTokens ?: JSONObject.NULL)
+    put("lastContextLimitTokens", group.lastContextLimitTokens ?: JSONObject.NULL)
+}
+
 internal fun readGroupRunConfig(g: JSONObject, warn: (String) -> Unit): GroupRunConfigSnapshot {
-    val rawThinking = g.optString("defaultThinkingLevel", "")
+    val rawThinking = if (g.isNull("defaultThinkingLevel")) "" else g.optString("defaultThinkingLevel", "")
     val thinking = rawThinking
         .takeIf { it.isNotEmpty() }
         ?.let { runCatching { ThinkingLevel.valueOf(it) }.getOrNull() }

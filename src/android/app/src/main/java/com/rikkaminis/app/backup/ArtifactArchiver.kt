@@ -66,8 +66,26 @@ object ArtifactArchiver {
         var totalBytes = 0L
         for (f in files) {
             val src = File(root, f.relPath.replace('/', File.separatorChar))
-            if (!src.isFile) continue
-            var bytes = src.readBytes() // bounded by MAX_FILE_BYTES per file
+            val guarded = transform != null
+            if (!src.isFile || (guarded && hasSymlinkComponent(root, src))) {
+                droppedSink?.add(f.relPath)
+                continue
+            }
+            val raw = try {
+                if (guarded) {
+                    // Read the same non-link leaf we checked; a replacement
+                    // leaf symlink must not be followed after selection.
+                    java.nio.file.Files.newInputStream(src.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS).use {
+                        val out = java.io.ByteArrayOutputStream()
+                        copyBounded(it, out, ExpansionBudget(maxTotalBytes = ArtifactBackupScope.MAX_FILE_BYTES))
+                        out.toByteArray()
+                    }
+                } else src.readBytes()
+            } catch (_: Exception) {
+                droppedSink?.add(f.relPath)
+                continue
+            }
+            var bytes = raw
             if (transform != null) {
                 val transformed = transform(f.relPath, bytes)
                 if (transformed == null) {
@@ -96,37 +114,114 @@ object ArtifactArchiver {
         zipFile: File,
         destByPrefix: Map<String, File>,
         fallbackDir: File? = null,
+        maxFileBytes: Long = ArtifactBackupScope.MAX_FILE_BYTES,
+        maxTotalBytes: Long = 2 * ArtifactBackupScope.MAX_ARCHIVE_BYTES,
     ): Int {
-        var count = 0
-        java.util.zip.ZipFile(zipFile).use { zf ->
-            val entries = zf.entries()
-            while (entries.hasMoreElements()) {
-                val entry = entries.nextElement()
-                if (entry.isDirectory) continue
-                val name = entry.name
-                if (name.contains("..") || name.startsWith("/") ||
-                    name.contains('\\') || name.contains(':')
-                ) {
-                    continue
+        val budget = ExpansionBudget(maxFileBytes, maxTotalBytes)
+        val stages = LinkedHashMap<File, File>()
+        val pending = ArrayList<Triple<File, File, File>>()
+        val targets = HashSet<String>()
+        try {
+            java.util.zip.ZipFile(zipFile).use { zf ->
+                val entries = zf.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (entry.isDirectory) continue
+                    val name = entry.name
+                    val slash = name.indexOf('/')
+                    val prefix = if (slash > 0) name.substring(0, slash) else ""
+                    val destDir = destByPrefix[prefix] ?: fallbackDir
+                    val rel = if (slash > 0) name.substring(slash + 1) else name
+                    val safeName = name.isNotEmpty() && !name.startsWith("/") &&
+                        !name.contains('\\') && !name.contains(':') &&
+                        name.split('/').none { it.isEmpty() || it == "." || it == ".." }
+                    val target = destDir?.let { File(it, rel) }
+                    val accepted = safeName && rel.isNotEmpty() && target != null && destDir != null &&
+                        isUnderBase(destDir.canonicalPath, target.canonicalPath)
+                    // Charge even excluded / unknown-prefix members; they are
+                    // still inflated on this first pass through the archive.
+                    if (!accepted) {
+                        zf.getInputStream(entry).use { copyBounded(it, null, budget) }
+                        continue
+                    }
+                    checkNotNull(target)
+                    checkNotNull(destDir)
+                    require(target.canonicalPath != destDir.canonicalPath && !target.isDirectory) {
+                        "artifact target is not a file"
+                    }
+                    require(targets.add(target.canonicalPath)) { "duplicate artifact target" }
+                    val relativeTarget = destDir.toPath().toAbsolutePath().normalize()
+                        .relativize(target.toPath().toAbsolutePath().normalize()).toString()
+                    require(!relativeTarget.split(File.separatorChar).first().startsWith(".artifact-restore-")) {
+                        "reserved artifact staging path"
+                    }
+                    var parent = target.parentFile
+                    while (parent != null && parent != destDir) {
+                        require(!parent.exists() || parent.isDirectory) { "artifact parent is not a directory" }
+                        parent = parent.parentFile
+                    }
+                    val stageDir = stages.getOrPut(destDir) {
+                        require(destDir.isDirectory || destDir.mkdirs()) { "cannot create artifact root" }
+                        java.nio.file.Files.createTempDirectory(destDir.toPath(), ".artifact-restore-").toFile()
+                    }
+                    val staged = File.createTempFile("entry-", ".tmp", stageDir)
+                    FileOutputStream(staged).use { output ->
+                        zf.getInputStream(entry).use { copyBounded(it, output, budget) }
+                        output.fd.sync()
+                    }
+                    pending.add(Triple(staged, target, destDir.canonicalFile))
                 }
-                val slash = name.indexOf('/')
-                val prefix = if (slash > 0) name.substring(0, slash) else ""
-                val destDir = destByPrefix[prefix] ?: fallbackDir ?: continue
-                val rel = if (slash > 0) name.substring(slash + 1) else name
-                if (rel.isEmpty() || rel.contains("..")) continue
-                val target = File(destDir, rel)
-                // [fix-R12 D8] The old `startsWith(destDir.canonicalPath)` let a
-                // sibling like "shared_evil/x" pass a "shared" check. Require the
-                // canonical separator boundary (same shape as SkillRepository).
-                if (!isUnderBase(destDir.canonicalPath, target.canonicalPath)) continue
-                target.parentFile?.mkdirs()
-                zf.getInputStream(entry).use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
-                }
-                count++
             }
+            // No existing target is touched until EVERY member is validated
+            // and bounded. Each publish is same-volume and never truncates a
+            // live file; an I/O failure can leave whole files, not half-files.
+            for ((staged, target, root) in pending) {
+                require(isUnderBase(root.path, target.canonicalPath) && !target.isDirectory) {
+                    "artifact target changed during restore"
+                }
+                require(target.parentFile.isDirectory || target.parentFile.mkdirs()) { "cannot create artifact parent" }
+                java.nio.file.Files.move(staged.toPath(), target.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+            return pending.size
+        } finally {
+            for (stage in stages.values) stage.deleteRecursively()
         }
-        return count
+    }
+
+    /** Actual expanded bytes, shared by the FIRST filter pass and extraction.
+     * Two export roots each have a 12 MiB allowance; no ZIP metadata is trusted. */
+    internal class ExpansionBudget(
+        val maxFileBytes: Long = ArtifactBackupScope.MAX_FILE_BYTES,
+        val maxTotalBytes: Long = 2 * ArtifactBackupScope.MAX_ARCHIVE_BYTES,
+    ) {
+        var totalBytes: Long = 0
+    }
+
+    internal fun copyBounded(input: java.io.InputStream, output: java.io.OutputStream?, budget: ExpansionBudget) {
+        val buffer = ByteArray(8192)
+        var memberBytes = 0L
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            if (n == 0) continue
+            require(n.toLong() <= budget.maxFileBytes - memberBytes) { "artifact entry expanded byte limit exceeded" }
+            require(n.toLong() <= budget.maxTotalBytes - budget.totalBytes) { "artifact total expanded byte limit exceeded" }
+            memberBytes += n
+            budget.totalBytes += n
+            output?.write(buffer, 0, n)
+        }
+    }
+
+    private fun hasSymlinkComponent(root: File, file: File): Boolean {
+        if (!isUnderBase(root.canonicalPath, file.canonicalPath)) return true
+        var path: File? = file.absoluteFile
+        val base = root.absoluteFile
+        while (path != null && path != base) {
+            if (java.nio.file.Files.isSymbolicLink(path.toPath())) return true
+            path = path.parentFile
+        }
+        return path != base
     }
 
     /** Legacy single-destination extraction (used by tests / callers with one root). */

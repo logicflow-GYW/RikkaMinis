@@ -79,6 +79,7 @@ object ArtifactBackupScope {
         maxFileBytes: Long = MAX_FILE_BYTES,
         maxArchiveBytes: Long = MAX_ARCHIVE_BYTES,
         allowedExtensions: Set<String> = DEFAULT_ALLOWED_EXTENSIONS,
+        rejectFileSymlinks: Boolean = false,
     ): Selection {
         val files = ArrayList<SelectedFile>()
         var total = 0L
@@ -143,6 +144,12 @@ object ArtifactBackupScope {
             if (!visited.add(canon)) return
             val children = dir.listFiles() ?: return
             for (child in children.sortedBy { it.name }) {
+                // MCP's transform judges the logical name. Do not let an
+                // alias (including a directory alias) change that identity.
+                if (rejectFileSymlinks && java.nio.file.Files.isSymbolicLink(child.toPath())) {
+                    nonText++
+                    continue
+                }
                 // [FIX-R3-D / F-06] Resolve FIRST: `child.name` is the link's
                 // own token, `target.name` is what the bytes actually are.
                 val target = resolveInside(child) ?: continue

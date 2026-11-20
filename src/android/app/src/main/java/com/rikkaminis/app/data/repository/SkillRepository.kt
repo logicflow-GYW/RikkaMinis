@@ -1103,6 +1103,9 @@ class SkillRepository(private val context: Context) {
         // online updates. Defaults keep direct zip imports unchanged.
         source: ImportSource = ImportSource.FILE,
         sourceURL: String? = null,
+        // Normal ZIP imports keep their full-manifest policy. Compatibility
+        // converters explicitly deny cleanup when their source was incomplete.
+        manifestComplete: Boolean = true,
     ): Skill? {
         val entries = try { readZipEntries(input) } catch (e: Exception) {
             Log.w(TAG, "Failed to read zip archive: ${e.message}")
@@ -1170,7 +1173,7 @@ class SkillRepository(private val context: Context) {
         // extraction means our idea of "what this skill ships" is incomplete, and
         // a SKILL.md-only archive says nothing about the payload (deleting on that
         // evidence would wipe a skill's scripts on a paste-shaped import).
-        if (writeFailures == 0 && writtenRelPaths.isNotEmpty()) {
+        if (manifestComplete && writeFailures == 0 && writtenRelPaths.isNotEmpty()) {
             deleteStaleSiblingFiles(skillDir, writtenRelPaths)
         } else if (writeFailures > 0) {
             Log.w(TAG, "importFromArchive: $writeFailures write failure(s) — skipped stale cleanup")

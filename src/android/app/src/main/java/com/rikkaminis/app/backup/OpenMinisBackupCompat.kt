@@ -1142,16 +1142,20 @@ object OpenMinisBackupCompat {
             return out
         }
         val bySkill = LinkedHashMap<String, MutableList<Pair<String, String>>>()
+        val incompleteSkills = HashSet<String>()
+        val indexComplete = indexRead.missingShards.isEmpty() && indexRead.unparsableLines == 0
         for (e in records) {
             val path = e.optString("path", "")
             if (!path.startsWith("skills/")) continue
             if (e.optBoolean("isDirectory", false)) continue
-            if (e.optString("skipped", "").isNotEmpty()) continue
-            val sha = e.optString("sha256", "")
-            if (sha.isEmpty()) continue
             val parts = path.split('/')
             if (parts.size < 3) continue
             val skillId = parts[1]
+            val sha = e.optString("sha256", "")
+            if (e.optString("skipped", "").isNotEmpty() || sha.isEmpty()) {
+                incompleteSkills.add(skillId)
+                continue
+            }
             val rel = parts.drop(2).joinToString("/")
             bySkill.getOrPut(skillId) { ArrayList() }.add(rel to sha)
         }
@@ -1189,6 +1193,9 @@ object OpenMinisBackupCompat {
                     JSONObject()
                         .put("id", skillId)
                         .put("name", name)
+                        // Machine-readable: a known partial manifest may merge,
+                        // but cannot prove a local sibling should be deleted.
+                        .put("archiveComplete", indexComplete && missingBlobs == 0 && skillId !in incompleteSkills)
                         .put("archive", Base64.getEncoder().encodeToString(zipBytes)),
                 )
                 if (missingBlobs > 0) {

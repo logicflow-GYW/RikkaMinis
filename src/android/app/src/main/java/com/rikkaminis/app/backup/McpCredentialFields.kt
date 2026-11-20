@@ -2,6 +2,7 @@ package com.rikkaminis.app.backup
 
 import org.json.JSONArray
 import org.json.JSONObject
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * [FULLSCAN-1119 A / F-01 + F-02] The two halves of the MCP credential
@@ -318,21 +319,75 @@ internal object McpCredentialFields {
         return Regex("""\[redacted:\d+]""").containsMatchIn(url)
     }
 
-    /**
-     * Entry point used by Stage 7: given the backup's wrapper payload
-     * (`{"mcpServers":{"<id>":{…}}}`) and this device's export of the same
-     * server, restore the live credentials in place.
-     *
-     * Returns false when either side is not the wrapper shape or the ids do not
-     * match — the caller then imports the backup payload untouched, which is
-     * exactly the old behaviour (no server existed here to protect).
-     */
+    /** Credential identity includes scheme/port/path, username and
+     * non-secret query parameters. Passwords/secret values are not retained;
+     * this transient comparison key must never be logged. */
+    internal fun endpointIdentity(raw: String): String? {
+        val masked = raw.trim().replace(Regex("""\[redacted(?::\d+)?]"""), "credential")
+        val url = masked.toHttpUrlOrNull() ?: return null
+        if (url.fragment != null) return null
+        val query = url.queryParameterNames.sorted().flatMap { key ->
+            url.queryParameterValues(key).map { value ->
+                key to if (key.lowercase() in SENSITIVE_QUERY_KEYS) "credential" else value
+            }
+        }
+        return listOf(url.scheme, url.host, url.port, url.encodedPath.trimEnd('/'), url.username, query).toString()
+    }
+
+    internal fun sameEndpoint(incoming: String, local: String): Boolean {
+        val identity = endpointIdentity(incoming) ?: return false
+        return identity == endpointIdentity(local)
+    }
+
+    private fun sameEntryDestination(incoming: JSONObject, local: JSONObject): Boolean {
+        val inUrl = incoming.optString("url", "").trim()
+        val loUrl = local.optString("url", "").trim()
+        if (inUrl.isNotEmpty() || loUrl.isNotEmpty()) {
+            // Redacted userinfo hides the subject, so identity is unknown:
+            // retain the complete old connection rather than guess a match.
+            return inUrl.isNotEmpty() && loUrl.isNotEmpty() && sameEndpoint(inUrl, loUrl)
+        }
+        val command = incoming.optString("command", "")
+        if (command.isBlank() || command != local.optString("command", "")) return false
+        // Compare the whole non-secret argv, including endpoint/tenant flags.
+        // Only the established benign local listen-port setting is ignored.
+        fun subject(entry: JSONObject): List<String> {
+            val args = redactSecretArgs(readStringList(entry, "args"))
+            val out = ArrayList<String>()
+            var i = 0
+            while (i < args.size) {
+                val arg = args[i]
+                if (arg == "--port" || arg.startsWith("--port=")) {
+                    out.add("--port")
+                    i += if (arg == "--port" && i + 1 < args.size) 2 else 1
+                } else {
+                    if (arg.isNotEmpty()) out.add(arg)
+                    i++
+                }
+            }
+            return out
+        }
+        return subject(incoming) == subject(local)
+    }
+
+    /** False means a same-id endpoint/transport/subject changed. Preserve the
+     * complete old entry instead of pairing live credentials with new routing. */
     internal fun mergeRedactedMcpServerPayload(incoming: JSONObject, local: JSONObject): Boolean {
         val inInner = incoming.optJSONObject("mcpServers") ?: return false
         val loInner = local.optJSONObject("mcpServers") ?: return false
         val id = inInner.keys().asSequence().firstOrNull() ?: return false
         val inEntry = inInner.optJSONObject(id) ?: return false
         val loEntry = loInner.optJSONObject(id) ?: return false
+        val needsLocal = listOf("headers", "env").any { key ->
+            val values = readStringMap(loEntry, key)
+            readStringMap(inEntry, key).any { (k, v) -> isPlaceholder(v) && !isPlaceholder(values[k]) }
+        } || restoreSecretArgs(readStringList(inEntry, "args"), readStringList(loEntry, "args")) !=
+            readStringList(inEntry, "args") ||
+            (isRedactedUrl(inEntry.optString("url", "")) && loEntry.optString("url", "").isNotEmpty())
+        if (needsLocal && !sameEntryDestination(inEntry, loEntry)) {
+            inInner.put(id, JSONObject(loEntry.toString()))
+            return false
+        }
         mergeEntryCredentials(inEntry, loEntry)
         return true
     }

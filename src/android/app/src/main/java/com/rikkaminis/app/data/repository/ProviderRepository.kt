@@ -3597,6 +3597,7 @@ class ProviderRepository(private val context: Context) {
     fun mergeImportInstanceJSON(
         jsonStr: String,
         srcEntryIds: List<String>,
+        onCredentialConflict: ((String) -> Unit)? = null,
     ): Pair<String, Map<String, String>>? {
         ensureConfigLoaded()
         val dict = try { JSONObject(jsonStr) } catch (_: Exception) { return null }
@@ -3624,7 +3625,10 @@ class ProviderRepository(private val context: Context) {
         // the field after the restore, or to re-import after re-editing).
         val fields = readImportInstanceFields(dict)
         val updated = applyImportInstanceFields(existing, fields)
-        if (updated != existing) updateInstance(updated)
+        val keepLocalConnection = shouldKeepProviderConnection(existing, updated, dict, !loadApiKey(existing.id).isNullOrEmpty())
+        if (keepLocalConnection) {
+            onCredentialConflict?.invoke("provider \"$label\": destination changed without credentials; kept local connection, reconfigure to migrate")
+        } else if (updated != existing) updateInstance(updated)
 
         val entries = parseImportedModelEntries(dict, existing.id)
         val entryMap = HashMap<String, String>()
@@ -3830,6 +3834,27 @@ internal fun readImportInstanceFields(dict: org.json.JSONObject): ImportInstance
  * identity) are untouched, so the "同名同类型 ⇒ 合并" matching and the
  * caller-resolved label stay intact.
  */
+internal fun shouldKeepProviderConnection(
+    local: ProviderInstance,
+    restored: ProviderInstance,
+    payload: JSONObject,
+    hasLocalKey: Boolean,
+): Boolean {
+    if (!hasLocalKey || payload.optString("apiKey", "").isNotEmpty()) return false
+    if (payload.optString("credentialType", "apiKey") != local.credentialType.name ||
+        restored.azureMode != local.azureMode) return true
+    fun endpoint(instance: ProviderInstance): String? =
+        if (instance.azureMode) instance.customBaseURL?.trim()?.takeIf { it.isNotEmpty() }
+        else instance.effectiveBaseURL
+    val old = endpoint(local)
+    val next = endpoint(restored)
+    // Both null means the same providerType's built-in endpoint, not an
+    // unknown custom address. Invalid custom endpoints fail closed below.
+    if (old == null && next == null) return false
+    if (old == null || next == null) return true
+    return !com.rikkaminis.app.backup.McpCredentialFields.sameEndpoint(next, old)
+}
+
 internal fun applyImportInstanceFields(base: ProviderInstance, f: ImportInstanceFields): ProviderInstance =
     base.copy(
         customBaseURL = f.customBaseURL,
