@@ -139,12 +139,19 @@ Usage:
   sh gh_sync.sh gh-releases-list --repo <owner/repo>
   sh gh_sync.sh gh-release-create --repo <owner/repo> --tag <vX.Y.Z> --name <n> [--body <b>] [--draft true|false] [--prerelease true|false]
   sh gh_sync.sh gh-actions-list --repo <owner/repo>
-  sh gh_sync.sh gh-actions-runs --repo <owner/repo> [--status queued|in_progress|completed] [--branch <b>]
+  sh gh_sync.sh gh-actions-runs [--repo <owner/repo>] [--workflow <id_or_file>] [--branch <b>] [--expect <sha>] [--status <status>] [--summary]
+  sh gh_sync.sh gh-actions-runs [--repo <owner/repo>] --run-id <id> [--expect <sha>]
   sh gh_sync.sh gh-actions-dispatch --repo <owner/repo> --workflow <id_or_file> [--ref <branch>] [--inputs <json>]
 EOF
 }
 
 cmd="$1"; shift || true
+if [ "$cmd" = gh-actions-runs ]; then
+  # With --repo, the read-only CI query also works outside a git checkout.
+  repo="$(infer_repo)"
+  [ -z "$repo" ] || set -- --repo "$repo" "$@"
+  exec python3 "$(dirname -- "$0")/gh_ci.py" runs "$@"
+fi
 need_cmd git
 need_cmd python3
 ROOT="$(repo_root)"; [ -n "$ROOT" ] || { err "not inside a git repo"; exit 1; }
@@ -601,23 +608,6 @@ data=json.dumps(payload).encode("utf-8"); req=urllib.request.Request(f"https://a
     export REPO="$repo"
     out="$(python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); url=f"https://api.github.com/repos/{owner}/{repo}/actions/workflows?per_page=50"; req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); data=json.load(urllib.request.urlopen(req,timeout=30)); w=data.get("workflows",[]); print("; ".join(["%s %s" % (it.get("id"), it.get("name")) for it in w[:20]]))' 2>/dev/null)" || true
     add_row 1 gh-actions-list OK "$out"
-    ;;
-
-  gh-actions-runs)
-    repo=""; status=""; branch=""
-    while [ $# -gt 0 ]; do case "$1" in --repo) repo="$2"; shift 2;; --status) status="$2"; shift 2;; --branch) branch="$2"; shift 2;; *) case "$1" in --*) err "unknown option: $1"; usage; exit 1;; *) break;; esac;; esac; done
-    [ -n "$repo" ] || repo="$(infer_repo)"
-    [ -n "$repo" ] || { err "--repo required (or set origin remote)"; exit 1; }
-    need_env GITHUB_TOKEN
-    export REPO="$repo" STATUS="$status" BRANCH="$branch"
-    out="$(python3 -c 'import os,json,urllib.request; tok=os.environ["GITHUB_TOKEN"]; owner,repo=os.environ["REPO"].split("/",1); status=os.environ.get("STATUS",""); branch=os.environ.get("BRANCH",""); qs=["per_page=10"]; 
-if status: qs.append("status="+status)
-if branch: qs.append("branch="+branch)
-url=f"https://api.github.com/repos/{owner}/{repo}/actions/runs?"+"&".join(qs); req=urllib.request.Request(url,headers={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","User-Agent":"minis"}); d=json.load(urllib.request.urlopen(req,timeout=30)); runs=d.get("workflow_runs",[]); lines=[]
-for r in runs[:10]:
-  lines.append("#%s %s %s %s" % (r.get("run_number"), r.get("name"), r.get("status"), r.get("conclusion")))
-print("; ".join(lines))' 2>/dev/null)" || true
-    add_row 1 gh-actions-runs OK "$out"
     ;;
 
   gh-actions-dispatch)

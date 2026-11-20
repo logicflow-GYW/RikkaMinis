@@ -1,7 +1,7 @@
 ---
 name: github-ops
 description: Trigger on ANY Git/GitHub op, workflow, or 'how to use GitHub' — clone/branch/commit/push/pull/merge/rebase/tag, issues/labels/releases/actions/PRs/forks, CI, delete/restore. Not pure browsing.
-version: 1.0.2
+version: 1.0.3
 ---
 ## Objectives
 
@@ -66,25 +66,38 @@ Codify GitHub/Git "basic operations" and common collaboration workflows into:
 | 9 | `gh-release-create --repo <owner/repo> --tag <vX.Y.Z> --name <n> [--body <b>] [--draft true|false] [--prerelease true|false]` | Create a release |
 |10| `gh-actions-list --repo <owner/repo>` | List workflows |
 |11| `gh-actions-dispatch --repo <owner/repo> --workflow <id_or_file> [--ref <branch>] [--inputs <json>]` | Manually trigger workflow_dispatch |
-|12| `gh_ci_wait.sh --repo <owner/repo> --workflow <id_or_file> --ref <branch> [--expect <sha>] [--timeout <s>] [--poll <s>] [--no-dispatch] [--job-detail]` | **Dispatch + wait for the run + verify head_sha + report verdict in one shot** — replaces the manual dispatch→wait→find→check-head→poll→conclude dance. |
+|12| `gh-actions-runs [--repo <owner/repo>] (--workflow <file> --branch <b> [--expect <sha>] [--status <s>] \| --run-id <id> [--expect <sha>]) [--summary]` | **Default per-job readout**: shows each job's `status`/`conclusion` + failed step + running step. This is what "did the scan gate fail while others still run" actually means. Add `--summary` to list only recent runs (no job details, 1 API call each). |
+|13| `gh_ci_wait.sh --repo <owner/repo> --workflow <id_or_file> --ref <branch> [--expect <sha>] [--timeout <s>] [--poll <s>] [--no-dispatch] [--fail-fast]` | **Dispatch (optional) + watch per-job + verify head_sha + final verdict in one shot.** Prints the same per-job snapshot every poll; `--fail-fast` exits the moment any parallel job turns red, without waiting for its siblings. `--job-detail` is accepted for backwards compatibility but job detail is now the default. |
 
 ## CI waits: use gh_ci_wait.sh (not hand-rolled loops)
 
 Prefer the single-purpose script `scripts/gh_ci_wait.sh` over pasting fresh curl/python polling each time. It encodes the hard-won RikkaMinis CI pitfalls:
 
-- **One call does everything**: optionally dispatches, then waits for the run, then verifies `head_sha`, then prints a one-line Markdown verdict and exits 0/1/2/3.
+- **One call does everything**: optionally dispatches, locks one run ID, verifies `head_sha`, then prints a per-job snapshot every `--poll` interval and the final verdict.
+- **Parallel jobs are visible while running**: the default output names each current job, including its failed or in-progress step, instead of hiding a red `scan-gate` behind a whole-workflow `in_progress`.
 - **`--expect <sha>` = anti false-green guard**: only accepts a run whose `head_sha` equals your pushed commit, and rejects a wrong-head completed run as "CI is a liar — do NOT trust it". This is the exact `head_sha` verification the methodology mandates.
-- **Picks the newest matching run** on the branch (handles the API list-cache-lag / multiple-runs-per-branch cases), and drops runs that don't match `--expect`.
+- **Picks the newest matching run** on the branch (handles the API list-cache-lag / multiple-runs-per-branch cases), and drops runs that don't match `--expect`. It filters by workflow file, so a scan workflow's completed run cannot be mistaken for a still-running build workflow.
 - **`--no-dispatch`** to attach to an already-triggered run (e.g. after a `main` push release build).
+- **`--fail-fast`** returns after the first hard job failure while siblings continue; use it when a red scan gate is enough evidence to stop and investigate.
 
 ```sh
-# dispatch build-apk.yml on a branch, wait, verify head, report, exit 0/1
+# dispatch build-apk.yml on a branch, watch every job, verify head, report, exit 0/1
 sh /var/minis/skills/github-ops/scripts/gh_ci_wait.sh \
   --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --ref fix/branch \
-  --expect <full-commit-sha> --timeout 900 --poll 60 --job-detail
+  --expect <full-commit-sha> --timeout 900 --poll 60
 ```
 
-Exit codes: `0` all-clear; `1` any step failed; `2` timed out with no verdict; `3` wrong-head when `--expect` given (phantom/false-green). Anything non-zero means **do not trust the green; investigate before merging**.
+For a one-off read of a running or completed run, use the existing command; `--summary` opts back into the coarse list when the goal is merely to find a run:
+
+```sh
+sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-runs \
+  --repo logicflow-GYW/RikkaMinis --run-id <run-id>
+# or
+sh /var/minis/skills/github-ops/scripts/gh_sync.sh gh-actions-runs \
+  --repo logicflow-GYW/RikkaMinis --workflow build-apk.yml --branch <branch> --expect <full-commit-sha>
+```
+
+The current-attempt job endpoint is pinned, so a partial rerun cannot hide a former red job under an all-green list. Exit codes: `0` all-clear; `1` a job failed; `2` timed out with no verdict; `3` wrong-head or incomplete job detail. Anything non-zero means **do not trust the green; investigate before merging**.
 
 ## Long waits: ≥180 s of silence gets your command killed (stall-guard)
 
