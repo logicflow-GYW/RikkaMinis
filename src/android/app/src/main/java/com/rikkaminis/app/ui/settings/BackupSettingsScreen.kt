@@ -119,7 +119,12 @@ internal class BackupTaskOwner {
     }
 
     @Synchronized
-    fun takeExport(): PendingExport? = pendingExport.also { pendingExport = null }
+    fun takeExport(): PendingExport? {
+        val request = pendingExport ?: return null
+        if (active.value !== request.token) return null
+        pendingExport = null
+        return request
+    }
 
     /** Completion also runs when a cancelled scope never enters the coroutine body. */
     fun launch(scope: CoroutineScope, token: Token, block: suspend CoroutineScope.() -> Unit): Job =
