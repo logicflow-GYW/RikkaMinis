@@ -102,6 +102,8 @@ internal class FakeAgentLoopHost(
     val streamRequests = mutableListOf<StreamRequest>()
     /** [surgery-1120 A-01] The commit handle + turn id of every attempt. */
     val streamCommitHandles = mutableListOf<TranscriptCommitHandle?>()
+    /** Called with each streamed attempt's commit handle (collector stand-in). */
+    var onStreamCommitHandle: ((TranscriptCommitHandle) -> Unit)? = null
     val streamTurnIds = mutableListOf<String?>()
     val streamMessageSnapshots = mutableListOf<List<LLMMessage>>()
     val lastTurnContextTokensValues = mutableListOf<Int>()
@@ -325,6 +327,12 @@ internal class FakeAgentLoopHost(
         // consequence.
         streamCommitHandles.add(transcriptCommit)
         streamTurnIds.add(turnId)
+        // [surgery-1120 A-01 review] Stands in for the collector attaching its
+        // run dir to the engine's handle (see ChatStreamOffloadHandler.stream).
+        // A test sets it to point the handle at a REAL temp dir, which is what
+        // makes the engine's plan/commit/abandon/discard decisions observable
+        // as files instead of as mocks.
+        transcriptCommit?.let { onStreamCommitHandle?.invoke(it) }
         val script = scripts.removeFirstOrNull()
             ?: error("harness: no TurnScript queued for attempt #$attemptIndex")
         script.throwBefore?.let { throw it }

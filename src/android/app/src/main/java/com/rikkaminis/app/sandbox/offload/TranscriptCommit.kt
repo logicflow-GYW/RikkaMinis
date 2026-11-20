@@ -56,8 +56,22 @@ object TranscriptCommit {
         }.toString()
     }
 
-    /** What `meta.json` carries before any row exists (turn id optional). */
-    data class Meta(val sessionId: String, val turnId: String?, val attempt: Int)
+    /**
+     * What `meta.json` carries before any row exists (turn id optional).
+     *
+     * [rowIndex] is the bubble-row the attempt's text will land in
+     * (`transcriptRowIndex` at stream start). It is stamped HERE, before the
+     * stream, because that is the only moment the engine knows it: a bubble
+     * with tool turns carries several rows, and recovery must insert the spool
+     * into the row the live path would have used instead of always row 0.
+     * Null = a dir written by an older build (attempt order, one row).
+     */
+    data class Meta(
+        val sessionId: String,
+        val turnId: String?,
+        val attempt: Int,
+        val rowIndex: Int? = null,
+    )
 
     /**
      * Deterministic row id for row [index] of the bubble [turnId]. Stable
@@ -99,14 +113,19 @@ object TranscriptCommit {
     }
 
     /** Write `meta.json` identity BEFORE the stream starts (recovery attribution). */
-    fun writeMeta(dir: File, sessionId: String, turnId: String?, attempt: Int) {
-        runCatching {
-            val obj = JSONObject().put(KEY_SESSION_ID, sessionId)
-            if (!turnId.isNullOrBlank()) obj.put(KEY_TURN_ID, turnId)
-            obj.put(KEY_ATTEMPT, attempt)
-            durableWrite(File(dir, FILE_META), obj.toString() + "\n")
-        }
-    }
+    fun writeMeta(
+        dir: File,
+        sessionId: String,
+        turnId: String?,
+        attempt: Int,
+        rowIndex: Int? = null,
+    ): Boolean = runCatching {
+        val obj = JSONObject().put(KEY_SESSION_ID, sessionId)
+        if (!turnId.isNullOrBlank()) obj.put(KEY_TURN_ID, turnId)
+        obj.put(KEY_ATTEMPT, attempt)
+        if (rowIndex != null) obj.put(KEY_ROW_INDEX, rowIndex)
+        durableWrite(File(dir, FILE_META), obj.toString() + "\n")
+    }.getOrDefault(false)
 
     /**
      * Best-effort read of a marker (plan or commit), or null when absent.
@@ -128,6 +147,13 @@ object TranscriptCommit {
             sessionId = session,
             turnId = obj.optString(KEY_TURN_ID).takeIf { it.isNotBlank() },
             attempt = obj.optInt(KEY_ATTEMPT, 0),
+            // Absent ⇒ a dir written before the row index was stamped; the
+            // recovery keeps its old attempt-ordered, single-row contract.
+            rowIndex = if (obj.has(KEY_ROW_INDEX) && !obj.isNull(KEY_ROW_INDEX)) {
+                obj.optInt(KEY_ROW_INDEX, 0)
+            } else {
+                null
+            },
         )
     }
 

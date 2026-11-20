@@ -35,7 +35,6 @@ import java.util.UUID
  */
 object ChatStreamOffloadHandler {
     private const val TAG = "ChatStreamOffload"
-    private const val STAGING_ROOT = "model-exec"
     private const val POLL_INTERVAL_MS = 160L
 
     /** Bytes of a dropped frame read back for the diagnostic summary. */
@@ -185,9 +184,13 @@ object ChatStreamOffloadHandler {
         // +1 per failure is still wrong: keep incrementing tracked with its own
         // try/finally so EVERY exit path pairs ++ with --.
         activeStreams.getAndIncrement()
+        // [surgery-1120 A-01 review] Declared OUTSIDE the staging try so the
+        // outer finally can end the ownership lease even when staging itself
+        // threw after the dir was registered.
+        var ownedDir: File? = null
         try {
         val dir = try {
-            val root = File(context.cacheDir, STAGING_ROOT)
+            val root = File(context.cacheDir, StreamOwnership.STAGING_ROOT)
             root.mkdirs()
             val d = File(root, "run-${UUID.randomUUID()}")
             if (!d.mkdir()) throw IllegalStateException("cannot create run dir")
@@ -199,8 +202,26 @@ object ChatStreamOffloadHandler {
         // transcript, e.g. sub-agent streams): the terminal cleanup uses it to
         // distinguish "transcript row durable" from "worker merely finished".
         val commitHandle = transcriptCommit
+        // [surgery-1120 A-01 review] Publish ownership BEFORE anything can read
+        // the staging root: a startup/late recovery scan in this process must
+        // never treat a dir its own collector is driving as abandoned.
+        StreamOwnership.register(dir)
+        ownedDir = dir
         if (!sessionId.isNullOrBlank()) {
-            PartialStreamRecovery.writeMeta(dir, sessionId, turnId, attempt = commitHandle?.attempt ?: 0)
+            PartialStreamRecovery.writeMeta(
+                dir,
+                sessionId,
+                turnId,
+                attempt = commitHandle?.attempt ?: 0,
+                // [surgery-1120 A-01 review] Which assistant row of the bubble
+                // this attempt's text belongs to. Stamped into meta.json so a
+                // recovery in another process writes the spool into the row
+                // the live path would have used instead of always row 0 — a
+                // tool-turn bubble persists row 0 before its tools run and
+                // row 1 after them. The handle is created by the engine before
+                // the stream, so it is the one source of this value.
+                rowIndex = commitHandle?.rowIndex,
+            )
         }
         commitHandle?.attachDir(dir)
 
@@ -524,6 +545,10 @@ object ChatStreamOffloadHandler {
             // skipped this decrement entirely.
             // [deep-audit-1018 ISSUE-04] Atomic decrement with a floor: no
             // read-modify-write can be lost, and the counter never goes negative.
+            // [surgery-1120 A-01 review] The ownership lease ends with the
+            // collector. A dir kept for recovery is no longer ours — the next
+            // start's scan must be able to see it.
+            ownedDir?.let { runCatching { StreamOwnership.release(it) } }
             activeStreams.updateAndGet { (it - 1).coerceAtLeast(0) }
         }
     }.flowOn(Dispatchers.IO)

@@ -32,7 +32,10 @@ class PartialStreamRecoveryTest {
         hasSessionMeta = meta,
         mtimeAgeMs = mtimeAgeMs,
         terminalCommitted = terminalCommitted,
-        donePresent = done,
+        // [surgery-1120 A-01 review] The DONE probe is a supplier now: the real
+        // recovery reads it lazily (only for dirs whose decision needs the
+        // frame), and a test states it as a value.
+        readDone = { done },
     )
 
     @Test

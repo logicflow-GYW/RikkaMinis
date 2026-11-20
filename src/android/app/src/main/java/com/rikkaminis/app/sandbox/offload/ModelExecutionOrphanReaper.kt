@@ -44,7 +44,6 @@ import java.io.File
 object ModelExecutionOrphanReaper {
 
     private const val TAG = "ModelExecOrphanReaper"
-    private const val STAGING_ROOT = "model-exec"
     /** A run dir must be untouched this long before it's deemed an orphan. */
     private const val ORPHAN_AGE_MS = 10 * 60 * 1000L // 10 minutes
 
@@ -105,20 +104,44 @@ object ModelExecutionOrphanReaper {
      *
      * JVM-testable: the file layout is the whole input.
      */
-    internal fun shouldLeaveToRecovery(dir: File): Boolean {
+    internal fun shouldLeaveToRecovery(
+        dir: File,
+        /**
+         * [surgery-1120 A-01 review] Does the spool carry a clean DONE frame?
+         * A terminal WITHOUT one is the error / non-chat shape: no transcript
+         * row is expected, and [PartialStreamRecoveryPolicy] skips it as
+         * SKIP_TERMINAL. Claiming such a dir "for recovery" left it to a
+         * recovery that will never take it — the dir then lived forever. The
+         * probe is a bounded single pass ([StreamScan], which also counts
+         * oversized frames instead of loading them) and runs only for dirs that
+         * already passed the age + terminal gates.
+         */
+        hasCleanDone: () -> Boolean = {
+            StreamScan.scan(File(dir, ModelExecutionService.STREAM_FILE)).done
+        },
+    ): Boolean {
         // No transcript identity ⇒ not a chat stream (title / QuickTest /
         // compaction dispatch, or a pre-protocol dir) ⇒ old behaviour.
         val meta = TranscriptCommit.readMeta(dir) ?: return false
         if (meta.turnId.isNullOrBlank()) return false
-        return !TranscriptCommit.isCommitted(dir)
+        if (TranscriptCommit.isCommitted(dir)) return false
+        return hasCleanDone()
     }
 
     /**
      * Scan the staging root and delete any eligible orphan run dir. Returns
      * the number deleted (for logging). Never throws.
      */
-    fun reapOrphans(context: Context): Int {
-        val root = File(context.cacheDir, STAGING_ROOT)
+    fun reapOrphans(context: Context): Int =
+        reapOrphansIn(File(context.cacheDir, StreamOwnership.STAGING_ROOT))
+
+    /**
+     * [surgery-1120 A-01 review] The sweep itself, over an explicit staging
+     * root. Production passes `cacheDir/model-exec`; a unit test passes a temp
+     * dir — the recovery scan got the same treatment so the two halves of the
+     * "who reclaims what" pair can be driven together on the JVM.
+     */
+    internal fun reapOrphansIn(root: File): Int {
         if (!root.isDirectory) return 0
         val canonicalRoot = runCatching { root.canonicalFile }.getOrElse { root }
         // [fix/audit-s2h3] was `val deleted = 0` — never incremented, so the
@@ -144,6 +167,12 @@ object ModelExecutionOrphanReaper {
             val mtime = child.lastModified()
             val ageMs = System.currentTimeMillis() - mtime
             if (ageMs < ORPHAN_AGE_MS) continue
+            // [surgery-1120 A-01 review] This process's own live stream: the
+            // dir mtime only moves when a file INSIDE it is created/renamed,
+            // not when the worker appends to stream.jsonl — so an actively
+            // streaming run can look "untouched for 10 minutes" on a very long
+            // answer. Ownership is the fact the age gate was standing in for.
+            if (StreamOwnership.isLive(child)) continue
             val runId = ModelExecutionDispatcher.runIdOf(child)
             val reason: String
             if (ModelExecutionRunDir.terminalPresent(child)) {
@@ -152,6 +181,15 @@ object ModelExecutionOrphanReaper {
                 // cold-start recovery owns it, the reaper must not delete it.
                 if (shouldLeaveToRecovery(child)) {
                     Log.i(TAG, "kept for transcript recovery (terminal, uncommitted): ${child.name}")
+                    continue
+                }
+                // [surgery-1120 A-01 review] A fresh beat is the one liveness
+                // signal that works on hidepid devices; `safeToDelete` reads
+                // /proc and only stays conservative because it refuses UNKNOWN.
+                // Checking the beat FIRST keeps a beating worker safe even
+                // where the pid probe would have been read as absent.
+                if (ModelExecutionRunDir.beatAlive(child)) {
+                    Log.i(TAG, "kept: worker still beating ${child.name}")
                     continue
                 }
                 // Criterion 2 (terminal branch): safeToDelete (terminal +
@@ -177,7 +215,11 @@ object ModelExecutionOrphanReaper {
                 if (!eligible) continue
                 reason = "cancelled-orphan"
             }
-            val ok = runCatching { child.deleteRecursively(); true }.getOrDefault(false)
+            // [surgery-1120 A-01 review] One delete entry point: canonical
+            // path guard + a last-moment liveness re-check. The decision above
+            // and this delete are separated by an arbitrary amount of work, and
+            // a worker needs no permission to start writing in between.
+            val ok = ModelExecutionRunDir.deleteIfUnowned(child, root, runId)
             if (ok) {
                 deleted++
                 Log.i(TAG, "reaped $reason orphan run dir: ${child.name} (mtime ${mtime}ms)")

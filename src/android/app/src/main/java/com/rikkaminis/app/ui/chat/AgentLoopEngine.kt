@@ -837,8 +837,25 @@ internal class AgentLoopEngine(
         val rowId = plannedTranscriptRowId(loopState, rowIndex) ?: return null
         // The plan is a durable fsync; the loop coroutine is the Main
         // dispatcher, so this must not run inline.
-        withContext(Dispatchers.IO) {
-            loopState.pendingTranscriptCommits.forEach { it.plan(rowId) }
+        val pending = loopState.pendingTranscriptCommits.toList()
+        // [surgery-1120 A-01 review] A plan that did not reach the disk is NOT
+        // a plan. The insert used to proceed anyway, so a crash between it and
+        // the commit left recovery with no id to look for and the spool got
+        // inserted a second time. Refuse to insert in that case — but only
+        // while the spool still exists: a handle whose dir the collector
+        // already acked and deleted (error / user-stop shape) has nothing left
+        // to duplicate, and a partial answer the user already saw must still be
+        // persisted then.
+        val failed = withContext(Dispatchers.IO) {
+            pending.filter { !it.plan(rowId) && it.spoolPresent() }
+        }
+        if (failed.isNotEmpty()) {
+            abandonTranscriptCommits(loopState)
+            AppLogger.warning(
+                TAG_STREAM,
+                "transcript plan could not be written (${failed.size} spool dir(s)) — not inserting an unplanned row",
+            )
+            throw IllegalStateException("transcript plan is not durable")
         }
         return rowId
     }
@@ -933,6 +950,19 @@ internal class AgentLoopEngine(
      * the collector acks + deletes, and cold-start recovery skips the dir
      * instead of inserting text the engine already discarded.
      */
+    /**
+     * [surgery-1120 A-01 review] Settle EVERY pending attempt as discarded.
+     * Used by the cancel exit: no row will ever be written for this run, so the
+     * dirs must be marked "delivered, nothing to insert" instead of being left
+     * for cold-start recovery.
+     */
+    private fun discardTranscriptCommits(loopState: AgentLoopState) {
+        if (loopState.pendingTranscriptCommits.isEmpty()) return
+        val pending = loopState.pendingTranscriptCommits.toList()
+        loopState.pendingTranscriptCommits.clear()
+        pending.forEach { handle -> runCatching { handle.discard() } }
+    }
+
     private suspend fun discardTranscriptCommit(loopState: AgentLoopState, handle: TranscriptCommitHandle?) {
         if (handle == null) return
         loopState.pendingTranscriptCommits.remove(handle)
@@ -1078,6 +1108,13 @@ internal class AgentLoopEngine(
         // whose blocks are still un-persisted.
         var lastSegmentUsage: LLMUsage? = null
         var lastSegmentReasoning: String? = null
+        // [surgery-1120 A-01 review] Per-BUBBLE attempt ordinal. It used to be
+        // declared inside the turn body, so every turn restarted it at 1: two
+        // run dirs of the same bubble (a length-wall continuation in round 2,
+        // a retry in round 3) then carried the SAME attempt number, and the
+        // recovery orders a row's segments by it. Monotonic here means one
+        // order no matter how many turns the bubble spans.
+        var attemptIndex = 0
 
         try {
         // [feat/runtime-limits-panel] 循环上界从 prefs 读（默认 256）。取一次局部
@@ -1566,7 +1603,6 @@ internal class AgentLoopEngine(
             // handle stays pending until the transcript row is durable.
             var attemptTurnId: String? = null
             var attemptCommitHandle: TranscriptCommitHandle? = null
-            var attemptIndex = 0
             // [incr1113 F-03] The overshoot latch is declared ONCE for the whole
             // user turn, above the `turnLoop@` (see its declaration site) — not
             // here, where every new turn used to re-arm it.
@@ -1656,6 +1692,11 @@ internal class AgentLoopEngine(
                         turnId = attemptTurnId!!,
                         sessionId = host.activeSessionId,
                         attempt = attemptIndex,
+                        // [surgery-1120 A-01 review] The row this attempt's
+                        // text will land in. The engine knows it only HERE, so
+                        // it rides on the handle and the stream handler stamps
+                        // it into the run dir's meta before collecting.
+                        rowIndex = loopState.transcriptRowIndex,
                     )
                     loopState.currentTranscriptTurnId = attemptTurnId
                     loopState.pendingTranscriptCommits.add(attemptCommitHandle)
@@ -5121,6 +5162,19 @@ internal class AgentLoopEngine(
         traceObserver.traceRunFile = null
         traceObserver.t7BudgetStopReason = null
         } catch (e: CancellationException) {
+            // [surgery-1120 A-01 review] A stopped / superseded attempt will
+            // never be committed, so its spool must not stay "uncommitted" for
+            // a later recovery to resurrect as an answer the user already
+            // abandoned. Settle it as discarded — under NonCancellable,
+            // because this coroutine is already cancelled and every suspension
+            // point would throw at once. The content is not lost: the stop path
+            // persists the partial text the user saw (handleUserCancelledCleanup)
+            // and the collector's own finally still wrote `cancel`.
+            runCatching {
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    discardTranscriptCommits(loopState)
+                }
+            }
             // T9: cancel is intentional — trace the interruption
             runCatching {
                 traceObserver.agentTraceRecorder.error(turn = traceObserver.activeTraceTurn, phase = "cancel", message = "runAgentLoop cancelled")

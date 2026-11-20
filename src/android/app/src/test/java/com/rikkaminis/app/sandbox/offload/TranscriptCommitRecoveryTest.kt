@@ -79,7 +79,7 @@ class TranscriptCommitRecoveryTest {
                 hasSessionMeta = true,
                 mtimeAgeMs = 120_000L,
                 terminalCommitted = false,
-                donePresent = true,
+                readDone = { true },
             ),
         )
     }
@@ -104,7 +104,7 @@ class TranscriptCommitRecoveryTest {
                 hasSessionMeta = true,
                 mtimeAgeMs = 120_000L,
                 terminalCommitted = true,
-                donePresent = true,
+                readDone = { true },
             ),
         )
     }
