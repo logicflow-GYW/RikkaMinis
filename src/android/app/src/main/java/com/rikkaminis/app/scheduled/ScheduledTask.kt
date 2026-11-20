@@ -77,6 +77,10 @@ data class ScheduledRunRef(
     val taskId: String,
     /** `null` when the run never got a session (it never reached the document). */
     val sessionId: String?,
+    /** Process-local admission epochs; never serialized into scheduled-tasks.json. */
+    val taskGeneration: Long = 0L,
+    val globalGeneration: Long = 0L,
+    val documentGeneration: Long = 0L,
 )
 
 /**
@@ -87,6 +91,31 @@ data class ScheduledTasksFile(
     val globalEnabled: Boolean = false,
     val running: ScheduledRunMarker? = null,
     val tasks: List<ScheduledTask> = emptyList(),
+)
+
+data class ScheduledTaskAdmissionSnapshot(
+    val file: ScheduledTasksFile,
+    val generations: Map<String, Long>,
+    val globalGeneration: Long,
+    val documentGeneration: Long,
+)
+
+data class ScheduledTaskRemovalWatermark(
+    val generations: Map<String, Long>,
+    val globalGeneration: Long,
+    val documentGeneration: Long,
+)
+
+enum class ScheduledTaskWriteDisposition { PERSISTED, NO_CHANGE, WRITE_FAILED }
+
+data class ScheduledTaskStoreTransition(
+    val transition: ScheduledTaskTransitions.Result,
+    val disposition: ScheduledTaskWriteDisposition,
+)
+
+data class ScheduledTaskMarkRunningOutcome(
+    val file: ScheduledTasksFile,
+    val disposition: ScheduledTaskWriteDisposition,
 )
 
 /**

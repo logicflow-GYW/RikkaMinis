@@ -99,6 +99,24 @@ object ScheduledTaskPolicy {
     }
 }
 
+object ScheduledTaskGenerationPolicy {
+    fun admits(
+        run: ScheduledRunRef,
+        taskGeneration: Long,
+        globalGeneration: Long,
+        documentGeneration: Long,
+    ): Boolean = run.taskGeneration == taskGeneration &&
+        run.globalGeneration == globalGeneration && run.documentGeneration == documentGeneration
+
+    fun invalidated(
+        run: ScheduledRunRef,
+        removedTaskIds: Set<String>?,
+        watermark: ScheduledTaskRemovalWatermark,
+    ): Boolean = run.documentGeneration < watermark.documentGeneration ||
+        (removedTaskIds != null && run.taskId in removedTaskIds &&
+            run.taskGeneration < (watermark.generations[run.taskId] ?: run.taskGeneration))
+}
+
 object ScheduledTaskRunOwnership {
 
     /**
