@@ -104,7 +104,7 @@ class BlobDownloadBridgeAuthTest {
         slot.arm("first")
         slot.arm("second")
         assertEquals(
-            "the replaced request is NOT_CURRENT — the caller reports that download as failed",
+            "the old credential cannot settle the replacement's request",
             BlobDownloadTokenSlot.Claim.NOT_CURRENT,
             slot.claim("first", 120_000L),
         )
@@ -210,13 +210,38 @@ class BlobDownloadBridgeAuthTest {
         )
     }
 
+    @Test
+    fun `a destroyed tab does not re-arm on a late request`() {
+        val slot = BlobDownloadTokenSlot()
+        slot.arm("before-teardown")
+        slot.close()
+        assertEquals(BlobDownloadTokenSlot.Claim.NO_TOKEN_ARMED, slot.claim("before-teardown", 120_000L))
+        slot.arm("after-teardown")
+        assertNull(slot.activeToken)
+        assertEquals(BlobDownloadTokenSlot.Claim.NO_TOKEN_ARMED, slot.claim("after-teardown", 120_000L))
+    }
+
+    @Test
+    fun `negative elapsed time does not extend a download credential`() {
+        var now = 10_000L
+        val slot = BlobDownloadTokenSlot(nowMs = { now })
+        slot.arm("token")
+        now = 9_999L
+        assertEquals(BlobDownloadTokenSlot.Claim.EXPIRED, slot.claim("token", 120_000L))
+    }
+
     // ── arm 2: the reason bound ─────────────────────────────────────────────
 
     @Test
     fun `a page-supplied reason is bounded and its control characters collapsed`() {
         val huge = "x".repeat(4_096)
         val bounded = boundedBlobFailureReason(huge, "fallback")
-        assertEquals("240 chars plus the ellipsis", 241, bounded.length)
+        assertEquals("the ellipsis is included in the bound", 240, bounded.length)
+        assertEquals(
+            "a character crossing the cutoff stays whole",
+            "x".repeat(238) + "…",
+            boundedBlobFailureReason("x".repeat(238) + "🙂rest", "fallback"),
+        )
         assertTrue("the truncation is visible: $bounded", bounded.endsWith("…"))
 
         assertEquals(
@@ -262,6 +287,9 @@ class BlobDownloadBridgeAuthTest {
             js.contains("saveBlobDownload(\"tok-123\", reader.result"),
         )
         assertTrue("the fetch still targets the blob URL:\n$js", js.contains("\"blob:https://example.com/abc\""))
+        assertTrue("load, not loadend, is the success event", js.contains("reader.onload ="))
+        assertFalse("loadend runs after failures too", js.contains("reader.onloadend"))
+        assertTrue("FileReader abort also settles", js.contains("reader.onabort = reader.onerror"))
     }
 
     @Test
@@ -352,12 +380,13 @@ class BlobDownloadBridgeAuthTest {
         assertEquals(
             "exactly one slot instance — two would split the credential",
             1,
-            Regex("BlobDownloadTokenSlot\\(\\)").findAll(src).count(),
+            Regex("private val blobDownloadSlot\\s*=\\s*BlobDownloadTokenSlot\\(").findAll(src).count(),
         )
         val destroy = codeOnly(funBody(src, "fun destroy()"))
+        val close = destroy.indexOf("blobDownloadSlot.close()")
         assertTrue(
-            "no credential may outlive the tab:\n$destroy",
-            destroy.contains("blobDownloadSlot.arm(null)"),
+            "close the slot before platform teardown that may fail:\n$destroy",
+            close in 0 until destroy.indexOf("try {"),
         )
         assertTrue(
             "the bridge registration itself is unchanged (both members on __minis__)",

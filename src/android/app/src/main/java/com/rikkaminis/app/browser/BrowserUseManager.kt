@@ -142,11 +142,6 @@ class BrowserUseManager(
          */
         private const val MAX_BLOB_REQUEST_AGE_MS = 120_000L
 
-        /** [SURGERY-C02] Cap on the sanitized reason excerpt kept in a refused
-         *  bridge call's log line — the log is a shareable artifact, and the
-         *  reason is page-authored. */
-        private const val MAX_BLOB_DIAGNOSTIC_CHARS = 64
-
         @SuppressLint("SetJavaScriptEnabled")
         fun configureWebView(webView: WebView, profile: UserAgentProfile, customUA: String? = null) {
             // [T-android-browser-blank] The browser lives inside a Material3
@@ -400,7 +395,8 @@ class BrowserUseManager(
      * terminal per download" a property of the object rather than of two
      * hand-matched branches.
      */
-    private val blobDownloadSlot = BlobDownloadTokenSlot()
+    private val blobDownloadSlot = BlobDownloadTokenSlot(nowMs = android.os.SystemClock::elapsedRealtime)
+    private val loggedBlobBridgeRefusal = java.util.concurrent.atomic.AtomicBoolean()
 
     /**
      * [audit2-A2] One-shot credential for the `__minis__.saveBlobDownload`
@@ -545,23 +541,14 @@ class BrowserUseManager(
          * this download request before it finished"), and that report was
          * itself reachable by any page that presented an arbitrary string —
          * the same hole as the uncredentialed error bridge, one branch over.
-         * The newer request that replaced this one reports its own outcome,
-         * so nothing the user needs is lost; the refused call leaves a bounded
-         * diagnostic line for forensics instead.
+         * A replaced request still cannot complete through the single slot.
+         * Only the native owner can report that as a user-visible failure.
          */
         @JavascriptInterface
         fun saveBlobDownload(token: String, dataUrl: String, filename: String) {
             val claim = blobDownloadSlot.claim(token, MAX_BLOB_REQUEST_AGE_MS)
             if (claim != BlobDownloadTokenSlot.Claim.MATCH) {
-                Log.w(
-                    TAG,
-                    blobBridgeRefusalDiagnostic(
-                        "saveBlobDownload",
-                        claim.name,
-                        filename,
-                        armedAfter = blobDownloadActiveToken != null,
-                    ),
-                )
+                logBlobBridgeRefusal("saveBlobDownload", claim)
                 return
             }
             // The credential dies with the call it authorised.
@@ -582,9 +569,8 @@ class BrowserUseManager(
          * diagnostic.
          *
          * A refused call must leave no trace in business state (no panel entry,
-         * no chat notice) — only a bounded, structured log line for forensics:
-         * outcome + reason length + a short sanitized excerpt. It is never
-         * thrown back into the page, which would leak internals.
+         * no chat notice). At most one metadata-only diagnostic per tab goes
+         * into the shareable log.
          *
          * Note the residual boundary: this does not make the token a secret
          * inside the page's own JS context (our injected script carries it); it
@@ -596,15 +582,7 @@ class BrowserUseManager(
         fun blobDownloadError(token: String, error: String) {
             val claim = blobDownloadSlot.claim(token, MAX_BLOB_REQUEST_AGE_MS)
             if (claim != BlobDownloadTokenSlot.Claim.MATCH) {
-                Log.w(
-                    TAG,
-                    blobBridgeRefusalDiagnostic(
-                        "blobDownloadError",
-                        claim.name,
-                        error,
-                        armedAfter = blobDownloadActiveToken != null,
-                    ),
-                )
+                logBlobBridgeRefusal("blobDownloadError", claim)
                 return
             }
             // Credentialed failure: the download is genuinely dead, so it stays
@@ -658,8 +636,8 @@ class BrowserUseManager(
             // unit-testable without a WebView — the same JVM lift [MinisMainDocGate]
             // was created for.
             decodeDataUrlPayload(header, dataUrl.substring(comma + 1))
-        } catch (t: Throwable) {
-            reportBlobFailure(filename, "payload decode failed: ${t.message}")
+        } catch (e: IllegalArgumentException) {
+            reportBlobFailure(safeName, "payload decode failed")
             return
         }
         Log.i(TAG, "blob download decoded: $safeName (${bytes.size} bytes, mime=$mime)")
@@ -672,31 +650,13 @@ class BrowserUseManager(
      * downloads panel + chat instead of dying in logcat.
      */
     private fun reportBlobFailure(filename: String?, reason: String) {
-        Log.w(TAG, "blob download failed${filename?.let { " ($it)" } ?: ""}: $reason")
+        Log.w(TAG, "blob download failed (named=${filename != null}, reasonChars=${reason.length})")
         onBlobDownloadFailed?.invoke(filename, reason)
     }
 
-    /**
-     * [SURGERY-C02] The log line for a bridge call that did not own the armed
-     * credential — the only trace a refused (unauthenticated / replayed /
-     * replaced / expired) callback is allowed to leave.
-     *
-     * Structured and bounded on purpose: the reason is page-authored and the log
-     * is a shareable artifact, so the raw text never goes in — outcome, whether
-     * a request is STILL pending, length and a sanitized, length-capped excerpt
-     * only. `armed=` is the useful forensic bit: a refusal while another request
-     * is armed means a page is pushing calls at the bridge during a real
-     * download; a refusal with nothing armed means a replay after the answer.
-     */
-    private fun blobBridgeRefusalDiagnostic(
-        member: String,
-        outcome: String,
-        reason: String,
-        armedAfter: Boolean,
-    ): String {
-        val excerpt = boundedBlobFailureReason(reason, fallback = "").take(MAX_BLOB_DIAGNOSTIC_CHARS)
-        return "blob bridge call refused ($member, ${outcome.lowercase()}, armed=$armedAfter): " +
-            "reasonLen=${reason.length} excerpt=[$excerpt]"
+    private fun logBlobBridgeRefusal(member: String, claim: BlobDownloadTokenSlot.Claim) {
+        if (!loggedBlobBridgeRefusal.compareAndSet(false, true)) return
+        Log.w(TAG, "blob bridge call refused ($member, $claim)")
     }
 
     init {
@@ -3269,6 +3229,8 @@ class BrowserUseManager(
     fun destroy() {
         if (destroyed) return
         destroyed = true
+        // Disarm even if a WebView/platform teardown operation below throws.
+        blobDownloadSlot.close()
         try {
             // [feat/browser-console-network-upload] Answer a still-pending
             // file chooser before tearing the WebView down — an unanswered
@@ -3327,10 +3289,6 @@ class BrowserUseManager(
             // next onPageStarted commits again.
             lastMainDocUrl = null
             lastMainFrameHttpError = null // [r3-B09 F-14] no status outlives the tab
-            // [SURGERY-C02] No download credential outlives the tab either: the
-            // bridge lives inside the renderer being torn down, so a still-armed
-            // token could only ever be replayed by a page — never answered.
-            blobDownloadSlot.arm(null)
             // Assign a no-op implementation instead of null — the Kotlin
             // Android SDK bindings expose webViewClient/webChromeClient as
             // non-null types (API 26+), so "= null" won't compile.

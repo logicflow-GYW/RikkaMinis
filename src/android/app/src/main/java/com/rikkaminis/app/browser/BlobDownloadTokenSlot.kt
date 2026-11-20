@@ -1,5 +1,6 @@
 package com.rikkaminis.app.browser
 
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 
 /**
@@ -32,7 +33,7 @@ import org.json.JSONObject
  * is injected, which is the only way to exercise the expiry arm deterministically.
  */
 internal class BlobDownloadTokenSlot(
-    private val nowMs: () -> Long = { System.currentTimeMillis() },
+    private val nowMs: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
 ) {
 
     /**
@@ -43,9 +44,7 @@ internal class BlobDownloadTokenSlot(
      *  - [MATCH] — this callback owns the armed request; consume and act.
      *  - [NO_TOKEN_ARMED] — nothing is pending (replay after the real answer,
      *    or a page calling the bridge on its own). Diagnostic only.
-     *  - [NOT_CURRENT] — a NEWER request owns the slot (this reader answered
-     *    after the page replaced its download). Diagnostic + the visible
-     *    "replaced" failure the success path has reported since r3-B09 F-10.
+     *  - [NOT_CURRENT] — the credential does not own the current request. Diagnostic only.
      *  - [EXPIRED] — the armed request is older than [BrowserUseManager]'s
      *    window, i.e. armed but never answered. Diagnostic only, by design: the
      *    only way to present the expired value is to hold the token we injected,
@@ -63,11 +62,20 @@ internal class BlobDownloadTokenSlot(
     @Volatile
     private var armedAtMs: Long = 0L
 
-    /** Arm [value] as the one credential the bridge will accept. */
+    private var closed = false
+
+    /** Arm [value] unless the tab has already been torn down. */
     fun arm(value: String?) {
         synchronized(this) {
+            if (closed) return
             activeToken = value
             armedAtMs = if (value == null) 0L else nowMs()
+        }
+    }
+
+    fun close() {
+        synchronized(this) {
+            activeToken = null // release-ok: permanent tab close under the same lock as arm/claim; no later owner
         }
     }
 
@@ -84,7 +92,7 @@ internal class BlobDownloadTokenSlot(
         val ageMs = nowMs() - armedAtMs
         activeToken = null
         armedAtMs = 0L
-        if (maxAgeMs > 0 && ageMs > maxAgeMs) Claim.EXPIRED else Claim.MATCH
+        if (ageMs !in 0L..maxAgeMs) Claim.EXPIRED else Claim.MATCH
     }
 }
 
@@ -105,30 +113,31 @@ internal const val MAX_BLOB_FAILURE_REASON_CHARS = 240
 /**
  * Sanitize + bound [reason] for the downloads panel / chat notice.
  *
- * Collapses every control character (C0 + DEL) to a single space and the
- * surrounding whitespace, then truncates to [MAX_BLOB_FAILURE_REASON_CHARS]
- * with an ellipsis. Blank input keeps the caller's own wording, so an empty
- * `String(e)` still yields a sentence rather than an empty row.
+ * Folds whitespace and control characters, without copying the entire input
+ * just to truncate it. The limit includes the ellipsis and never splits UTF-16
+ * surrogate pairs. An empty result uses the caller's fixed fallback.
  */
 internal fun boundedBlobFailureReason(reason: String, fallback: String): String {
-    val cleaned = buildString(minOf(reason.length, MAX_BLOB_FAILURE_REASON_CHARS * 2)) {
-        var pendingSpace = false
-        for (ch in reason) {
-            val control = ch.code < 0x20 || ch.code == 0x7F
-            if (control || ch.isWhitespace()) {
-                pendingSpace = isNotEmpty()
-                continue
-            }
-            if (pendingSpace) {
-                append(' ')
-                pendingSpace = false
-            }
-            append(ch)
+    val limit = MAX_BLOB_FAILURE_REASON_CHARS
+    val out = StringBuilder(minOf(reason.length, limit))
+    var pendingSpace = false
+    for (ch in reason) {
+        if (ch.isISOControl() || ch.isWhitespace()) {
+            pendingSpace = out.isNotEmpty()
+            continue
         }
-    }.trim()
-    if (cleaned.isEmpty()) return fallback
-    return if (cleaned.length <= MAX_BLOB_FAILURE_REASON_CHARS) cleaned
-    else cleaned.take(MAX_BLOB_FAILURE_REASON_CHARS) + "…"
+        if (pendingSpace) {
+            out.append(' ')
+            pendingSpace = false
+        }
+        out.append(ch)
+        if (out.length > limit) {
+            var end = limit - 1
+            if (out[end - 1].isHighSurrogate()) end--
+            return out.substring(0, end).trimEnd() + "…"
+        }
+    }
+    return if (out.isEmpty()) fallback else out.toString()
 }
 
 /**
@@ -154,10 +163,11 @@ internal fun blobDownloadFetchScript(blobUrl: String, token: String, filename: S
                 .then(function(r) { return r.blob(); })
                 .then(function(blob) {
                     var reader = new FileReader();
-                    reader.onloadend = function() {
+                    reader.onload = function() {
                         __minis__.saveBlobDownload($tokenLiteral, reader.result, ${JSONObject.quote(filename)});
                     };
                     reader.onerror = function() { __minis__.blobDownloadError($tokenLiteral, 'FileReader error'); };
+                    reader.onabort = reader.onerror;
                     reader.readAsDataURL(blob);
                 })
                 .catch(function(e) { __minis__.blobDownloadError($tokenLiteral, String(e)); });
