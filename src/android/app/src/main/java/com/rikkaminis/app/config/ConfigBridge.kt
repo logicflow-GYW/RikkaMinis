@@ -11,6 +11,53 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.coroutines.cancellation.CancellationException
 
+/** One element-level operation on a registered array field. */
+enum class ConfigArrayOperation { APPEND, REMOVE }
+
+/** The values observed and written by one approved array operation. */
+data class ConfigArrayMutation(
+    val previous: ConfigValue.Arr,
+    val applied: ConfigValue.Arr,
+)
+
+/** The approved-time remove lost its target before the row reached the writer. */
+class ConfigArrayNotFound(message: String) : Exception(message)
+
+/**
+ * Apply one approved array operation against the value read at write time.
+ *
+ * The confirmation preview is intentionally not an input here: another
+ * approved row may already have changed the field, or an external writer may
+ * have changed it while the dialog was open. The read-modify-write stays in
+ * this one call, but no bridge lock is held across confirmation.
+ */
+fun applyConfigArrayOperation(
+    readCurrent: () -> ConfigValue,
+    write: (ConfigValue) -> Unit,
+    operation: ConfigArrayOperation,
+    operand: ConfigValue,
+    notFoundReason: String,
+): ConfigArrayMutation {
+    val current = (readCurrent() as? ConfigValue.Arr) ?: ConfigValue.Arr(emptyList())
+    val existing = current.value
+    val next = when (operation) {
+        ConfigArrayOperation.APPEND -> existing + operand
+        ConfigArrayOperation.REMOVE -> {
+            val filtered = existing.filter { it != operand }
+            if (filtered.size == existing.size) {
+                throw ConfigArrayNotFound(notFoundReason)
+            }
+            filtered
+        }
+    }
+    val mutation = ConfigArrayMutation(
+        previous = ConfigValue.Arr(existing),
+        applied = ConfigValue.Arr(next),
+    )
+    write(mutation.applied)
+    return mutation
+}
+
 /**
  * Bridge between the offload handler (Kotlin / shell args / JSON
  * stdout) and the rest of the Config module (registry, gate). Mirrors
@@ -458,8 +505,7 @@ object ConfigBridge {
                             put("reason", e.message ?: e.toString())
                         }
                     }
-                    val existing = (oldValue as? ConfigValue.Arr)?.value ?: emptyList()
-                    newValue = ConfigValue.Arr(existing + parsedValue)
+                    newValue = parsedValue
                     displayVerb = "append"
                     displayPath = rawPath
                     displayOld = ""
@@ -474,15 +520,18 @@ object ConfigBridge {
                         }
                     }
                     val existing = (oldValue as? ConfigValue.Arr)?.value ?: emptyList()
-                    val filtered = existing.filter { it != parsedValue }
-                    if (filtered.size == existing.size) {
+                    if (existing.none { it == parsedValue }) {
                         return JSONObject().apply {
                             put("ok", false)
                             put("error", "not_found")
                             put("reason", "No occurrence of value ${parsedValue.displayString} in '${field.path}'.")
                         }
                     }
-                    newValue = ConfigValue.Arr(filtered)
+                    // Existence is checked again at apply time against the current
+                    // array. The value may change while the confirmation dialog is open.
+                    // If it vanished, the approved row becomes a precise not_found
+                    // failure instead of silently writing an approval-time snapshot.
+                    newValue = parsedValue
                     displayVerb = "remove"
                     displayPath = rawPath
                     displayOld = parsedValue.displayString
@@ -524,6 +573,12 @@ object ConfigBridge {
                     scope = field.scope,
                     oldValue = oldValue,
                     newValue = newValue,
+                    arrayOperation = when {
+                        isAppend -> ConfigArrayOperation.APPEND
+                        isRemove -> ConfigArrayOperation.REMOVE
+                        else -> null
+                    },
+                    arrayOperand = if (isAppend || isRemove) parsedValue else null,
                     auditNewValue = if (isSecretField) redactedNewValue else null,
                 )
             )
@@ -653,9 +708,30 @@ object ConfigBridge {
                             displayName = r.collection.displayName
                             displayPath = r.rawPath
                         } else if (r.field != null) {
-                            r.field.write(r.newValue)
-                            displayName = r.field.displayName
-                            displayPath = r.field.path
+                            val field = r.field
+                            val operation = r.arrayOperation
+                            if (operation == null) {
+                                // Ordinary `set` remains an intentional full replacement.
+                                field.write(r.newValue)
+                            } else {
+                                val operand = r.arrayOperand
+                                    ?: throw IllegalStateException("Array operation has no operand for ${r.rawPath}.")
+                                val mutation = applyConfigArrayOperation(
+                                    readCurrent = field::read,
+                                    write = field::write,
+                                    operation = operation,
+                                    operand = operand,
+                                    notFoundReason = "No occurrence of value ${operand.displayString} in '${field.path}'.",
+                                )
+                                // A receipt describes the value that actually reached the
+                                // writer, not the preview snapshot from before confirmation.
+                                effectiveOldJSON = mutation.previous.jsonString()
+                                effectiveNewJSON = mutation.applied.jsonString()
+                                effectiveOldDisplay = mutation.previous.displayString
+                                effectiveNewDisplay = mutation.applied.displayString
+                            }
+                            displayName = field.displayName
+                            displayPath = field.path
                             // [T-minis-config-provider-add] If this is a
                             // credential field, display rows pull from the
                             // redacted copy so the secret never reaches the
@@ -728,6 +804,8 @@ object ConfigBridge {
         val scope: String,
         val oldValue: ConfigValue,
         val newValue: ConfigValue,
+        val arrayOperation: ConfigArrayOperation? = null,
+        val arrayOperand: ConfigValue? = null,
         // [T-minis-config-provider-add] When non-null, audit / display
         // logging uses this instead of `newValue` — the executor still
         // applies `newValue` un-redacted so the credential reaches the
@@ -802,6 +880,7 @@ object ConfigBridge {
  */
 internal fun classifyWriteFailure(e: Throwable): Pair<String, String>? = when {
     e is CancellationException -> null
+    e is ConfigArrayNotFound -> "not_found" to (e.message ?: "value not found")
     e is ConfigError.AlreadyExists -> "already_exists" to (e.message ?: "already exists")
     e is ConfigError.PermissionDenied -> "permission_denied" to (e.message ?: "permission denied")
     e is ConfigError -> "invalid_value" to (e.message ?: "invalid value")
