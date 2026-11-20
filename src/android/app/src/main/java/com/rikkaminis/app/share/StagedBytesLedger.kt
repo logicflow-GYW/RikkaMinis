@@ -92,25 +92,78 @@ internal class StagedBytesLedger(initial: Long = 0L) {
  */
 internal object StagedInFlightFiles {
 
-    private val names: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val lock = Any()
+    private val states = mutableMapOf<String, Long>()
 
-    /** Claim [name] before the file is created. Empty names are ignored. */
-    fun begin(name: String) {
-        if (name.isNotEmpty()) names.add(name)
+    /**
+     * Claim [name] before the file is created. An existing committed claim is
+     * preserved so Activity recreation cannot turn credited bytes back into
+     * pending bytes. Empty names are ignored.
+     */
+    fun begin(name: String) = synchronized(lock) {
+        if (name.isNotEmpty()) states.putIfAbsent(name, -1L)
+        Unit
     }
 
     /** Release [name] (its file is gone, or nothing will reference it again). */
-    fun end(name: String) {
-        names.remove(name)
+    fun end(name: String) = synchronized(lock) {
+        states.remove(name)
+        Unit
     }
 
     /** Release every name in [released] (the hand-off persisted them elsewhere). */
-    fun endAll(released: Collection<String>) {
-        for (name in released) names.remove(name)
+    fun endAll(released: Collection<String>) = synchronized(lock) {
+        for (name in released) states.remove(name)
+        Unit
     }
 
+    /**
+     * Credit a successfully written file once and publish its committed state
+     * under the same lock used by cleanup reconciliation. [onCredit] may also
+     * checkpoint its extraction slot, making saved-state snapshots atomic with
+     * respect to the byte credit.
+     */
+    fun credit(name: String, bytes: Long, onCredit: () -> Unit): Boolean = synchronized(lock) {
+        if (name.isEmpty() || (states[name] ?: -1L) >= 0L) return@synchronized false
+        onCredit()
+        states[name] = bytes.coerceAtLeast(0L)
+        true
+    }
+
+    /** Restore an already completed on-disk file after process recreation. */
+    fun restoreCommitted(name: String, bytes: Long, onCredit: () -> Unit): Boolean =
+        credit(name, bytes, onCredit)
+
+    /** Serialize cleanup with commit and pending/in-flight ownership transfer. */
+    fun <T> withLock(block: () -> T): T = synchronized(lock) { block() }
+
     /** Consistent copy for a cleanup pass — see [shouldKeepStagedFile]. */
-    fun snapshot(): Set<String> = names.toSet()
+    fun snapshot(): Set<String> = synchronized(lock) { states.keys.toSet() }
+
+    /** Names whose successful bytes are already represented in the ledger. */
+    fun committedSnapshot(): Set<String> = synchronized(lock) {
+        states.filterValues { it >= 0L }.keys.toSet()
+    }
+
+    /**
+     * Reconcile referenced and completed in-flight files from disk. Holding
+     * the registry lock across the byte sum and ledger replacement prevents a
+     * concurrent successful copy from being credited and then overwritten by
+     * a stale cleanup total.
+     */
+    fun reconcileLedger(
+        directory: java.io.File,
+        referenced: Set<String>,
+        setLedger: (Long) -> Unit,
+    ): Long = synchronized(lock) {
+        val namesToCount = referenced + states.filterValues { it >= 0L }.keys
+        val bytes = namesToCount.sumOf { name ->
+            val file = java.io.File(directory, name)
+            if (file.isFile) file.length() else 0L
+        }
+        setLedger(bytes)
+        bytes
+    }
 }
 
 /**
