@@ -142,8 +142,8 @@ class ModelExecutionService : Service() {
          * permits: concurrent streams, queued remainder, observable queue
          * depth. See [ProviderExecSlotPolicy] for the sizing rationale —
          * the guard still covers exactly the provider network call region
-         * (unsafe lifecycle + native-heap budget sharing), just for N=2
-         * instead of N=1.
+         * (unsafe lifecycle + native-heap budget sharing), with a default of
+         * N=6 and a user-configurable range of 1..12.
          *
          * Deliberately a java.util.concurrent.Semaphore, NOT the kotlinx
          * one: the queue-frame publisher needs TIMED tryAcquire, and
@@ -151,8 +151,8 @@ class ModelExecutionService : Service() {
          * permit-loss race when a queued acquire() is cancelled by
          * withTimeoutOrNull (fixed upstream only in 1.10; reproduced at
          * ~0.5-2% per timed-out acquire in sandbox probes — a permit vanishes
-         * while acquire/release counts stay balanced). A lost permit in a
-         * 2-slot pool halves throughput permanently; after two losses the
+         * while acquire/release counts stay balanced). A lost permit in the
+         * pool permanently reduces capacity; if all permits are lost, the
          * worker starves forever. The JDK Semaphore's tryAcquire(timeout)
          * has no such window and works fine inside runBlocking (it parks
          * the thread; the surrounding coroutine just blocks — acceptable
@@ -160,7 +160,7 @@ class ModelExecutionService : Service() {
          */
         private val executionSlots = java.util.concurrent.Semaphore(
             // [feat/runtime-limits-panel] pool sized from the user-tunable
-            // slot count (default 2). Companion init runs at worker process
+            // slot count (default 6). Companion init runs at worker process
             // spawn, so a change applies to the NEXT worker process.
             ProviderExecSlotPolicy.liveProviderSlots(),
             true, // fairness: FIFO waiters — queue position is honest

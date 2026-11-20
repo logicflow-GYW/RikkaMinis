@@ -86,7 +86,7 @@
     <string name="runtime_limits_sessions_footer">서브에이전트 전환은 즉시 적용됩니다. 세션 상한은 다음 앱 시작 시 적용됩니다. 상한을 높이면 메모리 피크가 증가합니다 — 최종 방어는 프로세스 감시입니다.</string>
     <string name="runtime_limits_budget_footer">모든 예산은 강제 적용됩니다: 상한에 도달하면 실행이 일시정지됩니다(내용 보존, Resume으로 재개) — 조용한 중단은 없습니다. 기본값은 실측 보정값입니다. 높이면 폭주 루프 가드가 느슨해져 중단 전에 더 많은 토큰을 소모합니다.</string>
     <string name="runtime_limits_recovery_footer">복구 설정은 복원력과 토큰 소비의 트레이드오프입니다: 연속/재시도가 많을수록 불안정한 네트워크를 견디지만 재과금됩니다. 적을수록 오류가 빨리 드러납니다. 0으로 설정하면 해당 복구 경로가 비활성화됩니다.</string>
-    <string name="runtime_limits_network_footer">생성 하드월과 워커 슬롯은 다음 model-service 워커 프로세스에 적용됩니다(진행 중인 요청은 이전 설정으로 완료). 하드월을 낮추면 건강한 느린 생성을 오탐할 위험이 있습니다. 슬롯을 2 초과로 올리면 네이티브 힙 피크가 배가됩니다 — 메모리 위험.</string>
+    <string name="runtime_limits_network_footer">생성 하드월과 워커 슬롯은 다음 model-service 워커 프로세스에 적용됩니다(진행 중인 요청은 이전 설정으로 완료). 하드월을 낮추면 건강한 느린 생성을 오탐할 위험이 있습니다. 워커 슬롯을 늘리면 네이티브 힙 피크가 배가됩니다 — 메모리 위험.</string>
     <string name="runtime_limits_turns">턴 상한</string>
     <string name="runtime_limits_turns_desc">실행당 최대 턴 수(기본 256)</string>
     <string name="runtime_limits_provider_attempts">Provider 호출</string>
@@ -118,7 +118,7 @@
     <string name="runtime_limits_first_chunk_proxy">첫 청크·프록시</string>
     <string name="runtime_limits_first_chunk_proxy_desc">초, 프록시/게이트웨이 라우트(기본 45)</string>
     <string name="runtime_limits_provider_slots">워커 슬롯</string>
-    <string name="runtime_limits_provider_slots_desc">워커당 동시 Provider 실행 수(기본 2, 초과 시 위험)</string>
+    <string name="runtime_limits_provider_slots_desc">워커당 동시 Provider 실행 수(기본값 6, 범위 1–12; 높이면 메모리 위험 증가)</string>
     <string name="runtime_limits_queue_admission">큐 어드미션</string>
     <string name="runtime_limits_queue_admission_desc">거부 전 최대 대기 수(기본 6)</string>
     <string name="settings_section_storage">저장 공간</string>

@@ -14,9 +14,9 @@ import org.junit.Test
  * (engine, worker, providers, ConfigBuiltins) compiles against, and the
  * retry-delay derivation that replaced the fixed intArrayOf(1, 2, 4).
  *
- * Why this matters: the defaults ARE the previously hard-coded constants.
- * If any default drifts, an untouched install silently changes behavior —
- * this test is the tripwire.
+ * Why this matters: these defaults are either the previously hard-coded
+ * constants or explicit tuning contracts. If any default drifts, an untouched
+ * install silently changes behavior — this test is the tripwire.
  */
 class AgentRuntimeLimitsPrefsTest {
 
@@ -45,7 +45,8 @@ class AgentRuntimeLimitsPrefsTest {
         assertEquals(30, p.GENERATION_TIMEOUT_DEFAULT_MIN) // FirstChunkTimeoutPolicy.GENERATION_TIMEOUT_SEC
         assertEquals(30, p.FIRST_CHUNK_DIRECT_DEFAULT_SEC) // FirstChunkTimeoutPolicy.DIRECT_TIMEOUT_SEC
         assertEquals(45, p.FIRST_CHUNK_PROXY_DEFAULT_SEC)  // FirstChunkTimeoutPolicy.PROXY_TIMEOUT_SEC
-        assertEquals(2, p.PROVIDER_SLOTS_DEFAULT)          // ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS
+        assertEquals(6, p.PROVIDER_SLOTS_DEFAULT)          // ProviderExecSlotPolicy.MAX_CONCURRENT_PROVIDER_RUNS
+        assertEquals(12, p.PROVIDER_SLOTS_MAX)
         assertEquals(6, p.QUEUE_ADMISSION_DEFAULT)         // ProviderExecSlotPolicy.MAX_QUEUED_REQUESTS
     }
 

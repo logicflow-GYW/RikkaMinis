@@ -86,7 +86,7 @@
     <string name="runtime_limits_sessions_footer">Der Sub-Agent-Schalter greift sofort; das Sitzungslimit beim nächsten App-Start. Ein höheres Limit erhögt die Speicherspitze — die letzte Verteidigung bleibt der Prozess-Watchdog.</string>
     <string name="runtime_limits_budget_footer">Alle Budgets sind verbindlich: Bei Erreichen wird der Lauf pausiert (Inhalte bleiben, Resume zum Fortsetzen) — nie ein stiller Abbruch. Defaults sind kalibrierte Feldwerte; höher = schwächerer Schutz gegen Endlosschleifen (mehr Token-Verbrauch bis zum Stopp).</string>
     <string name="runtime_limits_recovery_footer">Recovery-Regler: mehr Fortsetzungen/Retries überstehen instabile Netze, kosten aber erneut Token; weniger zeigt Fehler schneller. 0 deaktiviert den jeweiligen Pfad.</string>
-    <string name="runtime_limits_network_footer">Generations-Wall und Worker-Slots gelten für den NÄCHSTEN Model-Service-Worker (laufende Requests enden nach alten Limits). Eine niedrigere Wall kann gesunde langsame Generierungen fälschlich killen. Slots über 2 vervielfachen den Native-Heap-Peak — Speicherrisiko.</string>
+    <string name="runtime_limits_network_footer">Generations-Wall und Worker-Slots gelten für den NÄCHSTEN Model-Service-Worker (laufende Requests enden nach alten Limits). Eine niedrigere Wall kann gesunde langsame Generierungen fälschlich killen. Höhere Worker-Slot-Zahlen vervielfachen den Native-Heap-Peak — Speicherrisiko.</string>
     <string name="runtime_limits_turns">Turn-Limit</string>
     <string name="runtime_limits_turns_desc">Max. Turns pro Lauf (Standard 256)</string>
     <string name="runtime_limits_provider_attempts">Provider-Aufrufe</string>
@@ -118,7 +118,7 @@
     <string name="runtime_limits_first_chunk_proxy">First Chunk, Proxy</string>
     <string name="runtime_limits_first_chunk_proxy_desc">Sekunden, Proxy/Gateway-Routen (Standard 45)</string>
     <string name="runtime_limits_provider_slots">Worker-Slots</string>
-    <string name="runtime_limits_provider_slots_desc">Gleichzeitige Provider-Runs pro Worker (Standard 2, darüber riskant)</string>
+    <string name="runtime_limits_provider_slots_desc">Gleichzeitige Provider-Runs pro Worker (Standard 6, Bereich 1–12; Erhöhen steigert das Speicherrisiko)</string>
     <string name="runtime_limits_queue_admission">Queue-Zulassung</string>
     <string name="runtime_limits_queue_admission_desc">Max. Queue vor Ablehnung (Standard 6)</string>
     <string name="settings_section_storage">Speicher</string>

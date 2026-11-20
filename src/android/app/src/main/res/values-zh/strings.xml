@@ -122,7 +122,7 @@
     <string name="runtime_limits_sessions_footer">子代理开关立即生效；并发上限下次启动应用时生效。调高上限会提高内存峰值——真正的兜底仍是进程守卫。</string>
     <string name="runtime_limits_budget_footer">所有预算均为强制执行：撞墙即暂停（内容保留，可点 Resume 继续），不会静默停止。默认值为实测校准值；调大会放松失控循环护栏——失控的循环会烧掉更多 token 才被拦住。</string>
     <string name="runtime_limits_recovery_footer">恢复参数在韧性与 token 消耗之间取舍：续写/重试越多越能扛住不稳定网络，但会重复计费；越少越快暴露错误。设为 0 即关闭该恢复路径。</string>
-    <string name="runtime_limits_network_footer">生成硬墙与 worker 槽位对下一个 model-service worker 进程生效（进行中的请求按旧限制跑完）。调低硬墙有误杀健康慢生成的风险；worker 槽位超过 2 会成倍放大 native 堆峰值——有内存风险。</string>
+    <string name="runtime_limits_network_footer">生成硬墙与 worker 槽位对下一个 model-service worker 进程生效（进行中的请求按旧限制跑完）。调低硬墙有误杀健康慢生成的风险；提高 worker 槽位会成倍放大 native 堆峰值——有内存风险。</string>
     <string name="runtime_limits_turns">回合上限</string>
     <string name="runtime_limits_turns_desc">每次运行的最大回合数（默认 256）</string>
     <string name="runtime_limits_provider_attempts">Provider 调用</string>
@@ -154,7 +154,7 @@
     <string name="runtime_limits_first_chunk_proxy">首包超时·代理</string>
     <string name="runtime_limits_first_chunk_proxy_desc">秒，代理/网关路由（默认 45）</string>
     <string name="runtime_limits_provider_slots">Worker 槽位</string>
-    <string name="runtime_limits_provider_slots_desc">单 worker 并发 provider 请求数（默认 2，调高有内存风险）</string>
+    <string name="runtime_limits_provider_slots_desc">单 worker 并发 provider 请求数（默认 6，范围 1–12；调高会增加内存风险）</string>
     <string name="runtime_limits_queue_admission">排队准入</string>
     <string name="runtime_limits_queue_admission_desc">拒绝新请求前的最大排队数（默认 6）</string>
     <string name="settings_section_storage">存储</string>
