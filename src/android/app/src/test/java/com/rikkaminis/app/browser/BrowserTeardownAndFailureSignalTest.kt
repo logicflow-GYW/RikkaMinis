@@ -2,6 +2,7 @@ package com.rikkaminis.app.browser
 
 import java.io.File
 import java.io.FileNotFoundException
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -220,11 +221,50 @@ class BrowserTeardownAndFailureSignalTest {
             "the manager must expose a failure channel",
             manager.contains("var onBlobDownloadFailed: ((filename: String?, reason: String) -> Unit)? = null"),
         )
-        val calls = Regex("reportBlobFailure\\(").findAll(manager).count()
-        assertTrue(
-            "every silent drop branch must go through the reporting funnel " +
-                "(definition + 7 sites, found $calls)",
-            calls >= 8,
+        // [SURGERY-C02] The set of reporting sites is pinned EXACTLY, not by
+        // count. A `>= N` criterion is a time bomb: it is green while a new
+        // (possibly unauthenticated) reporting site is added and only notices
+        // much later. The expected sites are the ones where the failure is
+        // REAL and the app is the source of the news:
+        //
+        //   1. the credentialed error bridge (the page's own reader failed),
+        //   2. the payload is too large,
+        //   3. the page supplied an unusable filename,
+        //   4. the data URL is malformed,
+        //   5. the payload could not be decoded,
+        //   6. the tab was closed before the download could start,
+        //   7. the definition itself.
+        //
+        // The two BRIDGE members' refusal paths (nothing armed / replaced /
+        // expired credential) are deliberately NOT in this list: a page that
+        // presents the wrong value must not be able to write business state —
+        // that was the C02 hole in both members.
+        val expectedSites = listOf(
+            "the page failed to read the download",
+            "payload too large",
+            "the page supplied an unusable filename",
+            "malformed data URL",
+            "payload decode failed",
+            "the tab was closed before the download could start",
+        )
+        val sites = Regex("reportBlobFailure\\(").findAll(manager).count()
+        assertEquals(
+            "the reporting funnel's definition + 6 call sites (found $sites)",
+            expectedSites.size + 1,
+            sites,
+        )
+        for (marker in expectedSites) {
+            assertTrue(
+                "the reporting site for `$marker` is gone — a real failure would " +
+                    "silently vanish from the panel again",
+                manager.contains(marker),
+            )
+        }
+        assertFalse(
+            "the bridge members must not report a REFUSED credential — that is " +
+                "the C02 hole (any page could present a wrong value and mint a " +
+                "download-failure panel row plus a chat notice)",
+            manager.contains("the page replaced this download request before it finished"),
         )
         assertFalse(
             "no bare 'rejected' / 'dropped' log may remain — those were the silent " +
