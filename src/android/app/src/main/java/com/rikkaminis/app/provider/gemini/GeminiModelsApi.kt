@@ -102,13 +102,92 @@ object GeminiModelsApi {
         // [T-provider-custom-user-agent] models-list UA override; falls back to
         // the branded default when the instance has no custom UA.
         builder.applyUserAgentOverride(customUserAgent)
-        // [audit-0917] execute() moved INSIDE the try. It was outside, so an
-        // IOException (offline, DNS failure, TLS reset — the common case for a
-        // model-list refresh) propagated out of fetchModels instead of
-        // returning the built-in fallback the way every HTTP error path does.
-        val response = try {
-            // [FIX-1 / F-209] Cancellable execute — see provider/CallCancellation.kt.
-            client.newCall(builder.build()).executeOrCancel()
+        // [R5-F-03] Keep cancellation armed through body consumption and parsing.
+        return@withContext try {
+            client.newCall(builder.build()).executeOrCancel() { response ->
+                val body = response.body?.string() ?: return@executeOrCancel fallback
+
+                if (!response.isSuccessful) {
+                    // [FIX-1 / F-196] 401/403 is an AUTH answer, not "this endpoint
+                    // does not do model lists". Returning the builtin catalog for it
+                    // made a revoked key, a WAF block or a regional denial look like
+                    // a successful refresh whose result happened to be the static
+                    // list — the user got no signal and the UI reported success. The
+                    // 403 fallback exists for one specific case: an OAuth token that
+                    // carries no generative-language scope (Cloud Code Assist), where
+                    // the builtin list is genuinely the best answer. Restrict it to
+                    // that case and let an api-key 401/403 surface as a failure.
+                    if (response.code == 401 || response.code == 403) {
+                        if (context != null) cache.invalidate(context, cacheKey)
+                        // [R5-E2 E-C-05①] The Cloud Code Assist fallback is a fact about
+                        // GOOGLE's endpoint, not about the credential: a relay in front of
+                        // the API answers 401/403 for its OWN reasons (disabled key, WAF,
+                        // quota) and has no "generative-language scope" to lack, so
+                        // answering it with the static Google catalog replaced the relay's
+                        // rows with five models it may not serve — and reported success.
+                        // Only an OAuth credential pointed AT Google keeps the fallback.
+                        if (oauthCredential && isOfficialGeminiBase(baseUrl)) {
+                            // The documented case: OAuth without the
+                            // generative-language scope. Builtin list is the best
+                            // available answer, matching iOS.
+                            return@executeOrCancel LLMModel.allGemini
+                        }
+                        android.util.Log.w(
+                            TAG,
+                            "models fetch auth failure code=${response.code} oauth=$oauthCredential " +
+                                "official=${isOfficialGeminiBase(baseUrl)} — not falling back to builtin list: ${body.take(300)}",
+                        )
+                        return@executeOrCancel emptyList()
+                    }
+                    return@executeOrCancel fallback
+                }
+
+                val models = try {
+                    val json = JSONObject(body)
+                    val arr = json.optJSONArray("models") ?: return@executeOrCancel fallback
+                    val result = mutableListOf<LLMModel>()
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        val name = obj.getString("name").removePrefix("models/")
+                        val displayName = obj.optString("displayName", name)
+                        // Filter to chat-capable models (matching iOS).
+                        val supportsGen = obj.optJSONArray("supportedGenerationMethods")
+                            ?.let { methods ->
+                                (0 until methods.length()).any {
+                                    methods.getString(it).contains("generateContent")
+                                }
+                            } == true
+                        if (supportsGen) {
+                            // [model-defaults-1112] `GET /v1beta/models` reports
+                            // `inputTokenLimit` / `outputTokenLimit` per model. Both were
+                            // dropped, so a Gemini row's context window came only from the
+                            // models.dev registry (or the id heuristic) even though the
+                            // vendor stated it. models.dev still wins where it has a row
+                            // (ModelsDevApi.applyDevData is `registry ?: existing`), so this
+                            // mainly covers ids the registry has not catalogued yet
+                            // (preview / express / new generations).
+                            result.add(
+                                LLMModel(
+                                    id = name,
+                                    displayName = displayName,
+                                    provider = "Google",
+                                    contextWindow = obj.optInt("inputTokenLimit").takeIf { it > 0 },
+                                    maxOutputTokens = obj.optInt("outputTokenLimit").takeIf { it > 0 },
+                                )
+                            )
+                        }
+                    }
+                    if (result.isEmpty()) return@executeOrCancel fallback
+                    ModelsDevApi.enrichModels(result)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    return@executeOrCancel fallback
+                }
+
+                if (context != null) cache.save(context, cacheKey, models)
+                models
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             // A cancelled fetch must unwind, not masquerade as a network error
             // and hand back the builtin list.
@@ -116,90 +195,6 @@ object GeminiModelsApi {
         } catch (e: Exception) {
             android.util.Log.w(TAG, "models fetch failed (fallback=${fallback.size} rows): ${e.message}")
             return@withContext fallback
-        }
-        try {
-            val body = response.body?.string() ?: return@withContext fallback
-
-            if (!response.isSuccessful) {
-                // [FIX-1 / F-196] 401/403 is an AUTH answer, not "this endpoint
-                // does not do model lists". Returning the builtin catalog for it
-                // made a revoked key, a WAF block or a regional denial look like
-                // a successful refresh whose result happened to be the static
-                // list — the user got no signal and the UI reported success. The
-                // 403 fallback exists for one specific case: an OAuth token that
-                // carries no generative-language scope (Cloud Code Assist), where
-                // the builtin list is genuinely the best answer. Restrict it to
-                // that case and let an api-key 401/403 surface as a failure.
-                if (response.code == 401 || response.code == 403) {
-                    if (context != null) cache.invalidate(context, cacheKey)
-                    // [R5-E2 E-C-05①] The Cloud Code Assist fallback is a fact about
-                    // GOOGLE's endpoint, not about the credential: a relay in front of
-                    // the API answers 401/403 for its OWN reasons (disabled key, WAF,
-                    // quota) and has no "generative-language scope" to lack, so
-                    // answering it with the static Google catalog replaced the relay's
-                    // rows with five models it may not serve — and reported success.
-                    // Only an OAuth credential pointed AT Google keeps the fallback.
-                    if (oauthCredential && isOfficialGeminiBase(baseUrl)) {
-                        // The documented case: OAuth without the
-                        // generative-language scope. Builtin list is the best
-                        // available answer, matching iOS.
-                        return@withContext LLMModel.allGemini
-                    }
-                    android.util.Log.w(
-                        TAG,
-                        "models fetch auth failure code=${response.code} oauth=$oauthCredential " +
-                            "official=${isOfficialGeminiBase(baseUrl)} — not falling back to builtin list: ${body.take(300)}",
-                    )
-                    return@withContext emptyList()
-                }
-                return@withContext fallback
-            }
-
-            val models = try {
-                val json = JSONObject(body)
-                val arr = json.optJSONArray("models") ?: return@withContext fallback
-                val result = mutableListOf<LLMModel>()
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    val name = obj.getString("name").removePrefix("models/")
-                    val displayName = obj.optString("displayName", name)
-                    // Filter to chat-capable models (matching iOS).
-                    val supportsGen = obj.optJSONArray("supportedGenerationMethods")
-                        ?.let { methods ->
-                            (0 until methods.length()).any {
-                                methods.getString(it).contains("generateContent")
-                            }
-                        } == true
-                    if (supportsGen) {
-                        // [model-defaults-1112] `GET /v1beta/models` reports
-                        // `inputTokenLimit` / `outputTokenLimit` per model. Both were
-                        // dropped, so a Gemini row's context window came only from the
-                        // models.dev registry (or the id heuristic) even though the
-                        // vendor stated it. models.dev still wins where it has a row
-                        // (ModelsDevApi.applyDevData is `registry ?: existing`), so this
-                        // mainly covers ids the registry has not catalogued yet
-                        // (preview / express / new generations).
-                        result.add(
-                            LLMModel(
-                                id = name,
-                                displayName = displayName,
-                                provider = "Google",
-                                contextWindow = obj.optInt("inputTokenLimit").takeIf { it > 0 },
-                                maxOutputTokens = obj.optInt("outputTokenLimit").takeIf { it > 0 },
-                            )
-                        )
-                    }
-                }
-                if (result.isEmpty()) return@withContext fallback
-                ModelsDevApi.enrichModels(result)
-            } catch (_: Exception) {
-                return@withContext fallback
-            }
-
-            if (context != null) cache.save(context, cacheKey, models)
-            models
-        } finally {
-            response.close()
         }
     }
 }

@@ -87,157 +87,140 @@ object OpenAIModelsApi {
         val url = buildModelsURL(baseURL, azureMode)
         val request = buildModelsRequest(url, apiKey, azureMode, customUserAgent)
 
-        // [fix/audit0917-b8] Call cancellation is now wired into the request:
-        // `execute()` is blocking and has no cancellation hook, so a cancelled
-        // fetchModels (user leaves the screen / switches provider) used to run
-        // to completion — including `cache.save` — and hold an OkHttp thread.
-        // The completion hook cancels the Call, which makes `execute()` throw
-        // immediately; the catch below asks the coroutine whether *it* is still
-        // alive and only falls back if it is.
-        //
-        // [FIX-1 / F-209] This was the ORIGINAL of that idiom and the only
-        // place it lived; four sibling fetchers kept the bare execute(). The
-        // hook now lives in provider/CallCancellation.kt and every fetcher —
-        // including this one — calls it, so there is one implementation instead
-        // of five copies of which one was correct.
+        // [R5-F-03] The watcher now owns the entire body-read/parse lifetime.
         val call = client.newCall(request)
-        val response = try {
-            call.executeOrCancel()
+        return@withContext try {
+            call.executeOrCancel() { response ->
+                val body = response.body?.string() ?: return@executeOrCancel fallback
+
+                if (!response.isSuccessful) {
+                    if (context != null && (response.code == 401 || response.code == 403)) {
+                        cache.invalidate(context, cacheKey)
+                    }
+                    // [r3-b08 F-06] An AUTH answer is not "this endpoint does not do
+                    // model lists". Gemini already refuses to answer 401/403 with
+                    // its builtin catalog ([FIX-1 / F-196]); the two other official
+                    // instances still did, which made a revoked key look like a
+                    // successful refresh whose result happened to be the static
+                    // list (ProviderRepository.refreshModels then replaces the
+                    // user's rows and reports SUCCESS_API).
+                    return@executeOrCancel if (usesBuiltinCatalogOnFailure(isCustomBase, response.code)) {
+                        LLMModel.allOpenAI
+                    } else {
+                        emptyList()
+                    }
+                }
+
+                val models = try {
+                    val json = JSONObject(body)
+                    val data = json.optJSONArray("data") ?: return@executeOrCancel fallback
+                    val parsed = mutableListOf<LLMModel>()
+                    for (i in 0 until data.length()) {
+                        val obj = data.getJSONObject(i)
+                        val id = obj.getString("id")
+
+                        // Only filter by chat prefixes for official OpenAI endpoints;
+                        // custom endpoints (vLLM, Ollama) may serve any model ID.
+                        if (!isCustomBase) {
+                            if (!chatPrefixes.any { id.startsWith(it) }) continue
+                            if (excludeSuffixes.any { id.contains(it) }) continue
+                            if (id.contains(":ft-")) continue
+                        }
+
+                        val displayName = obj.optString("name", id)
+                        // [gateway-context-1112] The endpoint's OWN capability
+                        // metadata — context window, output cap, display name and
+                        // the four `supports_*` flags. The parser used to read
+                        // only `id` / `name` / `architecture`, so a gateway that
+                        // advertises a 960K window had that number dropped on the
+                        // floor and the app fell back to the models.dev registry
+                        // and then to an id-shape guess (the 128K the user saw).
+                        // The endpoint's own number is the most trustworthy source
+                        // there is, so it is captured here at the boundary.
+                        val endpointMeta = parseOpenAIModelEndpointMetadata(obj)
+                        // Third-party gateways (vLLM, OpenRouter-compat proxies) often
+                        // report per-model modalities under `architecture.{input,output}_modalities`
+                        // the same way OpenRouter does — pick them up so vision/audio
+                        // models are routable without waiting for models.dev enrichment.
+                        val arch = obj.optJSONObject("architecture")
+                        // OpenAI / OpenRouter return modalities as `image_input` / `text_output` with
+                        // suffixes; the rest of the codebase (models.dev, capability fragments,
+                        // ModelEntryDetailScreen toggles) uses the bare form. Normalize at the parse
+                        // boundary so persisted overrides round-trip correctly through the toggles.
+                        //
+                        // [INCR-1113 F-06] …and fold the endpoint's own `supports_vision` /
+                        // `supports_audio` flags in. Gateways routinely declare the flags without
+                        // publishing `architecture.input_modalities`; reading the flags and then
+                        // dropping them (the pre-fix shape) left such a model text-only in the app
+                        // while the endpoint had explicitly said it takes images. `supports_tools`
+                        // has no `LLMModel` field to carry it, so it stays parsed-but-unconsumed on
+                        // purpose — see the gate's exemption list.
+                        val inputModalities = mergeDeclaredModalities(
+                            declared = arch?.optJSONArray("input_modalities")?.toStringList().normalizeModalities(),
+                            declaresVision = endpointMeta.supportsVision,
+                            declaresAudio = endpointMeta.supportsAudio,
+                        )
+                        val outputModalities = arch?.optJSONArray("output_modalities")?.toStringList().normalizeModalities()
+
+                        // T119: known reasoning families (GPT-5.x, o-series, Codex
+                        // Mini) get supportsReasoning pre-set to true so the
+                        // Thinking pill enables before models.dev enrichment lands
+                        // — for brand-new ids (e.g. gpt-5.5) the catalog rarely has
+                        // the `reasoning` flag yet, and without this the pill
+                        // stays disabled.
+                        val idLower = id.lowercase()
+                        val knownReasoning = idLower.startsWith("gpt-5") ||
+                            idLower.startsWith("o1") ||
+                            idLower.startsWith("o3") ||
+                            idLower.startsWith("o4") ||
+                            idLower.contains("codex")
+
+                        parsed.add(
+                            LLMModel(
+                                id = id,
+                                // [gateway-context-1112] Prefer the endpoint's own
+                                // display name; fall back to the id (the previous
+                                // behaviour) when the endpoint reports none.
+                                displayName = endpointMeta.displayName ?: displayName,
+                                provider = resolveProviderName(isCustomBase, providerName),
+                                contextWindow = endpointMeta.contextWindow,
+                                maxOutputTokens = endpointMeta.maxOutputTokens,
+                                inputModalities = inputModalities,
+                                outputModalities = outputModalities,
+                                // [gateway-context-1112] The endpoint's own flag
+                                // wins only when it says TRUE — see
+                                // `resolveSupportsReasoning` for why a `false` is
+                                // not authoritative (the local gateway reports
+                                // false for every model).
+                                supportsReasoning = resolveSupportsReasoning(
+                                    endpointFlag = endpointMeta.supportsReasoning,
+                                    knownReasoningFamily = knownReasoning,
+                                ),
+                            )
+                        )
+                    }
+                    if (parsed.isEmpty()) return@executeOrCancel fallback
+                    // [T-sensenova-effort-enum] For endpoints whose real reasoning_effort
+                    // enum is measured (see GatewayEffortTruth), the measurement outranks
+                    // what models.dev declares for these ids — it under-declares every one
+                    // of them, which silently capped the picker below the tiers the gateway
+                    // accepts. Host-scoped, so other providers' same-named models are
+                    // untouched.
+                    ModelsDevApi.applyGatewayEffortTruth(ModelsDevApi.enrichModels(parsed), url)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    return@executeOrCancel fallback
+                }
+
+                if (context != null) cache.save(context, cacheKey, models)
+                models
+            }
         } catch (e: CancellationException) {
             // The caller must unwind, not fall back.
             throw e
         } catch (_: Throwable) {
             return@withContext fallback
-        }
-        // [fix/audit-s4m1] try/finally guarantees close across every early
-        // return@withContext below (body-null, !isSuccessful, empty data,
-        // parse throw). Previously a successful models-list fetch leaked a
-        // Response + connection handle.
-        try {
-            val body = response.body?.string() ?: return@withContext fallback
-
-            if (!response.isSuccessful) {
-                if (context != null && (response.code == 401 || response.code == 403)) {
-                    cache.invalidate(context, cacheKey)
-                }
-                // [r3-b08 F-06] An AUTH answer is not "this endpoint does not do
-                // model lists". Gemini already refuses to answer 401/403 with
-                // its builtin catalog ([FIX-1 / F-196]); the two other official
-                // instances still did, which made a revoked key look like a
-                // successful refresh whose result happened to be the static
-                // list (ProviderRepository.refreshModels then replaces the
-                // user's rows and reports SUCCESS_API).
-                return@withContext if (usesBuiltinCatalogOnFailure(isCustomBase, response.code)) {
-                    LLMModel.allOpenAI
-                } else {
-                    emptyList()
-                }
-            }
-
-            val models = try {
-                val json = JSONObject(body)
-                val data = json.optJSONArray("data") ?: return@withContext fallback
-                val parsed = mutableListOf<LLMModel>()
-                for (i in 0 until data.length()) {
-                    val obj = data.getJSONObject(i)
-                    val id = obj.getString("id")
-
-                    // Only filter by chat prefixes for official OpenAI endpoints;
-                    // custom endpoints (vLLM, Ollama) may serve any model ID.
-                    if (!isCustomBase) {
-                        if (!chatPrefixes.any { id.startsWith(it) }) continue
-                        if (excludeSuffixes.any { id.contains(it) }) continue
-                        if (id.contains(":ft-")) continue
-                    }
-
-                    val displayName = obj.optString("name", id)
-                    // [gateway-context-1112] The endpoint's OWN capability
-                    // metadata — context window, output cap, display name and
-                    // the four `supports_*` flags. The parser used to read
-                    // only `id` / `name` / `architecture`, so a gateway that
-                    // advertises a 960K window had that number dropped on the
-                    // floor and the app fell back to the models.dev registry
-                    // and then to an id-shape guess (the 128K the user saw).
-                    // The endpoint's own number is the most trustworthy source
-                    // there is, so it is captured here at the boundary.
-                    val endpointMeta = parseOpenAIModelEndpointMetadata(obj)
-                    // Third-party gateways (vLLM, OpenRouter-compat proxies) often
-                    // report per-model modalities under `architecture.{input,output}_modalities`
-                    // the same way OpenRouter does — pick them up so vision/audio
-                    // models are routable without waiting for models.dev enrichment.
-                    val arch = obj.optJSONObject("architecture")
-                    // OpenAI / OpenRouter return modalities as `image_input` / `text_output` with
-                    // suffixes; the rest of the codebase (models.dev, capability fragments,
-                    // ModelEntryDetailScreen toggles) uses the bare form. Normalize at the parse
-                    // boundary so persisted overrides round-trip correctly through the toggles.
-                    //
-                    // [INCR-1113 F-06] …and fold the endpoint's own `supports_vision` /
-                    // `supports_audio` flags in. Gateways routinely declare the flags without
-                    // publishing `architecture.input_modalities`; reading the flags and then
-                    // dropping them (the pre-fix shape) left such a model text-only in the app
-                    // while the endpoint had explicitly said it takes images. `supports_tools`
-                    // has no `LLMModel` field to carry it, so it stays parsed-but-unconsumed on
-                    // purpose — see the gate's exemption list.
-                    val inputModalities = mergeDeclaredModalities(
-                        declared = arch?.optJSONArray("input_modalities")?.toStringList().normalizeModalities(),
-                        declaresVision = endpointMeta.supportsVision,
-                        declaresAudio = endpointMeta.supportsAudio,
-                    )
-                    val outputModalities = arch?.optJSONArray("output_modalities")?.toStringList().normalizeModalities()
-
-                    // T119: known reasoning families (GPT-5.x, o-series, Codex
-                    // Mini) get supportsReasoning pre-set to true so the
-                    // Thinking pill enables before models.dev enrichment lands
-                    // — for brand-new ids (e.g. gpt-5.5) the catalog rarely has
-                    // the `reasoning` flag yet, and without this the pill
-                    // stays disabled.
-                    val idLower = id.lowercase()
-                    val knownReasoning = idLower.startsWith("gpt-5") ||
-                        idLower.startsWith("o1") ||
-                        idLower.startsWith("o3") ||
-                        idLower.startsWith("o4") ||
-                        idLower.contains("codex")
-
-                    parsed.add(
-                        LLMModel(
-                            id = id,
-                            // [gateway-context-1112] Prefer the endpoint's own
-                            // display name; fall back to the id (the previous
-                            // behaviour) when the endpoint reports none.
-                            displayName = endpointMeta.displayName ?: displayName,
-                            provider = resolveProviderName(isCustomBase, providerName),
-                            contextWindow = endpointMeta.contextWindow,
-                            maxOutputTokens = endpointMeta.maxOutputTokens,
-                            inputModalities = inputModalities,
-                            outputModalities = outputModalities,
-                            // [gateway-context-1112] The endpoint's own flag
-                            // wins only when it says TRUE — see
-                            // `resolveSupportsReasoning` for why a `false` is
-                            // not authoritative (the local gateway reports
-                            // false for every model).
-                            supportsReasoning = resolveSupportsReasoning(
-                                endpointFlag = endpointMeta.supportsReasoning,
-                                knownReasoningFamily = knownReasoning,
-                            ),
-                        )
-                    )
-                }
-                if (parsed.isEmpty()) return@withContext fallback
-                // [T-sensenova-effort-enum] For endpoints whose real reasoning_effort
-                // enum is measured (see GatewayEffortTruth), the measurement outranks
-                // what models.dev declares for these ids — it under-declares every one
-                // of them, which silently capped the picker below the tiers the gateway
-                // accepts. Host-scoped, so other providers' same-named models are
-                // untouched.
-                ModelsDevApi.applyGatewayEffortTruth(ModelsDevApi.enrichModels(parsed), url)
-            } catch (_: Exception) {
-                return@withContext fallback
-            }
-
-            if (context != null) cache.save(context, cacheKey, models)
-            models
-        } finally {
-            response.close()
         }
     }
 
