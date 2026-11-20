@@ -1,33 +1,35 @@
 package com.rikkaminis.app.data.repository
 
 import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.UUID
 
 /**
- * [E2-F14] Atomic writer for `mcp/servers.json`, the one file written by **two
- * independent processes**:
- *
- *   - this app ([MCPRepository.save], from the Settings form, the agent's CLI
- *     bridge, backup import, and the createdAt back-fill on load);
- *   - `minis-mcp-cli` inside the guest (`utils/config.py::save_config`, i.e. the
- *     agent running `minis-mcp-cli add/enable/...` while the user has the sheet
- *     open).
- *
- * Both used a FIXED staging name (`servers.json.tmp`). Two writers therefore
- * raced on one file: writer A truncated and wrote it, writer B truncated and
- * wrote it again, then A's rename published a file whose bytes belong to B (or,
- * if the writes interleaved, a mix of both), while B's rename found no source
- * left and — in the Kotlin fallback — rewrote the live file non-atomically. Both
- * sides are fixed: the staging name is unique per write here and in
- * `config.py`, so each writer only ever renames its own file, and `ATOMIC_MOVE`
- * makes the publication a single rename.
- *
- * Everything here is plain `java.io`/`java.nio` so a JVM probe can drive it
- * concurrently without an Android runtime.
+ * Shared transaction/atomic-publish boundary for MCPRepository and guest
+ * `utils/config.py`. The stable `servers.json.lock` inode uses POSIX record
+ * locks (Python lockf, NOT flock); the JSON inode itself is replaced per write.
+ * The caller must re-read, apply its delta, publish and update memory inside
+ * [withTransaction], never publish a cached whole-list snapshot.
+ * Plain java.io/java.nio so the real boundary is JVM-testable.
  */
 internal object ServersJsonIo {
+
+    // File locks do not exclude other threads of the same JVM (they throw an
+    // OverlappingFileLockException instead). Serialize local transactions too.
+    private val transactionMonitor = Any()
+
+    fun <T> withTransaction(dir: File, baseName: String, action: () -> T): T =
+        synchronized(transactionMonitor) {
+            dir.mkdirs()
+            RandomAccessFile(File(dir, "$baseName.lock"), "rw").use { file ->
+                file.channel.use { channel ->
+                    channel.lock().use { action() }
+                }
+            }
+        }
 
     /** Staging files older than this are treated as debris from a killed writer. */
     private const val STALE_TEMP_MS = 60L * 60L * 1000L
@@ -51,7 +53,10 @@ internal object ServersJsonIo {
         dir.mkdirs()
         val tmp = tempFileFor(dir, baseName)
         return try {
-            tmp.writeText(text)
+            FileOutputStream(tmp).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
             publish(tmp, File(dir, baseName))
         } catch (e: Exception) {
             runCatching { tmp.delete() }
@@ -61,7 +66,7 @@ internal object ServersJsonIo {
         }
     }
 
-    /** Publish [tmp] over [target]: one atomic rename, with progressively weaker fallbacks. */
+    /** Publish only by rename; a failed rename must never truncate the live JSON. */
     private fun publish(tmp: File, target: File): Boolean {
         runCatching {
             Files.move(
@@ -72,13 +77,9 @@ internal object ServersJsonIo {
             )
             return true
         }
-        // Some filesystems refuse ATOMIC_MOVE / rename onto an existing path.
+        // rename(2) is still atomic on local filesystems without ATOMIC_MOVE.
         if (tmp.renameTo(target)) return true
-        runCatching {
-            target.writeText(tmp.readText())
-            tmp.delete()
-            return true
-        }
+        tmp.delete()
         return false
     }
 
