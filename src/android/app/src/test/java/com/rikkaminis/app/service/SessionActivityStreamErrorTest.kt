@@ -6,6 +6,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.rikkaminis.app.scheduled.ScheduledRunMarker
+import com.rikkaminis.app.scheduled.ScheduledRunRef
 import com.rikkaminis.app.scheduled.ScheduledTask
 import com.rikkaminis.app.scheduled.ScheduledTaskTransitions
 import com.rikkaminis.app.scheduled.ScheduledTasksFile
