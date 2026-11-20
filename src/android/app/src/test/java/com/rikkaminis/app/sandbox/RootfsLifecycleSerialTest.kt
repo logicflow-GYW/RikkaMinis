@@ -10,11 +10,13 @@ import org.junit.Test
 class RootfsLifecycleSerialTest {
     @Test fun `every lifecycle entrypoint holds one common mutex without recursive reacquisition`() {
         val source = source()
-        for (fn in listOf("installIfNeeded", "reset", "autoRepair", "restoreCriticalFromAssets")) {
+        assertTrue(source.contains("private val bootTransaction = BootTransaction(lifecycleMutex)"))
+        for ((fn, route) in listOf("installIfNeeded" to "runInstall", "reset" to "runReset", "autoRepair" to "runExclusive", "restoreCriticalFromAssets" to "runExclusive")) {
             val start = source.indexOf("suspend fun $fn(")
             assertTrue(start >= 0)
             val wrapper = source.substring(start, source.indexOf("\n    }", start))
-            assertTrue(wrapper, wrapper.contains("lifecycleMutex.withLock"))
+            assertTrue(wrapper, wrapper.contains("bootTransaction.$route"))
+            assertFalse("locked implementation must not reacquire lifecycleMutex", wrapper.contains("lifecycleMutex.withLock"))
             assertTrue(wrapper, wrapper.contains("${fn}Locked("))
         }
         assertTrue(source.contains("installIfNeededLocked(forceReinstall = true)"))
