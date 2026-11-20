@@ -44,6 +44,7 @@ import com.rikkaminis.app.provider.thinking.ReasoningEchoDecider
 import com.rikkaminis.app.provider.thinking.ReasoningEchoPolicy
 import com.rikkaminis.app.provider.thinking.ThinkingResolveContext
 import com.rikkaminis.app.provider.thinking.ThinkingRuleResolver
+import com.rikkaminis.app.provider.thinking.RequestThinkingRules
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -104,6 +105,8 @@ class OpenAIProvider constructor(
      * which is wrong for Azure's deployments-path routing.
      */
     private val azureBase: String? = null,
+    /** Worker-owned snapshot; null is reserved for direct callers that read the UI cache. */
+    private val requestThinkingRules: RequestThinkingRules? = null,
 ) : LLMProvider {
     override val name = "OpenAI"
     override var instanceContext: com.rikkaminis.app.data.model.ProviderInstance? = null
@@ -2896,7 +2899,10 @@ class OpenAIProvider constructor(
             isOfficialDeepSeek = isOfficialDeepSeek,
             offEffort = explicitOffEffort(),
         )
-        val echo = ThinkingRuleResolver.echoPolicyFor(ctx)
+        // Direct callers capture once here too; wire and echo must never read two cache versions.
+        val rules = requestThinkingRules
+            ?: RequestThinkingRules.capture(ThinkingRuleResolver.customRulesFor(thinkingRuleInstanceId))
+        val echo = rules.echoPolicyFor(ctx)
 
         if (level == ThinkingLevel.AUTO) return echo
 
@@ -3003,7 +3009,7 @@ class OpenAIProvider constructor(
         // table above stays OUTSIDE the registry: it encodes host-exact relay dialects
         // measured live (RikkaHub absorption) that a model-pattern scope cannot express,
         // and every known relay host short-circuits before the resolver runs.
-        val trace = ThinkingRuleResolver.apply(body, ctx)
+        val trace = rules.apply(body, ctx)
         // [T-thinking-rules-observability] Which rule actually won must be inspectable,
         // or a rule layer just replaces one hidden variable with a more complicated one.
         // [T-thinking-resolve-in-log] The INPUT side of the decision is logged first
