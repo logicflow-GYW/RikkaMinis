@@ -124,6 +124,29 @@ class BrowserUseManager(
          */
         private const val MAX_BLOB_DATA_URL_CHARS = 24 * 1024 * 1024
 
+        /**
+         * [SURGERY-C02] How long an armed blob-download credential stays
+         * acceptable, measured from the injection that carried it.
+         *
+         * The credential is one-shot, so this is about the case "armed but the
+         * page never answered": without a window, a token captured from our own
+         * injected script would be replayable for the life of the tab. 120 s is
+         * two orders of magnitude above a legitimate read (a `fetch` +
+         * FileReader over the 24 MiB string cap finishes in well under a
+         * second) while still short enough that a stale answer dies quickly.
+         *
+         * Expiry is diagnostic-only (see [BlobDownloadTokenSlot.Claim.EXPIRED]):
+         * only the holder of the injected token can present it, so a stale
+         * answer must not be able to mint the panel row this wave exists to
+         * deny an unauthenticated page.
+         */
+        private const val MAX_BLOB_REQUEST_AGE_MS = 120_000L
+
+        /** [SURGERY-C02] Cap on the sanitized reason excerpt kept in a refused
+         *  bridge call's log line — the log is a shareable artifact, and the
+         *  reason is page-authored. */
+        private const val MAX_BLOB_DIAGNOSTIC_CHARS = 64
+
         @SuppressLint("SetJavaScriptEnabled")
         fun configureWebView(webView: WebView, profile: UserAgentProfile, customUA: String? = null) {
             // [T-android-browser-blank] The browser lives inside a Material3
@@ -369,24 +392,42 @@ class BrowserUseManager(
     private val tabDeathSignal = CompletableDeferred<Unit>()
 
     /**
+     * [SURGERY-C02] The one-shot credential shared by the blob-download
+     * SUCCESS callback and, since this wave, the FAILURE callback. The state
+     * machine (arm / atomic compare-and-consume / expiry) lives in
+     * [BlobDownloadTokenSlot] so it is unit-testable; the two bridge members
+     * below are the only callers, which is what makes "at most one business
+     * terminal per download" a property of the object rather than of two
+     * hand-matched branches.
+     */
+    private val blobDownloadSlot = BlobDownloadTokenSlot()
+
+    /**
      * [audit2-A2] One-shot credential for the `__minis__.saveBlobDownload`
-     * bridge call — same shape as the async-JS token above (a fresh UUID per
-     * request, compared with `==`). [fetchBlobDownload] arms it right before
-     * injecting the FileReader that echoes it back.
+     * bridge call — canonicalised on [blobDownloadSlot] since
+     * [SURGERY-C02] (it used to be a bare `@Volatile String?` compared with
+     * `==` and cleared in a second, unsynchronised step, so two concurrent
+     * JavaBridge callbacks could both see the armed value). [fetchBlobDownload]
+     * arms it right before injecting the FileReader that echoes it back; both
+     * bridge callbacks consume it through [BlobDownloadTokenSlot.claim].
      *
      * Why it exists: `addJavascriptInterface` exposes the bridge to EVERY page
      * this tab loads, so without a credential any third-party page (or an
-     * iframe inside one) could call `__minis__.saveBlobDownload(…)` itself and
-     * write attacker-chosen bytes into the session workspace — no user action
-     * needed. The token is only knowable to script we injected ourselves.
+     * iframe inside one) could call the download bridge itself — writing
+     * attacker-chosen bytes into the session workspace, or (the C02 hole) a
+     * fabricated "Download failed: …" panel row plus chat notice — no user
+     * action needed. The token is only knowable to script we injected ourselves.
      *
-     * Consumed (cleared) on first use, so a replayed call after the real
-     * download landed is rejected as well.
+     * Deliberately still a property over the slot's token (rather than reading
+     * the slot at each site): the WebView lifecycle gate
+     * (`scripts/scan/browser_destroy_wakeup_check.py`) anchors on the arm
+     * literal in [fetchBlobDownload] and on "the arm happens behind the
+     * destroyed latch" — moving the write into the slot's own file would take
+     * that gate's teeth away.
      */
-    // @Volatile: armed on the main thread (download listener →
-    // fetchBlobDownload), read on the WebView's JavaBridge thread.
-    @Volatile
-    private var blobDownloadActiveToken: String? = null
+    private var blobDownloadActiveToken: String?
+        get() = blobDownloadSlot.activeToken
+        set(value) = blobDownloadSlot.arm(value)
 
     // ── [feat/browser-console-network-upload] diagnostics buffers ────────────
 
@@ -491,32 +532,88 @@ class BrowserUseManager(
          * injected FileReader. Runs on the WebView's JavaBridge thread — file
          * I/O downstream is fine, but don't touch the WebView from here.
          *
-         * [audit2-A2] Credential check. This method is reachable from ANY page
-         * the tab loads (that is what `addJavascriptInterface` means), so the
-         * call is only honoured when it carries the token [fetchBlobDownload]
-         * just armed. An unauthenticated call is dropped silently — never
-         * thrown back into the page, which would leak internals — and leaves a
-         * warn line for forensics.
+         * [audit2-A2] Credential check, [SURGERY-C02] made atomic. This method
+         * is reachable from ANY page the tab loads (that is what
+         * `addJavascriptInterface` means), so the call is only honoured when it
+         * carries the token [fetchBlobDownload] just armed — and the
+         * compare-and-consume in [BlobDownloadTokenSlot.claim] means two
+         * concurrent callbacks holding the same value cannot both win.
+         *
+         * [SURGERY-C02] A refused call (nothing armed / a replaced credential /
+         * an expired one) writes NO business state: no downloads-panel row, no
+         * chat notice. It used to report a visible failure ("the page replaced
+         * this download request before it finished"), and that report was
+         * itself reachable by any page that presented an arbitrary string —
+         * the same hole as the uncredentialed error bridge, one branch over.
+         * The newer request that replaced this one reports its own outcome,
+         * so nothing the user needs is lost; the refused call leaves a bounded
+         * diagnostic line for forensics instead.
          */
         @JavascriptInterface
         fun saveBlobDownload(token: String, dataUrl: String, filename: String) {
-            if (token != blobDownloadActiveToken) {
-                // [r3-B09 F-10] A newer blob: fetch overwrote the single-slot
-                // token before this reader answered; say so instead of dropping
-                // the download on the floor.
-                reportBlobFailure(filename, "the page replaced this download request before it finished")
+            val claim = blobDownloadSlot.claim(token, MAX_BLOB_REQUEST_AGE_MS)
+            if (claim != BlobDownloadTokenSlot.Claim.MATCH) {
+                Log.w(
+                    TAG,
+                    blobBridgeRefusalDiagnostic(
+                        "saveBlobDownload",
+                        claim.name,
+                        filename,
+                        armedAfter = blobDownloadActiveToken != null,
+                    ),
+                )
                 return
             }
-            // One-shot: the credential dies with the call it authorised.
-            blobDownloadActiveToken = null
+            // The credential dies with the call it authorised.
             deliverBlobDownload(dataUrl, filename)
         }
 
+        /**
+         * [SURGERY-C02] The blob reader's error hook.
+         *
+         * Before this wave the signature was `blobDownloadError(error)` — no
+         * credential at all — so any page could call it repeatedly with
+         * attacker-authored text and get a FAILED row in the downloads panel
+         * plus a native "Download failed: …" chat notice per call, unbounded in
+         * count and length. Now it takes the same one-shot token the success
+         * callback takes, from the same [BlobDownloadTokenSlot], which gives the
+         * download exactly one business terminal: whichever of the two answers
+         * arrives first with the armed credential wins, and the other is a
+         * diagnostic.
+         *
+         * A refused call must leave no trace in business state (no panel entry,
+         * no chat notice) — only a bounded, structured log line for forensics:
+         * outcome + reason length + a short sanitized excerpt. It is never
+         * thrown back into the page, which would leak internals.
+         *
+         * Note the residual boundary: this does not make the token a secret
+         * inside the page's own JS context (our injected script carries it); it
+         * closes "no credential is needed at all", which is what let any frame
+         * write app state. The wider iframe/origin trust model is a separate
+         * question (audit candidate C04).
+         */
         @JavascriptInterface
-        fun blobDownloadError(error: String) {
-            // [r3-B09 F-10] No token on this member (the page-side error hook is
-            // not credentialed), so no name is known here either.
-            reportBlobFailure(null, error.ifBlank { "the page failed to read the download" })
+        fun blobDownloadError(token: String, error: String) {
+            val claim = blobDownloadSlot.claim(token, MAX_BLOB_REQUEST_AGE_MS)
+            if (claim != BlobDownloadTokenSlot.Claim.MATCH) {
+                Log.w(
+                    TAG,
+                    blobBridgeRefusalDiagnostic(
+                        "blobDownloadError",
+                        claim.name,
+                        error,
+                        armedAfter = blobDownloadActiveToken != null,
+                    ),
+                )
+                return
+            }
+            // Credentialed failure: the download is genuinely dead, so it stays
+            // visible (r3-B09 F-10) — but the reason is page-authored and goes
+            // into a panel row and a chat notice, so it is sanitized and bounded.
+            reportBlobFailure(
+                null,
+                boundedBlobFailureReason(error, fallback = "the page failed to read the download"),
+            )
         }
     }
 
@@ -577,6 +674,29 @@ class BrowserUseManager(
     private fun reportBlobFailure(filename: String?, reason: String) {
         Log.w(TAG, "blob download failed${filename?.let { " ($it)" } ?: ""}: $reason")
         onBlobDownloadFailed?.invoke(filename, reason)
+    }
+
+    /**
+     * [SURGERY-C02] The log line for a bridge call that did not own the armed
+     * credential — the only trace a refused (unauthenticated / replayed /
+     * replaced / expired) callback is allowed to leave.
+     *
+     * Structured and bounded on purpose: the reason is page-authored and the log
+     * is a shareable artifact, so the raw text never goes in — outcome, whether
+     * a request is STILL pending, length and a sanitized, length-capped excerpt
+     * only. `armed=` is the useful forensic bit: a refusal while another request
+     * is armed means a page is pushing calls at the bridge during a real
+     * download; a refusal with nothing armed means a replay after the answer.
+     */
+    private fun blobBridgeRefusalDiagnostic(
+        member: String,
+        outcome: String,
+        reason: String,
+        armedAfter: Boolean,
+    ): String {
+        val excerpt = boundedBlobFailureReason(reason, fallback = "").take(MAX_BLOB_DIAGNOSTIC_CHARS)
+        return "blob bridge call refused ($member, ${outcome.lowercase()}, armed=$armedAfter): " +
+            "reasonLen=${reason.length} excerpt=[$excerpt]"
     }
 
     init {
@@ -652,21 +772,12 @@ class BrowserUseManager(
         // have different lifetimes and would otherwise clear each other's token.
         val token = UUID.randomUUID().toString()
         blobDownloadActiveToken = token
-        val js = """
-            (function() {
-                fetch(${JSONObject.quote(blobUrl)})
-                    .then(function(r) { return r.blob(); })
-                    .then(function(blob) {
-                        var reader = new FileReader();
-                        reader.onloadend = function() {
-                            __minis__.saveBlobDownload(${JSONObject.quote(token)}, reader.result, ${JSONObject.quote(guessedName)});
-                        };
-                        reader.onerror = function() { __minis__.blobDownloadError('FileReader error'); };
-                        reader.readAsDataURL(blob);
-                    })
-                    .catch(function(e) { __minis__.blobDownloadError(String(e)); });
-            })();
-        """.trimIndent()
+        // [SURGERY-C02] The script itself lives at the top level
+        // ([blobDownloadFetchScript]) so both error callbacks can be shown to
+        // carry the credential without a WebView — they did not before this
+        // wave, which is exactly the hole that let any page fabricate a
+        // download failure.
+        val js = blobDownloadFetchScript(blobUrl, token, guessedName)
         // [deep-audit-1045 B-02] NOT `webView.post { … }`: that is a View-queue
         // write. On a DETACHED WebView — which every headless pool tab is until
         // something attaches it to a window — the runnable parks in View's
@@ -3216,6 +3327,10 @@ class BrowserUseManager(
             // next onPageStarted commits again.
             lastMainDocUrl = null
             lastMainFrameHttpError = null // [r3-B09 F-14] no status outlives the tab
+            // [SURGERY-C02] No download credential outlives the tab either: the
+            // bridge lives inside the renderer being torn down, so a still-armed
+            // token could only ever be replayed by a page — never answered.
+            blobDownloadSlot.arm(null)
             // Assign a no-op implementation instead of null — the Kotlin
             // Android SDK bindings expose webViewClient/webChromeClient as
             // non-null types (API 26+), so "= null" won't compile.
