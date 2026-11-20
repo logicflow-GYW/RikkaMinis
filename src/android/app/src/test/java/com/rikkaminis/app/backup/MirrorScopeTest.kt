@@ -254,4 +254,16 @@ class MirrorScopeTest {
             MirrorScope.selectSkills(File(root, "skills")).map { it.relPath },
         )
     }
+
+    @Test
+    fun nonCanonicalFilesystemNamesDoNotPoisonFutureManifests() {
+        write("memory/a:b.md", "colon is legal on Unix but excluded from this manifest")
+        write("memory/a\\b.md", "backslash is a filename character, not a separator")
+        write("memory/%2e%2e%2f.md", "escape-looking literal is safe and preserved")
+        write("memory/ordinary.md", "ordinary source")
+        assertEquals(
+            listOf("memory/%2e%2e%2f.md", "memory/ordinary.md"),
+            MirrorScope.selectMemory(File(root, "memory")).map { it.relPath },
+        )
+    }
 }

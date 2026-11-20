@@ -145,6 +145,13 @@ class ConfigWriteEnvelopeTest {
     }
 
     @Test
+    fun arrayRemoveMissingAtApplyKeepsNotFoundCode() {
+        val (code, reason) = classifyWriteFailure(ConfigArrayNotFound("element disappeared"))!!
+        assertEquals("not_found", code)
+        assertEquals("element disappeared", reason)
+    }
+
+    @Test
     fun plainRuntimeFailuresAreWriteFailedWithReason() {
         val (code, reason) = classifyWriteFailure(IllegalStateException("disk full"))!!
         assertEquals("write_failed", code)

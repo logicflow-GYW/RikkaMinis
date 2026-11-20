@@ -135,7 +135,8 @@ object MirrorStore {
                     current += MirrorPlan.Entry(f.relPath, f.size, f.modifiedMs)
                 }
             }
-            val diff = MirrorPlan.diff(manifest?.entries ?: emptyList(), current)
+            val previous = manifest?.entries ?: emptyList()
+            val diff = MirrorPlan.diff(previous, current, missingTargetCopies(target, previous))
             diff.toWrite.size + diff.removed.size
         }.getOrNull()
     }
@@ -512,7 +513,8 @@ object MirrorStore {
             pick(File(app.filesDir, "minis-global/$dir")).let(selection::addAll)
         }
         val currentEntries = selection.map { MirrorPlan.Entry(it.relPath, it.size, it.modifiedMs) }
-        val diff = MirrorPlan.diff(manifest?.entries ?: emptyList(), currentEntries)
+        val previous = manifest?.entries ?: emptyList()
+        val diff = MirrorPlan.diff(previous, currentEntries, missingTargetCopies(target, previous))
         if (!force && !MirrorPlan.shouldWrite(manifest?.syncedAtMs, now, diff.hasChanges)) {
             return if (diff.hasChanges) Outcome.Throttled else Outcome.NoChanges
         }
@@ -643,6 +645,20 @@ object MirrorStore {
         val readBack = target.read(relPath) ?: return false
         return readBack.size == expected.size && readBack.contentEquals(expected)
     }
+
+    /**
+     * Manifest entries whose physical copy is missing (or is a directory, not
+     * a regular file). Both the settings counter and the writer feed this same
+     * set into MirrorPlan.diff; force only skips the time window and cannot
+     * bypass the destination check.
+     */
+    private fun missingTargetCopies(
+        target: MirrorTarget,
+        previous: List<MirrorPlan.Entry>,
+    ): Set<String> = previous.asSequence()
+        .map { it.relPath }
+        .filterNot { target.exists(currentPath(it)) }
+        .toHashSet()
 
     private fun currentPath(relPath: String) = "$CURRENT_REL/$relPath"
 

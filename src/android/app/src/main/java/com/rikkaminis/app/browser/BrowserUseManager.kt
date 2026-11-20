@@ -36,6 +36,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -586,7 +588,7 @@ class BrowserUseManager(
         // <a download>, unrenderable MIME types). Without a listener, WebView
         // silently drops these — the user taps "download" and nothing happens.
         webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
-            Log.i(TAG, "onDownloadStart: ${url.take(120)} mime=$mimetype len=$contentLength")
+            Log.i(TAG, downloadStartLogMessage(url, mimetype, contentLength))
             when {
                 // blob: object URLs only exist inside the page — read via JS.
                 url.startsWith("blob:") -> fetchBlobDownload(url, contentDisposition, mimetype)
@@ -3340,6 +3342,22 @@ internal object MinisMainDocGate {
         if (mainDocUrl.isNullOrBlank()) return true
         return isTrustedMainDoc(mainDocUrl)
     }
+}
+
+/** Format only diagnostic metadata before the message reaches persistent logs. */
+internal fun downloadStartLogMessage(url: String, mimeType: String?, contentLength: Long): String {
+    val source = when {
+        url.startsWith("data:", ignoreCase = true) -> "data:"
+        url.startsWith("blob:", ignoreCase = true) -> "blob:"
+        // Paths can carry secrets too. Keep only the origin and non-default port.
+        else -> url.toHttpUrlOrNull()?.let { parsed ->
+            val defaultPort = if (parsed.scheme == "https") 443 else 80
+            val port = if (parsed.port == defaultPort) "" else ":${parsed.port}"
+            "${parsed.scheme}://${parsed.host}$port/"
+        } ?: "<unknown>"
+    }
+    val mime = mimeType?.toMediaTypeOrNull()?.let { "${it.type}/${it.subtype}" } ?: "<unknown>"
+    return "onDownloadStart: $source mime=$mime len=$contentLength"
 }
 
 /**

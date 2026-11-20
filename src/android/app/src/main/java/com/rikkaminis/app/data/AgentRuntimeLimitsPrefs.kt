@@ -7,12 +7,12 @@ import android.content.SharedPreferences
  * [feat/runtime-limits-panel] User-tunable agent runtime limits — the single
  * source of truth behind Settings → Agent Runtime → Runtime Limits.
  *
- * Everything here was previously a hard-coded `const val` scattered across
+ * Most values here were previously hard-coded across
  * AgentLoopEngine / ChatAgentTraceObserver / ProviderExecSlotPolicy /
- * FirstChunkTimeoutPolicy / VerificationStopPolicy. The shipped values of
- * those constants become the DEFAULTs below, so an untouched install behaves
- * byte-identically to the pre-panel build — the panel only lets the user
- * deviate deliberately.
+ * FirstChunkTimeoutPolicy / VerificationStopPolicy. Their shipped values
+ * become the DEFAULTs below; the provider-slot default/range are intentionally
+ * tuned to 6/12 in this build. All other untouched knobs preserve the
+ * pre-panel behavior, while the panel lets the user deviate deliberately.
  *
  * Mirrors the ConcurrencyPrefs pattern: [prime] captures the application
  * context once at app startup (MinisApp.onCreate) and warms a volatile
@@ -145,8 +145,8 @@ object AgentRuntimeLimitsPrefs {
     const val KEY_QUEUE_ADMISSION = "queueAdmission"
 
     const val PROVIDER_SLOTS_MIN = 1
-    const val PROVIDER_SLOTS_MAX = 4
-    const val PROVIDER_SLOTS_DEFAULT = 2
+    const val PROVIDER_SLOTS_MAX = 12
+    const val PROVIDER_SLOTS_DEFAULT = 6
 
     const val QUEUE_ADMISSION_MIN = 2
     const val QUEUE_ADMISSION_MAX = 12

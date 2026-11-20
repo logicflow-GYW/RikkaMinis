@@ -12,7 +12,6 @@ import java.net.URI
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import org.json.JSONObject
 
 object AnthropicModelsApi {
@@ -102,46 +101,39 @@ object AnthropicModelsApi {
             val request = requestBuilder.build()
             android.util.Log.d("AnthropicModels", "Fetching models (level=$idx): ${request.url.scheme}://${request.url.host}${request.url.encodedPath} headerKeys=${request.headers.names()} authPresent=${request.headers["Authorization"] != null}")
 
-            val response: Response = try {
-                // [FIX-1 / F-209] Cancellable execute — see provider/CallCancellation.kt.
-                // Matters most here: this is a per-level fallback loop, so an
-                // uncancellable fetch stacked its cost once per candidate base.
-                client.newCall(request).executeOrCancel()
+            // [R5-F-03] Each fallback level owns its response until parsing ends.
+            val models = try {
+                client.newCall(request).executeOrCancel() { response ->
+                    val body = response.body?.string() ?: run {
+                        android.util.Log.w("AnthropicModels", "Empty response body (level=$idx)")
+                        ""
+                    }
+
+                    if (!response.isSuccessful) {
+                        android.util.Log.e("AnthropicModels", "Fetch failed (level=$idx): ${response.code} ${body.take(200)}")
+                        // 401/403 almost always means the credential rotated; drop any stale
+                        // cache entry so the next lookup hits the network again.
+                        if (context != null && (response.code == 401 || response.code == 403)) {
+                            AnthropicModelsCache.invalidate(context, cacheKey)
+                        }
+                        lastFailureCode = response.code
+                        lastFailureBody = body
+                        return@executeOrCancel null
+                    }
+
+                    if (idx > 0) {
+                        android.util.Log.i("AnthropicModels", "Parent-path fallback succeeded at level=$idx base=$candidate")
+                    }
+                    android.util.Log.d("AnthropicModels", "Response ${response.code}, body length: ${body.length}")
+                    parseAndCache(body, isCustomEndpoint, context, cacheKey)
+                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")
                 continue
             }
-            // [fix/audit-s4m1] close on every path — this loop `continue`s on
-            // failures and returns on success, and each level previously leaked
-            // a Response; the leak amplified across fallback levels.
-            try {
-                val body = response.body?.string() ?: run {
-                    android.util.Log.w("AnthropicModels", "Empty response body (level=$idx)")
-                    ""
-                }
-
-                if (!response.isSuccessful) {
-                    android.util.Log.e("AnthropicModels", "Fetch failed (level=$idx): ${response.code} ${body.take(200)}")
-                    // 401/403 almost always means the credential rotated; drop any stale
-                    // cache entry so the next lookup hits the network again.
-                    if (context != null && (response.code == 401 || response.code == 403)) {
-                        AnthropicModelsCache.invalidate(context, cacheKey)
-                    }
-                    lastFailureCode = response.code
-                    lastFailureBody = body
-                    continue
-                }
-
-                if (idx > 0) {
-                    android.util.Log.i("AnthropicModels", "Parent-path fallback succeeded at level=$idx base=$candidate")
-                }
-                android.util.Log.d("AnthropicModels", "Response ${response.code}, body length: ${body.length}")
-                return@withContext parseAndCache(body, isCustomEndpoint, context, cacheKey)
-            } finally {
-                response.close()
-            }
+            if (models != null) return@withContext models
         }
 
         // All candidate bases failed.
@@ -198,6 +190,8 @@ object AnthropicModelsApi {
             android.util.Log.i("AnthropicModels", "Parsed ${parsed.size} models: ${parsed.map { it.id }.joinToString()}")
             if (parsed.isEmpty()) return fallback
             ModelsDevApi.enrichModels(parsed)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (_: Exception) {
             return fallback
         }

@@ -146,4 +146,44 @@ class ConfigWriteBatchWiringTest {
             lines.count { it.contains("internal fun classifyWriteFailure(") },
         )
     }
+
+    @Test
+    fun approvedArrayRowsReadCurrentValueAtApplyPoint() {
+        val anchor = findLine("val operation = r.arrayOperation")
+        val domain = indentDomain(anchor)
+        val body = lines.slice(domain).joinToString("\n")
+        assertTrue("array field writes must use the approved-time helper", body.contains("applyConfigArrayOperation("))
+        assertTrue("array helper must read the field at apply time", body.contains("readCurrent = field::read"))
+        assertTrue("array helper must write the value it just derived", body.contains("write = field::write"))
+        val helperCallEnd = findLine("// A receipt describes the value that actually reached the", anchor)
+        val helperCall = lines.subList(anchor, helperCallEnd).joinToString("\n")
+        val directWrite = helperCall.indexOf("field.write(r.newValue)")
+        val helperCallIndex = helperCall.indexOf("applyConfigArrayOperation(")
+        assertTrue("ordinary set branch must retain its direct replacement", directWrite >= 0)
+        assertTrue("array branch must use the helper after the ordinary set branch", helperCallIndex > directWrite)
+    }
+
+    @Test
+    fun arrayPreviewStoresElementOperationNotReplacementArray() {
+        assertEquals(
+            "append and remove branches each retain the element for apply time",
+            2,
+            listOf("isAppend ->", "isRemove ->").count { marker ->
+                val start = src.indexOf(marker)
+                start >= 0 && src.indexOf("newValue = parsedValue", start) >= 0
+            },
+        )
+        assertTrue("append/remove rows must carry an explicit operation", src.contains("arrayOperation = when"))
+        assertTrue("append/remove rows must carry the element operand", src.contains("arrayOperand = if (isAppend || isRemove) parsedValue else null"))
+        assertFalse("the preview must not precompute the replacement array", src.contains("newValue = ConfigValue.Arr(existing + parsedValue)"))
+        assertFalse("the preview must not precompute the filtered array", src.contains("newValue = ConfigValue.Arr(filtered)"))
+    }
+
+    @Test
+    fun ordinarySetStillWritesItsFullReplacementValue() {
+        val anchor = findLine("if (operation == null)")
+        val domain = indentDomain(anchor)
+        val body = lines.slice(domain).joinToString("\n")
+        assertTrue("ordinary set must remain full replacement", body.contains("field.write(r.newValue)"))
+    }
 }

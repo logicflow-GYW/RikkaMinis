@@ -16,8 +16,11 @@ stay exactly the mcpServers object form:
     }
 """
 
+import contextlib
+import fcntl
 import json
 import os
+import threading
 import time
 
 CONFIG_DIR = "/var/minis/mcp-servers"
@@ -123,33 +126,56 @@ def get_server(name):
     return get_servers().get(name)
 
 
+# lockf uses POSIX record locks, the same namespace as Java FileChannel.lock.
+# flock is a separate namespace on Linux and does NOT exclude the Android UI.
+# Record locks are process-wide, so threads in this process also need a mutex.
+_CONFIG_MUTEX = threading.Lock()
+
+
+@contextlib.contextmanager
+def _config_lock():
+    _ensure_dir()
+    with _CONFIG_MUTEX:
+        # Never unlink this file: waiters must keep locking the same inode even
+        # while servers.json itself is replaced atomically.
+        with open(CONFIG_PATH + ".lock", "a+b") as lock_file:
+            fcntl.lockf(lock_file, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.lockf(lock_file, fcntl.LOCK_UN)
+
+
 def upsert_server(name, server):
-    """Add or overwrite a server (last-write-wins on name collision)."""
-    config = load_config()
-    config.setdefault("mcpServers", {})[name] = server
-    save_config(config)
+    """Merge one name under the shared transaction lock; same-name last wins."""
+    with _config_lock():
+        config = load_config()
+        config.setdefault("mcpServers", {})[name] = server
+        save_config(config)
 
 
 def remove_server(name):
     """Delete a server. Returns True if it existed."""
-    config = load_config()
-    servers = config.setdefault("mcpServers", {})
-    if name in servers:
-        del servers[name]
-        save_config(config)
-        return True
-    return False
+    with _config_lock():
+        config = load_config()
+        servers = config.setdefault("mcpServers", {})
+        if name in servers:
+            del servers[name]
+            save_config(config)
+            return True
+        return False
 
 
 def set_enabled(name, enabled):
     """Flip a server's enabled flag. Returns True if the server existed."""
-    config = load_config()
-    server = config.get("mcpServers", {}).get(name)
-    if server is None:
-        return False
-    server["enabled"] = bool(enabled)
-    save_config(config)
-    return True
+    with _config_lock():
+        config = load_config()
+        server = config.get("mcpServers", {}).get(name)
+        if server is None:
+            return False
+        server["enabled"] = bool(enabled)
+        save_config(config)
+        return True
 
 
 def is_http(server):

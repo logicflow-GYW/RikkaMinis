@@ -1264,7 +1264,7 @@ class OpenAIProvider constructor(
                                 "Responses API error frame — code=$code type=$errType message=$message"
                             )
                             throw mapHttpError(
-                                openAiStreamErrorStatus(code, errType),
+                                openAiStreamErrorStatus(code, errType, message),
                                 err.toString(),
                             )
                         }
@@ -1294,7 +1294,7 @@ class OpenAIProvider constructor(
                             // error object itself, whose `message` field is what
                             // extractHttpErrorMessage reads.
                             throw mapHttpError(
-                                openAiStreamErrorStatus(code, err?.optString("type", "") ?: ""),
+                                openAiStreamErrorStatus(code, err?.optString("type", "") ?: "", message),
                                 err?.toString() ?: event.toString(),
                             )
                         }
@@ -1382,6 +1382,7 @@ class OpenAIProvider constructor(
                             openAiStreamErrorStatus(
                                 inlineError.optString("code", ""),
                                 inlineError.optString("type", ""),
+                                inlineError.optString("message", ""),
                             ),
                             event.toString(),
                         )

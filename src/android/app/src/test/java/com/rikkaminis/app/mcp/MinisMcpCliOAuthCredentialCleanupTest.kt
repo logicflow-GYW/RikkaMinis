@@ -139,8 +139,17 @@ class MinisMcpCliOAuthCredentialCleanupTest {
             # -- 2. same-name add must not inherit the old token ----------
             run(cli.cmd_add, ["--name", "beta", "--url", "https://b1.example/mcp"])
             write("beta.json", '{"access_token": "tok-1"}')
-            run(cli.cmd_add, ["--name", "beta", "--url", "https://b2.example/mcp"])
+            write("beta.json.tmp", '{}')
+            write("beta.secret", "old-secret")
+            run(cli.cmd_add, ["--name", "beta", "--url", "https://b2.example/mcp",
+                               "--oauth-client-id", "cid-beta",
+                               "--oauth-auth-endpoint", "https://b2.example/auth",
+                               "--oauth-token-endpoint", "https://b2.example/token",
+                               "--oauth-client-secret", "new-secret-beta"])
             check("same-name add clears the previous token bridge", not exists("beta.json"))
+            check("same-name add clears the half-written bridge", not exists("beta.json.tmp"))
+            check("same-name add replaces the old client secret", exists("beta.secret") and
+                  open(path("beta.secret"), encoding="utf-8").read() == "new-secret-beta")
             check("same-name add lands the new url",
                   (config.get_server("beta") or {}).get("url") == "https://b2.example/mcp")
 
@@ -162,7 +171,103 @@ class MinisMcpCliOAuthCredentialCleanupTest {
             check("the add still reports success",
                   bool(r["out"]) and r["out"][0].get("added") == "eps")
 
-            # -- 5. a cleanup that cannot happen is reported, not ignored --
+            # -- 5. validation failures must preserve the previous server and
+            # all three credential files. The values are synthetic and are
+            # never included in any diagnostic detail.
+            def seed_old(name):
+                old = {
+                    "enabled": True,
+                    "url": "https://old.example/mcp",
+                    "oauth": {
+                        "mode": "static",
+                        "clientId": "old-client",
+                        "authorizationEndpoint": "https://old.example/auth",
+                        "tokenEndpoint": "https://old.example/token",
+                    },
+                }
+                config.save_config({"mcpServers": {name: old}})
+                old_files = {
+                    name + ".json": '{"access_token":"opaque-access"}',
+                    name + ".json.tmp": '{"refresh_token":"opaque-refresh"}',
+                    name + ".secret": "opaque-secret",
+                }
+                for file_name, text in old_files.items():
+                    write(file_name, text)
+                return old, old_files
+
+            def preserved(name, old, old_files):
+                return (config.get_server(name) == old and
+                        all(exists(file_name) and
+                            open(path(file_name), encoding="utf-8").read() == text
+                            for file_name, text in old_files.items()))
+
+            def invalid_add(label, extra):
+                name = "invalid-" + label
+                old, old_files = seed_old(name)
+                r = run(cli.cmd_add, ["--name", name] + extra)
+                check(label + " rejects", r["exit"] != 0, r["exit"])
+                check(label + " preserves old config and credentials",
+                      preserved(name, old, old_files))
+
+            invalid_add("missing-transport", [])
+            invalid_add("bad-args", ["--command", "python", "--args", "'unterminated"])
+            invalid_add("bad-timeout", ["--url", "https://new.example/mcp",
+                                         "--startup-timeout", "0"])
+            invalid_add("oauth-missing-field", ["--url", "https://new.example/mcp",
+                                                 "--oauth-client-id", "new-client",
+                                                 "--oauth-auth-endpoint", "https://new.example/auth"])
+            invalid_add("oauth-stdio-conflict", ["--command", "stdio-server",
+                                                   "--oauth-client-id", "new-client",
+                                                   "--oauth-auth-endpoint", "https://new.example/auth",
+                                                   "--oauth-token-endpoint", "https://new.example/token"])
+
+            # -- 6. seed and config-write failures are non-zero and cannot
+            # publish the replacement config.
+            seed_name = "seed-failure"
+            old, old_files = seed_old(seed_name)
+            secret_path = path(seed_name + ".secret")
+            had_open = "open" in cli.__dict__
+            previous_open = cli.__dict__.get("open")
+            real_open = previous_open or open
+
+            def fail_secret(path_arg, mode="r", *args, **kwargs):
+                if path_arg == secret_path and "w" in mode:
+                    raise OSError("synthetic seed failure")
+                return real_open(path_arg, mode, *args, **kwargs)
+
+            cli.open = fail_secret
+            try:
+                r = run(cli.cmd_add, ["--name", seed_name, "--url", "https://new.example/mcp",
+                                      "--oauth-client-id", "new-client",
+                                      "--oauth-auth-endpoint", "https://new.example/auth",
+                                      "--oauth-token-endpoint", "https://new.example/token",
+                                      "--oauth-client-secret", "opaque-new-secret"])
+            finally:
+                if had_open:
+                    cli.open = previous_open
+                else:
+                    del cli.open
+            check("seed failure exits non-zero", r["exit"] != 0, r["exit"])
+            check("seed failure does not publish new config",
+                  config.get_server(seed_name) == old)
+
+            write_name = "config-write-failure"
+            old, old_files = seed_old(write_name)
+            previous_upsert = config.upsert_server
+
+            def fail_upsert(name, server):
+                raise OSError("synthetic config write failure")
+
+            config.upsert_server = fail_upsert
+            try:
+                r = run(cli.cmd_add, ["--name", write_name, "--url", "https://new.example/mcp"])
+            finally:
+                config.upsert_server = previous_upsert
+            check("config write failure exits non-zero", r["exit"] != 0, r["exit"])
+            check("config write failure does not publish new config",
+                  config.get_server(write_name) == old)
+
+            # -- 7. a cleanup that cannot happen is reported, not ignored --
             # A directory in the bridge file's place makes os.remove fail even
             # as root. The add must then refuse to land: a config that is
             # visible next to the previous server's credentials is the leak.

@@ -20,26 +20,13 @@ import androidx.room.Upsert
  */
 internal const val SQLITE_MAX_VARIABLE_NUMBER = 999
 
-/**
- * [fix/r3-data-1119 F-07] Rows handed to one `NOT IN (:list)` statement.
- * Strictly below [SQLITE_MAX_VARIABLE_NUMBER] so the ceiling is never
- * approached: Room binds one parameter per list element, and a list that
- * reaches the ceiling is a hard SQL error rather than a slow query.
- */
+/** Maximum primary keys bound by one positive `DELETE ... IN` statement. */
 internal const val SQL_DELETE_CHUNK_SIZE = 900
 
 /**
- * [fix/r3-data-1119 F-07] Split [ids] into statement-sized chunks.
- *
- * A single `NOT IN (:list)` binds one parameter per element, so the list has
- * to stay under SQLite's ceiling on every device this app runs on. Chunking
- * is semantically neutral: `NOT IN` over the union of the chunks selects
- * exactly the rows `NOT IN` over the whole list would have.
- *
- * The helper is a plain top-level function (not a DAO default method) so the
- * policy is drivable from a JVM test and so Room never has to generate a
- * super-call bridge for it — the DAO keeps exactly the abstract statements it
- * had before.
+ * Split an already-computed delete set into bounded statements. Only positive
+ * `IN` deletes compose across chunks: chunking a keep set for `NOT IN` would
+ * delete rows that belong to another chunk.
  */
 internal fun <T> chunkedIds(ids: List<T>, chunkSize: Int = SQL_DELETE_CHUNK_SIZE): List<List<T>> {
     require(chunkSize > 0) { "chunkSize must be positive" }
@@ -99,25 +86,31 @@ interface ProviderConfigDao {
     @Query("DELETE FROM provider_agent_loop_ids") suspend fun clearAgentLoopIds()
     @Query("DELETE FROM provider_config_meta") suspend fun clearMeta()
 
-    /**
-     * [fix/r3-data-1119 F-07] Raw statement for the instances delete. Room
-     * binds one parameter per list element, so the caller must never hand
-     * this more than [SQL_DELETE_CHUNK_SIZE] ids — see [chunkedIds].
-     */
-    @Query("DELETE FROM provider_instances WHERE id NOT IN (:keepIds)")
-    suspend fun deleteInstancesNotIn(keepIds: List<String>)
+    // Read only primary keys: undecodable row payloads must not affect pruning.
+    @Query("SELECT id FROM provider_instances")
+    suspend fun loadInstanceIds(): List<String>
 
-    /** Raw statement for the entries delete; see [deleteInstancesNotIn]. */
-    @Query("DELETE FROM provider_model_entries WHERE id NOT IN (:keepIds)")
-    suspend fun deleteEntriesNotIn(keepIds: List<String>)
+    @Query("SELECT id FROM provider_model_entries")
+    suspend fun loadEntryIds(): List<String>
 
-    /** Raw statement for the groups delete; see [deleteInstancesNotIn]. */
-    @Query("DELETE FROM provider_model_groups WHERE id NOT IN (:keepIds)")
-    suspend fun deleteGroupsNotIn(keepIds: List<String>)
+    @Query("SELECT id FROM provider_model_groups")
+    suspend fun loadGroupIds(): List<String>
 
-    /** Raw statement for the meta delete; see [deleteInstancesNotIn]. */
-    @Query("DELETE FROM provider_config_meta WHERE key NOT IN (:keepKeys)")
-    suspend fun deleteMetaNotIn(keepKeys: List<String>)
+    @Query("SELECT key FROM provider_config_meta")
+    suspend fun loadMetaKeys(): List<String>
+
+    // Callers compute the FULL difference first, then bind at most 900 keys.
+    @Query("DELETE FROM provider_instances WHERE id IN (:ids)")
+    suspend fun deleteInstancesByIds(ids: List<String>)
+
+    @Query("DELETE FROM provider_model_entries WHERE id IN (:ids)")
+    suspend fun deleteEntriesByIds(ids: List<String>)
+
+    @Query("DELETE FROM provider_model_groups WHERE id IN (:ids)")
+    suspend fun deleteGroupsByIds(ids: List<String>)
+
+    @Query("DELETE FROM provider_config_meta WHERE key IN (:keys)")
+    suspend fun deleteMetaByKeys(keys: List<String>)
 
     /**
      * [fix/meta1028-d1 F-01] Drop a single meta row — the sync-token repair needs
@@ -144,8 +137,7 @@ interface ProviderConfigDao {
      *   3. upsert entries, then delete entries whose composite key vanished,
      *   4. groups / loop-ids / meta have no FK between them, order is free.
      *
-     * Empty incoming lists use the clear* calls because SQLite rejects
-     * "NOT IN ()" as a syntax error.
+     * Empty incoming lists retain the clear* fast paths.
      *
      * [fix/p1028-provider-corrupt-row] [preserveEntryIds] are `provider_model_entries`
      * rows the caller could NOT decode on load (see
@@ -157,15 +149,11 @@ interface ProviderConfigDao {
      * rather than re-derived here: only the mapping layer can tell "row is
      * absent from the config" apart from "row could not be read".
      *
-     * [fix/r3-data-1119 F-07] Every `NOT IN` delete below runs in
-     * [SQL_DELETE_CHUNK_SIZE]-sized statements. One statement binding the
-     * whole id list fails at bind time on API 26–29
-     * ([SQLITE_MAX_VARIABLE_NUMBER]), which rolled this whole transaction
-     * back — a provider catalog of ~1200 entries could not be saved at all on
-     * an Android 8–10 device. The chunks are semantically neutral (the union
-     * of `NOT IN` over the chunks is the same set), and because they all run
-     * inside this `@Transaction`, a chunk that fails still rolls the whole
-     * sync back rather than leaving a half-deleted table.
+     * Compute existing primary keys minus the COMPLETE keep set before
+     * chunking. Positive deletes then compose without removing another chunk's
+     * retained rows, and every statement stays below the API 26–29 bind limit.
+     * All reads, upserts and deletes remain in this transaction; any failure
+     * rolls back the whole sync.
      */
     @Transaction
     suspend fun syncAllIncremental(
@@ -180,8 +168,9 @@ interface ProviderConfigDao {
             clearInstances() // CASCADE wipes their entries too
         } else {
             upsertInstances(instances)
-            for (chunk in chunkedIds(instances.map { it.id })) {
-                deleteInstancesNotIn(chunk)
+            val keepInstanceIds = instances.map { it.id }.toHashSet()
+            for (chunk in chunkedIds(loadInstanceIds().filterNot { it in keepInstanceIds })) {
+                deleteInstancesByIds(chunk)
             }
         }
 
@@ -190,13 +179,13 @@ interface ProviderConfigDao {
         // degraded shape) but must survive the delete. When a corrupt row is the
         // ONLY row (entries empty + preserve non-empty) the clearEntries() fast
         // path must not run either — that is the same wipe via a different door.
-        val keepEntryIds = entryIdsToKeep(entries, preserveEntryIds)
+        val keepEntryIds = entryIdsToKeep(entries, preserveEntryIds).toHashSet()
         if (keepEntryIds.isEmpty()) {
             clearEntries()
         } else {
             if (entries.isNotEmpty()) upsertEntries(entries)
-            for (chunk in chunkedIds(keepEntryIds)) {
-                deleteEntriesNotIn(chunk)
+            for (chunk in chunkedIds(loadEntryIds().filterNot { it in keepEntryIds })) {
+                deleteEntriesByIds(chunk)
             }
         }
 
@@ -204,8 +193,9 @@ interface ProviderConfigDao {
             clearGroups()
         } else {
             upsertGroups(groups)
-            for (chunk in chunkedIds(groups.map { it.id })) {
-                deleteGroupsNotIn(chunk)
+            val keepGroupIds = groups.map { it.id }.toHashSet()
+            for (chunk in chunkedIds(loadGroupIds().filterNot { it in keepGroupIds })) {
+                deleteGroupsByIds(chunk)
             }
         }
 
@@ -223,8 +213,9 @@ interface ProviderConfigDao {
             clearMeta()
         } else {
             upsertMeta(meta)
-            for (chunk in chunkedIds(meta.map { it.key })) {
-                deleteMetaNotIn(chunk)
+            val keepMetaKeys = meta.map { it.key }.toHashSet()
+            for (chunk in chunkedIds(loadMetaKeys().filterNot { it in keepMetaKeys })) {
+                deleteMetaByKeys(chunk)
             }
         }
     }

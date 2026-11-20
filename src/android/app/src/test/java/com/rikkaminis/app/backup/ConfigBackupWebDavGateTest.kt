@@ -115,17 +115,12 @@ class ConfigBackupWebDavGateTest {
             ),
         )
         assertEquals("typed-just-now", plan.config!!.password)
-        // …while the non-secret fields do follow the backup.
-        assertEquals("alice", plan.config!!.username)
-        assertEquals("RikkaMinis_backups", plan.config!!.path)
-        assertEquals(
-            "https://dav.example.com/remote.php/dav/files/alice",
-            plan.config!!.url,
-        )
-        assertTrue(
-            "notice must say the password was kept: ${plan.notice}",
-            plan.notice!!.contains("沿用"),
-        )
+        // Cross-service password reuse is no longer authorized: keep the
+        // complete old combination, not only its password.
+        assertEquals("olduser", plan.config!!.username)
+        assertEquals("OldDir", plan.config!!.path)
+        assertEquals("https://old.example.com", plan.config!!.url)
+        assertTrue(plan.notice!!.contains("保留") && plan.notice.contains("重新填写"))
     }
 
     @Test

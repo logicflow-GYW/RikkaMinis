@@ -99,6 +99,7 @@ internal class FakeAgentLoopHost(
     /** [FIX-R4-Q F-06] The published model OBJECTS (enrichment assertions). */
     val currentModels = mutableListOf<LLMModel>()
     val streamRequests = mutableListOf<StreamRequest>()
+    val streamMessageSnapshots = mutableListOf<List<LLMMessage>>()
     val lastTurnContextTokensValues = mutableListOf<Int>()
     /** offloadContextIfNeeded args: contextWindow to lastContextTokens to force. */
     val offloadCalls = mutableListOf<Triple<Int, Int, Boolean>>()
@@ -306,6 +307,7 @@ internal class FakeAgentLoopHost(
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = flow {
         val attemptIndex = ++streamCounter
+        streamMessageSnapshots.add(messages.toList())
         streamRequests.add(
             StreamRequest(attemptIndex, provider.name, messages.size, systemPrompt, maxTokens, tools.size, thinkingLevel)
         )

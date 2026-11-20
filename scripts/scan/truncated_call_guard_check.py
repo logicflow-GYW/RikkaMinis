@@ -127,9 +127,10 @@ RESPONSES_FEED = """toolCallEventCount += responsesToolCallEventWeight(
 CHAT_INLINE_STATUS = """openAiStreamErrorStatus(
                                 inlineError.optString("code", ""),
                                 inlineError.optString("type", ""),
+                                inlineError.optString("message", ""),
                             )"""
 RESPONSES_STATUS_CALL = """mapHttpError(
-                                openAiStreamErrorStatus(code, err?.optString("type", "") ?: ""),
+                                openAiStreamErrorStatus(code, err?.optString("type", "") ?: "", message),
                                 err?.toString() ?: event.toString(),
                             )"""
 

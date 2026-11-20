@@ -47,7 +47,14 @@ internal fun mergeSessionMcpEnablement(
     overrideRows[id] ?: globalEnabled(id) ?: false
 }
 
-class MCPRepository(private val context: Context) {
+class MCPRepository private constructor(
+    private val context: Context?,
+    private val mcpDir: File,
+) {
+    constructor(context: Context) : this(context, File(context.filesDir, "minis-global/mcp-servers"))
+
+    /** Real file transactions without Android credential/SQLite services (JVM tests). */
+    internal constructor(dir: File) : this(null, dir)
 
     companion object {
         private const val TAG = "MCPRepository"
@@ -168,12 +175,8 @@ class MCPRepository(private val context: Context) {
     val sessionOverridesRevision: StateFlow<Long> = _sessionOverridesRevision.asStateFlow()
 
     private val db: SQLiteDatabase by lazy {
-        McpDbHelper(context).writableDatabase
+        McpDbHelper(requireNotNull(context) { "Session overrides require Android" }).writableDatabase
     }
-
-    /** Host dir backing `/var/minis/mcp-servers` (mirrors skills' minis-global dir). */
-    private val mcpDir: File
-        get() = File(context.filesDir, "minis-global/mcp-servers")
 
     private val serversFile: File
         get() = File(mcpDir, SERVERS_FILE_NAME)
@@ -191,24 +194,16 @@ class MCPRepository(private val context: Context) {
      * "zero servers". The old code returned an empty list for every failure mode
      * (`readText` threw, invalid JSON, missing `mcpServers` key) and `load()`
      * published that over the in-memory state — so a single truncated write (or
-     * a hand-edit typo) emptied the list, and the next [save] from any caller
+     * a hand-edit typo) emptied the list, and the next write from any caller
      * wrote the empty list back to disk permanently. Unreadable now means
      * "keep what we have and leave the file alone"; only a genuinely absent or
      * empty file yields an empty list. Compare ProviderRepository, which
      * deliberately keeps its DB rows when the mirror is unreadable.
      */
     fun load() {
-        val parsed = readServersFile()
-        if (parsed == null) {
-            Log.w(TAG, "servers.json unreadable — keeping ${_servers.value.size} in-memory server(s)")
-            return
-        }
-        _servers.value = parsed.servers
-        // [F-227] The createdAt back-fill used to run *inside* the reader, so a
-        // read could silently mutate the file. Doing it here — after a
-        // successful parse, and only as an explicit follow-up — keeps the
-        // reader side-effect free (and unreachable from a failed parse).
-        if (parsed.needsPersist) save(parsed.servers)
+        // Includes createdAt back-fill: re-read and persist under ONE lock, not
+        // a read followed by a whole-snapshot save that could erase a CLI add.
+        transact(change = { false })
     }
 
     /** Alias matching SkillRepository.reloadFromDisk() so callers read symmetrically. */
@@ -222,6 +217,7 @@ class MCPRepository(private val context: Context) {
      *   stable stamps that should be written back once
      */
     private data class ReadResult(
+        val root: JSONObject,
         val servers: List<MCPServerConfig>,
         val needsPersist: Boolean,
     )
@@ -234,12 +230,12 @@ class MCPRepository(private val context: Context) {
      */
     private fun readServersFile(): ReadResult? {
         val file = serversFile
-        if (!file.exists()) return ReadResult(emptyList(), needsPersist = false)
+        if (!file.exists()) return ReadResult(JSONObject().put("mcpServers", JSONObject()), emptyList(), needsPersist = false)
         val text = try { file.readText() } catch (e: Exception) {
             Log.w(TAG, "Failed to read servers.json: ${e.message}")
             return null
         }
-        if (text.isBlank()) return ReadResult(emptyList(), needsPersist = false)
+        if (text.isBlank()) return ReadResult(JSONObject().put("mcpServers", JSONObject()), emptyList(), needsPersist = false)
         val root = try { JSONObject(text) } catch (e: Exception) {
             Log.w(TAG, "servers.json is not valid JSON: ${e.message}")
             return null
@@ -273,38 +269,48 @@ class MCPRepository(private val context: Context) {
             idx++
         }
         val sorted = out.sortedByDescending { it.createdAt }
-        return ReadResult(sorted, needsPersist)
+        return ReadResult(root, sorted, needsPersist)
     }
 
-    /** Write [list] (defaults to current [servers]) to servers.json in mcpServers format. */
-    private fun save(list: List<MCPServerConfig> = _servers.value) {
-        mcpDir.mkdirs()
-        val mcpServers = JSONObject()
-        for (s in list) {
-            mcpServers.put(s.id, entryToJson(s))
-        }
-        val root = JSONObject().put("mcpServers", mcpServers)
-        try {
-            // [F-227] Publish through a staging file so a process death /
-            // storage-full mid-write can never leave a truncated servers.json
-            // behind — a truncated file used to parse as "zero servers" and then
-            // got persisted as the truth.
-            //
-            // [meta-audit-1028 E2 / B07 F-14] The staging name is NOT a constant
-            // any more. `minis-mcp-cli` inside the guest writes this same file
-            // (utils/config.py::save_config) and used the very same
-            // `servers.json.tmp`, so an agent running `minis-mcp-cli add …`
-            // while the user saved the form had two writers truncating one
-            // staging file: one rename could publish the other's bytes, and the
-            // loser fell back to rewriting the live file non-atomically. Both
-            // sides now stage under a unique name and publish with one atomic
-            // rename; see [ServersJsonIo].
-            if (!ServersJsonIo.writeAtomic(mcpDir, SERVERS_FILE_NAME, root.toString(2))) {
-                Log.e(TAG, "Failed to write $SERVERS_FILE_NAME: no rename path succeeded")
+    /**
+     * Re-read the latest document, apply only this operation's delta and publish
+     * memory AFTER successful persistence. The shared lock also orders local
+     * state publication and credential reconciliation against other UI writers.
+     * Unknown root fields and unrelated server fields survive unchanged.
+     */
+    private fun transact(
+        change: (JSONObject) -> Boolean,
+        afterCommit: () -> Unit = {},
+    ): Boolean = try {
+        ServersJsonIo.withTransaction(mcpDir, SERVERS_FILE_NAME) {
+            val parsed = readServersFile()
+            if (parsed == null) {
+                Log.w(TAG, "servers.json unreadable — keeping ${_servers.value.size} in-memory server(s)")
+                return@withTransaction false
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write $SERVERS_FILE_NAME: ${e.message}")
+            val entries = parsed.root.getJSONObject("mcpServers")
+            val changed = change(entries)
+            if (parsed.needsPersist) {
+                for (server in parsed.servers) {
+                    entries.optJSONObject(server.id)?.let { entry ->
+                        if (!entry.has("createdAt")) entry.put("createdAt", server.createdAt)
+                    }
+                }
+            }
+            if (changed || parsed.needsPersist) {
+                if (!ServersJsonIo.writeAtomic(mcpDir, SERVERS_FILE_NAME, parsed.root.toString(2))) {
+                    Log.e(TAG, "Failed to write $SERVERS_FILE_NAME: no rename path succeeded")
+                    return@withTransaction false
+                }
+            }
+            // No writer can interleave between commit, re-read and publication.
+            _servers.value = readServersFile()?.servers ?: return@withTransaction false
+            if (changed) afterCommit()
+            changed
         }
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to transact $SERVERS_FILE_NAME: ${e.message}")
+        false
     }
 
     private fun parseEntry(name: String, entry: JSONObject): MCPServerConfig {
@@ -404,19 +410,24 @@ class MCPRepository(private val context: Context) {
     /** Add or overwrite a server (rename/overwrite is last-write-wins by id). */
     fun add(server: MCPServerConfig): Boolean {
         if (server.id.isBlank()) return false
-        _servers.value = _servers.value.filter { it.id != server.id } + server
-        save()
-        reconcileOAuth(server)
-        Log.i(TAG, "Added MCP server: ${server.id}")
-        return true
+        return transact(change = { entries ->
+            entries.put(server.id, entryToJson(server))
+            true
+        }, afterCommit = {
+            reconcileOAuth(server)
+            Log.i(TAG, "Added MCP server: ${server.id}")
+        })
     }
 
     fun update(server: MCPServerConfig): Boolean {
-        if (_servers.value.none { it.id == server.id }) return false
-        _servers.value = _servers.value.map { if (it.id == server.id) server else it }
-        save()
-        reconcileOAuth(server)
-        return true
+        return transact(change = { entries ->
+            if (entries.optJSONObject(server.id) == null) false else {
+                entries.put(server.id, entryToJson(server))
+                true
+            }
+        }, afterCommit = {
+            reconcileOAuth(server)
+        })
     }
 
     /**
@@ -436,6 +447,7 @@ class MCPRepository(private val context: Context) {
      * name is the whole message).
      */
     private fun reconcileOAuth(server: MCPServerConfig) {
+        val context = context ?: return
         runCatching {
             com.rikkaminis.app.mcp.oauth.MCPOAuthStore.reconcileForServer(
                 context = context,
@@ -450,29 +462,41 @@ class MCPRepository(private val context: Context) {
     }
 
     fun delete(id: String) {
-        db.execSQL("DELETE FROM mcp_session_overrides WHERE mcp_id=?", arrayOf(id))
-        _servers.value = _servers.value.filter { it.id != id }
-        save()
-        // [T-mcp-oauth-purge-on-delete] Forgetting a server must also forget any
-        // OAuth secret/tokens/bridge-file it left behind — otherwise the
-        // client_secret and issued tokens orphan in EncryptedSharedPreferences
-        // and the in-guest bridge, a storage + credential-hygiene leak.
-        runCatching {
-            com.rikkaminis.app.mcp.oauth.MCPOAuthStore.purge(context, id)
-        }
-        Log.i(TAG, "Deleted MCP server: $id")
+        transact(change = { entries ->
+            entries.remove(id)
+            true
+        }, afterCommit = {
+            val context = context
+            if (context != null) {
+                db.execSQL("DELETE FROM mcp_session_overrides WHERE mcp_id=?", arrayOf(id))
+                // Only purge after this deletion landed, while still excluding
+                // same-name replacement by another transaction.
+                runCatching {
+                    com.rikkaminis.app.mcp.oauth.MCPOAuthStore.purge(context, id)
+                }
+            }
+            Log.i(TAG, "Deleted MCP server: $id")
+        })
     }
 
     fun setEnabled(id: String, enabled: Boolean) {
-        _servers.value = _servers.value.map {
-            if (it.id == id) it.copy(enabled = enabled) else it
-        }
-        save()
+        transact(change = { entries ->
+            val entry = entries.optJSONObject(id)
+            if (entry == null) false else {
+                entry.put("enabled", enabled)
+                true
+            }
+        })
     }
 
     fun toggle(id: String) {
-        val current = _servers.value.find { it.id == id } ?: return
-        setEnabled(id, !current.enabled)
+        transact(change = { entries ->
+            val entry = entries.optJSONObject(id)
+            if (entry == null) false else {
+                entry.put("enabled", !parseEntry(id, entry).enabled)
+                true
+            }
+        })
     }
 
     // -- Session Overrides (mirror SkillRepository) --
@@ -587,18 +611,15 @@ class MCPRepository(private val context: Context) {
         }
         val parsed = parseImportRoot(root)
         if (parsed.isEmpty()) return emptyList()
-        // Merge: overwrite same-name entries, keep the rest.
-        val incomingIds = parsed.mapTo(HashSet()) { it.id }
-        _servers.value = _servers.value.filter { it.id !in incomingIds } + parsed
-        _servers.value = _servers.value.sortedByDescending { it.createdAt }
-        save()
-        // [da1024-D] An import overwrites same-id entries last-write-wins, so an
-        // entry that used to be an authorized HTTP server can be replaced by a
-        // STDIO / OAuth-less one — the old tokens, client secret and plaintext
-        // bridge file would survive the overwrite untouched. Reconcile every
-        // imported entry (a fresh entry is a no-op: no credentials are stored
-        // under an id that was never authorized).
-        for (s in parsed) reconcileOAuth(s)
+        // Same-name last-write-wins, independent names merge into the latest
+        // file rather than the snapshot this repository last loaded.
+        val committed = transact(change = { entries ->
+            for (server in parsed) entries.put(server.id, entryToJson(server))
+            true
+        }, afterCommit = {
+            for (s in parsed) reconcileOAuth(s)
+        })
+        if (!committed) return emptyList()
         Log.i(TAG, "Imported ${parsed.size} MCP server(s)")
         return parsed
     }

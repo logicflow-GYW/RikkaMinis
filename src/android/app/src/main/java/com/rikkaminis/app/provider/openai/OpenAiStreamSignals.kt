@@ -68,12 +68,34 @@ internal fun responsesToolCallEventWeight(
  * @return an HTTP status code, or 0 when nothing is recognisable — `mapHttpError(0)`
  *   keeps the historical `ProviderError` outcome for unknown payloads.
  */
-internal fun openAiStreamErrorStatus(codeToken: String, typeToken: String): Int {
-    // A relay that sends a real numeric code keeps it verbatim.
+internal fun openAiStreamErrorStatus(
+    codeToken: String,
+    typeToken: String,
+    message: String = "",
+): Int {
+    // Explicit status/family wins over prose, especially auth, quota and 4xx.
     val numeric = codeToken.trim().toIntOrNull()
     if (numeric != null && numeric in 400..599) return numeric
-    openAiErrorFamilyStatus(codeToken)?.let { return it }
-    openAiErrorFamilyStatus(typeToken)?.let { return it }
+    val codeStatus = openAiErrorFamilyStatus(codeToken)
+    val typeStatus = openAiErrorFamilyStatus(typeToken)
+    // A generic upstream wrapper must not hide a permanent nested family.
+    if (codeStatus == 502 && typeStatus != null && typeStatus in 400..499) return typeStatus
+    if (codeStatus != null) return codeStatus
+    if (typeStatus != null) return typeStatus
+    // Observed 2026-11-20: some Responses relays omit code/type entirely.
+    // Only exact known transport messages with absent/unknown metadata qualify;
+    // an unfamiliar structured code or a vague "please retry" stays unknown.
+    val unknownTokens = setOf("", "unknown", "0")
+    if (codeToken.trim().lowercase() in unknownTokens &&
+        typeToken.trim().lowercase() in unknownTokens &&
+        message.trim().lowercase() in setOf(
+            "unable to forward upstream stream",
+            "upstream response stream was interrupted",
+            "upstream http/2 stream failed",
+            "upstream service temporarily unavailable",
+            "upstream request failed, please try again later",
+        )
+    ) return 502
     return 0
 }
 
@@ -100,6 +122,11 @@ internal fun openAiErrorFamilyStatus(token: String): Int? {
             t.startsWith("invalid_prompt") -> 400
         t == "server_error" || t == "api_error" || t == "overloaded_error" ||
             t.startsWith("internal") -> 500
+        // Field-observed Responses relay failures are transport failures, not
+        // permanent request errors. Keep this allowlist exact: an arbitrary
+        // upstream_* code may describe auth, policy, quota or a bad request.
+        t == "upstream_stream_read_error" || t == "upstream_error" ||
+            t == "bps_stream_error" -> 502
         else -> null
     }
 }

@@ -54,7 +54,7 @@ class BackupLaunchAndMinisbakGuardTest {
         assertTrue(
             "the catch arm must lower the claim through the ONE shared release site " +
                 "(a hand-written `operationBusy = false` is what the busy-gate count pins against)",
-            after.contains("releaseRestorePayload()"),
+            after.contains("releaseRestorePayload(token)"),
         )
         assertTrue(
             "the catch arm must report the failure instead of dying inside onClick",
@@ -70,7 +70,7 @@ class BackupLaunchAndMinisbakGuardTest {
         assertTrue(
             "convertAndRestore must gate on canStartRestorePayload — the same predicate the " +
                 "JSON branch's claim uses",
-            body.contains("canStartRestorePayload("),
+            body.contains("claimRestorePayload()") && body.contains("backupTaskOwner.transfer(preClaimed)"),
         )
         assertTrue(
             "the refusal must report backup_err_busy instead of returning silently",

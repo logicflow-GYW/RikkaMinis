@@ -3,11 +3,14 @@ package com.rikkaminis.app.ui.sandbox
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.sandbox.internalGuestTmpDeleteTreeNoFollow
 import com.rikkaminis.app.ui.settings.SharedFolderRegistry
@@ -660,6 +663,10 @@ class FileBrowserViewModel(
     // the opaque /data/user/0/.../minis-sessions/<sid>/workspace/foo.py host
     // path. When null, [linuxRootPath] (if any) drives the copy path as before.
     private val displayLinuxPrefix: String? = null,
+    // Injectable IO boundary for deterministic out-of-order completion tests.
+    private val listingDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val directoryReader: (suspend (File, Boolean) -> List<FileItem>)? = null,
+    private val fileOperationDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FileBrowserUiState())
@@ -667,6 +674,9 @@ class FileBrowserViewModel(
 
     /** Cached unsorted listing so re-sort doesn't need to re-stat the dir. */
     private var rawItems: List<FileItem> = emptyList()
+
+    /** Main-confined: repeated loads of the SAME path still have distinct owners. */
+    private var loadGeneration = 0L
 
     /** Path relative to [rootPath] (e.g. "skills/skill-creator"); empty = at root. */
     private var relativePath: String = initialPath?.let { init ->
@@ -915,7 +925,7 @@ class FileBrowserViewModel(
         }
 
     fun deleteItem(item: FileItem) {
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(fileOperationDispatcher) {
             // [R2 F-04] CANONICAL guard, decided on the file that will actually
             // be removed — not on the logical path the browser displays.
             //
@@ -1107,50 +1117,59 @@ class FileBrowserViewModel(
     }
 
     private fun loadItems() {
-        _uiState.value = _uiState.value.copy(isLoading = true)
-        val hostPath = currentHostPath
-        viewModelScope.launch(Dispatchers.IO) {
+        // Navigation calls on Main start immediately; delete's IO callback joins
+        // the same owner/commit lane before reading any mutable browser state.
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            val generation = ++loadGeneration
+            val requestPath = relativePath
+            val hostPath = currentHostPath
+            val showHidden = _uiState.value.showHidden
+            // A re-sort while the replacement is in flight must not revive the
+            // previous directory's cached entries under the new breadcrumbs.
+            rawItems = emptyList()
+            _uiState.value = _uiState.value.copy(
+                items = emptyList(),
+                isLoading = true,
+                isEmpty = false,
+                errorMessage = null,
+            )
+            var loadedItems = emptyList<FileItem>()
+            var loadError: Throwable? = null
             try {
-                // Resolve symlinks for listing but keep logical path for breadcrumbs.
-                // [R5-F F-F-02] `toRealPath()` alone cannot resolve a PRoot link
-                // (it stores a GUEST path the Android host does not have), so a
-                // folder whose name the user just tapped listed as EMPTY. The
-                // helper walks up to the deepest symlink ancestor and rebases —
-                // see its KDoc for the shape.
-                val resolvedPath = resolveListingHostDir(
-                    hostPath,
-                    ::resolveGuestAbsoluteTarget,
-                    sandboxRoots(),
-                )
-
-                // Dotfile filter is gated on the user-facing "Show Hidden
-                // Files" preference (T-hidden-files a3e7f1d0). Snapshot
-                // showHidden here so we don't see a torn read if the
-                // setter races with this background load.
-                val showHidden = _uiState.value.showHidden
-                val files = resolvedPath.listFiles()
-                    ?.filter { showHidden || !it.name.startsWith(".") }
-                    // [R4-V F-11] Pass the guest→host mapper so absolute link
-                    // targets (a PRoot link stores `/var/minis/…`) describe the
-                    // file the shell meant, not a nonexistent host path.
-                    ?.mapNotNull { FileItem.from(it, ::resolveGuestAbsoluteTarget, sandboxRoots()) }
-                    ?: emptyList()
-
-                rawItems = files
-                val sorted = applySort(files, _uiState.value)
-                _uiState.value = _uiState.value.copy(
-                    items = sorted,
-                    isLoading = false,
-                    isEmpty = sorted.isEmpty(),
-                )
+                loadedItems = withContext(listingDispatcher) {
+                    directoryReader?.let { return@withContext it(hostPath, showHidden) }
+                    // Resolve symlinks for listing but keep logical path for breadcrumbs.
+                    // [R5-F F-F-02] Guest-absolute symlinks need the same bounded
+                    // guest-to-host mapping as before, including at ancestor depth.
+                    val resolvedPath = resolveListingHostDir(
+                        hostPath,
+                        ::resolveGuestAbsoluteTarget,
+                        sandboxRoots(),
+                    )
+                    resolvedPath.listFiles()
+                        ?.filter { showHidden || !it.name.startsWith(".") }
+                        ?.mapNotNull { FileItem.from(it, ::resolveGuestAbsoluteTarget, sandboxRoots()) }
+                        ?: emptyList()
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    items = emptyList(),
-                    isLoading = false,
-                    isEmpty = true,
-                    errorMessage = e.message,
-                )
+                loadError = e
             }
+            // Native directory IO need not honour cancellation. Both success
+            // and failure must prove ownership HERE, on Main, before any write.
+            if (generation != loadGeneration || requestPath != relativePath ||
+                hostPath.absolutePath != _uiState.value.currentPath ||
+                showHidden != _uiState.value.showHidden
+            ) return@launch
+            rawItems = loadedItems
+            val sorted = applySort(rawItems, _uiState.value)
+            _uiState.value = _uiState.value.copy(
+                items = sorted,
+                isLoading = false,
+                isEmpty = sorted.isEmpty(),
+                errorMessage = loadError?.message,
+            )
         }
     }
 

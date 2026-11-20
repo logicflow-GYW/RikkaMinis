@@ -59,7 +59,22 @@ import okhttp3.Response
  * }
  * ```
  */
-internal suspend fun Call.executeOrCancel(): Response = coroutineScope {
+internal suspend fun Call.executeOrCancel(): Response = withCallCancellation { execute() }
+
+/**
+ * [R5-F-03] Keep cancellation armed through headers, body consumption and parsing.
+ * Unlike the headers-only overload, this owns and closes the response on every
+ * exit. Only model-list fetchers opt in; streaming callers keep their ownership.
+ */
+internal suspend fun <T> Call.executeOrCancel(consume: suspend (Response) -> T): T =
+    withCallCancellation {
+        execute().use { response ->
+            currentCoroutineContext().ensureActive()
+            consume(response)
+        }
+    }
+
+private suspend fun <T> Call.withCallCancellation(block: suspend () -> T): T = coroutineScope {
     // The scope coroutine is a child of the caller, so it dies with it — that
     // is the signal the watcher's completion handler reads below.
     val scopeJob = currentCoroutineContext().job
@@ -73,7 +88,7 @@ internal suspend fun Call.executeOrCancel(): Response = coroutineScope {
         if (!scopeJob.isActive) cancel()
     }
     try {
-        execute()
+        block()
     } catch (e: Throwable) {
         // Translate "the Call was cancelled because our job died" back into a
         // cancellation. `ensureActive()` throws CancellationException when the

@@ -63,7 +63,30 @@ object OpenRouterModelsApi {
         // exception then climbed all the way to
         // ProviderRepository.refreshModels, losing the fallback semantics.
         val response = try {
-            client.newCall(request).executeOrCancel()
+            client.newCall(request).executeOrCancel() { response ->
+                val body = response.body?.string() ?: return@executeOrCancel emptyList()
+
+                if (!response.isSuccessful) {
+                    if (context != null && (response.code == 401 || response.code == 403)) {
+                        cache.invalidate(context, cacheKey)
+                    }
+                    return@executeOrCancel emptyList()
+                }
+
+                val models = try {
+                    val json = JSONObject(body)
+                    val data = json.optJSONArray("data") ?: return@executeOrCancel emptyList()
+                    parseModels(data)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    return@executeOrCancel emptyList()
+                }
+
+                val enriched = ModelsDevApi.enrichModels(models)
+                if (context != null) cache.save(context, cacheKey, enriched)
+                enriched
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             // A cancelled fetch must unwind, not masquerade as a network error
             // and hand back the empty list.
@@ -72,30 +95,7 @@ object OpenRouterModelsApi {
             android.util.Log.w(TAG, "models fetch failed, using empty list: ${e.message}")
             return@withContext emptyList()
         }
-        try {
-            val body = response.body?.string() ?: return@withContext emptyList()
-
-            if (!response.isSuccessful) {
-                if (context != null && (response.code == 401 || response.code == 403)) {
-                    cache.invalidate(context, cacheKey)
-                }
-                return@withContext emptyList()
-            }
-
-            val models = try {
-                val json = JSONObject(body)
-                val data = json.optJSONArray("data") ?: return@withContext emptyList()
-                parseModels(data)
-            } catch (_: Exception) {
-                return@withContext emptyList()
-            }
-
-            val enriched = ModelsDevApi.enrichModels(models)
-            if (context != null) cache.save(context, cacheKey, enriched)
-            enriched
-        } finally {
-            response.close()
-        }
+        response
     }
 
     private fun parseModels(data: JSONArray): List<LLMModel> {

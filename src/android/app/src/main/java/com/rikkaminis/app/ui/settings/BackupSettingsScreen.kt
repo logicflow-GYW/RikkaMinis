@@ -34,6 +34,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -71,11 +72,75 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+
+/** Process-lifetime exclusion for tasks which can outlive the settings composition. */
+internal class BackupTaskOwner {
+    class Token internal constructor()
+    data class PendingExport(val token: Token, val includeSecrets: Boolean)
+
+    private val active = MutableStateFlow<Token?>(null)
+    val state = active.asStateFlow()
+    private var pendingExport: PendingExport? = null
+
+    @Synchronized
+    fun claim(): Token? {
+        if (active.value != null) return null
+        return Token().also { active.value = it }
+    }
+
+    /** Replace the payload job's claim without an unlocked handoff window. */
+    @Synchronized
+    fun transfer(token: Token): Token? {
+        if (active.value !== token) return null
+        return Token().also { active.value = it }
+    }
+
+    @Synchronized
+    fun release(token: Token): Boolean {
+        if (active.value !== token) return false
+        if (pendingExport?.token === token) pendingExport = null
+        active.value = null
+        return true
+    }
+
+    @Synchronized
+    fun awaitExport(token: Token, includeSecrets: Boolean) {
+        check(active.value === token)
+        pendingExport = PendingExport(token, includeSecrets)
+    }
+
+    @Synchronized
+    fun takeExport(): PendingExport? {
+        val request = pendingExport ?: return null
+        if (active.value !== request.token) return null
+        pendingExport = null
+        return request
+    }
+
+    /** Completion also runs when a cancelled scope never enters the coroutine body. */
+    fun launch(scope: CoroutineScope, token: Token, block: suspend CoroutineScope.() -> Unit): Job =
+        try {
+            scope.launch(block = block).also { job ->
+                job.invokeOnCompletion { release(token) }
+            }
+        } catch (t: Throwable) {
+            release(token)
+            throw t
+        }
+
+    companion object {
+        val application = BackupTaskOwner()
+    }
+}
 
 /**
  * Local backup / restore of app configuration — providers, appearance, and the
@@ -109,7 +174,6 @@ fun BackupSettingsScreen(
     // [T-backend-export] Local SAF export is picker-first: the launcher
     // callback runs AFTER the user picks a file, so it must remember which
     // confirmation (with/without secrets) triggered this picker instance.
-    var exportWithSecrets by remember { mutableStateOf(false) }
     var showSecretWarning by remember { mutableStateOf(false) }
     var importReport by remember { mutableStateOf<ConfigBackup.ImportResult?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -118,11 +182,9 @@ fun BackupSettingsScreen(
     // 必须放到 Dispatchers.IO。
     var pendingMinisbakBytes by remember { mutableStateOf<ByteArray?>(null) }
     var passphraseText by remember { mutableStateOf("") }
-    // [fix-minisbak-import] .minisbak 转换窗口的专用忙碌标记（与 operationBusy
-    // 双重门禁：转换期挡导入重入）。不能在恢复前一直占着 operationBusy——
-    // restoreWithSnapshot 的互斥守卫见 busy 就拒绝（backup_err_busy），那是
-    // 加密包导入"永远 busy"的根因；转换结束须在同一帧内让锁再交给
-    // restoreWithSnapshot（详见 convertAndRestore 注释）。
+    // Conversion has a page-local progress flag, but exclusion belongs to the
+    // application owner. convertAndRestore transfers its token into restore;
+    // the old job's completion cannot release the new job's claim.
     var minisbakConverting by remember { mutableStateOf(false) }
 
     // ---- WebDAV remote backup state ----
@@ -168,15 +230,10 @@ fun BackupSettingsScreen(
     }
     var showWebDavConfig by remember { mutableStateOf(false) }
     var showRemoteList by remember { mutableStateOf(false) }
-    // [refactor-backup-gate] SINGLE mutual-exclusion flag for ALL backup paths
-    // (local SAF export, WebDAV upload, WebDAV restore, pre-restore snapshot
-    // export, WebDAV delete). Previously backupBusy + webDavBusy were two
-    // independent bools that every button had to check (`!backupBusy &&
-    // !webDavBusy`) — a missed check on one entry (the local restore button)
-    // let two full 70MB+ payloads build concurrently and OOM. Consolidating to
-    // ONE gate removes the entire class of "forgot to gate this entry" bugs:
-    // there is now exactly one flag everyone reads and sets.
-    var operationBusy by remember { mutableStateOf(false) }
+    // Observe the same owner after navigation/recomposition; only token holders release it.
+    val backupTaskOwner = BackupTaskOwner.application
+    val operationClaim by backupTaskOwner.state.collectAsState()
+    val operationBusy = operationClaim != null
     // When true, the next secret-warning confirmation uploads to WebDAV
     // instead of launching the SAF file picker.
     var webDavUploadPending by remember { mutableStateOf(false) }
@@ -361,29 +418,29 @@ fun BackupSettingsScreen(
     // JSON can appear), and a failure ABORTS the restore instead — the user is
     // told, nothing was applied, and retrying after freeing space is safe.
     // Declared before the launchers below because their callbacks invoke it.
-    // [meta-audit-1028 D4 F-02] [preClaimed] says the caller already holds the shared
+    // [meta-audit-1028 D4 F-02] [preClaimed] is the token which holds the shared
     // gate (see [claimRestorePayload]): every restore that has to BUILD a payload — a
     // WebDAV download, a local snapshot/auto-backup read, the SAF import — now claims it
-    // BEFORE the download/read and hands the claim over here. Without the flag this
+    // BEFORE the download/read and hands the claim over here. Without ownership this
     // function's own check would refuse the very restore that already holds the lock —
     // the self-collision the [refactor-backup-gate] comment further down works around.
     //
     // (A lambda, not a nested `fun`, on purpose: `ime_inset_guard`'s B01-CALLS registry
     // attributes a `SettingsScaffold(` call to the nearest preceding `fun`, so a nested
     // one would orphan this screen's own exemption entry.)
-    val restoreWithSnapshot: (String, Boolean) -> Unit = doRestore@{ json, preClaimed ->
+    val restoreWithSnapshot: (String, BackupTaskOwner.Token) -> Unit = doRestore@{ json, preClaimed ->
         // [fix restore-mutex] Reject a restore while any backup/restore path is
         // already in flight. The pre-restore snapshot export builds another full
         // 70MB+ payload; two such exports concurrently (e.g. restoring while a
         // local backup upload is running) stacks two payloads and blows the
         // 512MB heap. This is the last line of defense behind the button-level
         // guards — the snapshot-restore dialog and WebDAV sheet reach here too.
-        if (!preClaimed && operationBusy) {
+        val token = backupTaskOwner.transfer(preClaimed)
+        if (token == null) {
             errorMessage = context.getString(R.string.backup_err_busy)
             return@doRestore
         }
         snapshotNote = null
-        operationBusy = true
         // Restore must complete even if the user navigates away; run on the
         // app scope and fall back to a tray notification once done.
         // [fix-audit-p1-1] All Compose state writes are hopped back to Main
@@ -392,7 +449,7 @@ fun BackupSettingsScreen(
         // applicationScope dispatcher), racing recomposition. The export
         // path in this same file already did withContext(Dispatchers.Main);
         // this restores the same discipline here.
-        application.applicationScope.launch snapshotBeforeRestore@{
+        backupTaskOwner.launch(application.applicationScope, token) snapshotBeforeRestore@{
             try {
                 // [T-backup-streaming-export] Stream the pre-restore snapshot
                 // straight to disk — the in-memory String variant OOMs on a
@@ -443,7 +500,7 @@ fun BackupSettingsScreen(
                 withContext(Dispatchers.Main) {
                     snapshotNote = failed
                     errorMessage = failed
-                    operationBusy = false
+                    backupTaskOwner.release(token)
                 }
                 notifier.notifyWorkCompleted(
                     tag = "webdav-restore",
@@ -506,7 +563,7 @@ fun BackupSettingsScreen(
                     restoredMsg = t.message ?: errImport
                 }
             } finally {
-                withContext(Dispatchers.Main) { operationBusy = false }
+                backupTaskOwner.release(token)
             }
             // Always notify completion from the tray; harmless if the screen is
             // still foregrounded (Toast + inline report already covered it).
@@ -530,58 +587,37 @@ fun BackupSettingsScreen(
     // starting, so restoreWithSnapshot's own check met "busy" and reported failure after
     // the bytes were already in the heap.
     //
-    // Returns false when the caller must not proceed; the reason has been reported.
-    val claimRestorePayload: () -> Boolean = claimRestorePayload@{
+    // Returns null when the caller must not proceed; the reason has been reported.
+    val claimRestorePayload: () -> BackupTaskOwner.Token? = claimRestorePayload@{
         if (!canStartRestorePayload(
                 operationBusy = operationBusy,
                 minisbakConverting = minisbakConverting,
             )
         ) {
             errorMessage = context.getString(R.string.backup_err_busy)
-            return@claimRestorePayload false
+            return@claimRestorePayload null
         }
-        operationBusy = true
-        true
+        // The observed UI flag may be stale; claim() is the authoritative atomic gate.
+        val token = backupTaskOwner.claim()
+        if (token == null) errorMessage = context.getString(R.string.backup_err_busy)
+        token
+    }
+    val releaseRestorePayload: (BackupTaskOwner.Token) -> Unit = { token ->
+        backupTaskOwner.release(token)
     }
 
-    /**
-     * Lower the claim from [claimRestorePayload]. Never call it after a handoff.
-     *
-     * [wave-1118 D4 F-05] Also the exit for an export that claimed the same gate
-     * and then failed to hand off to the SAF picker (`exportLauncher.launch`
-     * throwing): the gate is shared, so the release goes through this one site
-     * instead of a hand-written `operationBusy = false` that the busy-gate count
-     * could not tell apart from lowering another path's claim.
-     */
-    val releaseRestorePayload: () -> Unit = { operationBusy = false }
-
-    // [fix-minisbak-import] .minisbak 转换 + 恢复交接的唯一入口：文件选择器
-    //（明文包）与口令对话框（加密包）都走这里。
-    //
-    // 为什么持有 operationBusy 又要在恢复前让出去：restoreWithSnapshot 的
-    // 互斥守卫见 busy 即拒（backup_err_busy）。原先加密路径在转换完成后仍占
-    // 着全局锁，恢复必然被拒——解密成果被"备份或恢复正在进行中"整个吞掉。
-    // 转换期间保持双重门禁（与本屏其他操作的既有语义一致）：minisbakConverting
-    // 挡导入重入，operationBusy 挡其他备份/恢复操作；恢复前在同一帧内让锁，
-    // 让出与调用之间没有挂起点，主线程上不会被打断，锁不外泄。
-    val convertAndRestore: (ByteArray, CharArray?) -> Unit = convertAndRestore@{ pkg, pw ->
-        // [wave-1118 D4 F-07] Refusing here must SAY so. The JSON branch of the
-        // same picker callback reports `backup_err_busy` (claimRestorePayload),
-        // so a silent return made the two halves of one action behave
-        // differently: pick a `.minisbak` while a backup/restore is in flight
-        // and nothing at all happened on screen. Same shared predicate, same
-        // message, so the two branches cannot drift again.
-        if (!canStartRestorePayload(
-                operationBusy = operationBusy,
-                minisbakConverting = minisbakConverting,
-            )
-        ) {
+    // Conversion and SAF reads pass ownership forward; no release/reclaim gap.
+    val convertAndRestore: (ByteArray, CharArray?, BackupTaskOwner.Token?) -> Unit =
+        convertAndRestore@{ pkg, pw, preClaimed ->
+        val token = if (preClaimed != null) backupTaskOwner.transfer(preClaimed)
+            else claimRestorePayload()
+        if (token == null) {
+            pw?.fill(' ')
             errorMessage = context.getString(R.string.backup_err_busy)
             return@convertAndRestore
         }
         minisbakConverting = true
-        operationBusy = true
-        scope.launch {
+        backupTaskOwner.launch(scope, token) {
             var handedOff = false
             try {
                 // pw != null：口令对话框确认后的直接转换；pw == null：首次
@@ -606,13 +642,13 @@ fun BackupSettingsScreen(
                         // converted payload would be refused after it was already built.
                         // Same Main frame, no suspension, so the claim never escapes.
                         handedOff = true
-                        restoreWithSnapshot(sniff.json, true)
+                        restoreWithSnapshot(sniff.json, token)
                     }
                 }
             } catch (t: Throwable) {
                 errorMessage = t.message ?: errImport
             } finally {
-                if (!handedOff) operationBusy = false
+                if (!handedOff) releaseRestorePayload(token)
                 pw?.fill(' ')
                 minisbakConverting = false
             }
@@ -628,12 +664,13 @@ fun BackupSettingsScreen(
         // (multi-second) build, and the user can leave the screen while the
         // build+write finishes. Completion/failure lands in the tray as a
         // notification (the user may be off this screen by then).
+        val request = backupTaskOwner.takeExport() ?: return@rememberLauncherForActivityResult
+        val token = request.token
         if (uri == null) {
-            // User cancelled the picker — nothing was built, release the gate.
-            operationBusy = false
+            releaseRestorePayload(token)
             return@rememberLauncherForActivityResult
         }
-        application.applicationScope.launch {
+        backupTaskOwner.launch(application.applicationScope, token) {
             try {
                 // [T-backup-streaming-export] Stream the document straight
                 // into the picked file: on a heavy install the in-memory
@@ -645,7 +682,7 @@ fun BackupSettingsScreen(
                         java.io.OutputStreamWriter(out, Charsets.UTF_8).use { w ->
                             readFailures = ConfigBackup.exportToWriter(
                                 providerRepo = providerRepository,
-                                includeSecrets = exportWithSecrets,
+                                includeSecrets = request.includeSecrets,
                                 envVarRepo = envVarRepository,
                                 skillRepo = skillRepository,
                                 memoryRepo = memoryRepository,
@@ -696,7 +733,7 @@ fun BackupSettingsScreen(
                 // so a failed export doesn't litter Documents with 0-byte files.
                 runCatching { context.contentResolver.delete(uri, null, null) }
             } finally {
-                withContext(Dispatchers.Main) { operationBusy = false }
+                backupTaskOwner.release(token)
             }
         }
     }
@@ -705,6 +742,7 @@ fun BackupSettingsScreen(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
+        val token = claimRestorePayload() ?: return@rememberLauncherForActivityResult
         // [audit-0909] SAF pick callback runs on the Main thread; the file
         // read below can be tens of MB (auto-backup files embed the artifact
         // zip), so hop the read to IO — same fix shape as the snapshot-restore
@@ -720,7 +758,7 @@ fun BackupSettingsScreen(
         //    the same. The read now goes through [readSafBytes], which keeps
         //    the declared-size precheck as a cheap early reject AND caps the
         //    stream itself one byte past MAX_PAYLOAD_BYTES.
-        scope.launch {
+        backupTaskOwner.launch(scope, token) {
             try {
                 // [T-backup-import-memory] Reject oversized files BEFORE pulling
                 // them into memory. The exact check inside ConfigBackup.import
@@ -781,16 +819,16 @@ fun BackupSettingsScreen(
                 if (OpenMinisBackupCompat.looksLikeMinisBak(bytes)) {
                     // [fix-minisbak-import] 嗅探/转换/恢复交接统一走
                     // convertAndRestore（IO 线程 + 忙碌门禁 + 锁交接）。
-                    convertAndRestore(bytes, null)
-                } else if (claimRestorePayload()) {
+                    convertAndRestore(bytes, null, token)
+                } else {
                     try {
-                        restoreWithSnapshot(String(bytes, Charsets.UTF_8), true)
+                        restoreWithSnapshot(String(bytes, Charsets.UTF_8), token)
                     } catch (t: Throwable) {
                         // The claim is ours and the handoff did not happen (the decode
                         // itself can fail on a big payload) — lower it before rethrowing,
                         // or the whole backup screen stays wedged behind a gate nobody
                         // holds.
-                        releaseRestorePayload()
+                        releaseRestorePayload(token)
                         throw t
                     }
                 }
@@ -889,10 +927,10 @@ fun BackupSettingsScreen(
                     } else stringResource(R.string.auto_backup_never)
                 },
                 icon = Icons.Filled.Refresh,
-                onClick = if (operationBusy || autoBackupRunning) null else ({
+                onClick = if (operationBusy || autoBackupRunning) null else (runNow@{
+                    val token = claimRestorePayload() ?: return@runNow
                     autoBackupRunning = true
-                    operationBusy = true
-                    application.applicationScope.launch {
+                    backupTaskOwner.launch(application.applicationScope, token) {
                         try {
                             // [fix/da1023-backup-streaming-fetch] runNow and
                             // the post-run local listing are both disk IO —
@@ -945,7 +983,7 @@ fun BackupSettingsScreen(
                         } finally {
                             withContext(Dispatchers.Main) {
                                 autoBackupRunning = false
-                                operationBusy = false
+                                releaseRestorePayload(token)
                             }
                         }
                     }
@@ -1367,7 +1405,7 @@ fun BackupSettingsScreen(
             // (two full payloads in memory → OOM). Every rebuild of the
             // payload (config/chat changed since last time) keeps the value;
             // the flag clears in the shared finally below.
-            operationBusy = true
+            val token = claimRestorePayload() ?: return@runExport
             showSecretWarning = false
             val toWebDav = webDavUploadPending
             webDavUploadPending = false
@@ -1375,7 +1413,7 @@ fun BackupSettingsScreen(
                 // WebDAV upload: already fully background — the payload is
                 // built off-thread, the PUT runs on IO, and completion/failure
                 // lands in the tray. The user can leave the screen immediately.
-                application.applicationScope.launch {
+                backupTaskOwner.launch(application.applicationScope, token) {
                     try {
                         // [T-backup-streaming-export] Stream the document into
                         // a local temp file first, then PUT the file bytes —
@@ -1471,7 +1509,7 @@ fun BackupSettingsScreen(
                             )
                         }
                     } finally {
-                        withContext(Dispatchers.Main) { operationBusy = false }
+                        backupTaskOwner.release(token)
                     }
                 }
             } else {
@@ -1480,7 +1518,7 @@ fun BackupSettingsScreen(
                 // built in the picker callback (after the user chooses a
                 // location) so the picker never waits on generation. The
                 // callback remembers this request's withSecrets.
-                exportWithSecrets = withSecrets
+                backupTaskOwner.awaitExport(token, withSecrets)
                 // [wave-1118 D4 F-05] The flag was claimed above; if the
                 // launcher itself throws (no document provider registered, or
                 // the launcher is not registered yet) the result callback never
@@ -1494,7 +1532,7 @@ fun BackupSettingsScreen(
                 try {
                     exportLauncher.launch(ConfigBackup.suggestedFileName())
                 } catch (t: Throwable) {
-                    releaseRestorePayload()
+                    releaseRestorePayload(token)
                     errorMessage = String.format(errWriteFmt, t.message ?: errUnknown)
                 }
             }
@@ -1571,9 +1609,10 @@ fun BackupSettingsScreen(
                     // sheet mid-download re-enabled Restore and stacked a second 70MB
                     // payload. Holding the gate also stops a download from finishing
                     // into `backup_err_busy` (bytes paid for, restore refused).
-                    if (claimRestorePayload()) {
+                    val token = claimRestorePayload()
+                    if (token != null) {
                         remoteLoading = true
-                        application.applicationScope.launch {
+                        backupTaskOwner.launch(application.applicationScope, token) {
                             var handedOff = false
                             try {
                                 val json = withContext(Dispatchers.IO) {
@@ -1591,7 +1630,7 @@ fun BackupSettingsScreen(
                                 withContext(Dispatchers.Main) {
                                     showRemoteList = false
                                     handedOff = true
-                                    restoreWithSnapshot(json, true)
+                                    restoreWithSnapshot(json, token)
                                 }
                             } catch (t: Throwable) {
                                 withContext(Dispatchers.Main) {
@@ -1605,7 +1644,7 @@ fun BackupSettingsScreen(
                             } finally {
                                 withContext(Dispatchers.Main) {
                                     remoteLoading = false
-                                    if (!handedOff) releaseRestorePayload()
+                                    if (!handedOff) releaseRestorePayload(token)
                                 }
                             }
                         }
@@ -1638,9 +1677,10 @@ fun BackupSettingsScreen(
                     // manual sheet above (twin site, same defect, same fix): the gate is
                     // held across the network gap and handed to restoreWithSnapshot via
                     // [claimRestorePayload] / preClaimed.
-                    if (claimRestorePayload()) {
+                    val token = claimRestorePayload()
+                    if (token != null) {
                         autoRemoteLoading = true
-                        application.applicationScope.launch {
+                        backupTaskOwner.launch(application.applicationScope, token) {
                             var handedOff = false
                             try {
                                 val json = withContext(Dispatchers.IO) {
@@ -1652,7 +1692,7 @@ fun BackupSettingsScreen(
                                 withContext(Dispatchers.Main) {
                                     autoRemoteOpen = false
                                     handedOff = true
-                                    restoreWithSnapshot(json, true)
+                                    restoreWithSnapshot(json, token)
                                 }
                             } catch (t: Throwable) {
                                 withContext(Dispatchers.Main) {
@@ -1666,14 +1706,15 @@ fun BackupSettingsScreen(
                             } finally {
                                 withContext(Dispatchers.Main) {
                                     autoRemoteLoading = false
-                                    if (!handedOff) releaseRestorePayload()
+                                    if (!handedOff) releaseRestorePayload(token)
                                 }
                             }
                         }
                     }
                 },
                 onFetch = { entry ->
-                    if (!operationBusy) {
+                    val token = claimRestorePayload()
+                    if (token != null) {
                         // [deep-audit-1040 B-08] Claim the SAME single gate as
                         // every other backup path (local SAF export, WebDAV
                         // upload, restore, delete). This fetch pulls a full
@@ -1686,9 +1727,8 @@ fun BackupSettingsScreen(
                         // left "Run Now" / "Restore" / "Export" clickable and
                         // let two full payloads land on that directory at once
                         // (and stack on the 512MB heap).
-                        operationBusy = true
                         autoRemoteLoading = true
-                        scope.launch {
+                        backupTaskOwner.launch(scope, token) {
                             try {
                                 val json = withContext(Dispatchers.IO) {
                                     WebDavSync.restoreAuto(cfg, entry, webDavHttpClient)
@@ -1773,7 +1813,7 @@ fun BackupSettingsScreen(
                                 errorMessage = webDavErrorMessage(context, t)
                             } finally {
                                 autoRemoteLoading = false
-                                operationBusy = false
+                                releaseRestorePayload(token)
                             }
                             // Refresh the remote list only AFTER the busy flag
                             // is cleared — openAutoRemoteList() re-arms it and
@@ -1805,9 +1845,9 @@ fun BackupSettingsScreen(
                 TextButton(
                     onClick = {
                         val cfg = webDavConfig ?: return@TextButton
+                        val token = claimRestorePayload() ?: return@TextButton
                         autoDeletePending = null
-                        operationBusy = true
-                        scope.launch {
+                        backupTaskOwner.launch(scope, token) {
                             try {
                                 withContext(Dispatchers.IO) {
                                     WebDavSync.deleteBackupFile(
@@ -1823,7 +1863,7 @@ fun BackupSettingsScreen(
                             } catch (t: Throwable) {
                                 errorMessage = webDavErrorMessage(context, t)
                             } finally {
-                                operationBusy = false
+                                releaseRestorePayload(token)
                             }
                         }
                     },
@@ -1851,9 +1891,9 @@ fun BackupSettingsScreen(
                 TextButton(
                     onClick = {
                         val cfg = webDavConfig ?: return@TextButton
+                        val token = claimRestorePayload() ?: return@TextButton
                         deletePending = null
-                        operationBusy = true
-                        scope.launch {
+                        backupTaskOwner.launch(scope, token) {
                             try {
                                 withContext(Dispatchers.IO) {
                                     WebDavSync.deleteBackupFile(cfg, item, webDavHttpClient)
@@ -1867,7 +1907,7 @@ fun BackupSettingsScreen(
                             } catch (t: Throwable) {
                                 errorMessage = webDavErrorMessage(context, t)
                             } finally {
-                                operationBusy = false
+                                releaseRestorePayload(token)
                             }
                         }
                     },
@@ -1918,7 +1958,7 @@ fun BackupSettingsScreen(
                         // restoreWithSnapshot 的互斥守卫见 busy 即拒（
                         // backup_err_busy）——解密成果被"备份或恢复正在进行中"
                         // 整个吞掉，加密包导入永远到不了恢复那一步。
-                        convertAndRestore(pending, pw)
+                        convertAndRestore(pending, pw, null)
                     },
                 ) { Text(stringResource(R.string.ok)) }
             },
@@ -1953,7 +1993,7 @@ fun BackupSettingsScreen(
                         // restoreWithSnapshot in the same Main frame as the read result,
                         // so a read that succeeds can never be refused by the gate it
                         // was waiting on.
-                        if (!claimRestorePayload()) return@TextButton
+                        val token = claimRestorePayload() ?: return@TextButton
                         snapshotRestoreTarget = null
                         // [audit-0908] Auto-backup files embed the artifact
                         // zip and can be tens of MB — reading them on the
@@ -1961,15 +2001,15 @@ fun BackupSettingsScreen(
                         // of ms (old snapshots were ~2MB and hid this). Hop
                         // to IO, then hand off to the existing app-scoped
                         // restore path (which itself hops state writes to Main).
-                        scope.launch {
+                        backupTaskOwner.launch(scope, token) {
                             val content = withContext(Dispatchers.IO) {
                                 runCatching { file.readText() }.getOrNull()
                             }
                             withContext(Dispatchers.Main) {
                                 if (content != null) {
-                                    restoreWithSnapshot(content, true)
+                                    restoreWithSnapshot(content, token)
                                 } else {
-                                    releaseRestorePayload()
+                                    releaseRestorePayload(token)
                                     errorMessage = errRead
                                 }
                             }
@@ -2162,7 +2202,8 @@ fun BackupSettingsScreen(
                             importReport = null
                             snapshotNote = null
                             val snap = snapshotFiles.firstOrNull()
-                            if (snap != null && claimRestorePayload()) {
+                            val token = if (snap != null) claimRestorePayload() else null
+                            if (snap != null && token != null) {
                                 // [audit-0909 T6-M3] Same off-main-thread read
                                 // as the snapshot-restore dialog above
                                 // (audit-0908): auto-backup snapshots embed the
@@ -2175,15 +2216,15 @@ fun BackupSettingsScreen(
                                 // button is reachable while a WebDAV download is
                                 // still in flight, which is exactly the two-payload
                                 // heap the gate exists to prevent.
-                                scope.launch {
+                                backupTaskOwner.launch(scope, token) {
                                     val content = withContext(Dispatchers.IO) {
                                         runCatching { snap.readText() }.getOrNull()
                                     }
                                     withContext(Dispatchers.Main) {
                                         if (content != null) {
-                                            restoreWithSnapshot(content, true)
+                                            restoreWithSnapshot(content, token)
                                         } else {
-                                            releaseRestorePayload()
+                                            releaseRestorePayload(token)
                                             errorMessage = errRead
                                         }
                                     }

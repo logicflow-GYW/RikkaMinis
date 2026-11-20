@@ -348,7 +348,7 @@ internal object ConfigBuiltins {
         r.register(PrefsIntField(
             path = "runtime.providerSlots",
             displayName = "Provider worker slots",
-            description = "Max provider calls executing concurrently in one model-service worker process. Default 2. RAISING IT IS MEMORY-RISKY: concurrent streams multiply the worker's native-heap peak (SSE buffers, DirectByteBuffer) — sized by measurement, not optimism. Applies when the next worker process spawns.",
+            description = "Max provider calls executing concurrently in one model-service worker process. Default ${L.PROVIDER_SLOTS_DEFAULT}; range ${L.PROVIDER_SLOTS_MIN}..${L.PROVIDER_SLOTS_MAX}. RAISING IT IS MEMORY-RISKY: concurrent streams multiply the worker's native-heap peak (SSE buffers, DirectByteBuffer). Applies when the next worker process spawns.",
             prefs = limits, key = L.KEY_PROVIDER_SLOTS,
             defaultValue = L.PROVIDER_SLOTS_DEFAULT, minValue = L.PROVIDER_SLOTS_MIN, maxValue = L.PROVIDER_SLOTS_MAX,
         ))

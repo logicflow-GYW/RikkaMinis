@@ -72,7 +72,8 @@ internal object MirrorPlan {
     data class Diff(
         /** Present now, absent from the manifest. */
         val added: List<Entry>,
-        /** Present in both, but size or mtime moved. */
+        /** Present in both, but the source metadata moved OR the physical
+         *  mirror copy disappeared / stopped being a regular file. */
         val changed: List<Entry>,
         /** Absent now, present in the manifest — the file was deleted at the
          *  source, so the mirror copy must go too (its old bytes still land in
@@ -94,7 +95,16 @@ internal object MirrorPlan {
      * ([MirrorScope.select] returns a sorted list of leaves), so the second
      * occurrence simply wins here rather than throwing at sync time.
      */
-    fun diff(previous: List<Entry>, current: List<Entry>): Diff {
+    fun diff(
+        previous: List<Entry>,
+        current: List<Entry>,
+        /** RelPaths whose `current/<relPath>` copy is missing or not a regular
+         *  file on the mirror target right now even though the source is still
+         *  selected. The (size, mtime) pair is unchanged, so a plain metadata
+         *  diff would hide the loss; these must be treated as changed so
+         *  [Diff.toWrite] rewrites them on the next pass, forced or not. */
+        missingTargetCopies: Set<String> = emptySet(),
+    ): Diff {
         val before = HashMap<String, Entry>(previous.size * 2)
         for (e in previous) before[e.relPath] = e
         val added = ArrayList<Entry>()
@@ -106,6 +116,7 @@ internal object MirrorPlan {
             val old = before[c.relPath]
             when {
                 old == null -> added.add(c)
+                c.relPath in missingTargetCopies -> changed.add(c)
                 old.size != c.size || old.modifiedMs != c.modifiedMs -> changed.add(c)
                 else -> unchanged++
             }
@@ -471,6 +482,33 @@ internal object MirrorPlan {
     }
 
     /**
+     * Public-backup manifest is external, attacker-writable input on a shared
+     * volume. Accept only the same source prefixes [MirrorScope] can produce,
+     * with literal single-depth relative segments. This deliberately does not
+     * URL-decode: the manifest is plaintext and `%`/`..%2F` are literal names,
+     * never aliases for a path separator. Canonical symlink enforcement is the
+     * target's second, independent boundary.
+     */
+    fun isAllowedRelPath(relPath: String): Boolean {
+        if (relPath.isEmpty() || relPath.startsWith("/") || relPath.endsWith("/")) return false
+        if (relPath.any { it == '\\' || it == '\u0000' || it == '\n' || it == '\r' || it == '\t' }) return false
+        val segments = relPath.split('/')
+        if (segments.any { it.isEmpty() || it == "." || it == ".." || it.contains(':') }) return false
+        return segments[0] in MirrorScope.SOURCE_PREFIXES
+    }
+
+    /**
+     * Previous points are the names this app stamps itself. Foreign names are
+     * preserved by rotation (not deleted) and are therefore harmless as data,
+     * but a separator/dot segment controls WHERE deleteTree acts: reject the
+     * entire forged manifest instead of carrying an untrusted path into I/O.
+     */
+    fun isSafePreviousPoint(point: String): Boolean {
+        if (point.isEmpty() || point == "." || point == "..") return false
+        return point.none { it == '/' || it == '\\' || it == ':' || it == '\u0000' || it == '\t' || it == '\n' || it == '\r' }
+    }
+
+    /**
      * Parse a manifest. Returns null for ANY deviation (bad header, bad number,
      * truncated last line) — the caller treats null as "no manifest", i.e. a
      * full resync into `current` with `previous` untouched. That is the safe
@@ -499,6 +537,7 @@ internal object MirrorPlan {
                 }
                 "prev" -> {
                     if (parts.size != 2 || parts[1].isEmpty()) return null
+                    if (!isSafePreviousPoint(parts[1])) return null
                     points.add(parts[1])
                 }
                 "file" -> {
@@ -506,7 +545,7 @@ internal object MirrorPlan {
                     val size = parts[1].toLongOrNull() ?: return null
                     val mtime = parts[2].toLongOrNull() ?: return null
                     val rel = parts[3]
-                    if (rel.isEmpty()) return null
+                    if (!isAllowedRelPath(rel)) return null
                     entries.add(Entry(rel, size, mtime))
                 }
                 else -> return null

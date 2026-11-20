@@ -22,8 +22,13 @@ object SharedShareStore {
         File(context.filesDir, SHARE_DIR).apply { mkdirs() }
 
     fun savePendingShare(context: Context, share: PendingShare) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().putString(KEY_PENDING_SHARE, share.toJson().toString()).apply()
+        StagedInFlightFiles.withLock {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putString(KEY_PENDING_SHARE, share.toJson().toString()).apply()
+            StagedInFlightFiles.endAll(share.items.filter {
+                it.kind == PendingShare.Item.Kind.ATTACHMENT
+            }.map { it.value })
+        }
         AppLogger.info(TAG, "saved pending share with ${share.items.size} item(s)")
     }
 
@@ -74,31 +79,37 @@ object SharedShareStore {
         // a file created in between is deleted while its producer is still
         // copying into it.
         val listed = dir.listFiles().orEmpty()
-        val referenced = loadPendingShare(context)?.items.orEmpty()
-            .filter { it.kind == PendingShare.Item.Kind.ATTACHMENT }
-            .map { it.value }
-            .toSet()
-        // Files a live producer is still writing (or wrote but has not handed
-        // off yet). They are NOT orphans — see [StagedInFlightFiles].
-        val inFlight = StagedInFlightFiles.snapshot()
-        var keptBytes = 0L
-        var deleted = 0
-        for (f in listed) {
-            if (shouldKeepStagedFile(f.name, referenced, inFlight)) {
-                // Only referenced files are counted: an in-flight file's bytes
-                // are either already in the process-lifetime ledger (a restored
-                // staged set) or will be credited when its copy completes —
-                // adding the partial length here would double-count them.
-                if (f.name in referenced) keptBytes += f.length()
-            } else if (runCatching { f.delete() }.getOrDefault(false)) {
-                deleted++
+        StagedInFlightFiles.withLock {
+            val referenced = loadPendingShare(context)?.items.orEmpty()
+                .filter { it.kind == PendingShare.Item.Kind.ATTACHMENT }
+                .map { it.value }
+                .toSet()
+            // Files a live producer is still writing (or wrote but has not handed
+            // off yet). They are NOT orphans — see [StagedInFlightFiles].
+            val inFlight = StagedInFlightFiles.snapshot()
+            val deleted = cleanStagedDirectory(listed, referenced, inFlight)
+            val keptBytes = StagedInFlightFiles.reconcileLedger(dir, referenced) {
+                ShareReceiverActivity.setStagedBytes(it)
             }
+            AppLogger.info(
+                TAG,
+                "cleaned $deleted stale staged file(s); kept ${referenced.size} referenced + " +
+                    "${inFlight.size} in flight, ${keptBytes}B accounted on disk",
+            )
         }
-        ShareReceiverActivity.setStagedBytes(keptBytes)
-        AppLogger.info(
-            TAG,
-            "cleaned $deleted stale staged file(s); kept ${referenced.size} referenced + " +
-                "${inFlight.size} in flight, ${keptBytes}B accounted on disk",
-        )
     }
+}
+
+/** Actual file deletion loop, shared with the no-Android regression harness. */
+internal fun cleanStagedDirectory(
+    listed: Array<out File>,
+    referenced: Set<String>,
+    inFlight: Set<String>,
+): Int {
+    var deleted = 0
+    for (f in listed) {
+        if (!shouldKeepStagedFile(f.name, referenced, inFlight) &&
+            runCatching { f.delete() }.getOrDefault(false)) deleted++
+    }
+    return deleted
 }

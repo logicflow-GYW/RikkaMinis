@@ -227,7 +227,7 @@
     <string name="runtime_limits_sessions_footer">Sub-agent switch applies immediately. The session cap applies on next app start. Raising the cap increases peak memory use — the real backstop stays the process watchdog.</string>
     <string name="runtime_limits_budget_footer">All budgets are enforced: hitting one pauses the run (content kept, tap Resume to continue) — never a silent stop. Defaults are the calibrated field values; raising them loosens the runaway-loop guard, so a stuck loop burns more tokens before being stopped.</string>
     <string name="runtime_limits_recovery_footer">Recovery knobs trade resilience against token spend: more continuations/retries survive flaky networks but re-bill the model; fewer surface errors faster. 0 disables that recovery path.</string>
-    <string name="runtime_limits_network_footer">Generation wall and worker slots apply to the NEXT model-service worker process (in-flight runs finish on old limits). Lowering the wall risks killing healthy slow generations. Raising worker slots above 2 multiplies the worker\'s native-heap peak — memory-risky.</string>
+    <string name="runtime_limits_network_footer">Generation wall and worker slots apply to the NEXT model-service worker process (in-flight runs finish on old limits). Lowering the wall risks killing healthy slow generations. Higher worker-slot counts multiply the worker\'s native-heap peak — memory-risky.</string>
     <string name="runtime_limits_turns">Turn limit</string>
     <string name="runtime_limits_turns_desc">Max agent-loop turns per run (default 256)</string>
     <string name="runtime_limits_provider_attempts">Provider calls</string>
@@ -259,7 +259,7 @@
     <string name="runtime_limits_first_chunk_proxy">First chunk, proxy</string>
     <string name="runtime_limits_first_chunk_proxy_desc">Seconds, proxy/gateway routes (default 45)</string>
     <string name="runtime_limits_provider_slots">Worker slots</string>
-    <string name="runtime_limits_provider_slots_desc">Concurrent provider runs per worker (default 2, risky above)</string>
+    <string name="runtime_limits_provider_slots_desc">Concurrent provider runs per worker (default 6, range 1–12; raising increases memory risk)</string>
     <string name="runtime_limits_queue_admission">Queue admission</string>
     <string name="runtime_limits_queue_admission_desc">Max queued requests before rejection (default 6)</string>
     <string name="settings_section_storage">Storage</string>

@@ -60,7 +60,7 @@ class BackupFetchBusyGateTest {
         assertEquals(
             "fetch-to-local must raise the shared operationBusy gate exactly once",
             1,
-            handler.split("operationBusy = true").size - 1,
+            handler.split("claimRestorePayload()").size - 1,
         )
     }
 
@@ -74,7 +74,7 @@ class BackupFetchBusyGateTest {
         assertEquals(
             "the shared gate must be lowered exactly once inside `finally`",
             1,
-            finallyBlock.split("operationBusy = false").size - 1,
+            finallyBlock.split("releaseRestorePayload(token)").size - 1,
         )
     }
 
@@ -105,48 +105,13 @@ class BackupFetchBusyGateTest {
 
     @Test
     fun onlyTheFetchPathGainedAGateSite() {
-        // [meta-audit-1028 D4 F-02] 7 → 8: the restore-payload claim helper
-        // (`val claimRestorePayload`) is the single `operationBusy = true` site shared by
-        // every restore that builds a payload before it can call restoreWithSnapshot
-        // (WebDAV manual + auto, local snapshot, SAF import). One site, four entries — the
-        // alternative (claiming inside each handler) is what the count is protecting
-        // against. The contract behind the bump is pinned by RestorePayloadBusyGateTest
-        // (claim-before-payload per entry, preClaimed handoff, release on failure).
-        // 8 → 9 was the external-mirror "sync now" row; 9 → 8 again on
-        // 2026-10-29 [silent-mirror]: that row is gone (the mirror runs
-        // silently, its status row is passive). The only mirror action left is
-        // the status row's retry, which is a bounded text write and
-        // deliberately does NOT claim the gate — it reads `operationBusy` to
-        // stay disabled while a restore/fetch holds it, which is the ordering
-        // that matters (no 70 MB payload is built by a mirror sync).
-        assertEquals(
-            "exactly one new operationBusy = true site (the fetch path + the shared " +
-                "restore-payload claim helper)",
-            8,
-            code.split("operationBusy = true").size - 1,
-        )
-        // 10 = the pre-[FIX-P1A] baseline. The 11th site is the restore path's
-        // snapshot-failure abort (added by FIX-P1A / RT-S3: a failed snapshot
-        // used to leave the gate up forever while the import ran on; the abort
-        // branch lowers it before returning). It is NOT a free release — ⑦
-        // below pins that the branch really returns instead of falling through
-        // to the import, so the count cannot be bumped without the contract.
-        // [meta-audit-1028 D4 F-02] Still 11, and that is the interesting number: the
-        // release side did not grow. `releaseRestorePayload` is a single site (+1) and it
-        // is paid for by the `.minisbak` Plain handoff (-1), which no longer drops the
-        // gate before restoreWithSnapshot re-acquires it (see [preClaimed]). A new release
-        // site appearing here means someone lowered the gate by hand instead of through
-        // the helper.
-        // 12 → 11 follows the true-count above: the mirror row's paired release
-        // left with its claim. The mirror retry has no release site because it
-        // has no claim — a release site appearing here without a claim above
-        // means someone lowered another path's gate by hand.
-        assertEquals(
-            "exactly one new operationBusy = false site (the fetch path's finally), " +
-                "plus the restore snapshot-abort branch (pinned by snapshotFailure_abortsBeforeImport)",
-            11,
-            code.split("operationBusy = false").size - 1,
-        )
+        // The page only observes busy. Each task now consumes an atomic owner token;
+        // Boolean site counts would preserve the lifecycle defect this test must reject.
+        assertEquals(0, Regex("operationBusy\\s*=\\s*(true|false)").findAll(code).count())
+        assertTrue(code.contains("val token = backupTaskOwner.claim()"))
+        assertTrue(code.contains("val backupTaskOwner = BackupTaskOwner.application"))
+        assertTrue(handler.contains("backupTaskOwner.launch(scope, token)"))
+
     }
 
     // -- ⑦ a failed pre-restore snapshot aborts the restore (FIX-P1A / RT-S3) --
@@ -163,7 +128,7 @@ class BackupFetchBusyGateTest {
         )
         assertTrue(
             "the snapshot coroutine must be labelled so its failure branch can return",
-            code.contains("launch snapshotBeforeRestore@{"),
+            code.contains("launch(application.applicationScope, token) snapshotBeforeRestore@{"),
         )
         val failedIdx = code.indexOf("backup_snapshot_failed")
         assertTrue("the snapshot failure branch anchor disappeared", failedIdx >= 0)
@@ -176,7 +141,7 @@ class BackupFetchBusyGateTest {
         )
         assertTrue(
             "a failed snapshot must lower the shared busy gate before returning",
-            branch.contains("operationBusy = false"),
+            branch.contains("backupTaskOwner.release(token)"),
         )
         assertTrue(
             "a failed snapshot must NOT fall through into the import",
