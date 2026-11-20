@@ -49,7 +49,7 @@ Pins the automatic-backup streaming + fetch-hardening contract:
         post-fetch refresh after the composition (and with it the coroutine
         scope) was gone. Three decisions are pinned on the handler REGION
         (located by brace matching, not by a line pattern): the fetch path
-        claims the shared `operationBusy` gate, releases it inside the
+        claims a shared owner token, releases that token inside the
         `finally` of the same region, and only refreshes the list while the
         coroutine is still alive. Fail-closed: a handler region that cannot be
         located — or that no longer carries the refresh call — is RED, not a
@@ -548,34 +548,35 @@ def check_arm6(screen_code):
             "openAutoRemoteList() — anchor drift). Re-point this arm; a zero "
             "count must not read as a pass."
         )
-    if "operationBusy = true" not in region:
-        return (
-            "fetch-to-local must claim the shared operationBusy gate (the "
-            "payload is written + rotated into filesDir/backup-autos while "
-            "Run Now / Restore / Export stay clickable otherwise)"
-        )
-    finally_i = region.find("finally")
+    # Derive the claim identity, then require its successful branch to own the
+    # launch/payload. Merely mentioning a claim (or the old Boolean writes) is not a gate.
+    if re.search(r"\boperationBusy\s*=\s*(?:true|false)\b", region):
+        return "fetch-to-local still uses the retired page-local Boolean gate"
+    claim = re.search(r"\bval\s+(\w+)\s*=\s*claimRestorePayload\(\s*\)", region)
+    if not claim or not path_feasible(region, claim.start()):
+        return "fetch-to-local must consume a reachable claimRestorePayload() token"
+    token = claim.group(1)
+    success = re.search(r"\bif\s*\(\s*" + re.escape(token) + r"\s*!=\s*null\s*\)\s*\{",
+                        region[claim.end():])
+    if not success:
+        return "fetch-to-local must refuse a null claim before launching/building the payload"
+    guarded = braced_from(region, claim.end() + success.start()) or ""
+    launch = re.search(r"backupTaskOwner\.launch\(\s*scope\s*,\s*" + re.escape(token) + r"\s*\)", guarded)
+    if not launch or not path_feasible(guarded, launch.start()):
+        return "fetch-to-local must launch with the successfully claimed token"
+    # A real payload must be inside that token's guarded launch, never a sibling branch.
+    launch_body = braced_from(guarded, launch.start()) or ""
+    if not re.search(r"WebDavSync\.restoreAuto\(", launch_body):
+        return "fetch-to-local payload must run inside the token-owned launch"
+    finally_i = launch_body.find("finally")
     if finally_i < 0:
-        return (
-            "fetch-to-local must release the shared operationBusy gate on its "
-            "exit path (no `finally` in the handler region)"
-        )
-    finally_region = braced_from(region, finally_i) or ""
-    # wide-1024 (order axis): a release that is followed by another claim is
-    # not a release — the LAST write in the exit path is the one that survives.
-    writes = re.findall(r"operationBusy\s*=\s*(true|false)", finally_region)
-    if not writes:
-        return (
-            "fetch-to-local must release the shared operationBusy gate inside "
-            "its `finally` (a release on the happy path only leaks the gate)"
-        )
-    if writes[-1] != "false":
-        return (
-            "fetch-to-local's `finally` ends with `operationBusy = %s` — the last write "
-            "on the exit path wins, so the shared gate stays CLAIMED after the fetch "
-            "finishes and Run Now / Restore / Export are dead until the screen is "
-            "recreated (a release followed by a re-claim is not a release)" % writes[-1]
-        )
+        return "fetch-to-local must release its token inside finally"
+    finally_region = braced_from(launch_body, finally_i) or ""
+    release = re.search(r"\breleaseRestorePayload\(\s*" + re.escape(token) + r"\s*\)", finally_region)
+    if not release or not path_feasible(finally_region, release.start()):
+        return "fetch-to-local must releaseRestorePayload(token) on its finally exit"
+    if re.search(r"\bclaimRestorePayload\(", finally_region[release.end():]):
+        return "fetch-to-local's last write must release, not re-claim, the gate"
     refresh_i = region.find("openAutoRemoteList(")
     window = region[max(0, refresh_i - 200):refresh_i]
     if not LIVENESS_PAT.search(window):
@@ -1204,10 +1205,12 @@ fun BackupSettingsScreen(context: Context) {
         }
     }
     fun onFetch(entry: WebDavSync.AutoBackupEntry) {
-        if (!operationBusy) {
-            operationBusy = true
+        val token = claimRestorePayload()
+        if (token != null) {
             autoRemoteLoading = true
+            backupTaskOwner.launch(scope, token) {
             try {
+                val json = WebDavSync.restoreAuto(cfg, entry, webDavHttpClient)
                 val stamp = WebDavSync.sanitizeAutoBackupStamp(entry.item.displayName) ?: return
                 val local = File(dir, AutoBackupManager.LOCAL_FILE_PREFIX + stamp + ".json")
                 withContext(Dispatchers.IO) { local.writeText(json) }
@@ -1215,9 +1218,10 @@ fun BackupSettingsScreen(context: Context) {
                 autoBackupFiles = withContext(Dispatchers.IO) { AutoBackupManager.listLocal(context) }
             } finally {
                 autoRemoteLoading = false
-                operationBusy = false
+                releaseRestorePayload(token)
             }
             if (scope.isActive) openAutoRemoteList()
+            }
         }
     }
 }
@@ -1304,13 +1308,27 @@ VIOLATION_FLAG_RENAMED = COMPLIANT_SCREEN.replace(
 
 # arm6 (deep-audit-1040 B-08) — fetch-to-local gate + tail liveness.
 VIOLATION_FETCH_NO_BUSY_CLAIM = COMPLIANT_SCREEN.replace(
-    "            operationBusy = true\n            autoRemoteLoading = true\n",
-    "            autoRemoteLoading = true\n",
+    "        val token = claimRestorePayload()\n", "        val token = null\n",
 )
 
 VIOLATION_FETCH_NO_BUSY_RELEASE = COMPLIANT_SCREEN.replace(
-    "                autoRemoteLoading = false\n                operationBusy = false\n",
-    "                autoRemoteLoading = false\n",
+    "                releaseRestorePayload(token)\n", "",
+)
+
+# Migration negative control: the old spelling must NOT satisfy token ownership.
+VIOLATION_FETCH_OLD_BOOLEAN = COMPLIANT_SCREEN.replace(
+    "        val token = claimRestorePayload()\n        if (token != null) {",
+    "        operationBusy = true\n        if (!operationBusy) {",
+).replace("releaseRestorePayload(token)", "operationBusy = false")
+
+VIOLATION_FETCH_WRONG_TOKEN = COMPLIANT_SCREEN.replace(
+    "releaseRestorePayload(token)", "releaseRestorePayload(otherToken)",
+)
+VIOLATION_FETCH_DEAD_CLAIM = COMPLIANT_SCREEN.replace(
+    "val token = claimRestorePayload()", "val token = if (false) claimRestorePayload() else null",
+)
+VIOLATION_FETCH_DEAD_RELEASE = COMPLIANT_SCREEN.replace(
+    "releaseRestorePayload(token)", "if (false) releaseRestorePayload(token)",
 )
 
 VIOLATION_FETCH_UNGUARDED_REFRESH = COMPLIANT_SCREEN.replace(
@@ -1352,11 +1370,9 @@ VIOLATION_FETCH_RAW_PATH = COMPLIANT_SCREEN.replace(
 # W3 (order): the release is followed by a re-claim — last write wins, the gate
 # is left claimed.
 VIOLATION_FETCH_GATE_RECLAIM = COMPLIANT_SCREEN.replace(
-    '                autoRemoteLoading = false\n                operationBusy = false\n',
-    '                autoRemoteLoading = false\n                operationBusy = false\n'
-    '                operationBusy = true\n',
+    '                releaseRestorePayload(token)\n',
+    '                releaseRestorePayload(token)\n                claimRestorePayload()\n',
 )
-
 
 # ── r19 #9 / #10 / #11 (round-3 dual-gate witnesses) ──────────────────────
 # #9: the WebDAV upload PUTs a literal empty body — the document written into
@@ -1655,6 +1671,13 @@ def selftest():
     ok &= run_fixture("violation-flag-renamed-anchor-drift", expect_ok=False, screen=VIOLATION_FLAG_RENAMED)
     ok &= run_fixture("violation-fetch-no-busy-claim", expect_ok=False, screen=VIOLATION_FETCH_NO_BUSY_CLAIM)
     ok &= run_fixture("violation-fetch-no-busy-release", expect_ok=False, screen=VIOLATION_FETCH_NO_BUSY_RELEASE)
+    ok &= run_fixture("violation-fetch-old-boolean", expect_ok=False, screen=VIOLATION_FETCH_OLD_BOOLEAN,
+                      contains="retired page-local Boolean")
+    ok &= run_fixture("violation-fetch-wrong-token", expect_ok=False, screen=VIOLATION_FETCH_WRONG_TOKEN,
+                      contains="releaseRestorePayload(token)")
+    ok &= run_fixture("violation-fetch-dead-claim", expect_ok=False, screen=VIOLATION_FETCH_DEAD_CLAIM)
+    ok &= run_fixture("violation-fetch-dead-release", expect_ok=False, screen=VIOLATION_FETCH_DEAD_RELEASE)
+
     ok &= run_fixture("violation-fetch-unguarded-refresh", expect_ok=False, screen=VIOLATION_FETCH_UNGUARDED_REFRESH)
     ok &= run_fixture("violation-fetch-handler-renamed", expect_ok=False, screen=VIOLATION_FETCH_HANDLER_RENAMED)
     # wide-1024: each witness must trip the arm it was written against.
