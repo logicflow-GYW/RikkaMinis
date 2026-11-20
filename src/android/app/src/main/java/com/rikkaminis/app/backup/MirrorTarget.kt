@@ -19,6 +19,13 @@ import java.nio.file.attribute.BasicFileAttributes
  */
 internal interface MirrorTarget {
     fun read(relPath: String): ByteArray?
+
+    /** True iff a REGULAR file currently exists at the exact path (never a
+     *  directory or a dangling/absent path). Used to detect a deleted or
+     *  type-replaced copy whose (size, mtime) still matches the manifest, so
+     *  [MirrorPlan.diff] cannot mistake the loss for "unchanged". */
+    fun exists(relPath: String): Boolean
+
     fun write(relPath: String, bytes: ByteArray): Boolean
     fun delete(relPath: String): Boolean
 
@@ -54,7 +61,53 @@ internal interface MirrorTarget {
  */
 internal class FileTarget(private val base: File) : MirrorTarget {
 
-    private fun fileOf(relPath: String) = File(base, relPath)
+    private companion object {
+        /** Same two storage-relative roots as MirrorStore.ROOT_REL plus its two
+         *  subtrees. Repeating the literals keeps this I/O seam compilable in
+         *  an Android-free JVM harness; [MirrorPlan]/MirrorStore must continue
+         *  to build their paths from exactly these two components. */
+        const val MIRROR_TREE = "Download/RikkaMinis/backup/mirror"
+        const val AUTO_TREE = "Download/RikkaMinis/backup/auto"
+    }
+
+
+    /** Both production bases (volume root; the nested app-external fallback)
+     *  are followed by this storage-relative prefix in every caller path.
+     *  Keeping the literal here preserves the deliberately Android-free seam:
+     *  the same guard runs in the real JVM harness that probes links and `..`.
+     */
+    private val mirrorBoundary = File(base.canonicalFile, MIRROR_TREE)
+    private val autoBoundary = File(base.canonicalFile, AUTO_TREE)
+
+    /**
+     * Resolve and constrain every I/O entry point, including not-yet-created
+     * write targets. The boundary is the app's mirror/auto subtree, NEVER the
+     * whole volume. A forged manifest cannot synthesize `..` because the
+     * decoder rejects it, but these guards independently pin the filesystem
+     * identity as defence in depth (including symlinked parents).
+     */
+    private fun fileOf(relPath: String): File {
+        if (relPath.startsWith('/') || relPath.startsWith('\\') || relPath.contains('\u0000')) {
+            throw SecurityException("mirror target requires a relative path")
+        }
+        val file = File(base, relPath)
+        val resolved = file.canonicalFile
+        val baseResolved = base.canonicalFile
+        // Boundary components themselves are NOT canonicalized again: if the
+        // mirror directory has been replaced by an outgoing link, following
+        // it would redefine the trusted boundary to the attacker's directory.
+        val roots = listOf(mirrorBoundary, autoBoundary)
+        val insideRoot = roots.any { root ->
+            resolved == root || resolved.path.startsWith(root.path + File.separator)
+        }
+        if (!insideRoot || resolved == baseResolved) {
+            throw SecurityException("mirror target path escapes its boundary")
+        }
+        return resolved
+    }
+
+    override fun exists(relPath: String): Boolean =
+        runCatching { fileOf(relPath).isFile }.getOrDefault(false)
 
     override fun read(relPath: String): ByteArray? =
         runCatching { fileOf(relPath).takeIf { it.isFile }?.readBytes() }.getOrNull()
@@ -88,7 +141,11 @@ internal class FileTarget(private val base: File) : MirrorTarget {
      * same reason as `internalGuestTmpDeleteTreeNoFollow` in the guest sweep.
      */
     override fun deleteTree(relDirPrefix: String): Boolean {
-        val root = fileOf(relDirPrefix)
+        val root = try {
+            fileOf(relDirPrefix)
+        } catch (t: Throwable) {
+            return false
+        }
         // `exists()` follows links: a link to a missing target answers false
         // even though the link itself must still be removed.
         if (!root.exists() && !Files.isSymbolicLink(root.toPath())) return true
@@ -119,10 +176,31 @@ internal class FileTarget(private val base: File) : MirrorTarget {
     }
 
     override fun list(relDirPrefix: String): List<String> {
-        val root = fileOf(relDirPrefix)
+        val root = try {
+            fileOf(relDirPrefix)
+        } catch (t: Throwable) {
+            return emptyList()
+        }
         if (!root.isDirectory) return emptyList()
-        return root.walkTopDown().filter { it.isFile }
-            .map { it.relativeTo(base).invariantSeparatorsPath }
-            .toList()
+        val canonicalBase = base.canonicalFile
+        val out = ArrayList<String>()
+        runCatching {
+            Files.walkFileTree(
+                root.toPath(),
+                object : SimpleFileVisitor<Path>() {
+                    override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                        if (attrs.isRegularFile && !Files.isSymbolicLink(file)) {
+                            out.add(file.toFile().relativeTo(canonicalBase).invariantSeparatorsPath)
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    override fun visitFileFailed(file: Path, exc: java.io.IOException): FileVisitResult {
+                        throw exc
+                    }
+                },
+            )
+        }.getOrElse { return emptyList() }
+        return out
     }
 }

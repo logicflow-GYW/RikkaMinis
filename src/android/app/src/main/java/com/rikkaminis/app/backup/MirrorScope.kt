@@ -40,6 +40,12 @@ internal object MirrorScope {
     /** Mirror prefix for `/var/minis/shared`. */
     const val PREFIX_SHARED = "shared"
 
+    /** Every source prefix [MirrorPlan] can encounter in a manifest. Shared
+     *  depth/extension filters stay in [selectShared], because a previously
+     *  valid file may subsequently become non-selected and its mirror cleanup
+     *  must still have a decodable manifest. */
+    val SOURCE_PREFIXES = setOf(PREFIX_MEMORY, PREFIX_SKILLS, PREFIX_SHARED)
+
     /**
      * Per-file cap, same rationale as [ArtifactBackupScope.MAX_FILE_BYTES]: a
      * multi-MB file under these trees is an environment payload or an export,
@@ -234,7 +240,11 @@ internal object MirrorScope {
                 val size = runCatching { child.length() }.getOrNull() ?: continue
                 if (size > maxFileBytes) continue
                 val modified = runCatching { child.lastModified() }.getOrDefault(0L)
-                out.add(MirrorFile("$prefix/$childRel", size, modified, child))
+                val mirrorRel = "$prefix/$childRel"
+                // A real filesystem can contain a literal backslash or colon
+                // in a name. Never emit records that our decoder must reject.
+                if (!MirrorPlan.isAllowedRelPath(mirrorRel)) continue
+                out.add(MirrorFile(mirrorRel, size, modified, child))
             }
         }
 
