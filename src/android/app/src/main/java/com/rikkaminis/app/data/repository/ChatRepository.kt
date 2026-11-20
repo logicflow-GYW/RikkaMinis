@@ -88,6 +88,19 @@ class ChatRepository(
 
     suspend fun getSession(id: String): ChatSessionEntity? = dao.getSession(id)
 
+    /**
+     * [surgery-1120 A-01] Existence probe for the recovery's idempotency: the
+     * transcript row may have landed while the commit marker did not (crash
+     * between the two writes).
+     *
+     * Deliberately `sessionIdOf` (a short TEXT column projection) and not
+     * `getMessage`: this runs at cold start on a possibly-large row, and
+     * pulling `parts_json` through a CursorWindow is exactly the ceiling
+     * `loadPageTolerant` exists to absorb — an existence check has no business
+     * reading the body.
+     */
+    suspend fun messageExists(id: String): Boolean = dao.sessionIdOf(id) != null
+
     /** All persisted token_usage JSON strings for a session (one per LLM call). */
     suspend fun sessionTokenUsages(sessionId: String): List<String> = dao.tokenUsages(sessionId)
 
@@ -720,6 +733,10 @@ class ChatRepository(
         // (SessionForkManager.duplicateSession) must carry this through, or the
         // copy loses the error state that ChatTranscriptRebuild reads.
         errorInfo: String? = null,
+        // [surgery-1120 A-01] Deterministic row id for a streamed turn. A crash
+        // between this insert and the transcript commit marker is recovered by
+        // finding this same id (never by inventing a fresh UUID on retry).
+        stableId: String? = null,
     ): MessageEntity {
         // [Diag-appendMessage] Step markers so a hang between tool-END and the
         // next LLM round can be pinned to the exact DAO call that never returns
@@ -747,7 +764,7 @@ class ChatRepository(
         val capped = capPartsJsonForRow(partsJson)
         val cappedReasoning = capReasoningContentForRow(reasoningContent)
         val message = MessageEntity(
-            id = UUID.randomUUID().toString(),
+            id = stableId ?: UUID.randomUUID().toString(),
             sessionId = sessionId,
             role = role,
             partsJson = capped,

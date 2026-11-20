@@ -274,6 +274,74 @@ object ModelExecutionRunDir {
     fun terminalPresent(dir: File): Boolean = File(dir, FILE_TERMINAL).exists()
 
     /**
+     * [surgery-1120 A-01 review] Conservative "the :modelservice worker may
+     * still write into this dir" probe, for readers that are about to DELETE
+     * or claim a spool (cold-start recovery, the orphan reaper).
+     *
+     * The existing `beatAlive` alone is not enough here, and neither is
+     * `probeLiveness` alone:
+     *  - a worker that has not started beating yet (thread dispatch → first
+     *    beat) is invisible to the heartbeat, and on `hidepid=invisible`
+     *    devices `/proc/<worker-pid>` reads MISSING for a perfectly alive
+     *    worker — `probeLiveness` reports DEAD, i.e. the ONE answer that must
+     *    never authorize a delete;
+     *  - but the reverse gap is real too: a dir created by a worker that died
+     *    before its first beat has no beat and no readable pid, and nothing
+     *    would ever reclaim it.
+     *
+     * So: a fresh beat ⇒ alive. Otherwise the pid ref is the only
+     * reliable-POSITIVE signal — when THIS process can read its own
+     * `/proc` (i.e. the ref's pid is visible), a matching live process means
+     * alive. A DEAD/UNKNOWN probe is deliberately NOT treated as proof of
+     * absence by itself; the caller pairs it with the age / terminal gates it
+     * already has (10-minute reaper window, 30 s grace, committed marker), and
+     * [deleteIfUnowned] re-checks the two cheap signals immediately before the
+     * irreversible delete.
+     *
+     * Pure file/pid read; safe on the IO dispatcher. Never throws.
+     */
+    fun workerMayWrite(
+        dir: File,
+        expectedRunId: String?,
+        procRoot: File = File("/proc"),
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        if (!dir.isDirectory) return false
+        if (beatAlive(dir, nowMs)) return true
+        val ref = readWorkerRef(dir, expectedRunId) ?: return false
+        val result = readProcIdentity(ref.pid, procRoot)
+        if (result.status != ProcReadStatus.PRESENT) return false
+        val actual = result.identity ?: return false
+        return procIdentityMatches(ref, actual)
+    }
+
+    /**
+     * [surgery-1120 A-01 review] The one place a reader may irreversibly
+     * delete a staging run dir: path guard (canonical child of the staging
+     * root) → liveness re-check → delete. Returns true when the dir is gone.
+     *
+     * Deletion is not reversible, so every caller that reasons "nothing owns
+     * this" must go through here instead of `deleteRecursively()`: the window
+     * between a decision and the delete is exactly where a worker starts
+     * writing (it does not need our permission to create `stream.jsonl`).
+     */
+    fun deleteIfUnowned(
+        dir: File,
+        stagingRoot: File,
+        expectedRunId: String?,
+        procRoot: File = File("/proc"),
+    ): Boolean {
+        val canonicalRoot = runCatching { stagingRoot.canonicalFile }.getOrElse { stagingRoot }
+        val canonicalDir = runCatching { dir.canonicalFile }.getOrElse { return false }
+        if (canonicalDir.parentFile != canonicalRoot) {
+            android.util.Log.w(TAG, "refused to delete outside the staging root: ${dir.name}")
+            return false
+        }
+        if (workerMayWrite(dir, expectedRunId, procRoot)) return false
+        return runCatching { canonicalDir.deleteRecursively() }.getOrDefault(false)
+    }
+
+    /**
      * TF-I P0-B/P0-D: fine-grained death probe for the CLIENT death trigger.
      *
      * `probeLiveness` collapses "pid MISSING" and "identity mismatch" both into

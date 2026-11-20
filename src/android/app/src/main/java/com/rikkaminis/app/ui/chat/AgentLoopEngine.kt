@@ -31,6 +31,8 @@ import com.rikkaminis.app.conversation.ContextEstimator
 import com.rikkaminis.app.conversation.PreflightVerdict
 import com.rikkaminis.app.conversation.preflightContextBudget
 import com.rikkaminis.app.provider.LLMProvider
+import com.rikkaminis.app.sandbox.offload.TranscriptCommit
+import com.rikkaminis.app.sandbox.offload.TranscriptCommitHandle
 import com.rikkaminis.app.tools.AgentTraceRecorder
 import android.os.SystemClock
 import android.util.Log
@@ -765,7 +767,11 @@ internal class AgentLoopEngine(
             loopState.allToolInputs,
         )
         if (parts.isEmpty()) return null
-        val flushedRowId = host.persistAssistantTurn(
+        // [surgery-1120 A-01] Same plan→insert→commit contract as the two
+        // in-loop terminals: the row id is durable BEFORE the insert, so a
+        // crash in between leaves a plan recovery can use.
+        val flushedRowId = persistTranscriptRow(
+            loopState,
             parts, usage, reasoningContent, turnBlockMeta(loopState),
             modelId = loopState.currentProvider.model.id,
             entryId = host.activeEntryId,
@@ -792,7 +798,7 @@ internal class AgentLoopEngine(
      * resolves its boundary through this db id, so an un-anchored entry degrades
      * the walk after a reload.
      */
-    private fun markTurnPersisted(loopState: AgentLoopState, rowId: String?) {
+    private suspend fun markTurnPersisted(loopState: AgentLoopState, rowId: String?) {
         if (rowId != null) {
             loopState.unpersistedBlockStart = loopState.allToolBlocks.size
             val lastAssistantIdx = host.agentHistory.indexOfLast {
@@ -803,6 +809,164 @@ internal class AgentLoopEngine(
                     host.agentHistory[lastAssistantIdx].copy(dbMessageId = rowId)
             }
         }
+        // [surgery-1120 A-01] The row (or the deliberate empty-row decision) is
+        // the transcript commit. Release every streamed attempt that fed this
+        // row only NOW — the collectors' terminal cleanup waits on these.
+        releaseTranscriptCommits(loopState, rowId)
+    }
+
+
+    /**
+     * [surgery-1120 A-01] The deterministic row id for row [rowIndex] of the
+     * current bubble. Derived from the session + bubble identity, so the
+     * recovery path (a different process) recomputes the same value.
+     */
+    private fun plannedTranscriptRowId(loopState: AgentLoopState, rowIndex: Int): String? {
+        val turnId = loopState.currentTranscriptTurnId ?: return null
+        return TranscriptCommit.rowIdFor(host.activeSessionId, turnId, rowIndex)
+    }
+
+    /**
+     * [surgery-1120 A-01] Write the PLAN (the row id about to be inserted)
+     * into every pending attempt's run dir, durably, BEFORE the insert. A
+     * crash after the insert and before the commit then leaves a plan that
+     * recovery reads to decide "the row already exists" instead of inserting a
+     * duplicate.
+     */
+    private suspend fun planTranscriptRow(loopState: AgentLoopState, rowIndex: Int): String? {
+        val rowId = plannedTranscriptRowId(loopState, rowIndex) ?: return null
+        // The plan is a durable fsync; the loop coroutine is the Main
+        // dispatcher, so this must not run inline.
+        val pending = loopState.pendingTranscriptCommits.toList()
+        // [surgery-1120 A-01 review] A plan that did not reach the disk is NOT
+        // a plan. The insert used to proceed anyway, so a crash between it and
+        // the commit left recovery with no id to look for and the spool got
+        // inserted a second time. Refuse to insert in that case — but only
+        // while the spool still exists: a handle whose dir the collector
+        // already acked and deleted (error / user-stop shape) has nothing left
+        // to duplicate, and a partial answer the user already saw must still be
+        // persisted then.
+        val failed = withContext(Dispatchers.IO) {
+            pending.filter { !it.plan(rowId) && it.spoolPresent() }
+        }
+        if (failed.isNotEmpty()) {
+            abandonTranscriptCommits(loopState)
+            AppLogger.warning(
+                TAG_STREAM,
+                "transcript plan could not be written (${failed.size} spool dir(s)) — not inserting an unplanned row",
+            )
+            throw IllegalStateException("transcript plan is not durable")
+        }
+        return rowId
+    }
+
+    /**
+     * [surgery-1120 A-01] Commit the plan after the row is durable and release
+     * every pending collector. A null [rowId] means no row was written (empty
+     * answer): the spools are still reclaimed, because nothing is recoverable.
+     */
+    private suspend fun commitTranscriptRow(loopState: AgentLoopState, rowId: String?) {
+        releaseTranscriptCommits(loopState, rowId)
+    }
+
+    /**
+     * [surgery-1120 A-01] One assistant row, committed end to end:
+     * plan (durable) → insert with the deterministic id → commit.
+     *
+     * The plan is written BEFORE the insert so a crash in between leaves a
+     * durable record of the id that was (or was not) written; the commit runs
+     * only after the insert returned. A failed insert propagates and leaves
+     * the plan behind — the spool then stays recoverable, which is the point.
+     */
+    private suspend fun persistTranscriptRow(
+        loopState: AgentLoopState,
+        parts: List<AgentContentPart>,
+        usage: LLMUsage?,
+        reasoningContent: String?,
+        blockMeta: Map<String, AssistantBlock>,
+        modelId: String?,
+        entryId: String?,
+    ): String? {
+        // The row index advances per ROW, not per call site: a bubble can hold
+        // more than one assistant row (tool turn + final text turn), and each
+        // needs its own deterministic id. The recovery path recomputes the
+        // same sequence from the bubble id.
+        val rowIndex = loopState.transcriptRowIndex
+        val plannedId = planTranscriptRow(loopState, rowIndex)
+        val rowId = try {
+            host.persistAssistantTurn(
+                parts, usage, reasoningContent, blockMeta,
+                modelId = modelId,
+                entryId = entryId,
+                stableId = plannedId,
+            )
+        } catch (e: Throwable) {
+            // [surgery-1120 A-01] The row could not be written. The spool is
+            // still the only copy of this answer, so settle the handles as
+            // ABANDONED (no marker, no ack, no delete) BEFORE rethrowing —
+            // otherwise the collectors sit out the full commit timeout.
+            abandonTranscriptCommits(loopState)
+            throw e
+        }
+        if (rowId != null) loopState.transcriptRowIndex = rowIndex + 1
+        commitTranscriptRow(loopState, rowId)
+        return rowId
+    }
+
+    /**
+     * [surgery-1120 A-01] Resolve every pending stream attempt with the row id
+     * that just became durable. Empty [rowId] is a real outcome (no parts →
+     * no assistant row): the spools are intentionally discarded, so they still
+     * get a marker and can be cleaned; recovery must not turn them into a
+     * fabricated partial message.
+     */
+    private suspend fun releaseTranscriptCommits(loopState: AgentLoopState, rowId: String?) {
+        if (loopState.pendingTranscriptCommits.isEmpty()) return
+        val pending = loopState.pendingTranscriptCommits.toList()
+        loopState.pendingTranscriptCommits.clear()
+        // Each attempt settles with its OWN row id: the handle planned that id
+        // (durably, before the insert) and recovery recomputes the same one.
+        // Marker + ack are fsync writes; keep them off the Main dispatcher.
+        withContext(Dispatchers.IO) { pending.forEach { it.commit(rowId) } }
+    }
+
+    /**
+     * [surgery-1120 A-01] The transcript write itself failed. Settle every
+     * pending attempt as ABANDONED so their collectors keep the terminal spool
+     * (no ack, no delete) instead of waiting out the commit timeout — recovery
+     * then re-reads the stream and the answer survives the failure.
+     */
+    private suspend fun abandonTranscriptCommits(loopState: AgentLoopState) {
+        if (loopState.pendingTranscriptCommits.isEmpty()) return
+        val pending = loopState.pendingTranscriptCommits.toList()
+        loopState.pendingTranscriptCommits.clear()
+        pending.forEach { it.abandon() }
+    }
+
+    /**
+     * [surgery-1120 A-01] This attempt's output was rolled back (transient
+     * retry / fallback before any row). Its spool must be reclaimed WITHOUT
+     * being resurrected later, so the handle settles committed-with-no-row:
+     * the collector acks + deletes, and cold-start recovery skips the dir
+     * instead of inserting text the engine already discarded.
+     */
+    /**
+     * [surgery-1120 A-01 review] Settle EVERY pending attempt as discarded.
+     * Used by the cancel exit: no row will ever be written for this run, so the
+     * dirs must be marked "delivered, nothing to insert" instead of being left
+     * for cold-start recovery.
+     */
+    private fun discardTranscriptCommits(loopState: AgentLoopState) {
+        if (loopState.pendingTranscriptCommits.isEmpty()) return
+        val pending = loopState.pendingTranscriptCommits.toList()
+        loopState.pendingTranscriptCommits.clear()
+        pending.forEach { handle -> runCatching { handle.discard() } }
+    }
+
+    private suspend fun discardTranscriptCommit(loopState: AgentLoopState, handle: TranscriptCommitHandle?) {
+        if (handle == null) return
+        loopState.pendingTranscriptCommits.remove(handle)
+        withContext(Dispatchers.IO) { handle.discard() }
     }
 
     /** Verbatim lift of ChatViewModel.runAgentLoop entry (FE-5 route C step 3). */
@@ -914,6 +1078,13 @@ internal class AgentLoopEngine(
             fallbackReasons = mutableListOf(),
         )
         loopState.assistantId = "assistant_${System.currentTimeMillis()}"
+        // [surgery-1120 A-01] The bubble identity for transcript row ids. A
+        // UUID (not the millisecond assistantId): two runs started in the same
+        // millisecond would otherwise share an id and collide on the
+        // deterministic row id. It is stamped into every run dir of this bubble
+        // BEFORE the stream, so a recovery in another process computes the same
+        // row ids from durable metadata.
+        loopState.transcriptBubbleId = "t-" + java.util.UUID.randomUUID()
 
         // [T-android-stream-flush-review] Restore the placeholder-bubble append
         // lost in the FE-5 route C extraction (be7d3a5). The pre-extraction loop
@@ -937,6 +1108,13 @@ internal class AgentLoopEngine(
         // whose blocks are still un-persisted.
         var lastSegmentUsage: LLMUsage? = null
         var lastSegmentReasoning: String? = null
+        // [surgery-1120 A-01 review] Per-BUBBLE attempt ordinal. It used to be
+        // declared inside the turn body, so every turn restarted it at 1: two
+        // run dirs of the same bubble (a length-wall continuation in round 2,
+        // a retry in round 3) then carried the SAME attempt number, and the
+        // recovery orders a row's segments by it. Monotonic here means one
+        // order no matter how many turns the bubble spans.
+        var attemptIndex = 0
 
         try {
         // [feat/runtime-limits-panel] 循环上界从 prefs 读（默认 256）。取一次局部
@@ -1419,10 +1597,23 @@ internal class AgentLoopEngine(
             // so we catch at collect level and unwrap.
             var collectDone = false
             var retryAttempt = 0  // per-turn auto-retry counter (resets on each new turn)
+            // [surgery-1120 A-01] Per-attempt stream identity/handle. The
+            // handle of a FAILED attempt is discarded at the top of the next
+            // iteration (content was rolled back); a SUCCESSFUL attempt's
+            // handle stays pending until the transcript row is durable.
+            var attemptTurnId: String? = null
+            var attemptCommitHandle: TranscriptCommitHandle? = null
             // [incr1113 F-03] The overshoot latch is declared ONCE for the whole
             // user turn, above the `turnLoop@` (see its declaration site) — not
             // here, where every new turn used to re-arm it.
             while (!collectDone) {
+                // A retry/fallback re-enters here with the previous attempt's
+                // handle still pending and no row written (the row is only
+                // written after a successful collect). Its streamed output was
+                // rolled back, so release its spool as discarded.
+                discardTranscriptCommit(loopState, attemptCommitHandle)
+                attemptCommitHandle = null
+                attemptIndex++
                 // T7-C: deadline 到达后不发新 provider 请求
                 if (traceObserver.activeRunBudget?.isExpired() == true) {
                     traceObserver.t7BudgetStopReason = "deadline_reached"
@@ -1488,6 +1679,27 @@ internal class AgentLoopEngine(
                     var streamStartedMs = -1L
                     var streamFirstContentMs = -1L
                     var streamChunkCount = 0
+                    // [surgery-1120 A-01] Stable identity for THIS attempt:
+                    // the bubble id + the attempt index. It is stamped into the
+                    // run dir's meta before the stream starts and reused as the
+                    // deterministic row id, so a crash between the Room insert
+                    // and the commit marker cannot duplicate the answer.
+                    // The bubble identity is stable for the whole run, so the
+                    // recovery path (another process) recomputes the same row
+                    // ids from it. The attempt index distinguishes the run dirs.
+                    attemptTurnId = loopState.transcriptBubbleId
+                    attemptCommitHandle = TranscriptCommitHandle(
+                        turnId = attemptTurnId!!,
+                        sessionId = host.activeSessionId,
+                        attempt = attemptIndex,
+                        // [surgery-1120 A-01 review] The row this attempt's
+                        // text will land in. The engine knows it only HERE, so
+                        // it rides on the handle and the stream handler stamps
+                        // it into the run dir's meta before collecting.
+                        rowIndex = loopState.transcriptRowIndex,
+                    )
+                    loopState.currentTranscriptTurnId = attemptTurnId
+                    loopState.pendingTranscriptCommits.add(attemptCommitHandle)
                     host.streamChatTurnOffloaded(
                         provider = loopState.currentProvider,
                         messages = preflightMessages,
@@ -1504,6 +1716,13 @@ internal class AgentLoopEngine(
                         // and the one that let the navbar badge disagree with the
                         // wire. One expression, one answer.
                         thinkingLevel = host.thinkingLevel,
+                        // [surgery-1120 A-01] This attempt's identity + the
+                        // rendezvous the engine settles after the transcript
+                        // row is durable. The handle is created HERE (before
+                        // the flow is collected) so the collector can register
+                        // its terminal cleanup on it.
+                        turnId = attemptTurnId,
+                        transcriptCommit = attemptCommitHandle,
                     ).collect { chunk ->
                 // [stream-timing 2026-09-14] one-shot marks: Started (server
                 // accepted the request) and the first user-visible content chunk.
@@ -2955,14 +3174,14 @@ internal class AgentLoopEngine(
                         ),
                         host.string(R.string.error_stream_interrupted),
                     )
+                    val carriedPlanId = planTranscriptRow(loopState, loopState.transcriptRowIndex)
                     val carriedRowId = host.persistAssistantTurn(
-                        carriedTurnParts,
-                        lastUsage,
-                        null,
-                        turnBlockMeta(loopState),
+                        carriedTurnParts, lastUsage, null, turnBlockMeta(loopState),
                         modelId = loopState.currentProvider.model.id,
-                        entryId = host.activeEntryId,
+                        entryId = host.activeEntryId, stableId = carriedPlanId,
                     )
+                    if (carriedRowId != null) loopState.transcriptRowIndex += 1
+                    commitTranscriptRow(loopState, carriedRowId)
                     markTurnPersisted(loopState, carriedRowId)
                     withContext(Dispatchers.Main) {
                         host.setInlineError(host.string(R.string.error_stream_interrupted))
@@ -3069,14 +3288,14 @@ internal class AgentLoopEngine(
                     ),
                     host.string(R.string.error_content_filtered),
                 )
+                    val carriedPlanId = planTranscriptRow(loopState, loopState.transcriptRowIndex)
                 val carriedRowId = host.persistAssistantTurn(
-                    carriedTurnParts,
-                    lastUsage,
-                    null,
-                    turnBlockMeta(loopState),
+                    carriedTurnParts, lastUsage, null, turnBlockMeta(loopState),
                     modelId = loopState.currentProvider.model.id,
-                    entryId = host.activeEntryId,
+                    entryId = host.activeEntryId, stableId = carriedPlanId,
                 )
+                if (carriedRowId != null) loopState.transcriptRowIndex += 1
+                commitTranscriptRow(loopState, carriedRowId)
                 markTurnPersisted(loopState, carriedRowId)
                 withContext(Dispatchers.Main) {
                     host.setInlineError(host.string(R.string.error_content_filtered))
@@ -3845,12 +4064,24 @@ internal class AgentLoopEngine(
                 // reportAgentLoopError instead, which is the more urgent
                 // truth anyway.
                 loopState.pendingInlineError = null
+                // [surgery-1120 A-01] PLAN the row id BEFORE the insert: the
+                // deterministic id is written durably into the run dir, so a
+                // crash between the insert and the commit marker leaves a plan
+                // that recovery reads to find the row instead of inserting a
+                // second one. The plan carries the row's index in the bubble,
+                // so the id is stable across processes.
+                // Inlined so the insert stays adjacent to its
+                // TerminalErrorPlacement payload (that adjacency is what the
+                // turn-tail banner test audits).
+                val plannedTailId = planTranscriptRow(loopState, loopState.transcriptRowIndex)
                 val persistedRowId = host.persistAssistantTurn(
                     TerminalErrorPlacement.partsForTerminalError(turnParts, pendingInlineError),
                     lastUsage, turnReasoningContent, blockMeta,
                     modelId = loopState.currentProvider.model.id,
-                    entryId = host.activeEntryId,
+                    entryId = host.activeEntryId, stableId = plannedTailId,
                 )
+                if (persistedRowId != null) loopState.transcriptRowIndex += 1
+                commitTranscriptRow(loopState, persistedRowId)
                 // [deep-audit-1016c ISSUE-01/A] Every block up to now is durable
                 // (the row above was written with parts covering the full
                 // unpersisted range). Advance only on success — if the DB write
@@ -3871,6 +4102,7 @@ internal class AgentLoopEngine(
                             host.agentHistory[lastAssistantIdx].copy(dbMessageId = persistedRowId)
                     }
                 }
+
                 TerminalErrorPlacement
                     .terminalErrorToSurface(pendingInlineError, persistedRowId)
                     ?.let { banner ->
@@ -3992,7 +4224,10 @@ internal class AgentLoopEngine(
                     // session tail on a tool_result row, which cold start then
                     // reported as "paused". Worst case now is a missing tool
                     // outcome on a row whose text is intact.
-                    earlyAssistantDbId = host.persistAssistantTurn(
+                    // [surgery-1120 A-01] The early row is the bubble's FIRST
+                    // row: plan its id (durable) before the insert, commit after.
+                    earlyAssistantDbId = persistTranscriptRow(
+                        loopState,
                         livePreviewParts, lastUsage, turnReasoningContent, liveMeta,
                         modelId = loopState.currentProvider.model.id,
                         entryId = host.activeEntryId,
@@ -4635,13 +4870,24 @@ internal class AgentLoopEngine(
             val earlyId = earlyAssistantDbId
             val assistantDbId = if (earlyId != null) {
                 host.updatePersistedAssistantTurn(earlyId, turnParts, blockMeta)
+                // [surgery-1120 A-01] The early row already exists; this update
+                // is its completion. Commit the plan for it.
+                commitTranscriptRow(loopState, earlyId)
                 earlyId
             } else {
+                // [surgery-1120 A-01] No early row (the turn had no parts at
+                // dispatch): this is the bubble's first row — plan the id
+                // durably, insert with it, commit after.
+                val plannedId = planTranscriptRow(loopState, loopState.transcriptRowIndex)
                 host.persistAssistantTurn(
                     turnParts, lastUsage, turnReasoningContent, blockMeta,
                     modelId = loopState.currentProvider.model.id,
                     entryId = host.activeEntryId,
-                )
+                    stableId = plannedId,
+                ).also { rowId ->
+                    if (rowId != null) loopState.transcriptRowIndex += 1
+                    commitTranscriptRow(loopState, rowId)
+                }
             }
             if (assistantDbId != null) {
                 val lastIdx = host.agentHistory.indexOfLast { it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null }
@@ -4769,6 +5015,10 @@ internal class AgentLoopEngine(
                     // iteration top, so clearing means new turn's blocks
                     // span [0..size).
                     loopState.assistantId = handled.newAssistantId
+                    // [surgery-1120 A-01] A new bubble gets its own row-id
+                    // namespace — the previous bubble's rows keep theirs.
+                    loopState.transcriptBubbleId = "t-" + java.util.UUID.randomUUID()
+                    loopState.transcriptRowIndex = 0
                     loopState.accumulatedText = ""
                     loopState.allToolBlocks.clear()
                     // [deep-audit-1016c ISSUE-01/A] New bubble ⇒ unpersisted range
@@ -4912,6 +5162,19 @@ internal class AgentLoopEngine(
         traceObserver.traceRunFile = null
         traceObserver.t7BudgetStopReason = null
         } catch (e: CancellationException) {
+            // [surgery-1120 A-01 review] A stopped / superseded attempt will
+            // never be committed, so its spool must not stay "uncommitted" for
+            // a later recovery to resurrect as an answer the user already
+            // abandoned. Settle it as discarded — under NonCancellable,
+            // because this coroutine is already cancelled and every suspension
+            // point would throw at once. The content is not lost: the stop path
+            // persists the partial text the user saw (handleUserCancelledCleanup)
+            // and the collector's own finally still wrote `cancel`.
+            runCatching {
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    discardTranscriptCommits(loopState)
+                }
+            }
             // T9: cancel is intentional — trace the interruption
             runCatching {
                 traceObserver.agentTraceRecorder.error(turn = traceObserver.activeTraceTurn, phase = "cancel", message = "runAgentLoop cancelled")

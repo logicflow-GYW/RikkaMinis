@@ -11,6 +11,7 @@ import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.data.routing.GroupRouter
 import com.rikkaminis.app.provider.LLMProvider
+import com.rikkaminis.app.sandbox.offload.TranscriptCommitHandle
 import com.rikkaminis.app.tools.ToolExecutionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -99,6 +100,11 @@ internal class FakeAgentLoopHost(
     /** [FIX-R4-Q F-06] The published model OBJECTS (enrichment assertions). */
     val currentModels = mutableListOf<LLMModel>()
     val streamRequests = mutableListOf<StreamRequest>()
+    /** [surgery-1120 A-01] The commit handle + turn id of every attempt. */
+    val streamCommitHandles = mutableListOf<TranscriptCommitHandle?>()
+    /** Called with each streamed attempt's commit handle (collector stand-in). */
+    var onStreamCommitHandle: ((TranscriptCommitHandle) -> Unit)? = null
+    val streamTurnIds = mutableListOf<String?>()
     val streamMessageSnapshots = mutableListOf<List<LLMMessage>>()
     val lastTurnContextTokensValues = mutableListOf<Int>()
     /** offloadContextIfNeeded args: contextWindow to lastContextTokens to force. */
@@ -231,6 +237,7 @@ internal class FakeAgentLoopHost(
         toolBlockMeta: Map<String, AssistantBlock>,
         modelId: String?,
         entryId: String?,
+        stableId: String?,
     ): String? {
         // Production contract (InterruptedTailDetector.kt:30, TurnAnswerPick.kt:10):
         // persistAssistantTurn drops an assistant row that has no parts. Model it,
@@ -305,6 +312,8 @@ internal class FakeAgentLoopHost(
         imageParts: List<LLMMessage.ImagePart>,
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
+        turnId: String?,
+        transcriptCommit: TranscriptCommitHandle?,
     ): Flow<LLMStreamChunk> = flow {
         val attemptIndex = ++streamCounter
         streamMessageSnapshots.add(messages.toList())
@@ -312,6 +321,18 @@ internal class FakeAgentLoopHost(
             StreamRequest(attemptIndex, provider.name, messages.size, systemPrompt, maxTokens, tools.size, thinkingLevel)
         )
         record("streamAttempt#$attemptIndex(provider=${provider.name})")
+        // [surgery-1120 A-01] The harness stands in for the collector: it
+        // receives the engine's commit handle, so a scenario can settle it the
+        // way the engine does (commit / abandon) and observe the terminal
+        // consequence.
+        streamCommitHandles.add(transcriptCommit)
+        streamTurnIds.add(turnId)
+        // [surgery-1120 A-01 review] Stands in for the collector attaching its
+        // run dir to the engine's handle (see ChatStreamOffloadHandler.stream).
+        // A test sets it to point the handle at a REAL temp dir, which is what
+        // makes the engine's plan/commit/abandon/discard decisions observable
+        // as files instead of as mocks.
+        transcriptCommit?.let { onStreamCommitHandle?.invoke(it) }
         val script = scripts.removeFirstOrNull()
             ?: error("harness: no TurnScript queued for attempt #$attemptIndex")
         script.throwBefore?.let { throw it }

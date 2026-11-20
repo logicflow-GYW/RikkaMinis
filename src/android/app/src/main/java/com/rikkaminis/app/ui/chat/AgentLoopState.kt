@@ -4,6 +4,7 @@ import com.rikkaminis.app.agent.runtime.AgentTerminal
 import com.rikkaminis.app.agent.runtime.AgentTerminalReason
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.provider.LLMProvider
+import com.rikkaminis.app.sandbox.offload.TranscriptCommitHandle
 
 /**
  * FE-5 route C step 2: the mutable run-scoped state of
@@ -49,6 +50,38 @@ internal class AgentLoopState(
      * are also reset at that point so the new bubble starts empty.
      */
     var assistantId: String = ""
+
+    /**
+     * [surgery-1120 A-01] The bubble identity used for transcript row ids. It
+     * is STABLE for the whole bubble (one user message = one bubble) and is
+     * stamped into every run dir of this bubble, so the recovery path — a
+     * different process — recomputes the same deterministic row ids.
+     */
+    var transcriptBubbleId: String = ""
+
+    /**
+     * [surgery-1120 A-01] The streamed attempt whose transcript row is being
+     * written. Stamped into the run dir's meta before the stream starts and
+     * reused as the deterministic row id, so a crash after the DB insert and
+     * before the commit marker finds the row instead of inserting a duplicate.
+     */
+    var currentTranscriptTurnId: String? = null
+
+    /**
+     * [surgery-1120 A-01] How many assistant rows this bubble has already
+     * planned. A bubble can carry more than one row (a tool turn persists its
+     * row, the final text turn persists another), so the deterministic id
+     * needs an index — the same index the recovery path can recompute.
+     */
+    var transcriptRowIndex: Int = 0
+
+    /**
+     * [surgery-1120 A-01] Handles of streamed attempts whose terminal spool is
+     * waiting for this turn's transcript commit. Length-wall / empty-turn / EOF
+     * continuations add one handle per attempt and all of them are released by
+     * the ONE terminal persist that carries their text. Cleared on release.
+     */
+    val pendingTranscriptCommits: MutableList<TranscriptCommitHandle> = mutableListOf()
 
     /** All tool blocks across the current bubble (reset on queue injection). */
     val allToolBlocks: MutableList<AssistantBlock> = mutableListOf()

@@ -243,6 +243,9 @@ object ProviderExecutionGateway {
         // run dir for cold-start partial-stream recovery). Optional with a
         // default so the sub-agent call site is untouched.
         sessionId: String? = null,
+        // [surgery-1120 A-01] Stable attempt identity + commit rendezvous.
+        turnId: String? = null,
+        transcriptCommit: TranscriptCommitHandle? = null,
     ): Flow<LLMStreamChunk> {
         val requestJson = buildRequest(
             instance = instance,
@@ -262,6 +265,8 @@ object ProviderExecutionGateway {
         return ChatStreamOffloadHandler.stream(
             context, requestJson, thinkingLevel.isEnabled, sessionId,
             WorkerKeyHandoff.keyFor(context, instance.id),
+            turnId = turnId,
+            transcriptCommit = transcriptCommit,
         )
     }
 
