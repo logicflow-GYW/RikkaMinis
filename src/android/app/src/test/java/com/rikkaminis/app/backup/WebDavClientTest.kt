@@ -1,8 +1,12 @@
 package com.rikkaminis.app.backup
 
 import okhttp3.OkHttpClient
+import okhttp3.ResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.BufferedSource
+import okio.ForwardingSource
+import okio.buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -46,6 +50,26 @@ class WebDavClientTest {
     }
 
     private fun dav() = WebDavClient(config, client)
+
+    private fun trackedClient(closed: java.util.concurrent.atomic.AtomicInteger): OkHttpClient =
+        OkHttpClient.Builder()
+            .addNetworkInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                val body = response.body ?: return@addNetworkInterceptor response
+                val trackedSource = object : ForwardingSource(body.source()) {
+                    override fun close() {
+                        try { super.close() } finally { closed.incrementAndGet() }
+                    }
+                }.buffer()
+                response.newBuilder()
+                    .body(object : ResponseBody() {
+                        override fun contentType() = body.contentType()
+                        override fun contentLength() = body.contentLength()
+                        override fun source(): BufferedSource = trackedSource
+                    })
+                    .build()
+            }
+            .build()
 
     private fun enqueue207(body: String) {
         server.enqueue(
@@ -316,6 +340,62 @@ class WebDavClientTest {
         assertEquals("/dav/RikkaMinis_backups/a..b.json", normal.encodedPath)
     }
 
+    @Test
+    fun `href resource path requires same origin collection and a single safe child`() {
+        val d = dav()
+        assertEquals(
+            "actual name.json",
+            d.resourcePathFromHref("/dav/RikkaMinis_backups/actual%20name.json"),
+        )
+        assertEquals(
+            "auto/actual.json",
+            d.resourcePathFromHref("/dav/RikkaMinis_backups/auto/actual.json", "auto"),
+        )
+        val bad = listOf(
+            "https://foreign.example/dav/RikkaMinis_backups/actual.json",
+            "${server.url("/")}dav/RikkaMinis_backups/../actual.json",
+            "${server.url("/")}dav/RikkaMinis_backups/%2e%2e/actual.json",
+            "${server.url("/")}dav/RikkaMinis_backups/%252e%252e/actual.json",
+            "${server.url("/")}dav/RikkaMinis_backups/%2Factual.json",
+            "${server.url("/")}dav/RikkaMinis_backups/%252Factual.json",
+            "/dav/other/actual.json",
+            "/dav/RikkaMinis_backups/auto/actual.json?download=1",
+        )
+        for (href in bad) {
+            try {
+                d.resourcePathFromHref(href)
+                fail("unsafe href must be refused: $href")
+            } catch (e: WebDavException) {
+                assertEquals(-1, e.statusCode)
+            }
+        }
+        try {
+            d.resourcePathFromHref("/dav/RikkaMinis_backups/actual.json", expectedSubdir = "auto")
+            fail("href outside the expected auto directory must be refused")
+        } catch (e: WebDavException) {
+            assertEquals(-1, e.statusCode)
+        }
+    }
+
+    @Test
+    fun `download preflight accepts only supported backup documents without side effects`() {
+        val valid = """{"format":"openminis.config.backup","version":1}""".toByteArray()
+        assertTrue(WebDavClient.isSupportedBackupPayload(valid, valid.size.toLong()))
+        assertFalse(WebDavClient.isSupportedBackupPayload(valid, valid.size - 1L))
+        assertFalse(WebDavClient.isSupportedBackupPayload("{}".toByteArray()))
+        assertFalse(WebDavClient.isSupportedBackupPayload(
+            """{"format":"openminis.config.backup","version":2}""".toByteArray(),
+        ))
+        assertTrue(WebDavClient.isSupportedBackupPayload(
+            """{"format":"openminis.config.backup"}""".toByteArray(),
+        ))
+        assertFalse(WebDavClient.isSupportedBackupPayload("[]".toByteArray()))
+        assertFalse(WebDavClient.isSupportedBackupPayload(
+            """{"format":"openminis.config.backup","version":1,"trailing":}""".toByteArray(),
+        ))
+        assertFalse(WebDavClient.isSupportedBackupPayload((String(valid) + " trailing").toByteArray()))
+    }
+
     // ── Upload ─────────────────────────────────────────────────────────────
 
     @Test
@@ -399,6 +479,81 @@ class WebDavClientTest {
         val request = server.takeRequest()
         assertEquals("GET", request.method)
         assertEquals("Basic YWxpY2U6czNjcmV0", request.getHeader("Authorization"))
+    }
+
+    @Test
+    fun `download enforces declared and unknown body byte limits and closes responses`() {
+        val declaredClosed = java.util.concurrent.atomic.AtomicInteger()
+        val declaredClient = trackedClient(declaredClosed)
+        val declaredLimited = WebDavClient(config, declaredClient, maxDownloadBytes = 5L)
+        server.enqueue(MockResponse().setResponseCode(200).setBody("123456"))
+        try {
+            declaredLimited.get("actual.json")
+            fail("declared oversized body must be rejected")
+        } catch (e: WebDavDownloadTooLargeException) {
+            assertEquals(5L, e.maxBytes)
+        }
+        assertEquals("GET", server.takeRequest().method)
+        assertEquals(1, declaredClosed.get())
+
+        val chunkedClosed = java.util.concurrent.atomic.AtomicInteger()
+        val chunkedLimited = WebDavClient(config, trackedClient(chunkedClosed), maxDownloadBytes = 5L)
+        server.enqueue(MockResponse().setResponseCode(200).setChunkedBody("123456", 2))
+        try {
+            chunkedLimited.get("actual.json")
+            fail("unknown-length body must be counted while streaming")
+        } catch (e: WebDavDownloadTooLargeException) {
+            assertEquals(5L, e.maxBytes)
+        }
+        assertEquals("GET", server.takeRequest().method)
+        assertEquals(1, chunkedClosed.get())
+
+    }
+
+    @Test
+    fun `download accepts exact cap and rejects one byte over for known and unknown lengths`() {
+        val exactKnown = WebDavClient(config, client, maxDownloadBytes = 5L)
+        server.enqueue(MockResponse().setResponseCode(200).setBody("12345"))
+        assertEquals("12345", String(exactKnown.get("actual.json"), Charsets.UTF_8))
+        server.takeRequest()
+
+        val oneOverKnown = WebDavClient(config, client, maxDownloadBytes = 5L)
+        server.enqueue(MockResponse().setResponseCode(200).setBody("123456"))
+        try {
+            oneOverKnown.get("actual.json")
+            fail("known length one byte over cap must be rejected")
+        } catch (e: WebDavDownloadTooLargeException) {
+            assertEquals(5L, e.maxBytes)
+        }
+        server.takeRequest()
+
+        val exactChunked = WebDavClient(config, client, maxDownloadBytes = 5L)
+        server.enqueue(MockResponse().setResponseCode(200).setChunkedBody("12345", 2))
+        assertEquals("12345", String(exactChunked.get("actual.json"), Charsets.UTF_8))
+        server.takeRequest()
+
+        val oneOverChunked = WebDavClient(config, client, maxDownloadBytes = 5L)
+        server.enqueue(MockResponse().setResponseCode(200).setChunkedBody("123456", 2))
+        try {
+            oneOverChunked.get("actual.json")
+            fail("unknown length one byte over cap must be rejected")
+        } catch (e: WebDavDownloadTooLargeException) {
+            assertEquals(5L, e.maxBytes)
+        }
+        server.takeRequest()
+    }
+
+    @Test
+    fun `download rejects invalid limit before consuming response`() {
+        val limited = WebDavClient(config, client, maxDownloadBytes = -1L)
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+        try {
+            limited.get("actual.json")
+            fail("negative cap must fail closed")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("maxDownloadBytes"))
+        }
+        assertEquals("GET", server.takeRequest().method)
     }
 
     @Test
@@ -494,11 +649,50 @@ class WebDavClientTest {
     }
 
     @Test
+    fun `restore and delete follow href when display name differs`() {
+        enqueue207(
+            """<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">
+              <d:response><d:href>/dav/RikkaMinis_backups/</d:href>
+                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+                  <d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+              </d:response>
+              <d:response><d:href>/dav/RikkaMinis_backups/actual-20260804-1530.json</d:href>
+                <d:propstat><d:prop><d:displayname>rikkaminis-backup-20260804-1530.json</d:displayname>
+                  <d:getcontentlength>12</d:getcontentlength><d:resourcetype/></d:prop>
+                  <d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+              </d:response></d:multistatus>""",
+        )
+        val item = WebDavSync.listBackupFiles(config, client).single()
+        assertEquals("PROPFIND", server.takeRequest().method)
+        assertEquals("rikkaminis-backup-20260804-1530.json", item.displayName)
+        assertEquals("actual-20260804-1530.json", item.resourceName)
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{\"format\":\"openminis.config.backup\"}"))
+        assertTrue(WebDavSync.restore(config, item, client).contains("openminis.config.backup"))
+        assertEquals("/dav/RikkaMinis_backups/actual-20260804-1530.json", server.takeRequest().path)
+
+        server.enqueue(MockResponse().setResponseCode(204))
+        WebDavSync.deleteBackupFile(config, item, client)
+        val delete = server.takeRequest()
+        assertEquals("DELETE", delete.method)
+        assertEquals("/dav/RikkaMinis_backups/actual-20260804-1530.json", delete.path)
+    }
+
+    @Test
     fun `sync restore downloads and returns the document`() {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("{\"formatVersion\":1}"))
-        val json = WebDavSync.restore(config, WebDavBackupItem("h", "rikkaminis-backup-1.json", 17, Instant.EPOCH), client)
-        assertEquals("{\"formatVersion\":1}", json)
-        assertEquals("/dav/RikkaMinis_backups/rikkaminis-backup-1.json", server.takeRequest().path)
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{\"format\":\"openminis.config.backup\"}"))
+        val json = WebDavSync.restore(
+            config,
+            WebDavBackupItem(
+                "${server.url("/")}dav/RikkaMinis_backups/actual.json",
+                "rikkaminis-backup-1.json",
+                17,
+                Instant.EPOCH,
+            ),
+            client,
+        )
+        assertEquals("{\"format\":\"openminis.config.backup\"}", json)
+        assertEquals("/dav/RikkaMinis_backups/actual.json", server.takeRequest().path)
     }
 
     // ── Non-WebDAV responses (captive portal / proxy login pages) ─────────

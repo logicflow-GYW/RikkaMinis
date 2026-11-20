@@ -108,7 +108,7 @@ class WebDavAutoBackupTest {
             lastModified = "Mon, 07 Sep 2026 00:00:00 GMT",
         ),
         davResponse(
-            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260906-080000.json",
+            "/dav/RikkaMinis_backups/auto/actual-oldest.json",
             "rikkaminis-backup-auto-20260906-080000.json", size = 300,
             lastModified = "Sun, 06 Sep 2026 00:00:00 GMT",
         ),
@@ -169,7 +169,10 @@ class WebDavAutoBackupTest {
         assertEquals(4, entries.size)
         // newest first: 09-08 (auto/) → 09-07 → 09-06 → 09-05 (root)
         assertEquals("auto", entries[0].subdir)
-        assertEquals("rikkaminis-backup-auto-20260908-080000.json", entries[0].item.displayName)
+        assertEquals(
+            "rikkaminis-backup-auto-20260908-080000.json",
+            entries[0].item.resourceName,
+        )
         assertEquals("rikkaminis-backup-auto-20260906-080000.json", entries[2].item.displayName)
         assertEquals("", entries[3].subdir)
         assertEquals("rikkaminis-backup-auto-20260905-080000.json", entries[3].item.displayName)
@@ -179,7 +182,7 @@ class WebDavAutoBackupTest {
     fun `pruneAutoBackups deletes only auto subdir copies beyond keep`() {
         enqueue207(autoListing())   // 3 auto files in auto/
         enqueue207(rootListing())   // 1 legacy straggler in root
-        server.enqueue(MockResponse().setResponseCode(204)) // DELETE oldest in auto/
+        server.enqueue(MockResponse().setResponseCode(204)) // DELETE oldest actual href target
 
         val deleted = WebDavSync.pruneAutoBackups(config, keep = 2, client)
         assertEquals(1, deleted)
@@ -188,7 +191,7 @@ class WebDavAutoBackupTest {
         val req = server.takeRequest() // DELETE oldest in auto/
         assertEquals("DELETE", req.method)
         assertEquals(
-            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260906-080000.json",
+            "/dav/RikkaMinis_backups/auto/actual-oldest.json",
             req.path,
         )
     }
@@ -200,7 +203,7 @@ class WebDavAutoBackupTest {
         )
         val entry = WebDavSync.AutoBackupEntry(
             item = WebDavBackupItem(
-                href = "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260908-080000.json",
+                href = "/dav/RikkaMinis_backups/auto/actual-resource.json",
                 displayName = "rikkaminis-backup-auto-20260908-080000.json",
                 size = 100,
                 lastModified = Instant.parse("2026-09-08T00:00:00Z"),
@@ -209,7 +212,7 @@ class WebDavAutoBackupTest {
         )
         val json = WebDavSync.restoreAuto(config, entry, client)
         assertEquals(
-            "/dav/RikkaMinis_backups/auto/rikkaminis-backup-auto-20260908-080000.json",
+            "/dav/RikkaMinis_backups/auto/actual-resource.json",
             server.takeRequest().path,
         )
         assertTrue(json.contains("openminis.config.backup"))
