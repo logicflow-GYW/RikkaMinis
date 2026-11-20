@@ -109,6 +109,23 @@ class RootfsManager private constructor(private val context: Context) {
                 archFile.readText().trim() == ARCH
 
     /**
+     * Optional owner of the destructive-install transaction. Set by
+     * [PRootKernel]'s boot/reset gate; null (JVM tests, direct callers) keeps
+     * the pre-fix behavior of "one lifecycleMutex around the extraction".
+     *
+     * Deliberately NOT a second lock: the owner runs the whole decision +
+     * extraction inside its own gate, so a concurrent reset cannot interleave
+     * between "this install will wipe" and the wipe.
+     */
+    @Volatile
+    private var bootTransaction: BootTransaction? = null
+
+    /** Installed by [PRootKernel]'s boot gate; see [installIfNeeded]. */
+    internal fun installBootTransaction(transaction: BootTransaction) {
+        bootTransaction = transaction
+    }
+
+    /**
      * Observable install progress. UI layers (OnboardingScreen,
      * RootfsManagementScreen) bind this and render a progress bar during
      * `installIfNeeded()` / `reset()`. Emits `Installed` on success and
@@ -125,11 +142,38 @@ class RootfsManager private constructor(private val context: Context) {
      * Progress is published to [installState] (Preparing → Extracting(f) →
      * Finalizing → Installed / Failed).
      */
-    suspend fun installIfNeeded(forceReinstall: Boolean = false): Unit = lifecycleMutex.withLock {
-        installIfNeededLocked(forceReinstall)
+    suspend fun installIfNeeded(forceReinstall: Boolean = false): Unit {
+        val transaction = bootTransaction
+        if (transaction != null && !transaction.ownsCurrentThread()) {
+            // [A04] The boot transaction is the OUTER lock; lifecycleMutex stays
+            // the inner one. The order is fixed (boot transaction → lifecycle
+            // mutex) so the two paths can never take them in opposite orders.
+            transaction.runInstall {
+                lifecycleMutex.withLock { installIfNeededLocked(forceReinstall) }
+            }
+            return
+        }
+        lifecycleMutex.withLock { installIfNeededLocked(forceReinstall) }
     }
 
-    /** Internal implementation; caller MUST hold lifecycleMutex. */
+    /**
+     * The auto-repair path is also a destructive operation: its Stage 3
+     * falls back to a full reset, and its Stage 1/2 run `apk` inside the very
+     * tree a concurrent boot would be unpacking. It therefore takes the same
+     * boot transaction as [installIfNeeded] — otherwise a repair could race a
+     * boot exactly like the reset did.
+     */
+    suspend fun autoRepair(): Boolean {
+        val transaction = bootTransaction
+        if (transaction != null && !transaction.ownsCurrentThread()) {
+            return transaction.runExclusive {
+                lifecycleMutex.withLock { autoRepairLocked() }
+            }
+        }
+        return lifecycleMutex.withLock { autoRepairLocked() }
+    }
+
+    /** Internal implementation; caller MUST hold lifecycleMutex (or the boot transaction). */
     internal suspend fun installIfNeededLocked(forceReinstall: Boolean): Unit = withContext(Dispatchers.IO) {
         if (!forceReinstall && isInstalled) {
             Log.d(TAG, "Rootfs already installed at $rootfsDir")
@@ -420,10 +464,6 @@ class RootfsManager private constructor(private val context: Context) {
      *
      * Returns true when the rootfs is healthy after the attempt.
      */
-    suspend fun autoRepair(): Boolean = lifecycleMutex.withLock {
-        autoRepairLocked()
-    }
-
     /** Internal implementation; caller MUST hold lifecycleMutex. */
     internal suspend fun autoRepairLocked(): Boolean = withContext(Dispatchers.IO) {
         val initial = verifyIntegrity()
@@ -542,8 +582,14 @@ class RootfsManager private constructor(private val context: Context) {
      * the restore (the apk database is ignored — restoring it would discard
      * user package records).
      */
-    suspend fun restoreCriticalFromAssets(): Boolean = lifecycleMutex.withLock {
-        restoreCriticalFromAssetsLocked()
+    suspend fun restoreCriticalFromAssets(): Boolean {
+        val transaction = bootTransaction
+        if (transaction != null && !transaction.ownsCurrentThread()) {
+            return transaction.runExclusive {
+                lifecycleMutex.withLock { restoreCriticalFromAssetsLocked() }
+            }
+        }
+        return lifecycleMutex.withLock { restoreCriticalFromAssetsLocked() }
     }
 
     /** Internal implementation; caller MUST hold lifecycleMutex. */
@@ -1035,9 +1081,21 @@ class RootfsManager private constructor(private val context: Context) {
     /** Called after a rootfs wipe and reinstall completed. */
     var afterRootfsReinstalled: (suspend () -> Unit)? = null
 
-    suspend fun reset(): Unit = lifecycleMutex.withLock {
-        resetLocked()
+    suspend fun reset(): Unit {
+        val transaction = bootTransaction
+        if (transaction != null && !transaction.ownsCurrentThread()) {
+            transaction.runReset { lifecycleMutex.withLock { resetLocked() } }
+            return
+        }
+        lifecycleMutex.withLock { resetLocked() }
     }
+
+    /**
+     * The install that the boot body performs re-enters this manager while the
+     * boot transaction is already held by THIS thread — the boot path calls
+     * [installIfNeeded] directly, so the re-entrant branch above takes
+     * lifecycleMutex alone and never waits for the gate it already owns.
+     */
 
     /** Internal implementation; caller MUST hold lifecycleMutex. */
     internal suspend fun resetLocked(): Unit = withContext(Dispatchers.IO) {
