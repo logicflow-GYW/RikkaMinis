@@ -53,6 +53,7 @@ import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.service.SessionConcurrencyManager
 import com.rikkaminis.app.util.Utf16Sanitizer
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -3509,6 +3510,16 @@ class ChatViewModel(
             _error.value = "No provider configured"
             return false
         }
+        val claimToken = Any()
+        var sendEpoch = -1L
+        if (!claimStreamingSlot(_isStreaming) {
+                streamingClaimToken = claimToken
+                streamEpoch++
+                streamingClaimEpoch = streamEpoch
+                sendEpoch = streamingClaimEpoch
+                _isStreaming.value = true
+            }
+        ) return false
         _canResume.value = false
         _error.value = null
 
@@ -3524,21 +3535,7 @@ class ChatViewModel(
         val deletedMessages = listOf(droppedTargetTail) +
             messages.subList(asstIdx + 1, messages.size).toList()
 
-        // Claim the streaming flag synchronously so a rapid second tap is
-        // rejected by the entry guard (same rationale as retryFromMessage T145).
         AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=true (sync, sid=$activeSessionId)")
-        // [T-claim-token-vs-stale-finally] Mint the claim token BEFORE the
-        // flag flips, so a predecessor's finally landing anywhere during this
-        // claim is a no-op instead of a flip that hides the new turn's Stop
-        // button. See streamingClaimToken KDoc.
-        streamingClaimToken = Any()
-        _isStreaming.value = true
-        streamEpoch++
-        // [T-stale-finally-vs-new-claim] Publish the claim so an older job's
-        // finally can't flip _isStreaming off during the setup window.
-        streamingClaimEpoch = streamEpoch
-        val sendEpoch = streamingClaimEpoch
-        val claimToken = streamingClaimToken
 
         // [dv29-B01] Hold the setup shell in sendShellJob so cancelStream() can
         // kill the whole turn (same shape/rationale as sendMessage / resume).
@@ -3694,11 +3691,13 @@ class ChatViewModel(
             } finally {
                 if (!streamLaunched) {
                     // [T-stale-finally-vs-new-claim] Only clear under our own claim.
-                    if (sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
-                        AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false (setup aborted)")
-                        _isStreaming.value = false
-                    } else {
-                        AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                    synchronized(_isStreaming) {
+                        if (sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
+                            AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false (setup aborted)")
+                            _isStreaming.value = false
+                        } else {
+                            AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                        }
                     }
                 }
             }
@@ -3744,6 +3743,16 @@ class ChatViewModel(
             return
         }
         val provider: LLMProvider = initialProvider
+        val claimToken = Any()
+        var sendEpoch = -1L
+        if (!claimStreamingSlot(_isStreaming) {
+                streamingClaimToken = claimToken
+                streamEpoch++
+                streamingClaimEpoch = streamEpoch
+                sendEpoch = streamingClaimEpoch
+                _isStreaming.value = true
+            }
+        ) return
         _error.value = null
 
         // T149: snapshot messages about to be truncated so we can revoke any
@@ -3790,26 +3799,7 @@ class ChatViewModel(
 
         revokeMemoryWritesInDeletedMessages(deletedMessages)
 
-        // T145: claim the streaming flag SYNCHRONOUSLY so a rapid second tap
-        // (or any concurrent send/retry attempt) is rejected by the entry
-        // guard. Previously this was set inside the suspended outer launch,
-        // leaving a multi-second window during DB cleanup + OAuth refresh
-        // where two retries could slip through and spawn duplicate streamJobs.
-        // The orphaned first job's `_isStreaming = false` at completion would
-        // then flip the UI to "stopped" while the second job was still running.
         AppLogger.info(TAG_STREAM, "retry _isStreaming=true (sync, sid=$activeSessionId)")
-        // [T-claim-token-vs-stale-finally] Mint the claim token BEFORE the
-        // flag flips, so a predecessor's finally landing anywhere during this
-        // claim is a no-op instead of a flip that hides the new turn's Stop
-        // button. See streamingClaimToken KDoc.
-        streamingClaimToken = Any()
-        _isStreaming.value = true
-        streamEpoch++
-        // [T-stale-finally-vs-new-claim] Publish the claim so an older job's
-        // finally can't flip _isStreaming off during the setup window.
-        streamingClaimEpoch = streamEpoch
-        val sendEpoch = streamingClaimEpoch
-        val claimToken = streamingClaimToken
 
         // [dv29-B01] Hold the setup shell in sendShellJob — see rerunFromToolBlock.
         sendShellJob = viewModelScope.launch(Dispatchers.IO) {
@@ -3884,11 +3874,13 @@ class ChatViewModel(
             } finally {
                 if (!streamLaunched) {
                     // [T-stale-finally-vs-new-claim] Only clear under our own claim.
-                    if (sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
-                        AppLogger.info(TAG_STREAM, "retry _isStreaming=false (setup aborted)")
-                        _isStreaming.value = false
-                    } else {
-                        AppLogger.info(TAG_STREAM, "retry _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                    synchronized(_isStreaming) {
+                        if (sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
+                            AppLogger.info(TAG_STREAM, "retry _isStreaming=false (setup aborted)")
+                            _isStreaming.value = false
+                        } else {
+                            AppLogger.info(TAG_STREAM, "retry _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                        }
                     }
                 }
             }
@@ -4367,97 +4359,48 @@ class ChatViewModel(
             _showContextExhaustedDialog.value = true
             return
         }
-        // [T5-auto-compact] At the compact line but below the hard ceiling —
-        // trigger the existing compact pipeline automatically instead of only
-        // warning (OmniBot AgentConversationContextCompactor parity). Must
-        // happen BEFORE `_isStreaming` flips true below, or compactAll aborts
-        // on the in-stream guard; the send coroutine awaits completion before
-        // persisting the user message (see awaitAutoCompactIfNeeded).
-        // [R5-C C-C-05] Skipped for edit sends — see the block above.
-        if (!editingSend) maybeTriggerAutoCompact()
-        // [fix/compact-exhausted-rescue-1005] A real user send re-arms the
-        // EXHAUSTED rescue gate: this message is about to be persisted, so
-        // this is the "new user message" reset per the 2026-10-05 design
-        // (send / manual compact / session open). Guards above (exhausted
-        // dialog, compaction busy, blank input) already returned, so a
-        // blocked or dropped send never re-arms the gate.
-        rescueAttemptedForCompact = false
-        // A fresh send supersedes any pending resume — mirror iOS which clears
-        // canResume at the top of send().
-        _canResume.value = false
-        // T185: clear the share-injected flag the moment the user actually
-        // sends. Without this, the "Move to…" capsule (gated on
-        // hasInjectedShareContent) keeps floating over the user-message row
-        // after the share content has been committed — it then visually
-        // collides with the user-attachment chips, which renders as the
-        // "image attachment shows up as Move to" symptom in T185. Mirrors
-        // iOS AIChatView.swift:2255 (`hasInjectedShareContent = false`
-        // inside the send button's tap closure).
-        // [T-per-message-load-balance] Advance the per-message rotation for
-        // this new user turn (loadBalance groups only; no-op otherwise)
-        // BEFORE snapshotting the provider, so this turn is served by the
-        // next member in rotation.
-        rotateForNewTurn("send")
-
         val initialProvider = currentProvider
         if (initialProvider == null) {
             _error.value = "No provider configured"
-            // [D1-F04 + W1118-COMPOSER F-06] The caller cleared the composer, so
-            // a refusal owes the text back — through the intent channel, so the
-            // FIELD and the caret come back too.
+            // The caller cleared the field; refusals owe the expanded text back.
             restoreComposerAfterRefusal(text)
             return
         }
-        // [incr1118 D1-F04] Spent ONLY by a send that actually starts. It used
-        // to be cleared above the provider gate, so a send refused here (no
-        // provider yet — first launch, a deleted/disabled provider) burned the
-        // share arm on a turn that never happened: the "Move to…" capsule lost
-        // its flag and the shared draft could no longer be moved anywhere.
-        if (_hasInjectedShareContent.value) _hasInjectedShareContent.value = false
         var provider: LLMProvider = initialProvider
-
+        val claimToken = Any()
+        var sendEpoch = -1L
+        // [R1-CHAT-01] The early idle read is advisory. A drain may have won
+        // since then: claim BEFORE changing the route, history, draft or run state.
+        val claimed = claimStreamingSlot(_isStreaming) {
+            streamingClaimToken = claimToken
+            // Pre-send compact must still see streaming=false. This synchronous
+            // preparation belongs to the winner and stays inside the same monitor.
+            if (!editingSend) maybeTriggerAutoCompact()
+            rescueAttemptedForCompact = false
+            _canResume.value = false
+            rotateForNewTurn("send")
+            provider = currentProvider ?: initialProvider
+            // Sweep the old turn's overlays BEFORE advancing the render epoch.
+            if (_streamingById.value.isNotEmpty()) {
+                AppLogger.warning(TAG_STREAM, "send: sweeping ${_streamingById.value.size} orphan streaming delta(s) before new turn")
+                flushAllStreamingDeltas()
+            }
+            streamEpoch++
+            streamingClaimEpoch = streamEpoch
+            sendEpoch = streamingClaimEpoch
+            // Only a send that actually won may spend the share arm.
+            if (_hasInjectedShareContent.value) _hasInjectedShareContent.value = false
+            _isStreaming.value = true
+        }
+        if (!claimed) {
+            // Keep attachments/edit/share staging intact; do not preempt the winner.
+            restoreComposerAfterRefusal(text)
+            return
+        }
+        AppLogger.info(TAG_STREAM, "send _isStreaming=true (sync, sid=$activeSessionId)")
         _error.value = null
-
         val currentAttachments = _attachments.value
         clearAttachments()
-
-        // T145: claim _isStreaming synchronously so a rapid second tap can't
-        // slip past the entry guard during DB/OAuth setup. See retryFromMessage.
-        AppLogger.info(TAG_STREAM, "send _isStreaming=true (sync, sid=$activeSessionId)")
-        // [T-claim-token-vs-stale-finally] Mint the claim token BEFORE the
-        // flag flips, so a predecessor's finally landing anywhere during this
-        // claim is a no-op instead of a flip that hides the new turn's Stop
-        // button. See streamingClaimToken KDoc.
-        streamingClaimToken = Any()
-        _isStreaming.value = true
-
-        // [T-android-thinking-indicator-linger] Invariant sweep: a fresh send
-        // only reaches here when no turn is streaming (the _isStreaming guard
-        // at the top routes mid-stream sends to enqueuePrompt). So any residual
-        // _streamingById entry is an orphan stranded by a prior turn that
-        // exited without draining it (e.g. a late delta re-added the entry
-        // after finalizeAtTurnLimit / cancel cleared it). mergeStreamingOverlay
-        // forces isStreaming=true on any message holding such an entry, so an
-        // orphan would render a second "thinking" row alongside the new turn's.
-        // Flush them into the canonical messages (isStreaming=false) before the
-        // new streaming message is created — no two messages ever stream at once.
-        if (_streamingById.value.isNotEmpty()) {
-            AppLogger.warning(TAG_STREAM, "send: sweeping ${_streamingById.value.size} orphan streaming delta(s) before new turn")
-            flushAllStreamingDeltas()
-        }
-
-        // [T-android-thinking-indicator-linger] Monotonic epoch: after the
-        // orphan sweep, bump the turn epoch so any trailing-flush / residual
-        // delta that re-adds an old entry LATER (flush coroutine survives
-        // streamJob.cancel) carries the old epoch and is ignored by
-        // mergeStreamingOverlay. Must happen AFTER the sweep — the sweep
-        // handles the old turn's remnants, the epoch seals this turn.
-        streamEpoch++
-        // [T-stale-finally-vs-new-claim] Publish the claim so an older job's
-        // finally can't flip _isStreaming off during the setup window.
-        streamingClaimEpoch = streamEpoch
-        val sendEpoch = streamingClaimEpoch
-        val claimToken = streamingClaimToken
 
         // T187: when the user is editing a previous message, truncate the
         // conversation from that message (inclusive) before persisting the
@@ -4604,113 +4547,127 @@ class ChatViewModel(
                 AppLogger.info(TAG_STREAM, "send shell aborted before stream (claim revoked; sid=$activeSessionId)")
                 return@launch
             }
-            streamLaunched = true
-            streamJob = launch(Dispatchers.IO) {
-                AppLogger.info(TAG_STREAM, "send streamJob ENTER sid=$activeSessionId")
-                try {
-                    // Acquire concurrency slot (suspends if at max)
-                    SessionConcurrencyManager.acquireSlot(activeSessionId)
-                    AppLogger.debug(TAG_STREAM, "send streamJob slot acquired")
-
+            synchronized(_isStreaming) {
+                // [R1-CHAT-01] Revalidate at the actual publication point; a stale
+                // setup must neither start work nor overwrite the winner's handle.
+                if (!isActive || !_isStreaming.value || sendEpoch != streamingClaimEpoch || claimToken !== streamingClaimToken) {
+                    return@synchronized
+                }
+                streamLaunched = true
+                streamJob = launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                    AppLogger.info(TAG_STREAM, "send streamJob ENTER sid=$activeSessionId")
                     try {
-                        // [audit-0920] setActive + buildFallbackProviders live
-                        // INSIDE this guarded region so the `finally` below is
-                        // the one that returns the concurrency slot. They used
-                        // to sit between the outer try and this one: a non-CE
-                        // throw from either (tracker callback registration, a
-                        // provider-config read) skipped releaseSlot entirely,
-                        // and with `maxConcurrent` defaulting to 2 the session
-                        // then queued forever behind a phantom holder. The
-                        // exception also escaped the coroutine (no
-                        // CoroutineExceptionHandler in the tree) and killed the
-                        // process instead of showing the error banner. Same
-                        // shape as the [audit-0917] fix in ChatTurnPersistence.
-                        SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                        // Acquire concurrency slot (suspends if at max)
+                        SessionConcurrencyManager.acquireSlot(activeSessionId)
+                        AppLogger.debug(TAG_STREAM, "send streamJob slot acquired")
 
-                        // Resolve the active group's fallback strategy
-                        val activeFallbackStrategy = run {
-                            val groupId = _selectedGroupId.value
-                            groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                                ?: com.rikkaminis.app.data.model.FallbackStrategy.default
+                        try {
+                            // [audit-0920] setActive + buildFallbackProviders live
+                            // INSIDE this guarded region so the `finally` below is
+                            // the one that returns the concurrency slot. They used
+                            // to sit between the outer try and this one: a non-CE
+                            // throw from either (tracker callback registration, a
+                            // provider-config read) skipped releaseSlot entirely,
+                            // and with `maxConcurrent` defaulting to 2 the session
+                            // then queued forever behind a phantom holder. The
+                            // exception also escaped the coroutine (no
+                            // CoroutineExceptionHandler in the tree) and killed the
+                            // process instead of showing the error banner. Same
+                            // shape as the [audit-0917] fix in ChatTurnPersistence.
+                            SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+
+                            // Resolve the active group's fallback strategy
+                            val activeFallbackStrategy = run {
+                                val groupId = _selectedGroupId.value
+                                groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                                    ?: com.rikkaminis.app.data.model.FallbackStrategy.default
+                            }
+
+                            // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
+                            val fallbackProviders = buildFallbackProviders(provider)
+
+                            AppLogger.info(TAG_STREAM, "send runAgentLoop CALL")
+                            runAgentLoop(
+                                provider = provider,
+                                systemPrompt = systemPrompt,
+                                fallbackProviders = fallbackProviders,
+                                fallbackStrategy = activeFallbackStrategy,
+                            )
+                            AppLogger.info(TAG_STREAM, "send runAgentLoop RETURN normal")
+                            // Drain any prompts the user queued while this loop was running.
+                            // Skipped on cancel: cancelled job won't reach here.
+                            drainQueuedPrompts(provider, systemPrompt, activeFallbackStrategy)
+                            AppLogger.info(TAG_STREAM, "send drainQueuedPrompts RETURN")
+                        } catch (e: CancellationException) {
+                            AppLogger.info(TAG_STREAM, "send runAgentLoop CANCELLED")
+                            Log.d(TAG, "Agent loop cancelled")
+                        } catch (e: Exception) {
+                            AppLogger.error(TAG_STREAM, "send runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
+                            Log.e(TAG, "Agent loop error (all fallbacks exhausted)", e)
+                            reportAgentLoopError(e)
+                            // T298: completion notifier should show the ❌ variant.
+                            SessionActivityTracker.markStreamError(activeSessionId)
+                        } finally {
+                            AppLogger.info(TAG_STREAM, "send streamJob FINALLY enter")
+                            // [T-claim-token-vs-stale-finally] Run-state teardown is
+                            // owned by the CURRENT turn only. An orphaned job's
+                            // finally landing after a newer claim would otherwise
+                            // wipe the live turn's running indicator (queue clock,
+                            // overlay excerpt, activity flag) while it still
+                            // streams — field-observed 2026-10-12 14:51 (message
+                            // area lost its running marker while content kept
+                            // arriving). releaseSlot below stays unconditional.
+                            synchronized(_isStreaming) {
+                                if (claimToken === streamingClaimToken) {
+                                    // [feat/provider-exec-concurrency] Reset queue-position
+                                    // state — the run is over, whatever it showed must not
+                                    // leak into the next one.
+                                    resetQueueWaitingAhead()
+                                    // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
+                                    resetAwaitingResponseSince()
+                                    // [T-android-overlay-reply-status-34599] Surface
+                                    // the assistant's most recent reply text to the
+                                    // overlay BEFORE setInactive so the post-completion
+                                    // overlay state (no-running, has-outcome) carries a
+                                    // non-null excerpt. Reading _messages here is safe:
+                                    // we're in the finally block of the agent loop and
+                                    // the stream has already flushed its last delta.
+                                    publishOverlayReplyExcerpt(activeSessionId)
+                                    SessionActivityTracker.setInactive(activeSessionId)
+                                }
+                            }
+                            SessionConcurrencyManager.releaseSlot(activeSessionId)
+                            AppLogger.info(TAG_STREAM, "send streamJob FINALLY exit")
                         }
-
-                        // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
-                        val fallbackProviders = buildFallbackProviders(provider)
-
-                        AppLogger.info(TAG_STREAM, "send runAgentLoop CALL")
-                        runAgentLoop(
-                            provider = provider,
-                            systemPrompt = systemPrompt,
-                            fallbackProviders = fallbackProviders,
-                            fallbackStrategy = activeFallbackStrategy,
-                        )
-                        AppLogger.info(TAG_STREAM, "send runAgentLoop RETURN normal")
-                        // Drain any prompts the user queued while this loop was running.
-                        // Skipped on cancel: cancelled job won't reach here.
-                        drainQueuedPrompts(provider, systemPrompt, activeFallbackStrategy)
-                        AppLogger.info(TAG_STREAM, "send drainQueuedPrompts RETURN")
                     } catch (e: CancellationException) {
-                        AppLogger.info(TAG_STREAM, "send runAgentLoop CANCELLED")
-                        Log.d(TAG, "Agent loop cancelled")
-                    } catch (e: Exception) {
-                        AppLogger.error(TAG_STREAM, "send runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
-                        Log.e(TAG, "Agent loop error (all fallbacks exhausted)", e)
-                        reportAgentLoopError(e)
-                        // T298: completion notifier should show the ❌ variant.
-                        SessionActivityTracker.markStreamError(activeSessionId)
-                    } finally {
-                        AppLogger.info(TAG_STREAM, "send streamJob FINALLY enter")
-                        // [T-claim-token-vs-stale-finally] Run-state teardown is
-                        // owned by the CURRENT turn only. An orphaned job's
-                        // finally landing after a newer claim would otherwise
-                        // wipe the live turn's running indicator (queue clock,
-                        // overlay excerpt, activity flag) while it still
-                        // streams — field-observed 2026-10-12 14:51 (message
-                        // area lost its running marker while content kept
-                        // arriving). releaseSlot below stays unconditional.
-                        if (claimToken === streamingClaimToken) {
-                            // [feat/provider-exec-concurrency] Reset queue-position
-                            // state — the run is over, whatever it showed must not
-                            // leak into the next one.
-                            resetQueueWaitingAhead()
-                            // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
-                            resetAwaitingResponseSince()
-                            // [T-android-overlay-reply-status-34599] Surface
-                            // the assistant's most recent reply text to the
-                            // overlay BEFORE setInactive so the post-completion
-                            // overlay state (no-running, has-outcome) carries a
-                            // non-null excerpt. Reading _messages here is safe:
-                            // we're in the finally block of the agent loop and
-                            // the stream has already flushed its last delta.
-                            publishOverlayReplyExcerpt(activeSessionId)
-                            SessionActivityTracker.setInactive(activeSessionId)
-                        }
-                        SessionConcurrencyManager.releaseSlot(activeSessionId)
-                        AppLogger.info(TAG_STREAM, "send streamJob FINALLY exit")
+                        AppLogger.info(TAG_STREAM, "send streamJob CANCELLED waiting for slot")
+                        Log.d(TAG, "Cancelled while waiting for concurrency slot")
                     }
-                } catch (e: CancellationException) {
-                    AppLogger.info(TAG_STREAM, "send streamJob CANCELLED waiting for slot")
-                    Log.d(TAG, "Cancelled while waiting for concurrency slot")
+                    // [T-android-stale-streamjob-clears-isstreaming] guard — see
+                    // `var streamJob` KDoc; identical pattern as runRerunStreamTail,
+                    // plus the epoch gate against the claim window.
+                    synchronized(_isStreaming) {
+                        if (streamJob === coroutineContext[Job] && sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
+                            AppLogger.info(TAG_STREAM, "send _isStreaming=false (about to set)")
+                            _isStreaming.value = false
+                        } else {
+                            AppLogger.info(TAG_STREAM, "send _isStreaming SKIPPED (stale job; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch claimSuperseded=${claimToken !== streamingClaimToken})")
+                        }
+                    }
+                    AppLogger.info(TAG_STREAM, "send streamJob EXIT")
                 }
-                // [T-android-stale-streamjob-clears-isstreaming] guard — see
-                // `var streamJob` KDoc; identical pattern as runRerunStreamTail,
-                // plus the epoch gate against the claim window.
-                if (streamJob === coroutineContext[Job] && sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
-                    AppLogger.info(TAG_STREAM, "send _isStreaming=false (about to set)")
-                    _isStreaming.value = false
-                } else {
-                    AppLogger.info(TAG_STREAM, "send _isStreaming SKIPPED (stale job; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch claimSuperseded=${claimToken !== streamingClaimToken})")
-                }
-                AppLogger.info(TAG_STREAM, "send streamJob EXIT")
+                streamJob?.start()
             }
             } finally {
                 if (!streamLaunched) {
                     // [T-stale-finally-vs-new-claim] Only clear under our own claim.
-                    if (sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
-                        AppLogger.info(TAG_STREAM, "send _isStreaming=false (setup aborted)")
-                        _isStreaming.value = false
-                    } else {
-                        AppLogger.info(TAG_STREAM, "send _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                    synchronized(_isStreaming) {
+                        if (sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
+                            AppLogger.info(TAG_STREAM, "send _isStreaming=false (setup aborted)")
+                            _isStreaming.value = false
+                        } else {
+                            AppLogger.info(TAG_STREAM, "send _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                        }
                     }
                 }
             }
@@ -4784,85 +4741,87 @@ class ChatViewModel(
     }
 
     fun cancelStream() {
-        AppLogger.info(TAG_STREAM, "cancelStream invoked _isStreaming=false (sid=$activeSessionId)")
-        val epochAtCancel = streamEpoch
-        streamJob?.cancel()
-        // [fix/compact-cancel-on-stop-1002] Stop is a full-turn stop: the
-        // in-flight auto-compact dies with the stream (it is turn-scoped
-        // side work — silent, invisible, still burning tokens for up to the
-        // 120s summary budget), and the send shell dies so a message held in
-        // the compact-wait window is never persisted+sent after the stop
-        // ("zombie send"). Uniform across cancelStream callers: every caller
-        // (stop button, notification onStop, mid-stream preempt, clearChat,
-        // headless teardown) means "this turn's work stops NOW", and a
-        // killed compact is always safe for the transcript (nothing is
-        // persisted before the commit block; inside it the worst case is a
-        // marker row the next session load rebuilds from — see the
-        // compactJob KDoc) — the next turn re-evaluates context pressure from live
-        // state and re-fires a fresh compact if still needed.
-        compactJob?.cancel()
-        sendShellJob?.cancel()
-        // [audit-0917] Guard the flag with the same epoch discipline every
-        // other clear site uses (rerunFromToolBlock / retry / resume finally
-        // blocks all compare sendEpoch == streamingClaimEpoch). An
-        // unconditional assignment could clear the flag of a turn that had
-        // already claimed streaming in the meantime — a stale cancel landing
-        // after the new claim but before the new job is established.
-        if (streamEpoch == epochAtCancel) {
-            _isStreaming.value = false
-        } else {
-            AppLogger.info(
-                TAG_STREAM,
-                "cancelStream _isStreaming=false SKIPPED (superseded; epoch=$epochAtCancel now=$streamEpoch)",
+        synchronized(_isStreaming) {
+            AppLogger.info(TAG_STREAM, "cancelStream invoked _isStreaming=false (sid=$activeSessionId)")
+            val epochAtCancel = streamEpoch
+            streamJob?.cancel()
+            // [fix/compact-cancel-on-stop-1002] Stop is a full-turn stop: the
+            // in-flight auto-compact dies with the stream (it is turn-scoped
+            // side work — silent, invisible, still burning tokens for up to the
+            // 120s summary budget), and the send shell dies so a message held in
+            // the compact-wait window is never persisted+sent after the stop
+            // ("zombie send"). Uniform across cancelStream callers: every caller
+            // (stop button, notification onStop, mid-stream preempt, clearChat,
+            // headless teardown) means "this turn's work stops NOW", and a
+            // killed compact is always safe for the transcript (nothing is
+            // persisted before the commit block; inside it the worst case is a
+            // marker row the next session load rebuilds from — see the
+            // compactJob KDoc) — the next turn re-evaluates context pressure from live
+            // state and re-fires a fresh compact if still needed.
+            compactJob?.cancel()
+            sendShellJob?.cancel()
+            // [audit-0917] Guard the flag with the same epoch discipline every
+            // other clear site uses (rerunFromToolBlock / retry / resume finally
+            // blocks all compare sendEpoch == streamingClaimEpoch). An
+            // unconditional assignment could clear the flag of a turn that had
+            // already claimed streaming in the meantime — a stale cancel landing
+            // after the new claim but before the new job is established.
+            if (streamEpoch == epochAtCancel) {
+                _isStreaming.value = false
+            } else {
+                AppLogger.info(
+                    TAG_STREAM,
+                    "cancelStream _isStreaming=false SKIPPED (superseded; epoch=$epochAtCancel now=$streamEpoch)",
+                )
+            }
+            // T7-A: 观察 —— 用户取消（T5 UserCancelled 语义，进入收尾）
+            traceObserver.t7State(
+                traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
+                ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FINALIZING),
+                "UserCancelled",
             )
-        }
-        // T7-A: 观察 —— 用户取消（T5 UserCancelled 语义，进入收尾）
-        traceObserver.t7State(
-            traceObserver.t7ObservedPhase ?: ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.CALLING_MODEL),
-            ChatAgentTraceObserver.t7PhaseSchema(AgentRunPhase.FINALIZING),
-            "UserCancelled",
-        )
-        // T7-D: 旁路验证 —— 用户取消
-        traceObserver.t7Reduce(AgentRunEvent.UserCancelled("user_stop"))
-        // T-streaming-side-channel: flush any in-flight delta back into the
-        // canonical message so the rest of cancelStream's cleanup (publish
-        // overlay excerpt, persist, retry-eligible state) sees the real
-        // content rather than a stale pre-stream snapshot.
-        flushAllStreamingDeltas()
-        // T171: drop activity tracker immediately, don't wait for the
-        // streamJob's finally block. When OkHttp is wedged in a blocking
-        // execute() call.cancel() may unwind eventually but the finally
-        // doesn't run until then — meanwhile RPC chat.session.status would
-        // still report isRunning=true and the user thinks the stop button
-        // did nothing.
-        // [T-android-overlay-reply-status-34599] User-initiated cancel:
-        // surface any reply we already streamed + tag outcome as
-        // Cancelled so the overlay's glyph reflects the actual end
-        // state (⊘) instead of carrying over the prior tool's outcome.
-        publishOverlayReplyExcerpt(activeSessionId)
-        SessionActivityTracker.clearToolRunning(com.rikkaminis.app.service.ToolOutcome.Cancelled)
-        SessionActivityTracker.setInactive(activeSessionId)
-        if (isDraft && realSessionId.isNotEmpty() && activeSessionId != sessionId) {
-            SessionActivityTracker.setInactive(sessionId)
-        }
-        // Stop whichever shell the agent loop is actually dispatching against.
-        // Before `ensureSession()` that is the draft id; after, the real id.
-        // Stopping the wrong one leaves a runaway yt-dlp/ffmpeg alive.
-        ExecutionCoordinator.stopCurrentCommand(activeSessionId)
-        if (isDraft && realSessionId.isNotEmpty() && activeSessionId != sessionId) {
-            // Mid-turn rename: sweep any lingering draft shell too.
-            ExecutionCoordinator.stopCurrentCommand(sessionId)
-        }
-        handleUserCancelledCleanup()
+            // T7-D: 旁路验证 —— 用户取消
+            traceObserver.t7Reduce(AgentRunEvent.UserCancelled("user_stop"))
+            // T-streaming-side-channel: flush any in-flight delta back into the
+            // canonical message so the rest of cancelStream's cleanup (publish
+            // overlay excerpt, persist, retry-eligible state) sees the real
+            // content rather than a stale pre-stream snapshot.
+            flushAllStreamingDeltas()
+            // T171: drop activity tracker immediately, don't wait for the
+            // streamJob's finally block. When OkHttp is wedged in a blocking
+            // execute() call.cancel() may unwind eventually but the finally
+            // doesn't run until then — meanwhile RPC chat.session.status would
+            // still report isRunning=true and the user thinks the stop button
+            // did nothing.
+            // [T-android-overlay-reply-status-34599] User-initiated cancel:
+            // surface any reply we already streamed + tag outcome as
+            // Cancelled so the overlay's glyph reflects the actual end
+            // state (⊘) instead of carrying over the prior tool's outcome.
+            publishOverlayReplyExcerpt(activeSessionId)
+            SessionActivityTracker.clearToolRunning(com.rikkaminis.app.service.ToolOutcome.Cancelled)
+            SessionActivityTracker.setInactive(activeSessionId)
+            if (isDraft && realSessionId.isNotEmpty() && activeSessionId != sessionId) {
+                SessionActivityTracker.setInactive(sessionId)
+            }
+            // Stop whichever shell the agent loop is actually dispatching against.
+            // Before `ensureSession()` that is the draft id; after, the real id.
+            // Stopping the wrong one leaves a runaway yt-dlp/ffmpeg alive.
+            ExecutionCoordinator.stopCurrentCommand(activeSessionId)
+            if (isDraft && realSessionId.isNotEmpty() && activeSessionId != sessionId) {
+                // Mid-turn rename: sweep any lingering draft shell too.
+                ExecutionCoordinator.stopCurrentCommand(sessionId)
+            }
+            handleUserCancelledCleanup()
 
-        // T189: iOS parity (AIChatViewModel.swift L2592-2610). If the user
-        // enqueued prompts during the cancelled stream, auto-resume the drain
-        // instead of leaving them stuck as dashed bubbles waiting for a manual
-        // long-press retry.
-        val pending = _promptQueue.value
-        if (pending.isNotEmpty()) {
-            AppLogger.info(TAG_STREAM, "cancel — ${pending.size} queued prompt(s) remain, restarting drain")
-            resumeQueueAfterCancel()
+            // T189: iOS parity (AIChatViewModel.swift L2592-2610). If the user
+            // enqueued prompts during the cancelled stream, auto-resume the drain
+            // instead of leaving them stuck as dashed bubbles waiting for a manual
+            // long-press retry.
+            val pending = _promptQueue.value
+            if (pending.isNotEmpty()) {
+                AppLogger.info(TAG_STREAM, "cancel — ${pending.size} queued prompt(s) remain, restarting drain")
+                resumeQueueAfterCancel()
+            }
         }
     }
 
@@ -4872,6 +4831,16 @@ class ChatViewModel(
             _error.value = "No provider configured"
             return
         }
+        val claimToken = Any()
+        var sendEpoch = -1L
+        if (!claimStreamingSlot(_isStreaming) {
+                streamingClaimToken = claimToken
+                streamEpoch++
+                streamingClaimEpoch = streamEpoch
+                sendEpoch = streamingClaimEpoch
+                _isStreaming.value = true
+            }
+        ) return
         _canResume.value = false
         _error.value = null
         // [T-error-persist-android] resume() follows finalizeAtTurnLimit's
@@ -4887,30 +4856,7 @@ class ChatViewModel(
         // behind the input bar.
         _forceScrollToBottom.tryEmit(Unit)
 
-        // [B-08 deep-audit-1048] Claim _isStreaming SYNCHRONOUSLY, before any
-        // coroutine starts — the same discipline sendMessage / retryFromMessage
-        // / rerunFromToolBlock already follow. This used to be minted INSIDE
-        // the setup coroutine, after systemPromptForSession() had already hit
-        // disk (SoulStore / memory / skill dirs), which opened two windows:
-        //   · every entry guard (`if (_isStreaming.value)` in sendMessage /
-        //     retryFromMessage / rerunFromToolBlock) still read false, so a
-        //     second turn could start while this one was still preparing;
-        //   · cancelStream() only had the previous streamJob to cancel — the
-        //     setup coroutine owned no handle, survived the Stop, and started a
-        //     stream the user had already stopped ("Stop 后诈尸").
         AppLogger.info(TAG_STREAM, "resume _isStreaming=true (sync, sid=$activeSessionId)")
-        // [T-claim-token-vs-stale-finally] Mint the claim token BEFORE the flag
-        // flips, so a predecessor's finally landing anywhere during this claim
-        // is a no-op instead of a flip that hides the new turn's Stop button.
-        // See streamingClaimToken KDoc.
-        streamingClaimToken = Any()
-        _isStreaming.value = true
-        streamEpoch++
-        // [T-stale-finally-vs-new-claim] Publish the claim so an older job's
-        // finally can't flip _isStreaming off during the setup window.
-        streamingClaimEpoch = streamEpoch
-        val sendEpoch = streamingClaimEpoch
-        val claimToken = streamingClaimToken
 
         // [FIX-R4-P F-07] The continue reminder used to be appended HERE, before
         // the setup shell ran. It is a real persisted user turn, so writing it
@@ -4960,8 +4906,12 @@ class ChatViewModel(
                 // cleanup's reminder-tail probe (planStopCleanup) now self-heals
                 // the remaining pre-first-packet window.
 
-                streamLaunched = true
-                streamJob = launch(Dispatchers.IO) {
+                synchronized(_isStreaming) {
+                    if (!isActive || !_isStreaming.value || sendEpoch != streamingClaimEpoch || claimToken !== streamingClaimToken) {
+                        return@synchronized
+                    }
+                    streamLaunched = true
+                    streamJob = launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
                     AppLogger.info(TAG_STREAM, "resume streamJob ENTER sid=$activeSessionId")
                     try {
                         SessionConcurrencyManager.acquireSlot(activeSessionId)
@@ -5071,23 +5021,25 @@ class ChatViewModel(
                             AppLogger.info(TAG_STREAM, "resume streamJob FINALLY enter")
                             // [T-claim-token-vs-stale-finally] Only the current turn
                             // may tear down run-state — see the send path's finally.
-                            if (claimToken === streamingClaimToken) {
-                                // [audit-0907 B2] Reset queue-position state — same
-                                // rationale as the send path's finally: whatever the
-                                // worker reported while queued must not leak into the
-                                // next run's typing indicator.
-                                resetQueueWaitingAhead()
-                                // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
-                                resetAwaitingResponseSince()
-                                // [T-android-overlay-reply-status-34599] Surface
-                                // the assistant's most recent reply text to the
-                                // overlay BEFORE setInactive so the post-completion
-                                // overlay state (no-running, has-outcome) carries a
-                                // non-null excerpt. Reading _messages here is safe:
-                                // we're in the finally block of the agent loop and
-                                // the stream has already flushed its last delta.
-                                publishOverlayReplyExcerpt(activeSessionId)
-                                SessionActivityTracker.setInactive(activeSessionId)
+                            synchronized(_isStreaming) {
+                                if (claimToken === streamingClaimToken) {
+                                    // [audit-0907 B2] Reset queue-position state — same
+                                    // rationale as the send path's finally: whatever the
+                                    // worker reported while queued must not leak into the
+                                    // next run's typing indicator.
+                                    resetQueueWaitingAhead()
+                                    // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
+                                    resetAwaitingResponseSince()
+                                    // [T-android-overlay-reply-status-34599] Surface
+                                    // the assistant's most recent reply text to the
+                                    // overlay BEFORE setInactive so the post-completion
+                                    // overlay state (no-running, has-outcome) carries a
+                                    // non-null excerpt. Reading _messages here is safe:
+                                    // we're in the finally block of the agent loop and
+                                    // the stream has already flushed its last delta.
+                                    publishOverlayReplyExcerpt(activeSessionId)
+                                    SessionActivityTracker.setInactive(activeSessionId)
+                                }
                             }
                             SessionConcurrencyManager.releaseSlot(activeSessionId)
                             AppLogger.info(TAG_STREAM, "resume streamJob FINALLY exit")
@@ -5098,22 +5050,28 @@ class ChatViewModel(
                     }
                     // [T-android-stale-streamjob-clears-isstreaming] guard +
                     // epoch gate (see runRerunStreamTail).
-                    if (streamJob === coroutineContext[Job] && sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
-                        AppLogger.info(TAG_STREAM, "resume _isStreaming=false (about to set)")
-                        _isStreaming.value = false
-                    } else {
-                        AppLogger.info(TAG_STREAM, "resume _isStreaming SKIPPED (stale job; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch claimSuperseded=${claimToken !== streamingClaimToken})")
+                    synchronized(_isStreaming) {
+                        if (streamJob === coroutineContext[Job] && sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
+                            AppLogger.info(TAG_STREAM, "resume _isStreaming=false (about to set)")
+                            _isStreaming.value = false
+                        } else {
+                            AppLogger.info(TAG_STREAM, "resume _isStreaming SKIPPED (stale job; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch claimSuperseded=${claimToken !== streamingClaimToken})")
+                        }
                     }
                     AppLogger.info(TAG_STREAM, "resume streamJob EXIT")
+                }
+                streamJob?.start()
                 }
             } finally {
                 if (!streamLaunched) {
                     // [T-stale-finally-vs-new-claim] Only clear under our own claim.
-                    if (sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
-                        AppLogger.info(TAG_STREAM, "resume _isStreaming=false (setup aborted)")
-                        _isStreaming.value = false
-                    } else {
-                        AppLogger.info(TAG_STREAM, "resume _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                    synchronized(_isStreaming) {
+                        if (sendEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
+                            AppLogger.info(TAG_STREAM, "resume _isStreaming=false (setup aborted)")
+                            _isStreaming.value = false
+                        } else {
+                            AppLogger.info(TAG_STREAM, "resume _isStreaming=false SKIPPED (superseded; sendEpoch=$sendEpoch claimEpoch=$streamingClaimEpoch)")
+                        }
                     }
                 }
             }
