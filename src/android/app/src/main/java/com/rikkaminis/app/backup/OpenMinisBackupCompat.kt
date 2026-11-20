@@ -796,14 +796,21 @@ object OpenMinisBackupCompat {
             }
         }
         val typeToLabel = HashMap<String, Pair<String, String>>()
+        val seenSourceIds = HashSet<String>()
 
         val out = JSONArray()
         for (i in 0 until instances.length()) {
             val inst = instances.optJSONObject(i) ?: continue
+            val source = inst.opt("id") as? String
             val ptype = inst.optString("providerType", "")
             val label = inst.optString("label", "")
+            // Count declarations before filtering bad provider records. A
+            // duplicate with a missing label still makes this id ambiguous.
+            if (!source.isNullOrBlank()) {
+                if (!seenSourceIds.add(source)) typeToLabel.remove(source)
+                else if (ptype.isNotBlank() && label.isNotBlank()) typeToLabel[source] = ptype to label
+            }
             if (ptype.isEmpty() || label.isEmpty()) continue
-            typeToLabel[inst.optString("id", "")] = ptype to label
 
             val obj = JSONObject()
             obj.put("providerType", ptype)
@@ -989,7 +996,13 @@ object OpenMinisBackupCompat {
             // 它当成「没有这条记录」——规则少了几条，界面上看不出任何异常。
             val d = shapes.objOrNull(rec, "d", "data/thinking_rules.jsonl 的 ThinkingRuleV1")
                 ?: continue
-            val instId = d.optString("instanceId", "")
+            val instId = (d.opt("instanceId") as? String).orEmpty()
+            if (instId !in typeToLabel) {
+                shapes.custom("thinkingRuleOwner") { n ->
+                    "thinking rules: skipped $n rule(s) without a unique declared source provider"
+                }
+                continue
+            }
             val arr = byInstance.getOrPut(instId) { JSONArray() }
             val r = JSONObject()
             r.put("id", d.optString("id", ""))

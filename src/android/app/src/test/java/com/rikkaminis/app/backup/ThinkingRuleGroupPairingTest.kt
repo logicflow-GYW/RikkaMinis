@@ -1,148 +1,161 @@
 package com.rikkaminis.app.backup
 
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * [SURGERY-W4 B01] The thinking-rules section is SPARSE: one group per provider
- * that HAS rules. The importer used to pair a group with a provider by ARRAY
- * POSITION, so A(0 rules)/B(1 rule) restored B's rules onto A.
- *
- * The fix is identity: every exported group carries the source provider's
- * instance id (`_sourceInstanceId`), and the importer pairs by that id
- * through Stage 1's source→restored map. A legacy backup (no such id) still
- * restores when the (type, label) pair is unique — and is REFUSED with a
- * visible note when it is ambiguous, instead of guessing.
- *
- * The decision function under test is the PRODUCTION one
- * (ConfigBackup.kt's ThinkingRuleGroupPairing), not a replica.
- */
+/** Synthetic documents through the real Provider and rule stages. */
 class ThinkingRuleGroupPairingTest {
-
     @Test
-    fun `the group lands on the provider its source id names`() {
-        val d = ConfigBackup.ThinkingRuleGroupPairing.decide(
-            sourceInstanceId = "src-b",
-            restoredBySource = mapOf("src-a" to "rest-a", "src-b" to "rest-b"),
-            idsForKey = listOf("rest-a", "rest-b"),
-            lastIdForKey = "rest-b",
+    fun `failed first provider keeps its original legacy slot`() = runBlocking {
+        val store = RestoreTestStore()
+        store.repo.awaitConfigLoaded()
+        store.failNextSecret = true
+        val report = ConfigBackup.import(
+            store.repo, restoreDocument(
+                providers = JSONArray().put(sourceProvider().put("apiKey", "fixture-only")).put(sourceProvider()),
+                rules = JSONArray().put(sourceRules(rows = arrayOf(ruleRow("first"))))
+                    .put(sourceRules(rows = arrayOf(ruleRow("second")))),
+            ),
         )
-        assertEquals(ConfigBackup.ThinkingRuleGroupPairing.Decision.Owner("rest-b"), d)
+        // The append of A happened, but its later credential write failed.
+        // B must not inherit A's rules or merge into the partially created A.
+        val owners = store.repo.instances.associate { it.label to it.id }
+        assertEquals(setOf("Same", "Same (2)"), owners.keys)
+        assertEquals(1, report.providersImported)
+        assertEquals(1, report.thinkingRulesImported)
+        assertEquals(mapOf("second" to owners.getValue("Same (2)")), store.dao.rules.mapValues { it.value.providerInstanceId })
+        assertTrue(report.skipped.any { it.contains("source provider not restored") })
     }
 
     @Test
-    fun `a sparse export does not shift rules onto the previous provider`() {
-        // A has no rules at all, so it never appears in the rules section.
-        val restoredBySource = mapOf("src-a" to "rest-a", "src-b" to "rest-b")
-        val idsForKey = listOf("rest-a", "rest-b")
-
-        val group = JSONObject().put("providerType", "openAI").put("providerLabel", "Same")
-            .put("_sourceInstanceId", "src-b")
-
-        val d = ConfigBackup.ThinkingRuleGroupPairing.decide(
-            sourceInstanceId = group.optString("_sourceInstanceId", ""),
-            restoredBySource = restoredBySource,
-            idsForKey = idsForKey,
-            lastIdForKey = "rest-b",
+    fun `bad rules array consumes its known legacy slot without shifting the next group`() = runBlocking {
+        val store = RestoreTestStore()
+        store.repo.awaitConfigLoaded()
+        val report = ConfigBackup.import(
+            store.repo, restoreDocument(
+                providers = JSONArray().put(sourceProvider()).put(sourceProvider()),
+                rules = JSONArray().put(sourceRules().put("rules", "broken"))
+                    .put(sourceRules(rows = arrayOf(ruleRow("second")))),
+            ),
         )
-
-        assertEquals(ConfigBackup.ThinkingRuleGroupPairing.Decision.Owner("rest-b"), d)
+        val owner = store.repo.instances.single { it.label == "Same (2)" }
+        assertEquals(1, report.thinkingRulesImported)
+        assertEquals(owner.id, store.dao.rules.getValue("second").providerInstanceId)
+        assertTrue(report.skipped.any { it.contains("invalid rules array") })
     }
 
     @Test
-    fun `a legacy group with a unique label still restores`() {
-        val d = ConfigBackup.ThinkingRuleGroupPairing.decide(
-            sourceInstanceId = "",
-            restoredBySource = emptyMap(),
-            idsForKey = listOf("rest-solo"),
-            lastIdForKey = "rest-solo",
+    fun `surplus or sparse legacy groups with the same key are not guessed`() = runBlocking {
+        for (groupCount in listOf(1, 3)) {
+            val store = RestoreTestStore()
+            store.repo.awaitConfigLoaded()
+            val rules = JSONArray()
+            repeat(groupCount) { rules.put(sourceRules(rows = arrayOf(ruleRow("rule-$it")))) }
+            val report = ConfigBackup.import(
+                store.repo, restoreDocument(
+                    providers = JSONArray().put(sourceProvider()).put(sourceProvider()), rules = rules,
+                ),
+            )
+            assertEquals(2, report.providersImported)
+            assertEquals(0, report.thinkingRulesImported)
+            assertTrue(store.dao.rules.isEmpty())
+            assertEquals(groupCount, report.skipped.count { it.contains("rules not restored") })
+        }
+    }
+
+    @Test
+    fun `valid legacy documents keep unique labels and full duplicate label order`() = runBlocking {
+        val store = RestoreTestStore()
+        store.repo.awaitConfigLoaded()
+        val report = ConfigBackup.import(
+            store.repo, restoreDocument(
+                providers = JSONArray().put(sourceProvider()).put(sourceProvider("Unique")).put(sourceProvider()),
+                rules = JSONArray().put(sourceRules(rows = arrayOf(ruleRow("a"))))
+                    .put(sourceRules("Unique", rows = arrayOf(ruleRow("u"))))
+                    .put(sourceRules(rows = arrayOf(ruleRow("b")))),
+            ),
         )
-        assertEquals(ConfigBackup.ThinkingRuleGroupPairing.Decision.Owner("rest-solo"), d)
-    }
-
-    @Test
-    fun `a legacy group with duplicate labels is refused instead of guessed`() {
-        // Two providers share the key, but the backup carries only ONE rule
-        // group for them: the sparse section cannot say which provider owns it.
-        val d = ConfigBackup.ThinkingRuleGroupPairing.decide(
-            sourceInstanceId = "",
-            restoredBySource = emptyMap(),
-            idsForKey = listOf("rest-a", "rest-b"),
-            lastIdForKey = "rest-b",
-            groupCountForKey = 1,
+        val owners = store.repo.instances.associate { it.label to it.id }
+        assertEquals(3, report.thinkingRulesImported)
+        assertEquals(
+            mapOf("a" to owners.getValue("Same"), "u" to owners.getValue("Unique"), "b" to owners.getValue("Same (2)")),
+            store.dao.rules.mapValues { it.value.providerInstanceId },
         )
-        assertEquals(ConfigBackup.ThinkingRuleGroupPairing.Decision.Refused("ambiguous"), d)
     }
 
     @Test
-    fun `a legacy backup with one group per provider stays position-safe`() {
-        // Two providers share the key and the backup carries TWO groups — the
-        // pre-annotation format, where the groups line up one to one.
-        val first = ConfigBackup.ThinkingRuleGroupPairing.decide(
-            sourceInstanceId = "",
-            restoredBySource = emptyMap(),
-            idsForKey = listOf("rest-a", "rest-b"),
-            lastIdForKey = "rest-b",
-            groupCountForKey = 2,
+    fun `sparse explicit and mixed documents only apply known owners`() = runBlocking {
+        val store = RestoreTestStore()
+        store.repo.awaitConfigLoaded()
+        val report = ConfigBackup.import(
+            store.repo, restoreDocument(
+                providers = JSONArray().put(sourceProvider(source = "a")).put(sourceProvider(source = "b")),
+                rules = JSONArray().put(sourceRules(rows = arrayOf(ruleRow("unowned"))))
+                    .put(sourceRules(source = "b", rows = arrayOf(ruleRow("belongs-to-b")))),
+            ),
         )
-        assertEquals(ConfigBackup.ThinkingRuleGroupPairing.Decision.Owner("rest-a"), first)
+        assertEquals(1, report.thinkingRulesImported)
+        assertEquals(setOf("belongs-to-b"), store.dao.rules.keys)
+        assertEquals(store.repo.instances.single { it.label == "Same (2)" }.id, store.dao.rules.getValue("belongs-to-b").providerInstanceId)
+        assertTrue(report.skipped.any { it.contains("mixed with source-identified") })
     }
 
     @Test
-    fun `a legacy group whose provider is missing is refused`() {
-        val d = ConfigBackup.ThinkingRuleGroupPairing.decide(
-            sourceInstanceId = "",
-            restoredBySource = emptyMap(),
-            idsForKey = emptyList(),
-            lastIdForKey = null,
-            groupCountForKey = 1,
+    fun `duplicate source declarations including a failed one and duplicate groups are refused`() = runBlocking {
+        for (duplicateProviders in listOf(true, false)) {
+            val store = RestoreTestStore()
+            store.repo.awaitConfigLoaded()
+            val providers = JSONArray().put(sourceProvider(source = "src"))
+            val rules = JSONArray().put(sourceRules(source = "src", rows = arrayOf(ruleRow("a"))))
+            if (duplicateProviders) {
+                providers.put(sourceProvider(source = "src").put("providerType", "no-such-type"))
+            } else {
+                rules.put(sourceRules(source = "src", rows = arrayOf(ruleRow("b"))))
+            }
+            val report = ConfigBackup.import(store.repo, restoreDocument(providers, rules))
+            assertEquals(1, report.providersImported)
+            assertEquals(0, report.thinkingRulesImported)
+            assertTrue(store.dao.rules.isEmpty())
+            assertTrue(report.skipped.any { it.contains("duplicated") })
+        }
+    }
+
+    @Test
+    fun `an unidentified malformed group cannot be hidden by a surplus legacy group`() = runBlocking {
+        val store = RestoreTestStore()
+        store.repo.awaitConfigLoaded()
+        val report = ConfigBackup.import(
+            store.repo, restoreDocument(
+                providers = JSONArray().put(sourceProvider()),
+                rules = JSONArray().put(JSONObject.NULL).put(sourceRules(rows = arrayOf(ruleRow("surplus")))),
+            ),
         )
-        assertEquals(ConfigBackup.ThinkingRuleGroupPairing.Decision.Refused("no-provider"), d)
+        assertEquals(0, report.thinkingRulesImported)
+        assertTrue(store.dao.rules.isEmpty())
+        assertTrue(report.skipped.any { it.contains("no identifiable type/label") })
     }
 
     @Test
-    fun `a group whose source provider was not restored is refused`() {
-        val d = ConfigBackup.ThinkingRuleGroupPairing.decide(
-            sourceInstanceId = "src-gone",
-            restoredBySource = mapOf("src-a" to "rest-a"),
-            idsForKey = listOf("rest-a"),
-            lastIdForKey = "rest-a",
+    fun `both groups retain their own id reassignment notes`() = runBlocking {
+        val store = RestoreTestStore()
+        store.repo.awaitConfigLoaded()
+        val report = ConfigBackup.import(
+            store.repo, restoreDocument(
+                providers = JSONArray().put(sourceProvider("Original")).put(sourceProvider("A")).put(sourceProvider("B")),
+                rules = JSONArray().put(sourceRules("Original", rows = arrayOf(ruleRow("same-id"))))
+                    .put(sourceRules("A", rows = arrayOf(ruleRow("same-id", "rule A"))))
+                    .put(sourceRules("B", rows = arrayOf(ruleRow("same-id", "rule B")))),
+            ),
         )
-        assertEquals(ConfigBackup.ThinkingRuleGroupPairing.Decision.Refused("unknown-source"), d)
-    }
-
-    @Test
-    fun `a group with no restored provider at all is refused`() {
-        val d = ConfigBackup.ThinkingRuleGroupPairing.decide(
-            sourceInstanceId = "",
-            restoredBySource = emptyMap(),
-            idsForKey = emptyList(),
-            lastIdForKey = null,
-        )
-        assertEquals(ConfigBackup.ThinkingRuleGroupPairing.Decision.Refused("no-provider"), d)
-    }
-
-    @Test
-    fun `the refusal notes name the reason`() {
-        assertTrue(ConfigBackup.ThinkingRuleGroupPairing.refusalNote("Same", "ambiguous").contains("source identity"))
-        assertTrue(ConfigBackup.ThinkingRuleGroupPairing.refusalNote("Same", "unknown-source").contains("not restored"))
-        assertTrue(ConfigBackup.ThinkingRuleGroupPairing.refusalNote("Same", "no-provider").contains("not restored"))
-    }
-
-    @Test
-    fun `the exported group shape carries the source identity`() {
-        // The shape the exporter writes: a group with providerType/label/rules
-        // plus the source id. Older groups (without it) stay loadable.
-        val group = JSONObject()
-            .put("providerType", "openAI")
-            .put("providerLabel", "Same")
-            .put("_sourceInstanceId", "src-b")
-            .put("rules", JSONArray().put(JSONObject().put("id", "r1").put("label", "rule")))
-
-        assertEquals("src-b", group.optString("_sourceInstanceId", ""))
-        assertEquals(1, group.getJSONArray("rules").length())
+        assertEquals(3, report.thinkingRulesImported)
+        assertEquals("same-id", store.dao.rules.getValue("same-id").label)
+        assertEquals(setOf("same-id", "rule A", "rule B"), store.dao.rules.values.map { it.label }.toSet())
+        assertEquals(2, report.skipped.count { it.contains("restored under new ids") })
+        assertTrue(report.skipped.any { it.contains("\"A\"") && it.contains("new ids") })
+        assertTrue(report.skipped.any { it.contains("\"B\"") && it.contains("new ids") })
     }
 }

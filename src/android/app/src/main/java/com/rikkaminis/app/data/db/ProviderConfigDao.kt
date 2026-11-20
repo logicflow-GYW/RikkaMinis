@@ -331,10 +331,9 @@ interface ProviderConfigDao {
             is ThinkingRuleMutation.Delete -> current.filterNot { it.id == mutation.id }
             is ThinkingRuleMutation.Reorder -> {
                 val byId = current.associateBy { it.id }
-                val ordered = mutation.orderedIds.mapNotNull { byId[it] }
-                // Keep any id the caller omitted (defensive against a partial
-                // list) appended.
-                ordered + current.filter { it.id !in mutation.orderedIds }
+                // Reorder is a permutation, not an import of multiple rule rows.
+                val ids = mutation.orderedIds.toSet()
+                ids.mapNotNull { byId[it] } + current.filter { it.id !in ids }
             }
         }.mapIndexed { i, e -> e.copy(sortOrder = i) }
         val occupied = loadAllThinkingRules().associate { it.id to it.providerInstanceId }

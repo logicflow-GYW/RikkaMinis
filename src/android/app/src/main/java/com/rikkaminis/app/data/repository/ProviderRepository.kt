@@ -10,6 +10,7 @@ import com.rikkaminis.app.data.db.ProviderConfigMetaEntity
 import com.rikkaminis.app.data.db.ProviderConfigSnapshot
 import com.rikkaminis.app.data.db.ProviderDatabase
 import com.rikkaminis.app.data.db.ProviderThinkingRuleEntity
+import com.rikkaminis.app.data.db.ThinkingRuleMutation
 import com.rikkaminis.app.data.db.compositeEntryKey
 import com.rikkaminis.app.data.db.restoreFrozenBlobs
 import com.rikkaminis.app.data.db.toProviderConfig
@@ -41,14 +42,40 @@ import com.rikkaminis.app.provider.thinking.ThinkingRuleCoding
 import com.rikkaminis.app.provider.thinking.ThinkingRuleResolver
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
-class ProviderRepository(private val context: Context) {
+class ProviderRepository internal constructor(
+    private val context: Context,
+    private val prefs: SharedPreferences,
+    private val providerDao: ProviderConfigDao,
+    private val persistExecutor: Executor,
+    loadEncryptedPrefs: () -> SharedPreferences,
+) {
+    // provider.db is separate from minis.db. Only this executor writes regular
+    // config snapshots; FIFO submission under configLock preserves mutation order.
+    constructor(context: Context) : this(
+        context,
+        context.getSharedPreferences("provider_config", Context.MODE_PRIVATE),
+        ProviderDatabase.getInstance(context).providerConfigDao(),
+        Executors.newSingleThreadExecutor { r ->
+            Thread(r, "ProviderConfig-Persist").apply { isDaemon = true }
+        },
+        { com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(context, "provider_secrets") },
+    )
 
     // [T-android-thinking-level-arch] coerceInputValues makes kotlinx.serialization
     // fall back to a property's DEFAULT when it can't decode the wire value —
@@ -66,18 +93,6 @@ class ProviderRepository(private val context: Context) {
         encodeDefaults = true
         coerceInputValues = true
     }
-
-    private val prefs: SharedPreferences = context.getSharedPreferences("provider_config", Context.MODE_PRIVATE)
-
-    // [T-android-provider-room-store] Per-row provider config DB. Lives in
-    // its own provider.db file so a downgrade to a build that doesn't know
-    // about provider tables can't crash the main minis.db open. The legacy
-    // SharedPreferences JSON mirror under "provider_config / config" is
-    // still written on every save so older builds keep reading current
-    // config — losing nothing on downgrade. See [loadConfig] for the
-    // downgrade-and-back-up reconciliation logic.
-    private val providerDao: ProviderConfigDao =
-        ProviderDatabase.getInstance(context).providerConfigDao()
 
     companion object {
         /**
@@ -176,12 +191,7 @@ class ProviderRepository(private val context: Context) {
         prefs.edit().remove(lastFetchKey(instanceId)).apply()
     }
 
-    private val encryptedPrefs: SharedPreferences by lazy {
-        // T-android-keystore-aead-fail: route through the self-healing
-        // factory so a corrupted master key on Samsung One UI / Android
-        // 16 doesn't crash the app at first read.
-        com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(context, "provider_secrets")
-    }
+    private val encryptedPrefs: SharedPreferences by lazy(loadEncryptedPrefs)
 
     // [T-android-startup-config-stall] #753: loadConfig() does a synchronous
     // SharedPreferences read (~3s first-touch as the XML is parsed) + a
@@ -242,54 +252,6 @@ class ProviderRepository(private val context: Context) {
 
     suspend fun awaitConfigLoaded() = configLoadComplete.await()
 
-    init {
-        // [T8-1] One-time registration of provider API adapters so the
-        // data layer never imports provider implementations directly.
-        // Idempotent (last-registration-wins per type).
-        registerModelListProviders()
-        loadScope.launch {
-            val loaded = loadConfig()
-            synchronized(configLock) {
-                // Only adopt the disk config if nothing has written in the
-                // meantime. A write during the load window (rare — writes come
-                // from user/refresh actions that themselves need config) flips
-                // _configLoaded true and takes precedence; we must not clobber
-                // it with the stale on-disk snapshot.
-                if (!_configLoaded.value) {
-                    _config.value = loaded
-                    _configLoaded.value = true
-                    // [T-thinking-rules-cold-start-warm] Warm the resolver's
-                    // custom-rule cache on the adopt path too. The sync-load
-                    // path warms inside [ensureConfigLoaded], but once this
-                    // async load wins the race every later ensureConfigLoaded
-                    // early-returns — without this warm the cache stayed
-                    // empty after a cold start and user thinking rules were
-                    // silently ignored until the next rule edit.
-                    loadAllThinkingRulesIntoCache()
-                }
-            }
-            if (!configLoadComplete.isCompleted) configLoadComplete.complete(Unit)
-            // [model-catalog-split] One-shot migration: `modelEntries` now holds
-            // ONLY user selections, so the legacy full-catalog rows (isHidden =
-            // true, dropped in by the old refresh path) are removed. Runs before
-            // the voice-template reconcile so the seeds it re-adds are measured
-            // against the post-migration table.
-            try {
-                migrateSelectionOnlyModelEntries()
-            } catch (e: Exception) {
-                android.util.Log.w("ProviderRepo", "[ModelList] selection-only migration failed: ${e.message}")
-            }
-            // [T-android-provider-voice] Reconcile voice-template seeds after
-            // the initial load (add new template models, drop retired seeds,
-            // heal corrupted modality). Mirrors iOS ProviderConfigStore.init.
-            try {
-                ensureVoiceTemplateModels()
-            } catch (e: Exception) {
-                android.util.Log.w("ProviderRepo", "[Voice] ensureVoiceTemplateModels failed: ${e.message}")
-            }
-        }
-    }
-
     /**
      * Lock guarding all mutate-and-save sequences against concurrent writers
      * (notably the `for instance in enabled { scope.launch { autoRefreshModels(...) } }`
@@ -305,59 +267,50 @@ class ProviderRepository(private val context: Context) {
      */
     private val configLock = Any()
 
-    /**
-     * [T-android-provider-offmain-persist] Single-thread executor for the
-     * serialize + DB + commit span (see [saveConfig]). One thread = persist
-     * jobs land in submission (mutation) order and never overlap; daemon so
-     * it can never block JVM exit.
-     */
-    private val persistExecutor =
-        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-            Thread(r, "ProviderConfig-Persist").apply { isDaemon = true }
+    // Lock order: configLock -> thinkingRulesWriter (startup and instance removal).
+    // A rule writer never enters configLock; its owner check reads the StateFlow.
+    private val thinkingRulesWriter = Mutex()
+
+    internal enum class ConfigWrite { BOTH, DB_ONLY, MIRROR_ONLY, NEITHER }
+
+    private data class PersistedConfig(val snapshot: ProviderConfigSnapshot, val write: ConfigWrite)
+
+    // Only synchronous Provider/Group mutators run in this scope. Never hold it
+    // across a suspension or let it propagate to catalog refresh/UI threads.
+    private val restoringConfig = ThreadLocal<ConfigPersistenceBarrier>()
+
+    internal inner class ConfigPersistenceBarrier {
+        private val writes = ArrayList<CompletableDeferred<ConfigWrite>>()
+
+        fun <T> capture(submit: () -> T): T {
+            check(restoringConfig.get() == null)
+            restoringConfig.set(this)
+            return try {
+                submit()
+            } finally {
+                restoringConfig.remove()
+            }
         }
 
-    /**
-     * [SURGERY-W4 B05] Completion barrier for a restore batch.
-     *
-     * [saveConfig] stays fire-and-forget for ordinary UI edits (the 50–160 ms
-     * disk span must not move onto the click thread), but a restore caller has
-     * to know whether the Provider/Group writes it just applied actually
-     * landed before it reports success or lets the owner go. [beginPersistence]
-     * opens a batch; [ConfigPersistenceBarrier.await] waits for the LAST queued
-     * snapshot (the single-thread executor is FIFO, so that covers every job
-     * submitted before the call) and reports the batch's persisted status.
-     *
-     * Scope: this proves "the snapshots queued by this batch finished", NOT
-     * cross-database atomicity. A failure in an EARLIER batch that has not
-     * drained yet is also caught by the same FIFO wait.
-     */
-    private val persistFailures = java.util.concurrent.atomic.AtomicLong(0)
-    @Volatile
-    private var latestPersistJob: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        internal fun receipt(): CompletableDeferred<ConfigWrite> =
+            CompletableDeferred<ConfigWrite>().also { writes.add(it) }
 
-    inner class ConfigPersistenceBarrier internal constructor(
-        private val failuresAtStart: Long,
-    ) {
-        /**
-         * Suspend until every Provider snapshot queued so far has been written.
-         * Returns false when any write in/under this batch failed — the caller
-         * must surface that instead of reporting the restore as complete.
-         */
-        suspend fun await(): Boolean {
-            // FIFO executor: the newest queued job finishing means every job
-            // submitted before it has finished too.
-            latestPersistJob?.await()
-            return persistFailures.get() == failuresAtStart
+        // No writes => no wait, even if an unrelated UI write is queued. The
+        // receipts are not children of the waiter: cancellation cannot unqueue
+        // an already-published snapshot or cancel another observer's receipt.
+        suspend fun await(): List<ConfigWrite> {
+            currentCoroutineContext().ensureActive()
+            return writes.map { it.await() }
         }
-
-        /** The failure count observed when this batch began (for diagnostics). */
-        fun failuresAtStart(): Long = failuresAtStart
-
     }
 
-    /** Begin a restore batch whose completion [ConfigPersistenceBarrier.await] can observe. */
-    fun beginPersistenceBatch(): ConfigPersistenceBarrier =
-        ConfigPersistenceBarrier(persistFailures.get())
+    internal fun beginPersistenceBatch() = ConfigPersistenceBarrier()
+
+    // Accessed only by initial reconciliation (before config is published)
+    // and then by the FIFO persist writer. SharedPreferences may update its
+    // in-memory map EVEN when commit returns false. Keep the last acknowledged
+    // mirror for hash repair across repeated false commits, not that cached value.
+    private var acknowledgedMirror: Result<String?>? = null
 
     /**
      * [fix/p1028-provider-corrupt-row] `provider_model_entries.id` values the
@@ -396,6 +349,36 @@ class ProviderRepository(private val context: Context) {
      */
     @Volatile
     private var unreadableMemberGroupIds: Set<String> = emptySet()
+
+    init {
+        // [T8-1] One-time registration of provider API adapters so the
+        // data layer never imports provider implementations directly.
+        // Idempotent (last-registration-wins per type).
+        registerModelListProviders()
+        loadScope.launch {
+            // The async and on-demand paths must not independently reconcile a
+            // stale mirror over a snapshot already submitted by a mutator.
+            ensureConfigLoaded()
+            // [model-catalog-split] One-shot migration: `modelEntries` now holds
+            // ONLY user selections, so the legacy full-catalog rows (isHidden =
+            // true, dropped in by the old refresh path) are removed. Runs before
+            // the voice-template reconcile so the seeds it re-adds are measured
+            // against the post-migration table.
+            try {
+                migrateSelectionOnlyModelEntries()
+            } catch (e: Exception) {
+                android.util.Log.w("ProviderRepo", "[ModelList] selection-only migration failed: ${e.message}")
+            }
+            // [T-android-provider-voice] Reconcile voice-template seeds after
+            // the initial load (add new template models, drop retired seeds,
+            // heal corrupted modality). Mirrors iOS ProviderConfigStore.init.
+            try {
+                ensureVoiceTemplateModels()
+            } catch (e: Exception) {
+                android.util.Log.w("ProviderRepo", "[Voice] ensureVoiceTemplateModels failed: ${e.message}")
+            }
+        }
+    }
 
     private fun loadConfig(): ProviderConfig = runBlocking { loadConfigSuspending() }
 
@@ -541,7 +524,7 @@ class ProviderRepository(private val context: Context) {
             android.util.Log.i("ProviderPerf", "JSON fallback decode: ${decodeMs}ms (jsonLen=$jsonLen)")
             if (parsed != null) {
                 val mirrored = try {
-                    persistToDbAndMirror(parsed)
+                    persistToDbAndMirror(parsed).snapshot.toProviderConfig(json)
                 } catch (e: Exception) {
                     android.util.Log.w("ProviderRepo", "[ProviderStore] JSON→DB import failed: ${e.message}")
                     parsed
@@ -597,21 +580,11 @@ class ProviderRepository(private val context: Context) {
     }
 
     /**
-     * Atomically persist [config] to (DB) + (legacy JSON mirror), with
-     * the meta.json_sync_hash kept in lockstep with the mirror we just
-     * wrote. Returns the canonicalized config (entry uuids rewritten to
-     * the composite "{instanceId}/{modelId}" shape via the snapshot
-     * round-trip). Callers should treat the return value as the new
-     * authoritative state — using the in-memory pre-call object would
-     * leak the legacy uuid form into [_config.value].
-     *
-     * [fix/dv22-a1 §1042-A-01] Degraded mode: if the DB write fails
-     * (provider.db unavailable), the failure is logged and the JSON mirror
-     * is STILL written — with the DB down, prefs is the only surviving
-     * store. The next launch's hash-mismatch re-import reseeds the DB from
-     * the mirror once the DB opens again.
+     * Persist the snapshot to Room, then to the legacy JSON mirror. These are
+     * separate commits. Room failure must not prevent the downgrade copy from
+     * being written; mirror failure still leaves the Room commit to report.
      */
-    private suspend fun persistToDbAndMirror(config: ProviderConfig): ProviderConfig {
+    private suspend fun persistToDbAndMirror(config: ProviderConfig): PersistedConfig {
         // First serialize without the hash so the meta row reflects the
         // exact string we put into prefs (the hash sees the mirror that
         // older builds will read, not a hash-of-itself).
@@ -688,56 +661,35 @@ class ProviderRepository(private val context: Context) {
         dbWrite.onFailure { e ->
             android.util.Log.e(
                 "ProviderRepo",
-                "[ProviderStore] DB incremental sync failed (provider.db unavailable?); " +
-                    "the JSON mirror already carries this write — DB stale until the next " +
-                    "launch re-imports it: ${e.message}",
+                "[ProviderStore] DB incremental sync failed; still attempting the JSON mirror: ${e.message}",
                 e,
             )
         }
 
-        // commit() not apply(): apply() queues the disk write and returns. If the
-        // process dies before it flushes, the next launch sees
-        // DB(hash=new) + JSON-on-disk(content=old) → the hash-mismatch path reads
-        // that as "an old build wrote during a downgrade" and re-imports the stale
-        // JSON. commit() blocks the persist thread (~5–30ms) and makes "did it
-        // land" observable, which the repair below depends on.
-        val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
-        if (!mirrorWritten) {
-            // Order-aware on purpose: with the DB write first, "the save is lost"
-            // would be a lie whenever provider.db accepted the rows — the repair
-            // below then keeps the two stores in step and the DB carries the save.
-            android.util.Log.w(
-                "ProviderRepo",
-                if (dbWrite.isSuccess) {
-                    "[ProviderStore] prefs mirror commit() returned false — provider.db has " +
-                        "this save; json_sync_hash is repaired to name the mirror that " +
-                        "exists, so the two stores stay in step (disk full? prefs corruption?)"
-                } else {
-                    "[ProviderStore] prefs mirror commit() returned false — the JSON mirror " +
-                        "still holds the previous config (disk full? prefs corruption?)"
-                },
-            )
+        // commit(), not apply(): this answer is about the disk write, not just
+        // the prefs in-memory map. Keep DB -> mirror -> hash repair in this order.
+        val previousMirror = acknowledgedMirror ?: runCatching { prefs.getString("config", null) }
+            .also { acknowledgedMirror = it }
+        val committed = runCatching { prefs.edit().putString("config", mirrorStr).commit() }
+            .onFailure { android.util.Log.w("ProviderRepo", "[ProviderStore] mirror write threw", it) }
+            .getOrDefault(false)
+        val liveMirror = if (committed) {
+            runCatching { prefs.getString("config", null) }
+                .onFailure { android.util.Log.w("ProviderRepo", "[ProviderStore] mirror read-back failed", it) }
+                .also { acknowledgedMirror = it }
+        } else {
+            previousMirror
         }
-        // [fix/meta1028-d1 F-01] `meta.json_sync_hash` must be a FACT about the
-        // mirror, not a claim about the string we tried to write. The cold-start
-        // rule is "mismatch ⇒ the mirror is fresher, re-import it", so a hash
-        // naming a mirror that never landed makes the load path mistake a rejected
-        // commit for a downgrade and back-fill the OLD JSON over the rows the user
-        // just saved.
-        //
-        // The mirror cannot be written before the DB (provider_import_id_roundtrip
-        // arm 10 pins that order), so the token is repaired after the fact: read
-        // back what prefs actually holds and, when it disagrees with what the DB
-        // was told, rewrite the single meta row to name the mirror that exists.
-        //
-        // This one block covers BOTH ways the claim can be wrong — a rejected
-        // commit(), and a prefs store that reports success but hands back the old
-        // string — because both make `truthfulHash != mirrorHash`. It is skipped
-        // when the DB write failed: then nothing was told a hash, and the stale
-        // hash still names the mirror that is actually on disk.
-        val liveMirror: String? = prefs.getString("config", null)
-        val truthfulHash = decideSyncHash(intendedMirror = mirrorStr, liveMirror = liveMirror)
-        if (dbWrite.isSuccess && truthfulHash != mirrorHash) {
+        val mirrorWritten = committed && liveMirror.getOrNull() == mirrorStr
+        if (!mirrorWritten) {
+            android.util.Log.w("ProviderRepo", "[ProviderStore] JSON mirror write not confirmed (commit=$committed)")
+        }
+        // A hash naming a rejected write makes cold start treat the older
+        // mirror as a downgrade edit and overwrite the new DB rows. Repair to
+        // the last acknowledged string (or the read-back after a successful
+        // commit). Without a readable baseline we cannot safely invent a hash.
+        val truthfulHash = decideSyncHash(intendedMirror = mirrorStr, liveMirror = liveMirror.getOrNull())
+        if (dbWrite.isSuccess && liveMirror.isSuccess && truthfulHash != mirrorHash) {
             runCatching {
                 if (truthfulHash == null) {
                     providerDao.deleteMetaKey(ProviderConfigMetaKeys.JSON_SYNC_HASH)
@@ -782,9 +734,13 @@ class ProviderRepository(private val context: Context) {
                     "above) — neither store took this write, in-memory state only",
             )
         }
-        // Return canonicalized form so the caller's _config.value reflects
-        // entry uuids in composite-key shape from this write forward.
-        return snapshot.toProviderConfig(json)
+        val write = when {
+            dbWrite.isSuccess && mirrorWritten -> ConfigWrite.BOTH
+            dbWrite.isSuccess -> ConfigWrite.DB_ONLY
+            mirrorWritten -> ConfigWrite.MIRROR_ONLY
+            else -> ConfigWrite.NEITHER
+        }
+        return PersistedConfig(snapshot, write)
     }
 
     /**
@@ -800,13 +756,12 @@ class ProviderRepository(private val context: Context) {
         if (_configLoaded.value) return
         synchronized(configLock) {
             if (_configLoaded.value) return
-            _config.value = loadConfig()
+            val loaded = loadConfig()
+            loadAllThinkingRulesIntoCache(loaded)
+            _config.value = loaded
             _configLoaded.value = true
         }
-        // [T-android-thinking-rules-phase2] Warm the resolver's custom-rule cache
-        // once config is available, so the (sync) request builder can read user rules.
-        loadAllThinkingRulesIntoCache()
-        if (!configLoadComplete.isCompleted) configLoadComplete.complete(Unit)
+        configLoadComplete.complete(Unit)
     }
 
     private fun saveConfig(config: ProviderConfig) {
@@ -875,25 +830,31 @@ class ProviderRepository(private val context: Context) {
                 // callers see the new value.
                 revision = config.revision + 1,
             )
-            _config.value = published
-            val job = kotlinx.coroutines.CompletableDeferred<Unit>()
-            latestPersistJob = job
-            persistExecutor.execute {
-                try {
-                    runBlocking { persistToDbAndMirror(published) }
-                } catch (e: Exception) {
-                    persistFailures.incrementAndGet()
-                    // In-memory state is already emitted; the next successful
-                    // save resyncs mirror + DB (same contract as the old
-                    // catch path — fire-and-forget callers never see this).
-                    android.util.Log.e(
-                        "ProviderRepo",
-                        "[ProviderStore] async persist failed; DB+mirror stale until next save: ${e.message}",
-                        e,
-                    )
-                } finally {
-                    job.complete(Unit)
+            val batch = restoringConfig.get()
+            val receipt = batch?.receipt()
+            // Submit before publishing to StateFlow, whose unconfined readers
+            // can run inline and enqueue the next mutation on this same thread.
+            try {
+                persistExecutor.execute {
+                    var outcome = ConfigWrite.NEITHER
+                    try {
+                        outcome = runBlocking { persistToDbAndMirror(published).write }
+                    } catch (e: Exception) {
+                        android.util.Log.e("ProviderRepo", "[ProviderStore] async persist aborted: ${e.message}", e)
+                    } finally {
+                        receipt?.complete(outcome)
+                    }
                 }
+            } catch (e: java.util.concurrent.RejectedExecutionException) {
+                receipt?.complete(ConfigWrite.NEITHER)
+                android.util.Log.e("ProviderRepo", "[ProviderStore] persist submission rejected", e)
+            }
+            // An observer is not part of the restore even if it resumes inline.
+            if (batch != null) restoringConfig.remove()
+            try {
+                _config.value = published
+            } finally {
+                if (batch != null) restoringConfig.set(batch)
             }
         }
     }
@@ -1271,13 +1232,16 @@ class ProviderRepository(private val context: Context) {
         }
 
         saveConfig(config)
-        deleteApiKey(instanceId)
-        // [T-android-thinking-rules-phase2] The instance is gone — drop its custom
-        // rules from Room and the resolver cache (they can never fire again).
-        runCatching {
-            runBlocking { providerDao.deleteThinkingRulesForInstance(instanceId) }
-            ThinkingRuleResolver.setCustomRules(instanceId, emptyList())
+        // Same rule boundary as save/delete/reorder/restore. The owner is already
+        // absent from _config, so a waiting edit cannot recreate its rules.
+        runBlocking {
+            thinkingRulesWriter.withLock {
+                runCatching { providerDao.deleteThinkingRulesForInstance(instanceId) }
+                    .onFailure { android.util.Log.w("ProviderRepo", "[ProviderStore] rule cleanup failed ($instanceId)", it) }
+                ThinkingRuleResolver.setCustomRules(instanceId, emptyList())
+            }
         }
+        deleteApiKey(instanceId)
     }
 
     /**
@@ -1338,96 +1302,65 @@ class ProviderRepository(private val context: Context) {
         return _config.value.modelEntries.firstOrNull { it.providerInstanceId == instanceId }?.baseModel?.id
     }
 
-    /** Warm the resolver cache with every instance's custom rules (called on config load). */
-    fun loadAllThinkingRulesIntoCache() {
-        runCatching {
-            val rows = runBlocking { providerDao.loadAllThinkingRules() }
-            val byInstance = rows.groupBy { it.providerInstanceId }
-                .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { ThinkingRuleCoding.toRule(it) } }
-            ThinkingRuleResolver.setAllCustomRules(byInstance)
+    /** Read and publish under the same rule lock as edit/restore/delete. */
+    private fun loadAllThinkingRulesIntoCache(loaded: ProviderConfig) = runBlocking {
+        thinkingRulesWriter.withLock {
+            runCatching {
+                val ownerIds = loaded.instances.map { it.id }.toHashSet()
+                val byInstance = providerDao.loadAllThinkingRules()
+                    .filter { it.providerInstanceId in ownerIds }
+                    .groupBy { it.providerInstanceId }
+                    .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { ThinkingRuleCoding.toRule(it) } }
+                ThinkingRuleResolver.setAllCustomRules(byInstance)
+            }.onFailure { android.util.Log.w("ProviderRepo", "[ProviderStore] rule cache warm failed", it) }
         }
     }
 
-    private fun republishThinkingCache(instanceId: String) {
-        ThinkingRuleResolver.setCustomRules(instanceId, thinkingRules(instanceId))
+    /** On failed write, refresh inside the rule lock; don't turn a failed read into an empty list. */
+    private suspend fun republishThinkingCache(instanceId: String, rules: List<ThinkingRule>?) {
+        val persisted = rules ?: runCatching {
+            providerDao.loadThinkingRules(instanceId).map { ThinkingRuleCoding.toRule(it) }
+        }.onFailure { android.util.Log.w("ProviderRepo", "[ProviderStore] rule cache read-back failed ($instanceId)", it) }
+            .getOrNull() ?: return
+        ThinkingRuleResolver.setCustomRules(instanceId, persisted)
     }
 
-    /**
-     * [T-thinking-rules-single-query] Mutation paths pass the rows they just
-     * persisted so the resolver cache is updated WITHOUT a second Room
-     * roundtrip. Null = persistence failed → fall back to a fresh DB query
-     * so the cache never holds stale data.
-     */
-    private fun republishThinkingCache(instanceId: String, rules: List<ThinkingRule>?) {
-        if (rules != null) {
-            ThinkingRuleResolver.setCustomRules(instanceId, rules)
-            return
-        }
-        republishThinkingCache(instanceId)
-    }
-
-    /**
-     * Insert or update a custom rule. [id] null ⇒ new rule minted at the TOP of the
-     * list (position 0) — a rule overriding a built-in is useless below it; existing
-     * rules shift down. A non-null [id] updates in place, preserving position.
-     * Returns the rule id.
-     *
-     * [SURGERY-W4 B04] Rule-set mutations (save / delete / reorder / restore)
-     * are read-modify-replace over one owner's list. Two of them interleaved
-     * at the DAO level (read A, read B, write A, write B) both "succeed" and
-     * the second silently restores the first one's stale snapshot.
-     *
-     * The atomicity therefore lives in the DAO: [ProviderConfigDao.replaceThinkingRules]
-     * reads the owner's rules, applies the mutation and replaces the set in ONE
-     * Room transaction. A repository-level lock cannot do this — a suspend call
-     * may not sit inside a `synchronized` block — and the publish of the
-     * resolver cache STILL happens after the committed write.
-     */
-    fun saveThinkingRule(instanceId: String, rule: ThinkingRule, id: String? = null): String = runBlocking {
+    /** Insert at the top for a new id, or update in place. Returns the rule id. */
+    fun saveThinkingRule(instanceId: String, rule: ThinkingRule, id: String? = null): String {
         val ruleId = id ?: java.util.UUID.randomUUID().toString()
-        var persistedRules: List<ThinkingRule>? = null
-        runCatching {
-            val written = providerDao.replaceThinkingRules(
-                instanceId,
-                com.rikkaminis.app.data.db.ThinkingRuleMutation.Upsert(
-                    ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0),
-                ),
-            )
-            persistedRules = written.map { ThinkingRuleCoding.toRule(it) }
-        }.onFailure { e ->
-            android.util.Log.e("ProviderRepo", "[audit-0909] saveThinkingRule persistence failed ($instanceId/$ruleId)", e)
-        }
-        republishThinkingCache(instanceId, persistedRules)
-        ruleId
+        mutateThinkingRules(
+            instanceId,
+            ThinkingRuleMutation.Upsert(ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0)),
+        )
+        return ruleId
     }
 
-    fun deleteThinkingRule(instanceId: String, id: String) = runBlocking {
-        var persistedRules: List<ThinkingRule>? = null
-        runCatching {
-            val written = providerDao.replaceThinkingRules(
-                instanceId,
-                com.rikkaminis.app.data.db.ThinkingRuleMutation.Delete(id),
-            )
-            persistedRules = written.map { ThinkingRuleCoding.toRule(it) }
-        }.onFailure { e ->
-            android.util.Log.e("ProviderRepo", "[audit-0909] deleteThinkingRule persistence failed ($instanceId/$id)", e)
-        }
-        republishThinkingCache(instanceId, persistedRules)
-    }
+    fun deleteThinkingRule(instanceId: String, id: String) =
+        mutateThinkingRules(instanceId, ThinkingRuleMutation.Delete(id))
 
-    /** Reorder an instance's custom rules to match [orderedIds] (a permutation). */
-    fun reorderThinkingRules(instanceId: String, orderedIds: List<String>) = runBlocking {
-        var persistedRules: List<ThinkingRule>? = null
-        runCatching {
-            val written = providerDao.replaceThinkingRules(
-                instanceId,
-                com.rikkaminis.app.data.db.ThinkingRuleMutation.Reorder(orderedIds),
-            )
-            persistedRules = written.map { ThinkingRuleCoding.toRule(it) }
-        }.onFailure { e ->
-            android.util.Log.e("ProviderRepo", "[audit-0909] reorderThinkingRules persistence failed ($instanceId)", e)
+    /** Reorder an instance's custom rules to match [orderedIds]. */
+    fun reorderThinkingRules(instanceId: String, orderedIds: List<String>) =
+        mutateThinkingRules(instanceId, ThinkingRuleMutation.Reorder(orderedIds))
+
+    private fun mutateThinkingRules(instanceId: String, mutation: ThinkingRuleMutation) {
+        ensureConfigLoaded() // NEVER acquire configLock while holding thinkingRulesWriter.
+        runBlocking {
+            thinkingRulesWriter.withLock {
+                if (instance(instanceId) == null) return@withLock
+                // Room locks the row set; keep our lock until the committed rows
+                // reach the resolver too, or a late return can publish stale data.
+                withContext(NonCancellable) {
+                    var persistedRules: List<ThinkingRule>? = null
+                    runCatching {
+                        val written = providerDao.replaceThinkingRules(instanceId, mutation)
+                        persistedRules = written.map { ThinkingRuleCoding.toRule(it) }
+                    }.onFailure { e ->
+                        android.util.Log.e("ProviderRepo", "[ProviderStore] rule mutation failed ($instanceId)", e)
+                    }
+                    republishThinkingCache(instanceId, persistedRules)
+                }
+            }
         }
-        republishThinkingCache(instanceId, persistedRules)
     }
 
     // ── [T-auto-backup-assets] Backup/restore of custom thinking rules ──
@@ -1460,16 +1393,10 @@ class ProviderRepository(private val context: Context) {
         arr
     }
 
-    /**
-     * Replace [instanceId]'s custom rules with the rows from a backup,
-     * preserving each rule's id and sort_order. Returns the number of rules
-     * restored (0 when [rows] is empty or malformed, or when persistence
-     * failed — failures are logged, not thrown; [fix/dv22-a1 §1042-A-01]).
-     * A backup section that carries no rules for this instance is a no-op —
-     * restore must never wipe rules just because an older backup predates
-     * the section.
-     */
-    fun restoreThinkingRules(instanceId: String, rows: org.json.JSONArray): Int = runBlocking {
+    internal data class RestoredThinkingRules(val count: Int, val notes: List<String> = emptyList())
+
+    /** No valid input rows => no-op, never wipe a provider's rules on an empty section. */
+    internal suspend fun restoreThinkingRules(instanceId: String, rows: JSONArray): RestoredThinkingRules {
         val entities = ArrayList<ProviderThinkingRuleEntity>()
         for (i in 0 until rows.length()) {
             val o = rows.optJSONObject(i) ?: continue
@@ -1491,40 +1418,29 @@ class ProviderRepository(private val context: Context) {
                 )
             )
         }
-        if (entities.isEmpty()) return@runBlocking 0
-        synchronized(restoreIdentityNotes) { restoreIdentityNotes.clear() }
-        // [SURGERY-W4 B02/B04] One transaction over the WHOLE rule table decides
-        // id ownership: an id already owned by a different live provider is
-        // re-minted, never REPLACE-moved onto this restore target. The same lock
-        // as save/delete/reorder keeps a concurrent UI edit from handing this
-        // restore a half-applied snapshot.
-        val persistedRows = runCatching {
-            providerDao.replaceThinkingRules(instanceId, entities)
-        }.onFailure { e ->
-            android.util.Log.e(
-                "ProviderRepo",
-                "[ProviderStore] restoreThinkingRules persistence failed " +
-                    "($instanceId, ${entities.size} rules) \u2014 reporting 0 restored: ${e.message}",
-                e,
-            )
-        }.getOrNull() ?: return@runBlocking 0
-        for (i in persistedRows.indices) {
-            if (persistedRows[i].id != entities[i].id) {
-                restoreIdentityNotes.add("thinking rules \"$instanceId\": a rule id was owned by another provider; restored under a new id")
+        if (entities.isEmpty()) return RestoredThinkingRules(0, listOf("no valid rule rows — rules left unchanged"))
+        ensureConfigLoaded()
+        return thinkingRulesWriter.withLock {
+            currentCoroutineContext().ensureActive()
+            if (instance(instanceId) == null) {
+                return@withLock RestoredThinkingRules(0, listOf("provider no longer exists — rules not restored"))
+            }
+            // Once a transaction starts, publish its result before releasing
+            // the lock even if the restore waiter is cancelled after commit.
+            withContext(NonCancellable) {
+                val persistedRows = runCatching {
+                    providerDao.replaceThinkingRules(instanceId, entities)
+                }.onFailure { e ->
+                    android.util.Log.e("ProviderRepo", "[ProviderStore] rule restore failed ($instanceId)", e)
+                }.getOrNull() ?: return@withContext RestoredThinkingRules(0, listOf("rule write failed — rules not restored"))
+                republishThinkingCache(instanceId, persistedRows.sortedBy { it.sortOrder }.map { ThinkingRuleCoding.toRule(it) })
+                val changed = persistedRows.indices.count { persistedRows[it].id != entities[it].id }
+                val notes = if (changed == 0) emptyList() else listOf(
+                    "$changed conflicting or duplicate rule id(s) restored under new ids",
+                )
+                RestoredThinkingRules(persistedRows.size, notes)
             }
         }
-        republishThinkingCache(instanceId)
-        persistedRows.size
-    }
-
-    /** [SURGERY-W4 B02] Identity notes from the most recent rule restore. */
-    private val restoreIdentityNotes = java.util.Collections.synchronizedList(ArrayList<String>())
-
-    /** Drain notes produced by [restoreThinkingRules] (id re-minted because another owner held it). */
-    fun drainRestoreIdentityNotes(): List<String> = synchronized(restoreIdentityNotes) {
-        val out = restoreIdentityNotes.toList()
-        restoreIdentityNotes.clear()
-        out
     }
 
     /**
@@ -3303,6 +3219,7 @@ class ProviderRepository(private val context: Context) {
     fun importInstanceJSON(
         jsonStr: String,
         entryIdMapOut: MutableMap<String, String>? = null,
+        onInstanceAllocated: ((String) -> Unit)? = null,
     ): String? {
         ensureConfigLoaded()
         val dict = try { JSONObject(jsonStr) } catch (_: Exception) { return null }
@@ -3358,6 +3275,7 @@ class ProviderRepository(private val context: Context) {
             createdAt = dict.optLong("createdAt", 0L).takeIf { it > 0 }
                 ?: System.currentTimeMillis(),
         )
+        onInstanceAllocated?.invoke(instance.id)
         addInstance(instance)
 
         // Restore credentials (API key, manual OAuth bearer, structured OAuth
@@ -3638,6 +3556,7 @@ class ProviderRepository(private val context: Context) {
         jsonStr: String,
         srcEntryIds: List<String>,
         onCredentialConflict: ((String) -> Unit)? = null,
+        expectedInstanceId: String? = null,
     ): Pair<String, Map<String, String>>? {
         ensureConfigLoaded()
         val dict = try { JSONObject(jsonStr) } catch (_: Exception) { return null }
@@ -3646,7 +3565,8 @@ class ProviderRepository(private val context: Context) {
         val label = dict.optString("label", "").ifEmpty { return null }
 
         val existing = _config.value.instances.firstOrNull {
-            it.providerType == providerType && it.label == label
+            it.providerType == providerType && it.label == label &&
+                (expectedInstanceId == null || it.id == expectedInstanceId)
         } ?: return null
 
         // [T-backup-restore-credentials] A restore must bring the backup's
