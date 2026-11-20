@@ -8,6 +8,7 @@ import android.util.Log
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.provider.readProcessName
 import com.rikkaminis.app.provider.readProcCmdlineName
+import com.rikkaminis.app.provider.thinking.RequestThinkingRules
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -829,11 +830,8 @@ class ModelExecutionService : Service() {
     private fun executeRun(req: JSONObject, dir: File, carriedApiKey: String = ""): String {
         // [ISSUE-12a] `req` is pre-parsed by the caller (CapturedRequestBody) —
         // the duplicate parse of the multi-MB body is gone.
-        // [T-worker-thinking-rules-restore] Restore this instance's custom thinking
-        // rules from the request JSON BEFORE building the provider — the worker
-        // process never touches ProviderRepository, so the resolver cache is empty
-        // here otherwise. Mirrors the streaming path.
-        restoreThinkingRules(req)
+        // Decode once for this request, never publish into the process-wide UI cache.
+        val requestThinkingRules = decodeThinkingRules(req)
 
         // ── Reconstruct ProviderInstance ──
         val instance = com.rikkaminis.app.data.model.ProviderInstance(
@@ -995,6 +993,7 @@ class ModelExecutionService : Service() {
         // ── Build provider ──
         val provider = com.rikkaminis.app.provider.ProviderFactory.create(
             instance = instance, apiKey = apiKey, model = model, context = this,
+            requestThinkingRules = requestThinkingRules,
         )
         // [FIX-1 / F-191] Same cross-process stamp as the streaming path above.
         if (req.optBoolean("enhanced_cache", false)) {
@@ -1280,10 +1279,10 @@ class ModelExecutionService : Service() {
             }
             // [ISSUE-12a] `req` arrives pre-parsed (CapturedRequestBody) — this
             // path used to re-parse the same multi-MB body a second time.
-            // [T-worker-thinking-rules-restore] Same restore as executeRun — the
-            // streaming path is the main chat path, where the sensenova clamp bug
+            // [T-worker-thinking-rules-restore] Same per-request snapshot as executeRun —
+            // the streaming path is the main chat path, where the sensenova clamp bug
             // was observed live.
-            restoreThinkingRules(req)
+            val requestThinkingRules = decodeThinkingRules(req)
 
             // ── Reconstruct ProviderInstance (mirrors executeRun) ──
             val instance = com.rikkaminis.app.data.model.ProviderInstance(
@@ -1443,7 +1442,9 @@ class ModelExecutionService : Service() {
 
             // ── Provider ──
             @Suppress("UNCHECKED_CAST")
-            val provider = com.rikkaminis.app.provider.ProviderFactory.create(instance, apiKey, model, this)
+            val provider = com.rikkaminis.app.provider.ProviderFactory.create(
+                instance, apiKey, model, this, requestThinkingRules,
+            )
             // [FIX-1 / F-191] Stamp the Enhanced Cache toggle onto the provider
             // that actually sends the request. Previously this stamp lived only
             // in AgentLoopEngine, on the MAIN-process provider object — which
@@ -1945,20 +1946,20 @@ class ModelExecutionService : Service() {
         if (arr == null) emptyList() else (0 until arr.length()).map { arr.getJSONObject(it) }
 
     /**
-     * [T-worker-thinking-rules-restore] Restore the request's per-instance custom
-     * thinking rules into [com.rikkaminis.app.provider.thinking.ThinkingRuleResolver]'s
-     * cache. No-op when the dispatcher omitted the field (no custom rules — the
-     * overwhelmingly common case, and byte-identical to the pre-fix behaviour).
+     * Decode this request's custom thinking rules into a request-local snapshot.
+     * Deliberately does NOT publish into [ThinkingRuleResolver]'s process-wide
+     * cache: a second request on the same worker would otherwise overwrite this
+     * one before its provider builds the wire body.
+     *
+     * An absent field is an explicit EMPTY snapshot (older callers, or no custom
+     * rules), so nothing from a previous request can survive into this one.
      */
-    private fun restoreThinkingRules(req: JSONObject) {
-        val count = com.rikkaminis.app.provider.thinking.ThinkingRuleResolver
-            .restoreCustomRulesFromJson(
-                instanceId = req.optString("instance_id", "remote"),
-                field = req.optJSONArray("thinking_rules"),
-            )
-        if (count > 0) {
-            Log.i(TAG, "thinking rules restored: instance=${req.optString("instance_id", "remote")} count=$count")
+    private fun decodeThinkingRules(req: JSONObject): RequestThinkingRules {
+        val rules = RequestThinkingRules.fromJson(req.optJSONArray("thinking_rules"))
+        if (rules.size > 0) {
+            Log.i(TAG, "thinking rules captured: instance=${req.optString("instance_id", "remote")} count=${rules.size}")
         }
+        return rules
     }
 
     // ── passthrough parsing (mirrors ModelUseOffloadHandler) ──

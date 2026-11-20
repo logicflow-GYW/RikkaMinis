@@ -8,6 +8,38 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
+ * Rules owned by one provider request, never published into the process-wide UI cache.
+ * The list and CustomPath's tier map are copied; neither is exposed to callers.
+ * A missing field is an explicit empty snapshot, including on legacy worker requests.
+ */
+class RequestThinkingRules private constructor(private val rules: List<ThinkingRule>) {
+    val size: Int get() = rules.size
+
+    fun apply(body: JSONObject, ctx: ThinkingResolveContext): ThinkingResolveTrace =
+        ThinkingRuleResolver.applyDraftRules(body, ctx, rules)
+
+    fun echoPolicyFor(ctx: ThinkingResolveContext): ReasoningEchoPolicy? =
+        ThinkingRuleResolver.echoPolicyFor(ctx, rules)
+
+    companion object {
+        fun fromJson(field: JSONArray?): RequestThinkingRules = capture(
+            if (field == null) emptyList() else (0 until field.length()).mapNotNull { i ->
+                field.optJSONObject(i)?.let { ThinkingRuleCoding.decodeRuleJson(it) }
+            },
+        )
+
+        fun capture(rules: List<ThinkingRule>): RequestThinkingRules = RequestThinkingRules(
+            rules.map { rule ->
+                val format = rule.wireFormat
+                if (format is ThinkingWireFormat.CustomPath) {
+                    rule.copy(wireFormat = format.copy(values = format.values.toMap()))
+                } else rule
+            },
+        )
+    }
+}
+
+/**
  * Everything about the endpoint and the model that a rule may look at. Passed explicitly
  * rather than read off the provider so the resolver stays a pure function — which is what
  * makes it testable without a network stub.
@@ -528,9 +560,15 @@ object ThinkingRuleResolver {
      * and public so the truth table stays JVM-testable.
      */
     fun echoPolicyFor(ctx: ThinkingResolveContext): ReasoningEchoPolicy? =
-        (customRulesFor(ctx.instanceId) + builtInRules(ctx))
-            .firstOrNull { it.reasoningEcho != null && it.scope.matches(ctx.modelId) }
-            ?.reasoningEcho
+        echoPolicyFor(ctx, customRulesFor(ctx.instanceId))
+
+    /** Same echo semantics as the UI entry, evaluated only against the request snapshot. */
+    internal fun echoPolicyFor(
+        ctx: ThinkingResolveContext,
+        customRules: List<ThinkingRule>,
+    ): ReasoningEchoPolicy? = (customRules + builtInRules(ctx))
+        .firstOrNull { it.reasoningEcho != null && it.scope.matches(ctx.modelId) }
+        ?.reasoningEcho
 
     /**
      * Write the fields for one wire format. Each branch reproduces the corresponding
