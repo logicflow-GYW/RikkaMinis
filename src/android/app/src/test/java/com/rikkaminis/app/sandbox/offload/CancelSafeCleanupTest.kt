@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -133,14 +134,49 @@ class CancelSafeCleanupTest {
                 code.contains("ModelExecutionMailbox.writeCancel(") &&
                 code.contains("ModelExecutionMailbox.writeCancelDeath("),
         )
+        // [surgery-1120 A-01] The cleanup step now also carries the
+        // transcript-commit gate, so the literal one-line shape is gone. What
+        // must stay true is the WIRING the original assertion was about: the
+        // terminal/worker-exit wait runs INSIDE the helper's `cleanup` lambda
+        // (i.e. under its NonCancellable), never bare in the finally.
+        val cleanupBody = blockAfter(code, "cleanup = {")
         assertTrue(
             "the terminal/worker-exit wait must be the helper's cleanup step",
-            code.contains("cleanup = { awaitTerminalAndWorkerExitThenDelete(dir, runId) }"),
+            cleanupBody != null && cleanupBody.contains("awaitTerminalAndWorkerExitThenDelete("),
         )
         assertTrue(
             "and both must be handed to internalRunCancelCleanup",
             code.contains("internalRunCancelCleanup("),
         )
+        // Blindness guard: the wait must appear exactly twice — once as the
+        // function's own declaration and once as the call inside the helper.
+        // A bare call added elsewhere (the regression this pins) makes it 3.
+        assertEquals(
+            "the wait must be routed through the helper exactly once",
+            2,
+            Regex("""awaitTerminalAndWorkerExitThenDelete\(""").findAll(code).count(),
+        )
+    }
+
+    /**
+     * Text of the `{ … }` body opened at [marker], with brace matching, so a
+     * call that moved outside the lambda (the regression that matters) is not
+     * accidentally accepted.
+     */
+    private fun blockAfter(code: String, marker: String): String? {
+        val start = code.indexOf(marker)
+        if (start < 0) return null
+        var i = start + marker.length
+        var depth = 1
+        val from = i
+        while (i < code.length && depth > 0) {
+            when (code[i]) {
+                '{' -> depth++
+                '}' -> depth--
+            }
+            i++
+        }
+        return if (depth == 0) code.substring(from, i - 1) else null
     }
 
     // ── helpers ──────────────────────────────────────────────────────────

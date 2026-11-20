@@ -3133,15 +3133,14 @@ internal class AgentLoopEngine(
                         ),
                         host.string(R.string.error_stream_interrupted),
                     )
-                    val carriedRowId = persistTranscriptRow(
-                        loopState,
-                        carriedTurnParts,
-                        lastUsage,
-                        null,
-                        turnBlockMeta(loopState),
+                    val carriedPlanId = planTranscriptRow(loopState, loopState.transcriptRowIndex)
+                    val carriedRowId = host.persistAssistantTurn(
+                        carriedTurnParts, lastUsage, null, turnBlockMeta(loopState),
                         modelId = loopState.currentProvider.model.id,
-                        entryId = host.activeEntryId,
+                        entryId = host.activeEntryId, stableId = carriedPlanId,
                     )
+                    if (carriedRowId != null) loopState.transcriptRowIndex += 1
+                    commitTranscriptRow(loopState, carriedRowId)
                     markTurnPersisted(loopState, carriedRowId)
                     withContext(Dispatchers.Main) {
                         host.setInlineError(host.string(R.string.error_stream_interrupted))
@@ -3248,15 +3247,14 @@ internal class AgentLoopEngine(
                     ),
                     host.string(R.string.error_content_filtered),
                 )
-                val carriedRowId = persistTranscriptRow(
-                    loopState,
-                    carriedTurnParts,
-                    lastUsage,
-                    null,
-                    turnBlockMeta(loopState),
+                    val carriedPlanId = planTranscriptRow(loopState, loopState.transcriptRowIndex)
+                val carriedRowId = host.persistAssistantTurn(
+                    carriedTurnParts, lastUsage, null, turnBlockMeta(loopState),
                     modelId = loopState.currentProvider.model.id,
-                    entryId = host.activeEntryId,
+                    entryId = host.activeEntryId, stableId = carriedPlanId,
                 )
+                if (carriedRowId != null) loopState.transcriptRowIndex += 1
+                commitTranscriptRow(loopState, carriedRowId)
                 markTurnPersisted(loopState, carriedRowId)
                 withContext(Dispatchers.Main) {
                     host.setInlineError(host.string(R.string.error_content_filtered))
@@ -4031,13 +4029,18 @@ internal class AgentLoopEngine(
                 // that recovery reads to find the row instead of inserting a
                 // second one. The plan carries the row's index in the bubble,
                 // so the id is stable across processes.
-                val persistedRowId = persistTranscriptRow(
-                    loopState,
+                // Inlined so the insert stays adjacent to its
+                // TerminalErrorPlacement payload (that adjacency is what the
+                // turn-tail banner test audits).
+                val plannedTailId = planTranscriptRow(loopState, loopState.transcriptRowIndex)
+                val persistedRowId = host.persistAssistantTurn(
                     TerminalErrorPlacement.partsForTerminalError(turnParts, pendingInlineError),
                     lastUsage, turnReasoningContent, blockMeta,
                     modelId = loopState.currentProvider.model.id,
-                    entryId = host.activeEntryId,
+                    entryId = host.activeEntryId, stableId = plannedTailId,
                 )
+                if (persistedRowId != null) loopState.transcriptRowIndex += 1
+                commitTranscriptRow(loopState, persistedRowId)
                 // [deep-audit-1016c ISSUE-01/A] Every block up to now is durable
                 // (the row above was written with parts covering the full
                 // unpersisted range). Advance only on success — if the DB write
