@@ -510,12 +510,6 @@ def cmd_add(args, pretty):
     # `<oauth-dir>/<name>.secret`, oauth bridge) — whitelist it at the write
     # path, refuse rather than guess.
     validate_server_name(name, "--name")
-    # [R3-B F-10] A same-name add is an OVERWRITE: the previous server's issued
-    # tokens and client-secret handoff must be gone before the new config lands,
-    # or the new server sends the old server's Bearer token (see
-    # _clear_oauth_credentials). Runs before the secret is seeded below, else
-    # this would delete the secret we are about to write.
-    _clear_oauth_credentials(name, pretty)
     url = _pop_opt(args, "--url")
     command = _pop_opt(args, "--command")
     note = _pop_opt(args, "--note")
@@ -605,6 +599,17 @@ def cmd_add(args, pretty):
         if oauth_redirect:
             oauth["redirectURI"] = oauth_redirect
         server["oauth"] = oauth
+    elif oauth_client_secret or oauth_scopes or oauth_redirect:
+        _fail("OAuth flags require --oauth-client-id, --oauth-auth-endpoint and "
+              "--oauth-token-endpoint", "PARSE_ERROR", name, pretty)
+
+    # Clear only after every local parse and transport/OAuth validation has
+    # succeeded. An invalid same-name add must leave the existing server and
+    # its credentials untouched; a valid overwrite must clear the old bridge
+    # before the new secret is seeded, or the cleanup would delete that secret.
+    _clear_oauth_credentials(name, pretty)
+
+    if wants_oauth:
         # Client Secret must NOT enter servers.json (it syncs via iCloud).
         # The Keychain is the authority, but the CLI runs in the guest and
         # cannot write it — so seed a handoff file next to the token bridge
@@ -625,11 +630,14 @@ def cmd_add(args, pretty):
                 seeded_secret = True
             except OSError as exc:
                 _fail("failed to seed client secret: %s" % exc, "MCP_ERROR", name, pretty)
-    elif oauth_client_secret or oauth_scopes or oauth_redirect:
-        _fail("OAuth flags require --oauth-client-id, --oauth-auth-endpoint and "
-              "--oauth-token-endpoint", "PARSE_ERROR", name, pretty)
 
-    config.upsert_server(name, server)
+    try:
+        config.upsert_server(name, server)
+    except OSError as exc:
+        # Do not let a failed config publication escape as an unstructured
+        # traceback: the CLI contract is a non-zero JSON error and no new
+        # server entry becomes visible.
+        _fail("failed to save server config: %s" % exc, "MCP_ERROR", name, pretty)
     out = {"added": name, "config": server}
     if wants_oauth:
         out["oauth_note"] = (
