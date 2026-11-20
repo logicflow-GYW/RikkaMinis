@@ -520,11 +520,18 @@ class AnthropicProvider(
                         }
                         val stopReason = event.optJSONObject("delta")
                             ?.safeOptString("stop_reason", "")?.ifEmpty { null }
-                        // message_delta with stop_reason is the Anthropic clean
-                        // terminal — mark it so the EOF path below doesn't emit
-                        // a redundant truncated Finished.
-                        sawClearFinish = true
-                        send(LLMStreamChunk.Finished(stopReason))
+                        // A message_delta can precede content_block_stop on a
+                        // cut/invalid stream. Preserve the open block for the
+                        // orphan flush and mark its arguments incomplete even
+                        // if the declared reason looks normal.
+                        // model_context_window_exceeded stays a DECLARED reason:
+                        // shared admission refuses it before JSON repair, but
+                        // it is not an EOF/output wall that should resend the
+                        // same full context. Already streamed text is retained.
+                        if (stopReason != null) {
+                            sawClearFinish = true
+                            send(LLMStreamChunk.Finished(stopReason, truncated = toolBlock.isOpen))
+                        }
                     }
                     // [FIX-1 / F-195] The Messages streaming protocol carries a
                     // mid-stream `error` event (rate limit, overloaded, invalid
