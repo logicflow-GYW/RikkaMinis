@@ -593,7 +593,7 @@ object NativeOffloadServer {
         // 打点零副作用（OffloadRssProbe 读 /proc 失败返回 0），不影响 handler 结果。
         val rssBeforeKb = OffloadRssProbe.rssKb()
         val result = if (handler == null) {
-            Log.w(TAG, "no handler registered for '$name' (known=${handlers.keySet()})")
+            Log.w(TAG, "no handler registered for '$name' (known=${handlers.keys})")
             NativeOffloadResult(exitCode = 127, output = "native_offload: no handler for '$name'\n")
         } else {
             try {
