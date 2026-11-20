@@ -288,8 +288,8 @@ def main(argv=None):
         if not re.fullmatch(r"[a-fA-F0-9]{40}", args.expect):
             parser.error("--expect must be the full 40-character SHA")
         args.expect = args.expect.lower()
-    if args.mode == "wait" and not args.no_dispatch and not args.workflow:
-        parser.error("--workflow is required when dispatching")
+    if args.mode == "wait" and not args.workflow:
+        parser.error("--workflow is required for CI waits")
     if args.mode == "runs" and args.run_id and (args.workflow or args.branch or args.status):
         parser.error("--run-id cannot be combined with --workflow, --branch or --status")
     if not os.environ.get("GITHUB_TOKEN"):
