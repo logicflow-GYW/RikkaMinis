@@ -112,7 +112,7 @@ class ProviderConfigCorruptRowQuarantineTest {
         // Persist exactly what an ordinary save would: the snapshot built from
         // the loaded config (which never contains the corrupt row)…
         val saveSnapshot = load.config.toSnapshot(json, jsonSyncHash = "h")
-        val dao = FakeProviderConfigDao()
+        val dao = FakeProviderConfigDao(entryIdsToKeep(saveSnapshot.entries, load.quarantinedEntryRowIds))
 
         kotlinx.coroutines.runBlocking {
             dao.syncAllIncremental(
@@ -125,15 +125,15 @@ class ProviderConfigCorruptRowQuarantineTest {
             )
         }
 
-        val keep = dao.lastDeleteEntriesKeep
+        val keep = dao.remainingEntryIds
         assertTrue(
             "delete set must keep the undecodable row: was $keep",
-            keep != null && keep.contains("i1/m-bad"),
+            keep.contains("i1/m-bad"),
         )
         assertEquals(
             "delete set must still keep every decodable row",
             setOf("i1/m-good", "i1/m-bad"),
-            keep!!.toSet(),
+            keep.toSet(),
         )
         // The quarantined row is never re-upserted with a degraded shape.
         assertEquals(listOf("i1/m-good"), dao.upsertedEntries.map { it.id })
@@ -168,7 +168,7 @@ class ProviderConfigCorruptRowQuarantineTest {
         // (c) after the round-trip save the group row still carries the id, and
         // the group row is not in any delete set.
         val saveSnapshot = load.config.toSnapshot(json)
-        val dao = FakeProviderConfigDao()
+        val dao = FakeProviderConfigDao(entryIdsToKeep(saveSnapshot.entries, load.quarantinedEntryRowIds))
         kotlinx.coroutines.runBlocking {
             dao.syncAllIncremental(
                 instances = saveSnapshot.instances,
@@ -184,12 +184,12 @@ class ProviderConfigCorruptRowQuarantineTest {
             listOf("i1/m-good", "i1/m-bad"),
             json.decodeFromString(ListSerializer(String.serializer()), groupRowOut.memberEntryIdsJson),
         )
-        assertEquals(listOf("g1"), dao.lastDeleteGroupsKeep)
+        assertEquals(listOf("g1"), dao.remainingGroupIds.toList())
         assertEquals("i1/m-bad", dao.upsertedLoopIds.single().targetId)
         assertEquals(
             "the entry delete set keeps the member row the group still points at",
             setOf("i1/m-good", "i1/m-bad"),
-            dao.lastDeleteEntriesKeep!!.toSet(),
+            dao.remainingEntryIds.toSet(),
         )
     }
 
@@ -231,7 +231,7 @@ class ProviderConfigCorruptRowQuarantineTest {
             entryIdsToKeep(snap.entries, load.quarantinedEntryRowIds),
         )
 
-        val dao = FakeProviderConfigDao()
+        val dao = FakeProviderConfigDao(entryIdsToKeep(snap.entries, load.quarantinedEntryRowIds))
         kotlinx.coroutines.runBlocking {
             dao.syncAllIncremental(
                 instances = snap.instances,
@@ -244,7 +244,7 @@ class ProviderConfigCorruptRowQuarantineTest {
         }
         assertEquals(
             setOf("i1/m1", "i1/m2"),
-            dao.lastDeleteEntriesKeep!!.toSet(),
+            dao.remainingEntryIds.toSet(),
         )
     }
 
@@ -262,7 +262,7 @@ class ProviderConfigCorruptRowQuarantineTest {
         assertTrue(load.config.modelEntries.isEmpty())
 
         val saveSnapshot = load.config.toSnapshot(json)
-        val dao = FakeProviderConfigDao()
+        val dao = FakeProviderConfigDao(entryIdsToKeep(saveSnapshot.entries, load.quarantinedEntryRowIds))
         kotlinx.coroutines.runBlocking {
             dao.syncAllIncremental(
                 instances = saveSnapshot.instances,
@@ -277,7 +277,7 @@ class ProviderConfigCorruptRowQuarantineTest {
             "entries=empty but quarantined rows exist ⇒ clearEntries() would be the same wipe",
             dao.clearedTables.none { it == "provider_model_entries" },
         )
-        assertEquals(setOf("i1/m1", "i1/m2"), dao.lastDeleteEntriesKeep!!.toSet())
+        assertEquals(setOf("i1/m1", "i1/m2"), dao.remainingEntryIds.toSet())
     }
 
     // ---------------------------------------------------------------- case 6
@@ -291,8 +291,8 @@ class ProviderConfigCorruptRowQuarantineTest {
             listOf("i1/m1", "i1/m2", "i1/ghost"),
             entryIdsToKeep(rows, setOf("i1/m1", "i1/ghost")),
         )
-        // A stale quarantine id (row already gone) is harmless: NOT IN simply
-        // names an id that matches nothing.
+        // A stale quarantine id is harmless: it excludes no existing row from
+        // the primary-key difference.
         assertEquals(emptyList<String>(), entryIdsToKeep(emptyList(), emptySet()))
         assertEquals(listOf("i1/x"), entryIdsToKeep(emptyList(), setOf("i1/x")))
     }
@@ -304,13 +304,20 @@ class ProviderConfigCorruptRowQuarantineTest {
  * regression inside it — e.g. going back to `entries.map { it.id }` — shows up
  * here instead of only on a device.
  */
-private class FakeProviderConfigDao : ProviderConfigDao {
+private class FakeProviderConfigDao(initialEntryIds: List<String>) : ProviderConfigDao {
     val clearedTables = mutableListOf<String>()
     val upsertedEntries = mutableListOf<ProviderModelEntryEntity>()
     val upsertedGroups = mutableListOf<ProviderModelGroupEntity>()
     val upsertedLoopIds = mutableListOf<ProviderAgentLoopIdEntity>()
-    var lastDeleteEntriesKeep: List<String>? = null
-    var lastDeleteGroupsKeep: List<String>? = null
+    val remainingEntryIds = (initialEntryIds + "stale-entry").toMutableSet()
+    val remainingGroupIds = mutableSetOf<String>()
+    private val instanceIds = mutableSetOf<String>()
+    private val metaKeys = mutableSetOf<String>()
+
+    override suspend fun loadInstanceIds() = instanceIds.toList()
+    override suspend fun loadEntryIds() = remainingEntryIds.toList()
+    override suspend fun loadGroupIds() = remainingGroupIds.toList()
+    override suspend fun loadMetaKeys() = metaKeys.toList()
 
     override suspend fun loadInstances(): List<ProviderInstanceEntity> = emptyList()
     override suspend fun loadEntries(): List<ProviderModelEntryEntity> = emptyList()
@@ -318,17 +325,19 @@ private class FakeProviderConfigDao : ProviderConfigDao {
     override suspend fun loadAgentLoopIds(): List<ProviderAgentLoopIdEntity> = emptyList()
     override suspend fun loadMeta(): List<ProviderConfigMetaEntity> = emptyList()
 
-    override suspend fun upsertInstances(rows: List<ProviderInstanceEntity>) = Unit
+    override suspend fun upsertInstances(rows: List<ProviderInstanceEntity>) { instanceIds += rows.map { it.id } }
     override suspend fun upsertEntries(rows: List<ProviderModelEntryEntity>) {
         upsertedEntries += rows
+        remainingEntryIds += rows.map { it.id }
     }
     override suspend fun upsertGroups(rows: List<ProviderModelGroupEntity>) {
         upsertedGroups += rows
+        remainingGroupIds += rows.map { it.id }
     }
     override suspend fun upsertAgentLoopIds(rows: List<ProviderAgentLoopIdEntity>) {
         upsertedLoopIds += rows
     }
-    override suspend fun upsertMeta(rows: List<ProviderConfigMetaEntity>) = Unit
+    override suspend fun upsertMeta(rows: List<ProviderConfigMetaEntity>) { metaKeys += rows.map { it.key } }
 
     /**
      * [fix/meta1028-d1 F-01] the repair path can also DELETE the sync token
@@ -342,27 +351,26 @@ private class FakeProviderConfigDao : ProviderConfigDao {
 
     override suspend fun clearInstances() {
         clearedTables += "provider_instances"
+        instanceIds.clear()
     }
     override suspend fun clearEntries() {
         clearedTables += "provider_model_entries"
+        remainingEntryIds.clear()
     }
     override suspend fun clearGroups() {
         clearedTables += "provider_model_groups"
+        remainingGroupIds.clear()
     }
     override suspend fun clearAgentLoopIds() = Unit
-    override suspend fun clearMeta() = Unit
+    override suspend fun clearMeta() { metaKeys.clear() }
 
-    override suspend fun deleteInstancesNotIn(keepIds: List<String>) = Unit
-    override suspend fun deleteEntriesNotIn(keepIds: List<String>) {
-        // SQLite rejects "NOT IN ()" — the DAO contract is that this is never
-        // reached with an empty set (clearEntries covers that case).
-        assertTrue("deleteEntriesNotIn must never be called with an empty keep set", keepIds.isNotEmpty())
-        lastDeleteEntriesKeep = keepIds
+    override suspend fun deleteInstancesByIds(ids: List<String>) { instanceIds.removeAll(ids.toSet()) }
+    override suspend fun deleteEntriesByIds(ids: List<String>) {
+        assertTrue("positive deletion must not issue an empty batch", ids.isNotEmpty())
+        remainingEntryIds.removeAll(ids.toSet())
     }
-    override suspend fun deleteGroupsNotIn(keepIds: List<String>) {
-        lastDeleteGroupsKeep = keepIds
-    }
-    override suspend fun deleteMetaNotIn(keepKeys: List<String>) = Unit
+    override suspend fun deleteGroupsByIds(ids: List<String>) { remainingGroupIds.removeAll(ids.toSet()) }
+    override suspend fun deleteMetaByKeys(keys: List<String>) { metaKeys.removeAll(keys.toSet()) }
 
     override suspend fun instanceCount(): Int = 1
 
