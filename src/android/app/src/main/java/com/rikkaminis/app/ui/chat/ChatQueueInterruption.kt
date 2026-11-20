@@ -18,6 +18,8 @@ import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.logging.AppLogger
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -500,21 +502,22 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
  * overwrote the first job reference while BOTH agent loops kept running, i.e.
  * two writers interleaving into one session transcript.
  *
- * [mintAndClaim] runs only for the winner, inside the monitor — the caller
+ * [claimStreamingSlot] runs only for the winner, inside the monitor — the caller
  * raises the flag there itself (the literal stays at the call site: the
  * claim/release ownership gate derives its subjects from that assignment, and
- * hiding it behind a helper would make the gate blind to this entry). The
- * caller keeps the established publication order (claim token first, then
- * epoch, then the flag). The monitor is the StateFlow instance itself: it is
- * per-ViewModel and is already the shared truth every streaming-state reader
- * consults, so this adds no second lock (a second lock would be the next
- * race). Callers must keep slow work (disk reads, provider creation) OUTSIDE
- * this function.
+ * hiding it behind a helper would make the gate blind to this entry). Every
+ * turn entry — ordinary send and queue drain alike — must use this same
+ * monitor-backed protocol. The caller keeps the established publication order
+ * (token first, then epoch, then the flag). The monitor is the StateFlow
+ * instance itself: it is per-ViewModel and is already the shared truth every
+ * streaming-state reader consults, so this adds no second lock (a second lock
+ * would be the next race). Callers must keep slow work (disk reads, provider
+ * creation) OUTSIDE this function.
  *
  * Pure JVM: takes the flag as a parameter, so the interleaving is testable
  * without the ViewModel.
  */
-internal fun claimQueuedDrainSlot(
+internal fun claimStreamingSlot(
     streaming: MutableStateFlow<Boolean>,
     mintAndClaim: () -> Unit,
 ): Boolean = synchronized(streaming) {
@@ -547,7 +550,7 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         if (_promptQueue.value.isEmpty()) return@launch
         // [fullscan-1119 F-07] ADVISORY fast path only — it is not the
         // protection. The authoritative check-and-claim is
-        // [claimQueuedDrainSlot] below (one monitor across check + mint + flag
+        // [claimStreamingSlot] below (one monitor across check + mint + flag
         // flip); this line just avoids doing the prompt-build disk read when a
         // stream is obviously already running. Removing it would not reopen the
         // race, keeping ONLY it is exactly the audited bug.
@@ -579,130 +582,119 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         val baseSystemPrompt = systemPromptForSession()
         val systemPrompt = baseSystemPrompt
 
-        // [fullscan-1119 F-07] Check-and-claim is ONE atomic step. The audited
-        // race: `if (_isStreaming.value) return` ... then the synchronous
-        // prompt build ([systemPromptForSession] above) ... then
-        // `_isStreaming.value = true`. Two drain coroutines (double Stop, Stop
-        // + the compact-success kick) both passed the check during the build
-        // and both claimed; the second `streamJob =` then overwrote the first
-        // reference while BOTH agent loops ran — two writers interleaving into
-        // one session transcript. [claimQueuedDrainSlot] holds one monitor
-        // (the StateFlow instance itself — no second lock) across the check,
-        // the token mint, the epoch publish and the flag flip, so exactly one
-        // caller can win. The disk read above stays OUTSIDE the critical
-        // section.
-        val claimed = claimQueuedDrainSlot(_isStreaming) {
-            // Same publication order as every other claim site: token first
-            // ([T-claim-token-vs-stale-finally]), then the epoch
-            // ([T-stale-finally-vs-new-claim]), and the flag flips last —
-            // inside the monitor, so the check above and this raise cannot be
-            // split by another drain.
-            streamingClaimToken = drainToken
-            streamEpoch++
-            streamingClaimEpoch = streamEpoch
-            _isStreaming.value = true
-        }
-        if (!claimed) {
-            AppLogger.info(
-                ChatViewModel.TAG,
-                "resumeQueueAfterCancel: another turn claimed streaming — dropping this drain attempt",
-            )
-            return@launch
-        }
-        // T145: the streaming flag is claimed synchronously before launching
-        // the streamJob so a concurrent send/retry tap is rejected by the
-        // entry guard. Mirrors sendMessage discipline.
-        AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming=true (atomic claim, sid=$activeSessionId)")
-        _canResume.value = false
-        _error.value = null
-
-        // [T-stale-finally-vs-new-claim] Capture BEFORE launching so the
-        // finally gate compares against THIS takeover's claim even if the
-        // coroutine body starts late.
-        val launchEpoch = streamingClaimEpoch
-        // [T-claim-token-vs-stale-finally] Capture the claim identity this job
-        // was launched under.
-        val claimToken = streamingClaimToken
-        // [fullscan-1119 F-07] Revocation guard before the stream starts, with
-        // the identity captured OUTSIDE this coroutine ([drainToken]) — the
-        // claim can be revoked between the claim above and this launch by a
-        // newer turn (a Stop alone leaves the token intact, so the epoch is
-        // compared too). Bail out instead of starting a stream nobody owns.
-        if (streamEpoch != streamingClaimEpoch || drainToken !== streamingClaimToken) {
-            AppLogger.info(
-                ChatViewModel.TAG_STREAM,
-                "resumeQueueAfterCancel: claim revoked before stream start (superseded) — aborting drain",
-            )
-            return@launch
-        }
-        streamJob = launch(Dispatchers.IO) {
-            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")
-            try {
-                SessionConcurrencyManager.acquireSlot(activeSessionId)
-                AppLogger.debug(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob slot acquired")
-
-                try {
-                    // [audit-0920] Guarded region widened — same fix as the
-                    // send/resume/retry paths: setActive (tracker callback
-                    // registration) and the strategy read must sit inside the
-                    // try that owns the releaseSlot finally. Outside it, a
-                    // non-CE throw leaks the concurrency slot and escapes the
-                    // coroutine.
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                            ?: com.rikkaminis.app.data.model.FallbackStrategy.default
-                    }
-                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts CALL")
-                    drainQueuedPrompts(
-                        provider = provider,
-                        systemPrompt = systemPrompt,
-                        fallbackStrategy = activeFallbackStrategy,
-                    )
-                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts RETURN")
-                } catch (e: CancellationException) {
-                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drain CANCELLED")
-                } catch (e: Exception) {
-                    AppLogger.error(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drain EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
-                    Log.e(ChatViewModel.TAG, "Queued drain error (resumeQueueAfterCancel)", e)
-                    reportAgentLoopError(e)
-                } finally {
-                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY enter")
-                    if (claimToken === streamingClaimToken) {
-                        // [audit-0907 B2] Reset queue-position state — same
-                        // rationale as the send path's finally: whatever the
-                        // worker reported while queued must not leak into the
-                        // next run's typing indicator.
-                        resetQueueWaitingAhead()
-                        // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
-                        resetAwaitingResponseSince()
-                        // [T-android-overlay-reply-status-34599] Surface
-                        // the assistant's most recent reply text to the
-                        // overlay BEFORE setInactive so the post-completion
-                        // overlay state (no-running, has-outcome) carries a
-                        // non-null excerpt. Reading _messages here is safe:
-                        // we're in the finally block of the agent loop and
-                        // the stream has already flushed its last delta.
-                        publishOverlayReplyExcerpt(activeSessionId)
-                        SessionActivityTracker.setInactive(activeSessionId)
-                    }
-                    SessionConcurrencyManager.releaseSlot(activeSessionId)
-                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY exit")
+        // [R1-CHAT-01] All synchronous UI/retry/rerun entries are Main-confined.
+        // Resolve the blocking prompt on IO, then arbitrate the claim on Main
+        // too, so even the split-out synchronous entry windows cannot interleave.
+        withContext(Dispatchers.Main.immediate) {
+            if (_promptQueue.value.isEmpty() || !isActive) return@withContext
+            var launchEpoch = -1L
+            val claimToken = drainToken
+            val claimed = claimStreamingSlot(_isStreaming) {
+                streamingClaimToken = drainToken
+                streamEpoch++
+                streamingClaimEpoch = streamEpoch
+                launchEpoch = streamingClaimEpoch
+                _isStreaming.value = true
+            }
+            if (!claimed) {
+                AppLogger.info(
+                    ChatViewModel.TAG,
+                    "resumeQueueAfterCancel: another turn claimed streaming — dropping this drain attempt",
+                )
+                return@withContext
+            }
+            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming=true (atomic claim, sid=$activeSessionId)")
+            _canResume.value = false
+            _error.value = null
+            // Snapshot belongs to this claim, not a re-read after a competing claim.
+            if (!isActive || !_isStreaming.value || launchEpoch != streamingClaimEpoch || drainToken !== streamingClaimToken) {
+                AppLogger.info(
+                    ChatViewModel.TAG_STREAM,
+                    "resumeQueueAfterCancel: claim revoked before stream start (superseded) — aborting drain",
+                )
+                return@withContext
+            }
+            synchronized(_isStreaming) {
+                // Guard and job publication are one non-suspending commit. The first
+                // guard alone cannot prevent a Stop/new turn in its publication window.
+                if (!isActive || !_isStreaming.value || launchEpoch != streamingClaimEpoch || claimToken !== streamingClaimToken) {
+                    return@synchronized
                 }
-            } catch (e: CancellationException) {
-                AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob CANCELLED waiting for slot")
+                streamJob = launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")
+                    try {
+                        SessionConcurrencyManager.acquireSlot(activeSessionId)
+                        AppLogger.debug(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob slot acquired")
+
+                        try {
+                            // [audit-0920] Guarded region widened — same fix as the
+                            // send/resume/retry paths: setActive (tracker callback
+                            // registration) and the strategy read must sit inside the
+                            // try that owns the releaseSlot finally. Outside it, a
+                            // non-CE throw leaks the concurrency slot and escapes the
+                            // coroutine.
+                            SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+
+                            val activeFallbackStrategy = run {
+                                val groupId = _selectedGroupId.value
+                                groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
+                                    ?: com.rikkaminis.app.data.model.FallbackStrategy.default
+                            }
+                            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts CALL")
+                            drainQueuedPrompts(
+                                provider = provider,
+                                systemPrompt = systemPrompt,
+                                fallbackStrategy = activeFallbackStrategy,
+                            )
+                            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drainQueuedPrompts RETURN")
+                        } catch (e: CancellationException) {
+                            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drain CANCELLED")
+                        } catch (e: Exception) {
+                            AppLogger.error(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drain EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
+                            Log.e(ChatViewModel.TAG, "Queued drain error (resumeQueueAfterCancel)", e)
+                            reportAgentLoopError(e)
+                        } finally {
+                            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY enter")
+                            synchronized(_isStreaming) {
+                                if (claimToken === streamingClaimToken) {
+                                    // [audit-0907 B2] Reset queue-position state — same
+                                    // rationale as the send path's finally: whatever the
+                                    // worker reported while queued must not leak into the
+                                    // next run's typing indicator.
+                                    resetQueueWaitingAhead()
+                                    // [fix/zero-chunk-cancel] Same rationale for the network-wait clock.
+                                    resetAwaitingResponseSince()
+                                    // [T-android-overlay-reply-status-34599] Surface
+                                    // the assistant's most recent reply text to the
+                                    // overlay BEFORE setInactive so the post-completion
+                                    // overlay state (no-running, has-outcome) carries a
+                                    // non-null excerpt. Reading _messages here is safe:
+                                    // we're in the finally block of the agent loop and
+                                    // the stream has already flushed its last delta.
+                                    publishOverlayReplyExcerpt(activeSessionId)
+                                    SessionActivityTracker.setInactive(activeSessionId)
+                                }
+                            }
+                            SessionConcurrencyManager.releaseSlot(activeSessionId)
+                            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY exit")
+                        }
+                    } catch (e: CancellationException) {
+                        AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob CANCELLED waiting for slot")
+                    }
+                    // [T-android-stale-streamjob-clears-isstreaming] guard + epoch
+                    // gate (see runRerunStreamTail).
+                    synchronized(_isStreaming) {
+                        if (streamJob === coroutineContext[Job] && launchEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
+                            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming=false (about to set)")
+                            _isStreaming.value = false
+                        } else {
+                            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming SKIPPED (stale job)")
+                        }
+                    }
+                    AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob EXIT")
+                }
+                streamJob?.start()
             }
-            // [T-android-stale-streamjob-clears-isstreaming] guard + epoch
-            // gate (see runRerunStreamTail).
-            if (streamJob === coroutineContext[Job] && launchEpoch == streamingClaimEpoch && claimToken === streamingClaimToken) {
-                AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming=false (about to set)")
-                _isStreaming.value = false
-            } else {
-                AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming SKIPPED (stale job)")
-            }
-            AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob EXIT")
         }
     }
 }

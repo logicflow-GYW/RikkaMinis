@@ -30,7 +30,7 @@ class QueuedDrainClaimRaceTest {
     fun `an idle flag is claimed and raised`() {
         val flag = MutableStateFlow(false)
         var minted = 0
-        val won = claimQueuedDrainSlot(flag) {
+        val won = claimStreamingSlot(flag) {
             minted++
             flag.value = true
         }
@@ -43,7 +43,7 @@ class QueuedDrainClaimRaceTest {
     fun `an already-streaming flag is never claimed`() {
         val flag = MutableStateFlow(true)
         var minted = 0
-        val won = claimQueuedDrainSlot(flag) {
+        val won = claimStreamingSlot(flag) {
             minted++
             flag.value = true
         }
@@ -60,7 +60,7 @@ class QueuedDrainClaimRaceTest {
         val workers = (1..2).map {
             thread(name = "drain-claim-$it") {
                 start.await()
-                val won = claimQueuedDrainSlot(flag) {
+                val won = claimStreamingSlot(flag) {
                     // Widen the check→claim window. In production this window
                     // is the synchronous prompt build; without the monitor two
                     // callers both read false here and both claim.
@@ -82,9 +82,9 @@ class QueuedDrainClaimRaceTest {
             "internal fun ChatViewModel.resumeQueueAfterCancel()",
         )
         val read = body.indexOf("val baseSystemPrompt = systemPromptForSession()")
-        val claim = body.indexOf("claimQueuedDrainSlot(_isStreaming)")
+        val claim = body.indexOf("claimStreamingSlot(_isStreaming)")
         assertTrue("the prompt build must be the disk read", read >= 0)
-        assertTrue("the drain must claim through claimQueuedDrainSlot", claim >= 0)
+        assertTrue("the drain must claim through claimStreamingSlot", claim >= 0)
         assertTrue(
             "the disk read must stay OUTSIDE the critical section (before the claim)",
             read < claim,
@@ -103,7 +103,7 @@ class QueuedDrainClaimRaceTest {
         )
         assertTrue(
             "the loser must bail out of this drain attempt",
-            body.substring(claim).contains("return@launch"),
+            body.substring(claim).contains("return@withContext"),
         )
     }
 
@@ -136,13 +136,13 @@ class QueuedDrainClaimRaceTest {
             "ChatQueueInterruption.kt",
             "internal fun ChatViewModel.resumeQueueAfterCancel()",
         )
-        val guard = body.indexOf("if (streamEpoch != streamingClaimEpoch || drainToken !== streamingClaimToken)")
-        val site = body.indexOf("streamJob = launch(Dispatchers.IO)")
+        val guard = body.indexOf("if (!isActive || !_isStreaming.value || launchEpoch != streamingClaimEpoch || drainToken !== streamingClaimToken)")
+        val site = body.indexOf("streamJob = launch(Dispatchers.IO, start = CoroutineStart.LAZY)")
         assertTrue("the stream start must carry a revocation guard", guard >= 0)
         assertTrue("the guard must run before the stream starts", guard < site)
         assertTrue(
             "the guard must bail out instead of starting the stream",
-            body.substring(guard, site).contains("return@launch"),
+            body.substring(guard, site).contains("return@withContext"),
         )
     }
 }
