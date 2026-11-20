@@ -6,6 +6,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.rikkaminis.app.scheduled.ScheduledRunMarker
+import com.rikkaminis.app.scheduled.ScheduledRunRef
 import com.rikkaminis.app.scheduled.ScheduledTask
 import com.rikkaminis.app.scheduled.ScheduledTaskTransitions
 import com.rikkaminis.app.scheduled.ScheduledTasksFile
@@ -283,6 +285,8 @@ class SessionActivityStreamErrorTest {
         )
         assertWiring(runnerMapsVerdict(runner), audience = "ScheduledTaskRunner.onSessionSettled")
 
+        // [A03] A settle is credited only for the run the document names, so
+        // the fixture is the fire pass's own state: task + ITS marker.
         val file = ScheduledTasksFile(
             globalEnabled = true,
             tasks = listOf(
@@ -296,6 +300,7 @@ class SessionActivityStreamErrorTest {
                     failStreak = 0,
                 ),
             ),
+            running = ScheduledRunMarker(taskId = "t-1", sessionId = "s1", startedAt = 1_000L),
         )
 
         // A flagged run settles as failed (RESULT_ERROR = "error").
@@ -303,7 +308,7 @@ class SessionActivityStreamErrorTest {
         flags.mark("s1")
         val outcome = if (flags.consume("s1")) ScheduledTask.RESULT_ERROR else ScheduledTask.RESULT_OK
         assertEquals("error", outcome)
-        val failed = ScheduledTaskTransitions.completeRun(file, "t-1", outcome, "2026-10-15")
+        val failed = ScheduledTaskTransitions.completeRun(file, ScheduledRunRef("t-1", "s1"), outcome, "2026-10-15")
         assertEquals("a failed run counts one failure", 1, failed.task!!.failStreak)
         assertNull(
             "a failed run must NOT advance the daily gate — that is what keeps the day's retry open",
@@ -316,7 +321,7 @@ class SessionActivityStreamErrorTest {
         val cleanOutcome =
             if (clean.consume("s1")) ScheduledTask.RESULT_ERROR else ScheduledTask.RESULT_OK
         assertEquals("ok", cleanOutcome)
-        val ok = ScheduledTaskTransitions.completeRun(file, "t-1", cleanOutcome, "2026-10-15")
+        val ok = ScheduledTaskTransitions.completeRun(file, ScheduledRunRef("t-1", "s1"), cleanOutcome, "2026-10-15")
         assertEquals(0, ok.task!!.failStreak)
         assertEquals("2026-10-15", ok.task.lastRunDate)
     }

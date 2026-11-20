@@ -193,9 +193,13 @@ class ScheduledTaskStorePolicyTest {
      */
     @Test
     fun `settle-before-check credits the day and the fresh load reads already-ran`() {
-        val preSettle = docWith(tasks = listOf(task("t-1", lastRunDate = "2026-10-28")))
-        val settled = ScheduledTaskTransitions.completeRun(
-            preSettle, "t-1", ScheduledTask.RESULT_OK, today = "2026-10-29",
+        // [A03] The pre-settle document is what the fire pass left behind: the
+        // task plus the marker of ITS run, which the settle names.
+        val preSettle = docWith(
+            running = ScheduledRunMarker("t-1", "s-1", 1_000L),
+            tasks = listOf(task("t-1", lastRunDate = "2026-10-28")),
+        )
+        val settled = ScheduledTaskTransitions.completeRun(preSettle, ScheduledRunRef("t-1", "s-1"), ScheduledTask.RESULT_OK, today = "2026-10-29",
         )
         assertEquals("2026-10-29", settled.file.tasks.single().lastRunDate)
         val verdicts = ScheduledTaskPolicy.evaluate(

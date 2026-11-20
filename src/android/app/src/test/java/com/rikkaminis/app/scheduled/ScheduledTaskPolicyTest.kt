@@ -181,22 +181,34 @@ class ScheduledTaskPolicyTest {
     }
 
     // ─── transitions: fuse (brief §5.3) ──────────────────────────────────────
+    //
+    // [A03] A settle is only credited for the run the document names: every
+    // fixture below carries the marker its run wrote (task id + run session),
+    // and the calls pass that same session. The late-settlement arms (task
+    // deleted / restored / re-created, newer run) live in
+    // [ScheduledTaskLateSettlementTest].
+
+    /** A document with one task and the marker of ITS run (session [session]). */
+    private fun runningDoc(task: ScheduledTask, session: String = "s-run"): ScheduledTasksFile =
+        ScheduledTasksFile(
+            tasks = listOf(task),
+            running = ScheduledRunMarker(task.id, session, 1_000L),
+        )
 
     @Test
     fun `two consecutive failures do not trip the fuse`() {
-        val after1 = ScheduledTaskTransitions.completeRun(
-            ScheduledTasksFile(tasks = listOf(task(failStreak = 0))),
-            "t-1",
-            ScheduledTask.RESULT_ERROR,
+        val after1 = ScheduledTaskTransitions.completeRun(runningDoc(task(failStreak = 0)), ScheduledRunRef("t-1", "s-run"), ScheduledTask.RESULT_ERROR,
             today = "2026-10-04",
         )
         assertFalse(after1.fuseTripped)
         assertEquals(1, after1.task?.failStreak)
         assertEquals(true, after1.task?.enabled)
 
+        // A failure clears the marker (the gate retries in the same window), so
+        // the second attempt is its own run with its own session.
         val after2 = ScheduledTaskTransitions.completeRun(
-            after1.file,
-            "t-1",
+            after1.file.copy(running = ScheduledRunMarker("t-1", "s-run-2", 2_000L)),
+            ScheduledRunRef("t-1", "s-run-2"),
             ScheduledTask.RESULT_ERROR,
             today = "2026-10-04",
         )
@@ -208,26 +220,19 @@ class ScheduledTaskPolicyTest {
 
     @Test
     fun `third consecutive failure trips the fuse and disables the task`() {
-        var file = ScheduledTasksFile(tasks = listOf(task(failStreak = 2)))
-        val res = ScheduledTaskTransitions.completeRun(
-            file,
-            "t-1",
-            ScheduledTask.RESULT_ERROR,
+        val file = runningDoc(task(failStreak = 2))
+        val res = ScheduledTaskTransitions.completeRun(file, ScheduledRunRef("t-1", "s-run"), ScheduledTask.RESULT_ERROR,
             today = "2026-10-04",
         )
         assertTrue(res.fuseTripped)
         assertEquals(3, res.task?.failStreak)
         assertEquals(false, res.task?.enabled)
         assertEquals(true, res.task?.suspendedByFuse)
-        file = res.file
     }
 
     @Test
     fun `timeout outcome also counts toward the fuse`() {
-        val res = ScheduledTaskTransitions.completeRun(
-            ScheduledTasksFile(tasks = listOf(task(failStreak = 2))),
-            "t-1",
-            ScheduledTask.RESULT_TIMEOUT,
+        val res = ScheduledTaskTransitions.completeRun(runningDoc(task(failStreak = 2)), ScheduledRunRef("t-1", "s-run"), ScheduledTask.RESULT_TIMEOUT,
             today = "2026-10-04",
         )
         assertTrue(res.fuseTripped)
@@ -236,10 +241,7 @@ class ScheduledTaskPolicyTest {
 
     @Test
     fun `success resets the streak and stamps the day`() {
-        val res = ScheduledTaskTransitions.completeRun(
-            ScheduledTasksFile(tasks = listOf(task(failStreak = 2))),
-            "t-1",
-            ScheduledTask.RESULT_OK,
+        val res = ScheduledTaskTransitions.completeRun(runningDoc(task(failStreak = 2)), ScheduledRunRef("t-1", "s-run"), ScheduledTask.RESULT_OK,
             today = "2026-10-04",
         )
         assertFalse(res.fuseTripped)
@@ -250,10 +252,7 @@ class ScheduledTaskPolicyTest {
 
     @Test
     fun `failure does not advance lastRunDate so the task can retry same window`() {
-        val res = ScheduledTaskTransitions.completeRun(
-            ScheduledTasksFile(tasks = listOf(task(lastRunDate = "2026-10-02"))),
-            "t-1",
-            ScheduledTask.RESULT_ERROR,
+        val res = ScheduledTaskTransitions.completeRun(runningDoc(task(lastRunDate = "2026-10-02")), ScheduledRunRef("t-1", "s-run"), ScheduledTask.RESULT_ERROR,
             today = "2026-10-04",
         )
         assertEquals("2026-10-02", res.task?.lastRunDate)
@@ -262,12 +261,14 @@ class ScheduledTaskPolicyTest {
 
     @Test
     fun `every settled run clears the persisted run marker`() {
-        val file = ScheduledTasksFile(
-            running = ScheduledRunMarker("t-1", "s-1", 1_000L),
-            tasks = listOf(task()),
+        assertEquals(
+            null,
+            ScheduledTaskTransitions.completeRun(runningDoc(task()), ScheduledRunRef("t-1", "s-run"), "ok", "2026-10-04").file.running,
         )
-        assertEquals(null, ScheduledTaskTransitions.completeRun(file, "t-1", "ok", "2026-10-04").file.running)
-        assertEquals(null, ScheduledTaskTransitions.completeRun(file, "t-1", "error", "2026-10-04").file.running)
+        assertEquals(
+            null,
+            ScheduledTaskTransitions.completeRun(runningDoc(task()), ScheduledRunRef("t-1", "s-run"), "error", "2026-10-04").file.running,
+        )
     }
 
     @Test
@@ -276,7 +277,7 @@ class ScheduledTaskPolicyTest {
             running = ScheduledRunMarker("t-gone", "s-9", 1_000L),
             tasks = listOf(task(id = "t-1")),
         )
-        val res = ScheduledTaskTransitions.completeRun(file, "t-gone", "ok", "2026-10-04")
+        val res = ScheduledTaskTransitions.completeRun(file, ScheduledRunRef("t-gone", "s-9"), "ok", "2026-10-04")
         assertNull(res.task)
         assertFalse(res.fuseTripped)
         assertEquals(null, res.file.running)

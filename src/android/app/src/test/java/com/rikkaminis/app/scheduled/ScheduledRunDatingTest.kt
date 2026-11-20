@@ -114,6 +114,12 @@ class ScheduledRunDatingTest {
     // the seams that exist today (transitions + policy are read-only here):
     // the credited date must leave tomorrow's window eligible.
 
+    /**
+     * [A03] The settle carries the run's identity, so the fixture is the state
+     * the fire pass leaves behind: the task plus ITS `running` marker (the run
+     * session is "s-cross"). A document without that marker refuses the settle
+     * by design (see [ScheduledTaskLateSettlementTest]).
+     */
     private fun freshFile(): ScheduledTasksFile = ScheduledTasksFile(
         globalEnabled = true,
         tasks = listOf(
@@ -126,7 +132,7 @@ class ScheduledRunDatingTest {
                 enabled = true,
             ),
         ),
-        running = null,
+        running = ScheduledRunMarker(taskId = "t-cross", sessionId = "s-cross", startedAt = 1_000L),
     )
 
     @Test
@@ -134,7 +140,7 @@ class ScheduledRunDatingTest {
         // Fire pass ran 2026-10-15 (window 23:50-23:59); run settles 00:06 on
         // 2026-10-16. The fix credits "2026-10-15".
         val gateDate = ScheduledRunDating.gateDateOnSettle("2026-10-15", "2026-10-16", ScheduledTask.RESULT_OK)
-        val after = ScheduledTaskTransitions.completeRun(freshFile(), "t-cross", ScheduledTask.RESULT_OK, gateDate)
+        val after = ScheduledTaskTransitions.completeRun(freshFile(), ScheduledRunRef("t-cross", "s-cross"), ScheduledTask.RESULT_OK, gateDate)
         assertEquals("2026-10-15", after.file.tasks[0].lastRunDate)
 
         // Next day, 23:55, inside the next day's window: must be Fire, NOT
@@ -148,7 +154,7 @@ class ScheduledRunDatingTest {
         // What the OLD code wrote (LocalDate.now() at settle time): the settle
         // day. Pinned as a negative-control contrast: with that write, the next
         // day's beat inside the window is exactly the defect (ALREADY_RAN).
-        val after = ScheduledTaskTransitions.completeRun(freshFile(), "t-cross", ScheduledTask.RESULT_OK, "2026-10-16")
+        val after = ScheduledTaskTransitions.completeRun(freshFile(), ScheduledRunRef("t-cross", "s-cross"), ScheduledTask.RESULT_OK, "2026-10-16")
         assertEquals("2026-10-16", after.file.tasks[0].lastRunDate)
         val verdicts = ScheduledTaskPolicy.evaluate("2026-10-16", 23 * 60 + 55, after.file.tasks, null)
         assertEquals(
@@ -160,7 +166,7 @@ class ScheduledRunDatingTest {
     @Test
     fun `failure arm - real transitions never advances the gate whatever date is passed`() {
         for (today in listOf("2026-10-15", "2026-10-16", "")) {
-            val after = ScheduledTaskTransitions.completeRun(freshFile(), "t-cross", ScheduledTask.RESULT_ERROR, today)
+            val after = ScheduledTaskTransitions.completeRun(freshFile(), ScheduledRunRef("t-cross", "s-cross"), ScheduledTask.RESULT_ERROR, today)
             assertEquals(null, after.file.tasks[0].lastRunDate)
             assertEquals(ScheduledTask.RESULT_ERROR, after.file.tasks[0].lastResult)
         }

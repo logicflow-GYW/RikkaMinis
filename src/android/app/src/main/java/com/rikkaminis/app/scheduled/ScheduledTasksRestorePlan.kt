@@ -85,4 +85,5 @@ internal object ScheduledTasksRestorePlan {
 data class ScheduledTasksRestoreOutcome(
     val applied: Boolean,
     val notice: String?,
+    val removalWatermark: ScheduledTaskRemovalWatermark? = null,
 )

@@ -52,6 +52,65 @@ object ScheduledTasksStore {
 
     private val lock = Mutex()
 
+    // Process-local owner epochs; never encoded in scheduled-tasks.json.
+    private val admissionGenerations = mutableMapOf<String, Long>()
+    private var globalAdmissionGeneration = 0L
+    private var documentAdmissionGeneration = 0L
+
+    private fun admissionSnapshotLocked(file: ScheduledTasksFile) = ScheduledTaskAdmissionSnapshot(
+        file = file,
+        generations = file.tasks.associate { it.id to (admissionGenerations[it.id] ?: 0L) },
+        globalGeneration = globalAdmissionGeneration,
+        documentGeneration = documentAdmissionGeneration,
+    )
+
+    private fun removalWatermarkLocked() = ScheduledTaskRemovalWatermark(
+        generations = admissionGenerations.toMap(),
+        globalGeneration = globalAdmissionGeneration,
+        documentGeneration = documentAdmissionGeneration,
+    )
+
+    suspend fun admissionSnapshot(context: Context): ScheduledTaskAdmissionSnapshot = withContext(Dispatchers.IO) {
+        lock.withLock { admissionSnapshotLocked(loadLocked(context)) }
+    }
+
+    private fun admissionMatchesLocked(run: ScheduledRunRef): Boolean =
+        ScheduledTaskGenerationPolicy.admits(
+            run,
+            admissionGenerations[run.taskId] ?: 0L,
+            globalAdmissionGeneration,
+            documentAdmissionGeneration,
+        )
+
+    private fun documentMatchesLocked(run: ScheduledRunRef): Boolean =
+        run.documentGeneration == documentAdmissionGeneration
+
+    private fun sameAdmissionSpec(a: ScheduledTask?, b: ScheduledTask?): Boolean =
+        a?.let { listOf(it.title, it.prompt, it.windowStart, it.windowEnd, it.enabled,
+            it.maxTurns, it.deadlineSec, it.maxEstimatedTokens, it.suspendedByFuse) } ==
+            b?.let { listOf(it.title, it.prompt, it.windowStart, it.windowEnd, it.enabled,
+                it.maxTurns, it.deadlineSec, it.maxEstimatedTokens, it.suspendedByFuse) }
+
+    /** Called under the store mutex; epochs advance only after writeLocked returns true. */
+    private fun writeTransitionLocked(
+        context: Context,
+        old: ScheduledTasksFile,
+        next: ScheduledTasksFile,
+        restore: Boolean = false,
+    ): Boolean {
+        if (!writeLocked(context, next)) return false
+        if (restore) documentAdmissionGeneration++
+        if (restore || old.globalEnabled != next.globalEnabled) globalAdmissionGeneration++
+        val before = old.tasks.associateBy { it.id }
+        val after = next.tasks.associateBy { it.id }
+        for (id in before.keys + after.keys) {
+            if (!sameAdmissionSpec(before[id], after[id])) {
+                admissionGenerations[id] = (admissionGenerations[id] ?: 0L) + 1L
+            }
+        }
+        return true
+    }
+
     /**
      * [FIX-R3-E F-07] `scheduled-tasks.json` exists but cannot be turned into a
      * document — unparseable bytes, or a `version` this build does not read.
@@ -206,13 +265,17 @@ object ScheduledTasksStore {
                 // for them: it recorded the tasks THIS build could parse, i.e.
                 // none. Keep a verbatim copy first.
                 if (unreadable) preserveUnreadableLocked(context)
-                if (writeLocked(context, parsed.copy(running = null))) {
+                if (writeTransitionLocked(context, live, parsed.copy(running = null), restore = true)) {
                     // The bytes on disk are now a document we just produced, so
                     // an earlier unreadable verdict no longer applies. (A
                     // whole-document restore is the one write path allowed to
                     // run while [unreadable] is set — see its KDoc.)
                     unreadable = false
-                    ScheduledTasksRestoreOutcome(applied = true, notice = decision.notice)
+                    ScheduledTasksRestoreOutcome(
+                        applied = true,
+                        notice = decision.notice,
+                        removalWatermark = removalWatermarkLocked(),
+                    )
                 } else {
                     ScheduledTasksRestoreOutcome(
                         applied = false,
@@ -237,7 +300,10 @@ object ScheduledTasksStore {
         // mutex and the runner's checkMutex must never nest (LOCK ORDER note on
         // ScheduledTaskRunner.onTasksRemoved); guarded by
         // scripts/scan/scheduled_store_release_guard.py.
-        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = null)
+        ScheduledTaskRunner.onTasksRemoved(
+            removedTaskIds = null,
+            removalWatermark = outcome.removalWatermark ?: error("applied restore lacks committed watermark"),
+        )
         return outcome
     }
 
@@ -260,6 +326,7 @@ object ScheduledTasksStore {
     data class WriteOutcome(
         val file: ScheduledTasksFile,
         val persisted: Boolean,
+        val removalWatermark: ScheduledTaskRemovalWatermark,
     )
 
     suspend fun mutate(
@@ -283,14 +350,14 @@ object ScheduledTasksStore {
             // phantom success.
             if (unreadable) {
                 AppLogger.warning(TAG, "mutation refused: scheduled-tasks.json is unreadable")
-                return@withLock WriteOutcome(current, persisted = false)
+                return@withLock WriteOutcome(current, persisted = false, removalWatermark = removalWatermarkLocked())
             }
             val next = transform(current)
             // Identity means the transform refused the change (e.g. an edit
             // whose target vanished with allowInsert = false): nothing was
             // written, and the caller must not report success.
-            if (next === current) return@withLock WriteOutcome(next, persisted = false)
-            val wrote = writeLocked(context, next)
+            if (next === current) return@withLock WriteOutcome(next, persisted = false, removalWatermark = removalWatermarkLocked())
+            val wrote = writeTransitionLocked(context, current, next)
             if (!wrote) {
                 AppLogger.warning(TAG, "mutation not persisted; handing back the pre-write document")
             }
@@ -300,6 +367,7 @@ object ScheduledTasksStore {
             WriteOutcome(
                 file = ScheduledTaskStorePolicy.visibleAfterWrite(current, next, wrote),
                 persisted = wrote,
+                removalWatermark = removalWatermarkLocked(),
             )
         }
     }
@@ -334,7 +402,7 @@ object ScheduledTasksStore {
         }
 
     suspend fun deleteTask(context: Context, taskId: String): ScheduledTasksFile {
-        val next = mutate(context) { file ->
+        val write = mutateReporting(context) { file ->
             if (file.running?.taskId == taskId) {
                 file.copy(tasks = file.tasks.filterNot { it.id == taskId }, running = null)
             } else {
@@ -352,7 +420,8 @@ object ScheduledTasksStore {
         // on disk — the next minute beat then reads
         // `marker.taskId != runningTaskId` and books a `process-restart`
         // crash failure against a task that is running perfectly well.
-        if (next.tasks.any { it.id == taskId }) {
+        val next = write.file
+        if (!write.persisted || next.tasks.any { it.id == taskId }) {
             AppLogger.warning(
                 TAG,
                 "delete of task=$taskId not persisted; runner state left alone",
@@ -369,7 +438,10 @@ object ScheduledTasksStore {
         // decides, and a delete that LANDS can never be forgotten. The guard
         // above is about a delete that never happened, not about the run: a
         // real deletion always releases, whether or not a run is in flight.
-        ScheduledTaskRunner.onTasksRemoved(removedTaskIds = setOf(taskId))
+        ScheduledTaskRunner.onTasksRemoved(
+            removedTaskIds = setOf(taskId),
+            removalWatermark = write.removalWatermark,
+        )
         return next
     }
 
@@ -410,37 +482,97 @@ object ScheduledTasksStore {
      */
     suspend fun markRunning(
         context: Context,
-        taskId: String,
-        sessionId: String,
+        run: ScheduledRunRef,
         startedAt: Long,
-    ): ScheduledTasksFile = mutate(context) {
-        ScheduledTaskStorePolicy.markRunningDecision(
-            file = it,
-            taskId = taskId,
-            sessionId = sessionId,
-            startedAt = startedAt,
-        )
+    ): ScheduledTaskMarkRunningOutcome = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val current = loadLocked(context)
+            if (unreadable || !admissionMatchesLocked(run) || run.sessionId.isNullOrBlank()) {
+                return@withLock ScheduledTaskMarkRunningOutcome(current, ScheduledTaskWriteDisposition.NO_CHANGE)
+            }
+            val next = ScheduledTaskStorePolicy.markRunningDecision(current, run.taskId, run.sessionId, startedAt)
+            if (next === current) return@withLock ScheduledTaskMarkRunningOutcome(current, ScheduledTaskWriteDisposition.NO_CHANGE)
+            if (!writeTransitionLocked(context, current, next)) {
+                return@withLock ScheduledTaskMarkRunningOutcome(current, ScheduledTaskWriteDisposition.WRITE_FAILED)
+            }
+            ScheduledTaskMarkRunningOutcome(next, ScheduledTaskWriteDisposition.PERSISTED)
+        }
     }
 
-    /** A run settled (or was reaped). Applies transitions and clears the marker. */
+    /**
+     * A run settled (or was reaped). Applies transitions and clears the marker.
+     *
+     * [A03 late settlement] [run] is the settling run's identity — the
+     * decision whether this document may be credited lives in the pure
+     * [ScheduledTaskTransitions.completeRun], which compares it with the
+     * `running` marker. A stale settle (task deleted / backup-restored /
+     * re-created with the same id, or a newer run of the same task holding the
+     * marker) comes back as the SAME document instance, so nothing is written
+     * and the caller's result carries `task = null`.
+     */
     suspend fun completeRun(
+        context: Context,
+        run: ScheduledRunRef,
+        outcome: String,
+        today: String,
+    ): ScheduledTaskStoreTransition = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val current = loadLocked(context)
+            if (unreadable || !documentMatchesLocked(run)) {
+                return@withLock ScheduledTaskStoreTransition(
+                    ScheduledTaskTransitions.Result(current, null, false), ScheduledTaskWriteDisposition.NO_CHANGE,
+                )
+            }
+            val result = ScheduledTaskTransitions.completeRun(current, run, outcome, today)
+            if (result.file === current) {
+                return@withLock ScheduledTaskStoreTransition(result, ScheduledTaskWriteDisposition.NO_CHANGE)
+            }
+            if (!writeTransitionLocked(context, current, result.file)) {
+                return@withLock ScheduledTaskStoreTransition(
+                    ScheduledTaskTransitions.Result(current, null, false), ScheduledTaskWriteDisposition.WRITE_FAILED,
+                )
+            }
+            ScheduledTaskStoreTransition(result, ScheduledTaskWriteDisposition.PERSISTED)
+        }
+    }
+
+    /**
+     * [A03] Settlement for a dispatch that never produced a run identity (the
+     * fire pass threw before `prepareSession` returned, so no `running` marker
+     * was ever written for it).
+     *
+     * The credit is allowed only while the document carries NO marker at all —
+     * see [ScheduledTaskTransitions.completeUnstartedRun]. Callers pass a
+     * failure outcome, so this can count one failure but can never fake a
+     * successful run.
+     */
+    suspend fun completeUnstartedRun(
         context: Context,
         taskId: String,
         outcome: String,
         today: String,
-    ): ScheduledTaskTransitions.Result = withContext(Dispatchers.IO) {
+        taskGeneration: Long,
+        globalGeneration: Long,
+        documentGeneration: Long,
+    ): ScheduledTaskStoreTransition = withContext(Dispatchers.IO) {
         lock.withLock {
             val current = loadLocked(context)
-            // [FIX-R3-E F-07] Refuse on unreadable, like every other
-            // read-modify-write: the settlement would otherwise write an empty
-            // document over the task list. (The caller only logs the result.)
-            if (unreadable) {
-                AppLogger.warning(TAG, "settlement refused: scheduled-tasks.json is unreadable")
-                return@withLock ScheduledTaskTransitions.Result(current, null, fuseTripped = false)
+            val run = ScheduledRunRef(taskId, null, taskGeneration, globalGeneration, documentGeneration)
+            if (unreadable || !admissionMatchesLocked(run)) {
+                return@withLock ScheduledTaskStoreTransition(
+                    ScheduledTaskTransitions.Result(current, null, false), ScheduledTaskWriteDisposition.NO_CHANGE,
+                )
             }
-            val result = ScheduledTaskTransitions.completeRun(current, taskId, outcome, today)
-            if (result.file !== current) writeLocked(context, result.file)
-            result
+            val result = ScheduledTaskTransitions.completeUnstartedRun(current, taskId, outcome, today)
+            if (result.file === current) {
+                return@withLock ScheduledTaskStoreTransition(result, ScheduledTaskWriteDisposition.NO_CHANGE)
+            }
+            if (!writeTransitionLocked(context, current, result.file)) {
+                return@withLock ScheduledTaskStoreTransition(
+                    ScheduledTaskTransitions.Result(current, null, false), ScheduledTaskWriteDisposition.WRITE_FAILED,
+                )
+            }
+            ScheduledTaskStoreTransition(result, ScheduledTaskWriteDisposition.PERSISTED)
         }
     }
 
@@ -454,33 +586,51 @@ object ScheduledTasksStore {
      * DISABLE the task. Refuses while the file is unreadable (every other
      * read-modify-write does), which is fine: there is nothing to rewrite there.
      *
+     * [A03 late settlement] Scoped to [run]: only the marker this run
+     * wrote may be dropped, never one a newer run of the same task owns.
+     *
      * @return true when a matching marker was removed from the document.
      */
-    suspend fun clearRunningMarker(context: Context, taskId: String): Boolean =
-        withContext(Dispatchers.IO) {
-            lock.withLock {
-                val current = loadLocked(context)
-                if (unreadable) return@withLock false
-                val next = ScheduledTaskTransitions.clearRunningMarker(current, taskId)
-                if (next === current) return@withLock false
-                writeLocked(context, next)
+    suspend fun clearRunningMarker(
+        context: Context,
+        run: ScheduledRunRef,
+    ): ScheduledTaskWriteDisposition = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val current = loadLocked(context)
+            if (unreadable) return@withLock ScheduledTaskWriteDisposition.NO_CHANGE
+            val next = ScheduledTaskTransitions.clearRunningMarker(current, run)
+            if (next === current) return@withLock ScheduledTaskWriteDisposition.NO_CHANGE
+            if (!documentMatchesLocked(run)) return@withLock ScheduledTaskWriteDisposition.NO_CHANGE
+            if (!writeTransitionLocked(context, current, next)) {
+                ScheduledTaskWriteDisposition.WRITE_FAILED
+            } else {
+                ScheduledTaskWriteDisposition.PERSISTED
             }
         }
+    }
 
     /** Crash recovery: marker without an in-process run counts one failure. */
     suspend fun crashFailure(
         context: Context,
-        taskId: String,
-    ): ScheduledTaskTransitions.Result = withContext(Dispatchers.IO) {
+        run: ScheduledRunRef,
+    ): ScheduledTaskStoreTransition = withContext(Dispatchers.IO) {
         lock.withLock {
             val current = loadLocked(context)
-            if (unreadable) {
-                AppLogger.warning(TAG, "crash recovery refused: scheduled-tasks.json is unreadable")
-                return@withLock ScheduledTaskTransitions.Result(current, null, fuseTripped = false)
+            if (unreadable || !admissionMatchesLocked(run)) {
+                return@withLock ScheduledTaskStoreTransition(
+                    ScheduledTaskTransitions.Result(current, null, false), ScheduledTaskWriteDisposition.NO_CHANGE,
+                )
             }
-            val result = ScheduledTaskTransitions.crashFailure(current, taskId)
-            if (result.file !== current) writeLocked(context, result.file)
-            result
+            val result = ScheduledTaskTransitions.crashFailure(current, run.taskId)
+            if (result.file === current) {
+                return@withLock ScheduledTaskStoreTransition(result, ScheduledTaskWriteDisposition.NO_CHANGE)
+            }
+            if (!writeTransitionLocked(context, current, result.file)) {
+                return@withLock ScheduledTaskStoreTransition(
+                    ScheduledTaskTransitions.Result(current, null, false), ScheduledTaskWriteDisposition.WRITE_FAILED,
+                )
+            }
+            ScheduledTaskStoreTransition(result, ScheduledTaskWriteDisposition.PERSISTED)
         }
     }
 
