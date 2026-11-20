@@ -28,7 +28,7 @@ import java.nio.file.Files
 class MirrorFileTargetTest {
 
     private val root: File = Files.createTempDirectory("mirror-filetarget").toFile()
-    private val base = File(root, "backup")
+    private val base = root
     private val target = FileTarget(base)
 
     @After
@@ -40,20 +40,20 @@ class MirrorFileTargetTest {
 
     @Test
     fun overwriteReplacesUnderTheSameNameAndNeverForks() {
-        assertTrue(target.write("mirror/current/memory/2026-11-14.md", "v1".toByteArray()))
-        assertTrue(target.write("mirror/current/memory/2026-11-14.md", "v2-longer".toByteArray()))
+        assertTrue(target.write("${MirrorStore.CURRENT_REL}/memory/2026-11-14.md", "v1".toByteArray()))
+        assertTrue(target.write("${MirrorStore.CURRENT_REL}/memory/2026-11-14.md", "v2-longer".toByteArray()))
 
         assertEquals(
             "the second write must land on the same path — a forked copy is what MediaProvider " +
                 "did, and it left the mirror serving the first version forever",
             "v2-longer",
-            target.read("mirror/current/memory/2026-11-14.md")?.toString(Charsets.UTF_8),
+            target.read("${MirrorStore.CURRENT_REL}/memory/2026-11-14.md")?.toString(Charsets.UTF_8),
         )
         assertEquals(
             "exactly one file: `a.md`, `a.md.txt` and `a.md (1).txt` in one directory is the " +
                 "symptom this whole change exists to remove",
             listOf("2026-11-14.md"),
-            File(base, "mirror/current/memory").list()!!.sorted(),
+            File(base, "${MirrorStore.CURRENT_REL}/memory").list()!!.sorted(),
         )
     }
 
@@ -62,52 +62,52 @@ class MirrorFileTargetTest {
         // `read()` returning null is what silently disabled `previous/`: the
         // archive loop treats "no old bytes" as "nothing to preserve", so the
         // rollback history was empty from the first day and nothing said so.
-        assertNull(target.read("mirror/current/memory/absent.md"))
-        target.write("mirror/current/memory/present.md", "bytes".toByteArray())
-        assertEquals("bytes", target.read("mirror/current/memory/present.md")?.toString(Charsets.UTF_8))
+        assertNull(target.read("${MirrorStore.CURRENT_REL}/memory/absent.md"))
+        target.write("${MirrorStore.CURRENT_REL}/memory/present.md", "bytes".toByteArray())
+        assertEquals("bytes", target.read("${MirrorStore.CURRENT_REL}/memory/present.md")?.toString(Charsets.UTF_8))
     }
 
     @Test
     fun deleteRemovesTheFileAndIsIdempotentOnlyWhenNothingIsThere() {
-        target.write("mirror/current/shared/backlog.md", "x".toByteArray())
-        assertTrue(target.delete("mirror/current/shared/backlog.md"))
-        assertNull(target.read("mirror/current/shared/backlog.md"))
+        target.write("${MirrorStore.CURRENT_REL}/shared/backlog.md", "x".toByteArray())
+        assertTrue(target.delete("${MirrorStore.CURRENT_REL}/shared/backlog.md"))
+        assertNull(target.read("${MirrorStore.CURRENT_REL}/shared/backlog.md"))
         assertFalse(
             "the file is gone from disk, not just from an index",
-            File(base, "mirror/current/shared/backlog.md").exists(),
+            File(base, "${MirrorStore.CURRENT_REL}/shared/backlog.md").exists(),
         )
         // Idempotent cleanup: deleting an absent path is success (the manifest
         // can lag a manual deletion the user made in a file manager).
-        assertTrue(target.delete("mirror/current/shared/backlog.md"))
+        assertTrue(target.delete("${MirrorStore.CURRENT_REL}/shared/backlog.md"))
     }
 
     // ------------------------------------------------------- the write shape
 
     @Test
     fun writeLeavesNoTempFileBehind() {
-        target.write("auto/rikkaminis-auto-20261114-000000.json", "{}".toByteArray())
+        target.write("${MirrorStore.AUTO_REL}/rikkaminis-auto-20261114-000000.json", "{}".toByteArray())
         assertEquals(
             listOf("rikkaminis-auto-20261114-000000.json"),
-            File(base, "auto").list()!!.sorted(),
+            File(root, MirrorStore.AUTO_REL).list()!!.sorted(),
         )
     }
 
     @Test
     fun writeCreatesMissingDirectories() {
-        assertTrue(target.write("mirror/previous/20261114-200732/memory/deep/x.md", "d".toByteArray()))
-        assertTrue(File(base, "mirror/previous/20261114-200732/memory/deep/x.md").isFile)
+        assertTrue(target.write("${MirrorStore.PREVIOUS_REL}/20261114-200732/memory/deep/x.md", "d".toByteArray()))
+        assertTrue(File(base, "${MirrorStore.PREVIOUS_REL}/20261114-200732/memory/deep/x.md").isFile)
     }
 
     // ------------------------------------------------------ deleteTree safety
 
     @Test
     fun deleteTreeRemovesTheWholePoint() {
-        target.write("mirror/previous/20261029-090000/memory/a.md", "1".toByteArray())
-        target.write("mirror/previous/20261029-090000/memory/b.md", "2".toByteArray())
-        assertTrue(target.deleteTree("mirror/previous/20261029-090000/"))
+        target.write("${MirrorStore.PREVIOUS_REL}/20261029-090000/memory/a.md", "1".toByteArray())
+        target.write("${MirrorStore.PREVIOUS_REL}/20261029-090000/memory/b.md", "2".toByteArray())
+        assertTrue(target.deleteTree("${MirrorStore.PREVIOUS_REL}/20261029-090000/"))
         assertFalse(
             "a rotated point is gone, not just emptied",
-            File(base, "mirror/previous/20261029-090000").exists(),
+            File(base, "${MirrorStore.PREVIOUS_REL}/20261029-090000").exists(),
         )
     }
 
@@ -120,13 +120,13 @@ class MirrorFileTargetTest {
         // shipped code runs, on a real filesystem, not by reading the source.
         val outside = File(root, "outside").apply { mkdirs() }
         File(outside, "keep.txt").writeText("do not delete me")
-        val victim = File(base, "mirror/previous/20261114-000000")
+        val victim = File(base, "${MirrorStore.PREVIOUS_REL}/20261114-000000")
         File(victim, "memory").mkdirs()
         File(victim, "memory/a.md").writeText("payload")
         val link = File(victim, "link-to-outside")
         Files.createSymbolicLink(link.toPath(), outside.toPath())
 
-        assertTrue(target.deleteTree("mirror/previous/20261114-000000/"))
+        assertTrue(target.deleteTree("${MirrorStore.PREVIOUS_REL}/20261114-000000/"))
 
         assertFalse("the point itself is gone", victim.exists())
         assertTrue("the link target was NOT emptied through the link", File(outside, "keep.txt").isFile)
@@ -135,17 +135,17 @@ class MirrorFileTargetTest {
 
     @Test
     fun deleteTreeOnAnAbsentPrefixIsSuccess() {
-        assertTrue(target.deleteTree("mirror/previous/does-not-exist/"))
+        assertTrue(target.deleteTree("${MirrorStore.PREVIOUS_REL}/does-not-exist/"))
     }
 
     // ------------------------------------------------------------------ list
 
     @Test
     fun listReturnsPathsRelativeToBaseAndSkipsAbsentDirs() {
-        target.write("auto/rikkaminis-auto-20261114-000000.json", "{}".toByteArray())
+        target.write("${MirrorStore.AUTO_REL}/rikkaminis-auto-20261114-000000.json", "{}".toByteArray())
         assertEquals(
-            listOf("auto/rikkaminis-auto-20261114-000000.json"),
-            target.list("auto/"),
+            listOf("${MirrorStore.AUTO_REL}/rikkaminis-auto-20261114-000000.json"),
+            target.list("${MirrorStore.AUTO_REL}/"),
         )
         assertEquals(emptyList<String>(), target.list("nope/"))
     }
