@@ -76,7 +76,7 @@ internal class BlobDownloadTokenSlot(
     fun close() {
         synchronized(this) {
             closed = true
-            activeToken = null
+            activeToken = null // release-ok: owner completed permanent tab teardown inside the synchronized slot transaction
             armedAtMs = 0L
         }
     }
