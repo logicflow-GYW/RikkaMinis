@@ -75,7 +75,9 @@ internal class BlobDownloadTokenSlot(
 
     fun close() {
         synchronized(this) {
-            activeToken = null // release-ok: permanent tab close under the same lock as arm/claim; no later owner
+            closed = true
+            activeToken = null
+            armedAtMs = 0L
         }
     }
 
