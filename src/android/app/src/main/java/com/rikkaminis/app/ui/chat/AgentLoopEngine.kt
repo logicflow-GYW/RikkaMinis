@@ -2703,15 +2703,11 @@ internal class AgentLoopEngine(
             // probe restores the member).
             host.activeEntryId?.let { entryId ->
                 // [deep-audit-1016 6b] …except a blocked-empty reply, as above.
-                if (partialStreamFailure) {
+                if (!blockedEmptyReply) {
                     host.groupRouter.recordResult(
                         entryId,
-                        com.rikkaminis.app.data.routing.RouteOutcome.ServerError,
-                    )
-                } else if (!blockedEmptyReply) {
-                    host.groupRouter.recordResult(
-                        entryId,
-                        com.rikkaminis.app.data.routing.RouteOutcome.Success,
+                        if (partialStreamFailure) com.rikkaminis.app.data.routing.RouteOutcome.ServerError
+                        else com.rikkaminis.app.data.routing.RouteOutcome.Success,
                     )
                 }
             }
