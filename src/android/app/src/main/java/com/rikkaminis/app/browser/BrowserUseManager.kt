@@ -967,7 +967,7 @@ class BrowserUseManager(
             ) {
                 if (request.isForMainFrame) {
                     lastMainFrameHttpError = errorResponse.statusCode
-                    Log.w(TAG, "main-frame HTTP ${errorResponse.statusCode} for ${request.url}")
+                    Log.w(TAG, mainFrameHttpErrorLogMessage(errorResponse.statusCode, request.url.toString()))
                 }
             }
 
@@ -3346,19 +3346,37 @@ internal object MinisMainDocGate {
 
 /** Format only diagnostic metadata before the message reaches persistent logs. */
 internal fun downloadStartLogMessage(url: String, mimeType: String?, contentLength: Long): String {
-    val source = when {
-        url.startsWith("data:", ignoreCase = true) -> "data:"
-        url.startsWith("blob:", ignoreCase = true) -> "blob:"
-        // Paths can carry secrets too. Keep only the origin and non-default port.
-        else -> url.toHttpUrlOrNull()?.let { parsed ->
-            val defaultPort = if (parsed.scheme == "https") 443 else 80
-            val port = if (parsed.port == defaultPort) "" else ":${parsed.port}"
-            "${parsed.scheme}://${parsed.host}$port/"
-        } ?: "<unknown>"
-    }
+    val source = originOnlyForLog(url)
     val mime = mimeType?.toMediaTypeOrNull()?.let { "${it.type}/${it.subtype}" } ?: "<unknown>"
     return "onDownloadStart: $source mime=$mime len=$contentLength"
 }
+
+/**
+ * Reduce a remote URL to its origin (scheme + host + non-default port) before it
+ * reaches the persistent log.
+ *
+ * [R4-BM-01 follow-up] The download listener was the first site to leak a signed
+ * URL; the main-frame HTTP error line was a second one in the same class, still
+ * interpolating `request.url` verbatim — a CDN/relay 404 on a pre-signed link
+ * wrote `?X-Amz-Signature=…&token=…` into `filesDir/logs`. Every diagnostic that
+ * prints a fetched URL goes through here: query, fragment, path and userinfo are
+ * all dropped, and `data:`/`blob:` payloads collapse to their scheme.
+ * Unparseable input becomes `<unknown>` instead of falling back to raw text.
+ */
+internal fun originOnlyForLog(url: String): String = when {
+    url.startsWith("data:", ignoreCase = true) -> "data:"
+    url.startsWith("blob:", ignoreCase = true) -> "blob:"
+    // Paths can carry secrets too. Keep only the origin and non-default port.
+    else -> url.toHttpUrlOrNull()?.let { parsed ->
+        val defaultPort = if (parsed.scheme == "https") 443 else 80
+        val port = if (parsed.port == defaultPort) "" else ":${parsed.port}"
+        "${parsed.scheme}://${parsed.host}$port/"
+    } ?: "<unknown>"
+}
+
+/** [R4-BM-01 follow-up] Main-frame HTTP error line, origin-only. */
+internal fun mainFrameHttpErrorLogMessage(statusCode: Int, url: String): String =
+    "main-frame HTTP $statusCode for ${originOnlyForLog(url)}"
 
 /**
  * [deep-audit-1019 ISSUE-08] Decode the payload half of a `data:` URL.

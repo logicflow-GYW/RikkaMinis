@@ -1,5 +1,6 @@
 package com.rikkaminis.app.browser
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,5 +61,25 @@ class BrowserDownloadLogRedactionTest {
 
         assertFalse("MIME parameters can carry arbitrary data", "test-mime" in message)
         assertTrue("retain only the media type and subtype", "mime=text/plain len=9" in message)
+    }
+
+    @Test
+    fun mainFrameHttpErrorOmitsQueryUserInfoAndPath() {
+        val url = "https://user:pass@cdn.example.test:8080/dl/report.pdf" +
+            "?X-Amz-Signature=test-sig&token=test-query#test-fragment"
+        val message = mainFrameHttpErrorLogMessage(404, url)
+
+        for (secret in listOf("test-sig", "test-query", "test-fragment", "user", "pass", "report.pdf")) {
+            assertFalse("a 404 on a signed URL must not persist $secret", secret in message)
+        }
+        assertTrue("retain the status and origin", message == "main-frame HTTP 404 for https://cdn.example.test:8080/")
+    }
+
+    @Test
+    fun originOnlyForLogNeverFallsBackToRawInput() {
+        assertEquals("<unknown>", originOnlyForLog("file:///data/user/0/test-private"))
+        assertEquals("data:", originOnlyForLog("data:text/plain,test-inline"))
+        assertEquals("blob:", originOnlyForLog("blob:https://cdn.example.test/test-object"))
+        assertEquals("https://cdn.example.test/", originOnlyForLog("https://cdn.example.test/a?b=c"))
     }
 }
