@@ -118,6 +118,9 @@ internal interface AgentLoopHost {
         toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
         modelId: String? = null,
         entryId: String? = null,
+        // [surgery-1120 A-01] Stable row id for this streamed attempt, derived
+        // from its turn identity. Null keeps the existing random UUID.
+        stableId: String? = null,
     ): String?
     /**
      * [fix/early-turn-persist] Refresh an assistant row that was already
@@ -175,6 +178,10 @@ internal interface AgentLoopHost {
         imageParts: List<LLMMessage.ImagePart>,
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
+        // [surgery-1120 A-01] Stable per-attempt identity and the rendezvous
+        // the engine completes after its transcript row is durable.
+        turnId: String? = null,
+        transcriptCommit: com.rikkaminis.app.sandbox.offload.TranscriptCommitHandle? = null,
     ): Flow<LLMStreamChunk>
 
     // ── run lifecycle extras ──────────────────────────────────────────────

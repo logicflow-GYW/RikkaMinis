@@ -21,6 +21,16 @@ package com.rikkaminis.app.sandbox.offload
  * grace is the only signal that the run may still be alive. After the grace
  * an empty/no-meta dir is cleanup as before (with a beatAlive re-check at
  * the delete site in [PartialStreamRecovery.recover]).
+ *
+ * [surgery-1120 A-01] Terminal is no longer a blanket SKIP: the worker's
+ * terminal only proves the run dir is complete, NOT that the main process
+ * committed the assistant row (the stream collector's finally used to delete
+ * the dir before `persistAssistantTurn` ran). `terminalCommitted` is the
+ * transcript marker written by [TranscriptCommit.ackCommitted]; a terminal
+ * WITHOUT it is exactly the recoverable window. When the caller cannot read
+ * the marker (legacy call sites / non-chat runs) the default `true` keeps
+ * the old "terminal = delivered" behaviour, so only the explicitly
+ * uncommitted shape is re-interpreted.
  */
 internal object PartialStreamRecoveryPolicy {
 
@@ -41,9 +51,14 @@ internal object PartialStreamRecoveryPolicy {
         hasSessionMeta: Boolean,
         mtimeAgeMs: Long,
         cancelDeathPresent: Boolean = false,
+        terminalCommitted: Boolean = true,
+        donePresent: Boolean = false,
     ): Decision = when {
         recoveredPresent -> Decision.SKIP_RECOVERED
-        terminalPresent -> Decision.SKIP_TERMINAL
+        // [surgery-1120 A-01] Only a clean DONE whose transcript marker is
+        // absent is the uncommitted-normal-completion window. Error terminals
+        // and older non-chat terminal runs retain their old skip semantics.
+        terminalPresent && (!donePresent || terminalCommitted) -> Decision.SKIP_TERMINAL
         // [LOOP-1030 R2 M2] `cancel` alone = user stop → discard by design.
         // `cancel` + `cancel.death` = the client's DEATH cleanup
         // (ModelWorkerDiedException): stream.jsonl holds real model output the

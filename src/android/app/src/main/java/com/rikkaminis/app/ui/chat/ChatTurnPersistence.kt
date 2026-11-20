@@ -65,6 +65,10 @@ internal suspend fun ChatViewModel.persistAssistantTurn(
     // untouched; recorded into the message row for correct usage grouping.
     modelId: String? = null,
     entryId: String? = null,
+    // [surgery-1120 A-01] Stable row id for a streamed attempt. Recovery
+    // derives the same id from the run dir's turn id, so a crash between the
+    // insert and the commit marker finds the row instead of duplicating it.
+    stableId: String? = null,
 ): String? {
     if (parts.isEmpty()) return null
     val partsJson = buildAssistantPartsJson(parts, toolBlockMeta)
@@ -80,6 +84,7 @@ internal suspend fun ChatViewModel.persistAssistantTurn(
             reasoningContent = reasoningContent,
             usageModelId = modelId,
             usageEntryId = entryId,
+            stableId = stableId,
     )
     } catch (e: CancellationException) {
         throw e

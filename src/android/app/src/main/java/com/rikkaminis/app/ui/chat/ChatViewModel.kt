@@ -1717,8 +1717,9 @@ class ChatViewModel(
         override suspend fun persistAssistantTurn(
             parts: List<AgentContentPart>, usage: LLMUsage?, reasoningContent: String?,
             toolBlockMeta: Map<String, AssistantBlock>, modelId: String?, entryId: String?,
+            stableId: String?,
         ): String? = this@ChatViewModel.persistAssistantTurn(
-            parts, usage, reasoningContent, toolBlockMeta, modelId, entryId)
+            parts, usage, reasoningContent, toolBlockMeta, modelId, entryId, stableId)
         override suspend fun updatePersistedAssistantTurn(
             dbId: String, parts: List<AgentContentPart>, toolBlockMeta: Map<String, AssistantBlock>,
         ) = this@ChatViewModel.updatePersistedAssistantTurn(dbId, parts, toolBlockMeta)
@@ -1744,8 +1745,11 @@ class ChatViewModel(
             provider: LLMProvider, messages: List<LLMMessage>, systemPrompt: String?,
             maxTokens: Int, temperature: Double?, imageParts: List<LLMMessage.ImagePart>,
             tools: List<AgentToolDefinition>, thinkingLevel: ThinkingLevel,
+            turnId: String?,
+            transcriptCommit: com.rikkaminis.app.sandbox.offload.TranscriptCommitHandle?,
         ): Flow<LLMStreamChunk> = this@ChatViewModel.streamChatTurnOffloaded(
-            provider, messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel)
+            provider, messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
+            turnId, transcriptCommit)
         override fun generateSessionTitleIfNeeded() = this@ChatViewModel.generateSessionTitleIfNeeded()
         // [fix/rv1014-g1] Semantic auto-title trigger (shared criterion with
         // the title-already-set guard inside generateSessionTitleIfNeeded).

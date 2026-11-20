@@ -7,11 +7,14 @@ import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.offload.StreamOversizePolicy
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.UUID
@@ -76,6 +79,15 @@ object ChatStreamOffloadHandler {
     private const val STREAM_IDLE_STALL_MS = 5 * 60 * 1000L
     private const val CANCEL_ACK_TIMEOUT_MS = 5_000L
     private const val CANCEL_ACK_POLL_MS = 100L
+    /**
+     * [surgery-1120 A-01] How long the terminal cleanup waits for the engine's
+     * transcript commit before giving the spool back to cold-start recovery.
+     * The engine persists immediately after collecting this flow; a long Room
+     * write is the only legitimate reason to wait longer. Timing out is NOT a
+     * failure to surface to the user — it deliberately leaves no `client.ack`
+     * and no transcript marker, so the dir is recoverable rather than skipped.
+     */
+    private const val TRANSCRIPT_COMMIT_TIMEOUT_MS = 60_000L
     /**
      * How long the stream file may stay frozen before we RE-EXAMINE worker
      * liveness. This is NOT a "no output → dead" verdict: the worker is only
@@ -153,6 +165,15 @@ object ChatStreamOffloadHandler {
         // resolved by the caller (see WorkerKeyHandoff.keyFor). Empty ⇒ the
         // worker keeps its legacy prefs read + freshness abort.
         apiKey: String = "",
+        // [surgery-1120 A-01] Stable identity for THIS streamed attempt. It is
+        // stamped into meta.json and used by the engine for the tapped row id,
+        // so a crash between the Room insert and the commit marker cannot
+        // duplicate the recovered answer.
+        turnId: String? = null,
+        // [surgery-1120 A-01] Rendezvous the ENGINE completes after its
+        // transcript row is durable. Created by the caller (not here) so the
+        // engine can register it on the loop state before collection starts.
+        transcriptCommit: TranscriptCommitHandle? = null,
     ): Flow<LLMStreamChunk> = flow {
         // [fix/audit-s2h4] activeStreams was incremented BEFORE the staging try.
         // If root.mkdirs()/d.mkdir() threw ("stream staging failed"), the flow
@@ -174,9 +195,14 @@ object ChatStreamOffloadHandler {
         } catch (e: Exception) {
             throw RuntimeException("stream staging failed", e)
         }
+        // [surgery-1120 A-01] The engine's handle (null for callers without a
+        // transcript, e.g. sub-agent streams): the terminal cleanup uses it to
+        // distinguish "transcript row durable" from "worker merely finished".
+        val commitHandle = transcriptCommit
         if (!sessionId.isNullOrBlank()) {
-            PartialStreamRecovery.writeMeta(dir, sessionId)
+            PartialStreamRecovery.writeMeta(dir, sessionId, turnId, attempt = commitHandle?.attempt ?: 0)
         }
+        commitHandle?.attachDir(dir)
 
         val cancelFile = File(dir, ModelExecutionService.CANCEL_FILE)
         // [TF-F] Declared OUTSIDE the try so the finally block can read/write
@@ -185,6 +211,11 @@ object ChatStreamOffloadHandler {
         var lastRead = 0L
         var emittedChunks = false
         var terminalSeen = false
+        // [surgery-1120 A-01] DONE (not an error line) is the only shape whose
+        // content the engine commits into the transcript. Errors keep the old
+        // cleanup: no row is expected, so waiting for a commit would only pin
+        // the dir.
+        var doneSeen = false
         // [LOOP-1030 R2 M2] True only when the exit was the worker-DEATH throw.
         // The terminal finally uses it to write `cancel.death` (recoverable
         // content) instead of a plain user-stop `cancel` (discard by design).
@@ -274,6 +305,7 @@ object ChatStreamOffloadHandler {
                                     if (line.isBlank()) continue
                                     if (ChatStreamJsonl.isDone(line)) {
                                         terminalSeen = true
+                                        doneSeen = true
                                         return@withTimeoutOrNull true
                                     }
                                     if (ChatStreamJsonl.isError(line)) {
@@ -447,6 +479,13 @@ object ChatStreamOffloadHandler {
                 // the worker waited out its ack timeout + drain (~45 s) holding
                 // its native heap for a stream nobody was reading. See
                 // [internalRunCancelCleanup].
+                // [surgery-1120 A-01] A user stop is not a transcript commit:
+                // the old cleanup (cancel → bounded wait → delete) must stay.
+                // A normal DONE is different — the engine writes the Room row
+                // after this collector returns, so the ACK/delete must wait
+                // for its explicit commit. Captured here because the
+                // NonCancellable cleanup cannot ask the job afterwards.
+                val userCancelled = !currentCoroutineContext().isActive
                 internalRunCancelCleanup(
                     writeCancel = {
                         // Signal a cancel ONLY if we have not yet seen a terminal
@@ -468,7 +507,14 @@ object ChatStreamOffloadHandler {
                             }
                         }
                     },
-                    cleanup = { awaitTerminalAndWorkerExitThenDelete(dir, runId) },
+                    cleanup = {
+                        awaitTerminalAndWorkerExitThenDelete(
+                            context, dir, runId,
+                            requireTranscriptCommit = doneSeen && !userCancelled &&
+                                commitHandle != null,
+                            commitHandle = commitHandle,
+                        )
+                    },
                 )
             } catch (_: Exception) {}
         }
@@ -487,7 +533,18 @@ object ChatStreamOffloadHandler {
      * process to disappear, and only then delete the run dir. Any timeout or
      * ambiguity keeps the dir as an orphan (never delete under a live worker).
      */
-    private suspend fun awaitTerminalAndWorkerExitThenDelete(dir: File, runId: String?) {
+    private suspend fun awaitTerminalAndWorkerExitThenDelete(
+        context: Context,
+        dir: File,
+        runId: String?,
+        requireTranscriptCommit: Boolean = false,
+        commitHandle: TranscriptCommitHandle? = null,
+    ) {
+        // The deferred finalize outlives this flow, so it must run on the
+        // app-lifetime scope (never a per-call scope that could be dropped).
+        // Null (a non-MinisApp context, i.e. a unit test) falls back to the
+        // legacy inline ack below — never a silent no-op.
+        val scope = (context.applicationContext as? com.rikkaminis.app.MinisApp)?.applicationScope
         // (a) terminal marker. A DONE/error line usually precedes it by a
         // hair (finishRequest writes state + terminal right after the result),
         // so give it a bounded window.
@@ -517,6 +574,34 @@ object ChatStreamOffloadHandler {
         // to 45s and leaving the run dir as an orphan. The Dispatcher (non-
         // streaming) already acks; streaming now does too.
         if (writeBarrierSeen) {
+            if (requireTranscriptCommit && commitHandle != null && scope != null) {
+                // [surgery-1120 A-01] DONE is before the engine's DB persist.
+                // Register a process-lifetime waiter and RETURN from this
+                // finally: the flow must finish collecting before the engine can
+                // insert. The engine writes the durable marker + ACK only after
+                // its Room row lands. Process death before that leaves no marker
+                // or ack and cold-start recovery sees the terminal spool.
+                scope.launch {
+                    when (commitHandle.awaitOutcome(TRANSCRIPT_COMMIT_TIMEOUT_MS)) {
+                        is TranscriptCommitHandle.Outcome.Committed -> {
+                            if (!TranscriptCommit.isCommitted(dir)) {
+                                Log.w(TAG, "transcript marker absent; keeping run dir=${dir.name}")
+                                return@launch
+                            }
+                            try { ModelExecutionMailbox.writeClientAck(dir) } catch (_: Exception) {}
+                            if (awaitWorkerExit(dir, runId, WORKER_EXIT_WAIT_MS)) {
+                                runCatching { dir.deleteRecursively() }
+                            } else {
+                                Log.w(TAG, "committed stream run dir kept as orphan: ${dir.name}")
+                            }
+                        }
+                        TranscriptCommitHandle.Outcome.Abandoned, null -> {
+                            Log.w(TAG, "transcript not committed; keeping terminal spool for recovery dir=${dir.name}")
+                        }
+                    }
+                }
+                return
+            }
             try { ModelExecutionMailbox.writeClientAck(dir) } catch (_: Exception) {}
         }
 

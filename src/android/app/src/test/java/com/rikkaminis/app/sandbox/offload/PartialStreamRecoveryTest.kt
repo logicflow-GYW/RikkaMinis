@@ -21,6 +21,8 @@ class PartialStreamRecoveryTest {
         recovered: Boolean = false,
         meta: Boolean = true,
         mtimeAgeMs: Long = 60_000L,
+        terminalCommitted: Boolean = true,
+        done: Boolean = false,
     ) = PartialStreamRecoveryPolicy.decide(
         streamLen = streamLen,
         terminalPresent = terminal,
@@ -29,6 +31,8 @@ class PartialStreamRecoveryTest {
         recoveredPresent = recovered,
         hasSessionMeta = meta,
         mtimeAgeMs = mtimeAgeMs,
+        terminalCommitted = terminalCommitted,
+        donePresent = done,
     )
 
     @Test
@@ -203,5 +207,44 @@ class PartialStreamRecoveryTest {
         assertTrue("contains escaped text", json.contains("\"value\":\"partial\""))
         assertTrue("contains reminder", json.contains("system-reminder"))
         assertTrue("two parts", json.split("\"type\":\"text\"").size - 1 == 2)
+    }
+
+    // ── [surgery-1120 A-01] transcript-commit protocol ──
+
+    @Test
+    fun doneWithTerminalButNoMarker_isRecoverable() {
+        // The worker's terminal only says the run dir is complete. Without the
+        // transcript marker the Room row was never made durable, so the spool
+        // is still the only copy of the answer: it must NOT be skipped.
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.RECOVER,
+            decide(terminal = true, terminalCommitted = false, done = true),
+        )
+    }
+
+    @Test
+    fun doneWithTerminalAndCommittedMarker_isSkipped() {
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.SKIP_TERMINAL,
+            decide(terminal = true, terminalCommitted = true, done = true),
+        )
+    }
+
+    @Test
+    fun errorTerminal_keepsItsOldSkipSemantics() {
+        // An error terminal is not a transcript commit window: no row is
+        // expected, so the spool stays skipped as before.
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.SKIP_TERMINAL,
+            decide(terminal = true, terminalCommitted = false, done = false),
+        )
+    }
+
+    @Test
+    fun nonTerminalKilledRun_isUnaffected() {
+        assertEquals(
+            PartialStreamRecoveryPolicy.Decision.RECOVER,
+            decide(terminal = false, terminalCommitted = false, done = true),
+        )
     }
 }

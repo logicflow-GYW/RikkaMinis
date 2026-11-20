@@ -33,6 +33,9 @@ internal fun ChatViewModel.streamChatTurnOffloaded(
     imageParts: List<LLMMessage.ImagePart>,
     tools: List<AgentToolDefinition>,
     thinkingLevel: ThinkingLevel,
+    // [surgery-1120 A-01] Stable per-attempt transcript identity + commit hook.
+    turnId: String? = null,
+    transcriptCommit: com.rikkaminis.app.sandbox.offload.TranscriptCommitHandle? = null,
 ): Flow<LLMStreamChunk> {
     val instance = provider.instanceContext
         ?: throw ModelStreamErrorException(
@@ -66,5 +69,7 @@ internal fun ChatViewModel.streamChatTurnOffloaded(
         // run's partial stream.jsonl is recoverable at cold start. Same
         // draft-vs-real resolution the preview update path uses.
         sessionId = realSessionId.ifEmpty { sessionId },
+        turnId = turnId,
+        transcriptCommit = transcriptCommit,
     )
 }

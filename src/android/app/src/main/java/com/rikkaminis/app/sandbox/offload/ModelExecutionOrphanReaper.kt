@@ -91,6 +91,29 @@ object ModelExecutionOrphanReaper {
     }
 
     /**
+     * [surgery-1120 A-01] A terminal run dir whose TRANSCRIPT was never
+     * committed is NOT garbage — it is the only surviving copy of an answer
+     * that the old protocol deleted before `persistAssistantTurn` ran.
+     *
+     * The reaper's terminal branch deletes on "terminal present + worker dead +
+     * 10 min old", which is exactly the shape of the crash window. Reclaiming
+     * such a dir would destroy the content before (or instead of) the
+     * cold-start recovery that now knows how to insert it. So: a dir carrying a
+     * `meta.json` identity with NO committed `transcript.json` is left to
+     * [PartialStreamRecovery]; every other terminal dir keeps the old behaviour
+     * (the marker check is per-run and free — one file existence test).
+     *
+     * JVM-testable: the file layout is the whole input.
+     */
+    internal fun shouldLeaveToRecovery(dir: File): Boolean {
+        // No transcript identity ⇒ not a chat stream (title / QuickTest /
+        // compaction dispatch, or a pre-protocol dir) ⇒ old behaviour.
+        val meta = TranscriptCommit.readMeta(dir) ?: return false
+        if (meta.turnId.isNullOrBlank()) return false
+        return !TranscriptCommit.isCommitted(dir)
+    }
+
+    /**
      * Scan the staging root and delete any eligible orphan run dir. Returns
      * the number deleted (for logging). Never throws.
      */
@@ -124,6 +147,13 @@ object ModelExecutionOrphanReaper {
             val runId = ModelExecutionDispatcher.runIdOf(child)
             val reason: String
             if (ModelExecutionRunDir.terminalPresent(child)) {
+                // [surgery-1120 A-01] A terminal dir whose transcript was never
+                // committed is the crash window's only copy of the answer —
+                // cold-start recovery owns it, the reaper must not delete it.
+                if (shouldLeaveToRecovery(child)) {
+                    Log.i(TAG, "kept for transcript recovery (terminal, uncommitted): ${child.name}")
+                    continue
+                }
                 // Criterion 2 (terminal branch): safeToDelete (terminal +
                 // worker pid DEAD / never had ref).
                 if (!ModelExecutionRunDir.safeToDelete(child, runId)) continue
