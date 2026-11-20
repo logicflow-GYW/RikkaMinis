@@ -7,6 +7,12 @@ import com.rikkaminis.app.data.repository.ChatRepository
 import java.io.File
 
 /**
+ * [surgery-1120 A-01] File-level tag: the scan below is TOP-LEVEL (so the JVM
+ * probe can drive it), and an object-private `TAG` is not visible from it.
+ */
+private const val TAG = "PartialStreamRecovery"
+
+/**
  * [fix/partial-stream-recovery] Cold-start recovery of streamed partial
  * content (RikkaHub #1663 同构, backlog §27b).
  *
@@ -31,7 +37,6 @@ import java.io.File
  */
 object PartialStreamRecovery {
 
-    private const val TAG = "PartialStreamRecovery"
     private const val STAGING_ROOT = "model-exec"
     internal const val META_FILE = "meta.json"
     internal const val RECOVERED_FILE = "recovered.json"
