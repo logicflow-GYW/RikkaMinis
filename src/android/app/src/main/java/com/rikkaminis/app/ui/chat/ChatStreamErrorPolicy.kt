@@ -55,6 +55,19 @@ object ChatStreamErrorPolicy {
     }
 
     /**
+     * A typed transient failure after text can use the existing EOF continuation
+     * path instead of erasing the answer. Never carry tool activity across this
+     * boundary: tools are dispatched only after a successful collect, so the
+     * existing rollback/retry path can safely discard the failed attempt's calls.
+     * Reasoning-only and whitespace-only attempts have no answer to continue.
+     */
+    fun shouldContinuePartialReply(
+        isTransient: Boolean,
+        text: String,
+        hasToolActivity: Boolean,
+    ): Boolean = isTransient && text.isNotBlank() && !hasToolActivity
+
+    /**
      * A stream-exception recovery decision (§17
      * [fix/permanent-4xx-retried-as-transient]).
      */

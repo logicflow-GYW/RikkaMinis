@@ -12,6 +12,8 @@ import com.rikkaminis.app.tools.ToolExecutionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import com.rikkaminis.app.agent.runtime.AgentExecutionBudget
 import com.rikkaminis.app.agent.runtime.AgentRunBudgetCeilings
 import com.rikkaminis.app.agent.runtime.AgentRunEvent
@@ -1193,6 +1195,7 @@ internal class AgentLoopEngine(
             // log it at turn-end alongside the empty-turn warning.
             var turnFinishReason: String? = null
             var turnTruncated = false
+            var partialStreamFailure = false
             var lastUsage: LLMUsage? = null
             // [fix/prewindow-budget-1015] 2026-10-15 T321（session 16c39966）：
             // 同一份 ~4.9MB 历史在 deepseek 中转口径下记 191.9K，GLM 直连口径
@@ -1982,6 +1985,7 @@ internal class AgentLoopEngine(
                         host.resetAutoRetry()
                     }
                 } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
                     if (e is CancellationException && e.cause == null) throw e  // real job cancellation
                     val actual = unwrapFlowExceptionImpl(e)
                     // [fix/prewindow-budget-1015] 400-teacher：上下文超限 400 的
@@ -2225,6 +2229,42 @@ internal class AgentLoopEngine(
                         actual is com.rikkaminis.app.data.model.LLMError.TransientError ||
                         is5xx ||
                         streamErrorAutoRetry
+                    // Preserve a real partial answer from a typed transport failure.
+                    // Reuse EOF's bounded continuation, history fold, seam dedupe and
+                    // terminal persist. Tool-bearing attempts still roll back before
+                    // retry; their calls have NOT been dispatched inside collect.
+                    val hasToolActivity = toolCalls.isNotEmpty() ||
+                        loopState.allToolBlocks.drop(turnStartBlockIndex).any { it.kind == "tool_use" }
+                    if (ChatStreamErrorPolicy.shouldContinuePartialReply(
+                            isTransient, turnTextSb.toString(), hasToolActivity,
+                        )
+                    ) {
+                        materializeActiveTextBlock()
+                        loopState.pendingChunkSb.setLength(0)
+                        flushThinkingTailIfPending(loopState, turn, turnThinking, turnTextSb)
+                        finishThinkingBlock(loopState, turn)
+                        resetStreamThrottle(loopState)
+                        turnFinishReason = "network_error"
+                        turnTruncated = true
+                        partialStreamFailure = true
+                        collectDone = true
+                        host.resetAutoRetry()
+                        withContext(Dispatchers.Main) {
+                            host.clearInlineError()
+                            host.updateAssistantMessage(
+                                loopState.assistantId, loopState.accumulatedText + turnTextSb.toString(),
+                                true, loopState.allToolBlocks,
+                            )
+                        }
+                        AppLogger.warning(
+                            TAG_STREAM,
+                            "runAgentLoop turn=$turn typed stream failure — keeping ${turnTextSb.length} chars " +
+                                "for bounded continuation (${streamFailure?.basis ?: actual.javaClass.simpleName})",
+                        )
+                        traceObserver.t7Reduce(AgentRunEvent.ProviderAttemptFinished(ProviderAttemptOutcome.TRANSIENT_FAILURE))
+                        traceObserver.t7Reduce(AgentRunEvent.RetryRequested("partial-stream-continuation"))
+                        break
+                    }
                     // [T-fallback-retry-original] Restored original behavior: all members
                     // (including fallback chain members) get bounded retries on transient
                     // errors. This absorbs intermittent stream resets that the fallback
@@ -2663,7 +2703,12 @@ internal class AgentLoopEngine(
             // probe restores the member).
             host.activeEntryId?.let { entryId ->
                 // [deep-audit-1016 6b] …except a blocked-empty reply, as above.
-                if (!blockedEmptyReply) {
+                if (partialStreamFailure) {
+                    host.groupRouter.recordResult(
+                        entryId,
+                        com.rikkaminis.app.data.routing.RouteOutcome.ServerError,
+                    )
+                } else if (!blockedEmptyReply) {
                     host.groupRouter.recordResult(
                         entryId,
                         com.rikkaminis.app.data.routing.RouteOutcome.Success,

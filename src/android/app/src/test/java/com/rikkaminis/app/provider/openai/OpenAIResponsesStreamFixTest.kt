@@ -156,7 +156,7 @@ class OpenAIResponsesStreamFixTest {
         )
         assertTrue(
             "the error arm must reuse the single mapping table",
-            text.contains("openAiStreamErrorStatus(code, errType)"),
+            text.contains("openAiStreamErrorStatus(code, errType, message)"),
         )
     }
 
