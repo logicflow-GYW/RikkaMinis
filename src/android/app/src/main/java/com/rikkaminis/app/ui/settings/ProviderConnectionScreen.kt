@@ -1,10 +1,12 @@
 package com.rikkaminis.app.ui.settings
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -21,10 +23,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
-import com.rikkaminis.app.ui.util.bringIntoViewOnFocus
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -36,8 +44,52 @@ import com.rikkaminis.app.data.model.ProviderType
 import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.ui.components.SectionTextField
+import com.rikkaminis.app.ui.util.bringIntoViewOnFocus
 
 private const val TAG = "ProviderConnection"
+
+/**
+ * Owns one API-key save transaction. The caller supplies the draft snapshot
+ * synchronously; this class never reads the mutable editor state from IO.
+ * [write] runs on [ioDispatcher], while callbacks resume on [scope]'s context.
+ */
+internal class ProviderKeySaver(
+    private val scope: CoroutineScope,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
+    private val _isSaving = MutableStateFlow(false)
+    val isSaving: StateFlow<Boolean> = _isSaving.asStateFlow()
+
+    fun isSavingNow(): Boolean = _isSaving.value
+
+    fun save(
+        keyToSave: String,
+        write: suspend (String) -> Unit,
+        onSuccess: (String) -> Unit,
+        onFailure: () -> Unit,
+    ) {
+        if (_isSaving.value) return
+        _isSaving.value = true
+        scope.launch {
+            try {
+                try {
+                    withContext(ioDispatcher) { write(keyToSave) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    _isSaving.value = false
+                    onFailure()
+                    return@launch
+                }
+                onSuccess(keyToSave)
+            } finally {
+                _isSaving.value = false
+            }
+        }
+    }
+}
+
+internal fun keySaveActionAllowed(isSaving: Boolean): Boolean = !isSaving
 
 /**
  * [T-provider-connection-screen] Full configuration page for a single AI
@@ -74,7 +126,7 @@ fun ProviderConnectionScreen(
     // Label editing lives on the detail screen (its title). Here we show the
     // current label so the page has context; connection params are the focus.
 
-    var storedKey by remember { mutableStateOf<String?>(null) }
+    var storedKey by remember(instanceId) { mutableStateOf<String?>(null) }
     // [deep-audit-1041 B-01] Also key on `config.revision`. `loadApiKey` has no
     // revision counter of its own, but every path that writes a key also bumps
     // the config revision (instancesUpdate RPC / provider import / backup
@@ -92,11 +144,13 @@ fun ProviderConnectionScreen(
     LaunchedEffect(instanceId, config.revision) {
         storedKey = withContext(Dispatchers.IO) { providerRepository.loadApiKey(instanceId) }
     }
-    var isEditingKey by remember { mutableStateOf(false) }
-    var editKeyValue by remember { mutableStateOf("") }
-    var keyVisible by remember { mutableStateOf(false) }
-    // [deep-audit-1033 I05] The key save below is a coroutine now.
+    var isEditingKey by remember(instanceId) { mutableStateOf(false) }
+    var editKeyValue by remember(instanceId) { mutableStateOf("") }
+    var keyVisible by remember(instanceId) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val keySaver = remember(instanceId, scope) { ProviderKeySaver(scope) }
+    val isSavingKey by keySaver.isSaving.collectAsState()
+    val context = LocalContext.current
 
     // [da1023-C] Bind the connection states to instance.id: the old keyless
     // rememberSaveable leaked this instance's URL/UA state into the next
@@ -165,39 +219,56 @@ fun ProviderConnectionScreen(
             footer = stringResource(R.string.add_provider_multi_key_hint),
         ) {
             SettingsCardBlock {
-                ApiKeyCredentialBlock(
-                    storedKey = storedKey,
-                    keyVisible = keyVisible,
-                    onToggleVisibility = { keyVisible = !keyVisible },
-                    isEditing = isEditingKey,
-                    editValue = editKeyValue,
-                    onEditValueChange = { editKeyValue = it },
-                    onBeginEdit = {
-                        isEditingKey = true
-                        editKeyValue = storedKey ?: ""
-                    },
-                    onCancelEdit = {
-                        isEditingKey = false
-                        editKeyValue = ""
-                        keyVisible = false
-                    },
-                    onSave = {
-                        // [deep-audit-1033 I05] saveApiKey commits to
-                        // EncryptedSharedPreferences — blocking keystore IO on
-                        // the click's thread (the same defect the audit found
-                        // on the three add-provider screens; this is the fourth
-                        // save path for the same call). The key lands before
-                        // the editor closes, same order as before.
-                        scope.launch {
-                            withContext(Dispatchers.IO) {
-                                providerRepository.saveApiKey(instanceId, editKeyValue)
+                if (isSavingKey) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else {
+                    ApiKeyCredentialBlock(
+                        storedKey = storedKey,
+                        keyVisible = keyVisible,
+                        onToggleVisibility = { if (keySaveActionAllowed(keySaver.isSavingNow())) keyVisible = !keyVisible },
+                        isEditing = isEditingKey,
+                        editValue = editKeyValue,
+                        onEditValueChange = { value -> if (keySaveActionAllowed(keySaver.isSavingNow())) editKeyValue = value },
+                        onBeginEdit = {
+                            if (keySaveActionAllowed(keySaver.isSavingNow())) {
+                                isEditingKey = true
+                                editKeyValue = storedKey ?: ""
                             }
-                            storedKey = editKeyValue
-                            AppLogger.info(TAG, "Saved API key for ${instance.id}")
-                            isEditingKey = false
-                        }
-                    },
-                )
+                        },
+                        onCancelEdit = {
+                            if (keySaveActionAllowed(keySaver.isSavingNow())) {
+                                isEditingKey = false
+                                editKeyValue = ""
+                                keyVisible = false
+                            }
+                        },
+                        onSave = {
+                            if (keySaveActionAllowed(keySaver.isSavingNow())) {
+                                // Capture before launching: the UI draft remains mutable while
+                                // the encrypted-preferences write is suspended on IO.
+                                val keyToSave = editKeyValue
+                                keySaver.save(
+                                    keyToSave = keyToSave,
+                                    write = { key -> providerRepository.saveApiKey(instanceId, key) },
+                                    onSuccess = { savedKey ->
+                                        storedKey = savedKey
+                                        AppLogger.info(TAG, "Saved API key for ${instance.id}")
+                                        isEditingKey = false
+                                    },
+                                    onFailure = {
+                                        // Keep the draft and editor open; never include the key
+                                        // or exception text in a user-visible/logged message.
+                                        Toast.makeText(
+                                            context,
+                                            R.string.file_save_failed_toast,
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    },
+                                )
+                            }
+                        },
+                    )
+                }
             }
         }
 
