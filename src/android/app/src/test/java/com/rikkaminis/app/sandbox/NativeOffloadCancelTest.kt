@@ -101,13 +101,14 @@ class NativeOffloadCancelTest {
 
     @Test
     fun `the watcher cancels the request whose socket went away`() {
-        val dead = java.util.concurrent.ConcurrentHashMap<Int, Boolean>()
-        val monitor = OffloadSocketMonitor(pollMillis = 10, probe = { fd -> dead[fd] != false })
+        val fd = java.io.FileDescriptor()
+        val dead = java.util.concurrent.atomic.AtomicBoolean(false)
+        val monitor = OffloadSocketMonitor(pollMillis = 10, probe = { descriptor -> descriptor === fd && !dead.get() })
         val ctx = OffloadCallContext(11, "s")
-        monitor.watch(42, ctx)
         monitor.start()
+        monitor.watch(fd, ctx)
         try {
-            dead[42] = false
+            dead.set(true)
             val cancelled = waitUntil { ctx.isCancelled }
             assertTrue("a hung-up socket must cancel its request", cancelled)
         } finally {
@@ -117,10 +118,11 @@ class NativeOffloadCancelTest {
 
     @Test
     fun `the watcher leaves a live socket alone`() {
+        val fd = java.io.FileDescriptor()
         val monitor = OffloadSocketMonitor(pollMillis = 10, probe = { true })
         val ctx = OffloadCallContext(12, "s")
-        monitor.watch(43, ctx)
         monitor.start()
+        monitor.watch(fd, ctx)
         try {
             Thread.sleep(120)
             assertFalse("a live socket must not cancel its request", ctx.isCancelled)
@@ -134,12 +136,72 @@ class NativeOffloadCancelTest {
         val monitor = OffloadSocketMonitor(pollMillis = 10, probe = { true })
         monitor.start()
         try {
-            repeat(50) { monitor.watch(it, OffloadCallContext(it.toLong(), null)) }
+            repeat(50) { monitor.watch(java.io.FileDescriptor(), OffloadCallContext(it.toLong(), null)) }
             val threads = Thread.getAllStackTraces().keys.filter { it.name == "native-offload-monitor" }
             assertEquals("one watcher thread for 50 watched sockets", 1, threads.size)
         } finally {
             monitor.stop()
         }
+    }
+
+    @Test
+    fun `normal completed response ignores a subsequent HUP`() {
+        val context = OffloadCallContext(31, null)
+        var notified = 0
+        context.addCancellationListener { notified++ }
+        assertTrue(context.beginWork())
+        assertTrue(context.handlerFinished())
+        assertTrue(context.beginResponse())
+        assertTrue(context.complete())
+        assertFalse(context.cancel())
+        assertFalse(context.isCancelled)
+        assertEquals(0, notified)
+    }
+
+    @Test
+    fun `monitor stop cancels active requests but preserves completed`() {
+        val monitor = OffloadSocketMonitor(pollMillis = 10, probe = { true })
+        val active = OffloadCallContext(41, null)
+        val completed = OffloadCallContext(42, null)
+        monitor.start()
+        monitor.watch(java.io.FileDescriptor(), active)
+        monitor.watch(java.io.FileDescriptor(), completed)
+        completed.beginWork()
+        completed.handlerFinished()
+        completed.beginResponse()
+        completed.complete()
+        monitor.stop()
+        assertTrue(active.isCancelled)
+        assertFalse(completed.isCancelled)
+        assertEquals(0, monitor.watchedCount())
+    }
+
+    @Test
+    fun `watch after stop is cancelled and not retained`() {
+        val monitor = OffloadSocketMonitor(pollMillis = 10, probe = { true })
+        monitor.start()
+        monitor.stop()
+        val context = OffloadCallContext(43, null)
+        monitor.watch(java.io.FileDescriptor(), context)
+        assertTrue(context.isCancelled)
+        assertEquals(0, monitor.watchedCount())
+    }
+
+    @Test
+    fun `poll distinguishes readable bytes from HUP ERR and NVAL`() {
+        assertFalse(isTerminalSocketPollResult(1, 0x0001, 0x0018))
+        assertTrue(isTerminalSocketPollResult(1, 0x0010, 0x0018))
+        assertTrue(isTerminalSocketPollResult(1, 0x0008, 0x0018))
+        assertTrue(isTerminalSocketPollResult(1, 0x0020, 0x0038))
+        assertFalse(isTerminalSocketPollResult(0, 0, 0x0038))
+    }
+
+    @Test
+    fun `public LocalSocket fd and Os poll API are used`() {
+        val src = sourceOf("sandbox/NativeOffload.kt")
+        assertTrue(src.contains("Os.poll(arrayOf(pfd),0)"))
+        assertTrue(src.contains("socket.fileDescriptor?.takeIf { it.valid() }"))
+        assertFalse(src.contains("getDeclaredField(\"impl\")"))
     }
 
     // ---- A02: the bounded pool --------------------------------------------
@@ -227,22 +289,20 @@ class NativeOffloadCancelTest {
         val src = sourceOf("sandbox/NativeOffload.kt")
         assertTrue(
             "the monitor must cancel the request's context:\n$src",
-            src.contains("e.context.cancel()"),
+            Regex("entry\\.context\\.cancel\\(\\)").containsMatchIn(src) ||
+                src.contains("entry.context.cancel()"),
         )
         assertTrue(
             "the accept loop must watch the socket it accepted:\n$src",
-            src.contains("monitor.watch(fd, context)"),
+            src.contains("monitor.watch(descriptor, context)"),
         )
         assertTrue(
             "a request picked up from the queue must be skipped when it was already cancelled:\n$src",
             src.contains("abandoned in queue — skipped"),
         )
-        // The GUARD itself, not just the log text: a `if (false)` in front of
-        // the message keeps the string and silently re-enables the work.
-        assertTrue(
-            "the queue-skip guard must test the cancellation flag:\n$src",
-            Regex("if \\(\\s*context\\.isCancelled\\s*\\) \\{").containsMatchIn(src),
-        )
+        assertTrue("worker must atomically claim queued ownership", src.contains("if (!context.beginWork())"))
+        assertTrue("claim must precede any frame read", src.indexOf("if (!context.beginWork())") < src.indexOf("val magic = input.readLEInt(budget)"))
+
     }
 
     @Test
@@ -258,14 +318,14 @@ class NativeOffloadCancelTest {
     fun `the server stops the watcher and drains the queue on shutdown`() {
         val src = sourceOf("sandbox/NativeOffload.kt")
         val stop = src.substring(src.indexOf("fun stop()"), src.indexOf("private fun runAcceptLoop"))
-        assertTrue("stop() must stop the watcher:\n$stop", stop.contains("socketMonitor?.stop()"))
+        assertTrue("stop() must stop the watcher:\n$stop", stop.contains("monitor?.stop()"))
         assertTrue(
             "stop() must drain the queued sockets instead of parking their fds:\n$stop",
             stop.contains("drainPending"),
         )
         assertTrue(
             "a dropped queued request must be cancelled, not silently forgotten:\n$stop",
-            stop.contains("?.cancel()"),
+            stop.contains("cancelForShutdown()"),
         )
     }
 

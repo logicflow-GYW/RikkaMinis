@@ -49,9 +49,6 @@ object PRootKernel {
      */
     private val bootGate = BootOnceGate()
 
-    /** Shared boot/reset serialization; see [BootTransaction]. */
-    private val bootLifecycleGate = BootTransaction()
-
     /** Path to native library directory (for LD_LIBRARY_PATH). */
     var nativeLibDir: String = ""
         private set
@@ -113,34 +110,19 @@ object PRootKernel {
      * Initialize the PRoot environment: install rootfs and proot binary.
      */
     suspend fun boot(context: Context) {
-        if (isBooted) {
-            Log.d(TAG, "Already booted")
-            return
-        }
-        // [deep-audit-1016 FIX-C 3a] The fast path above stays lock-free; the
-        // gate re-checks under the lock and runs the body at most once. A loser
-        // waits here and then returns without touching the rootfs.
-        //
-        // [A04] The SAME gate also owns RootfsManager.reset(): `runInstall`
-        // marks this thread as the transaction owner, so the install that the
-        // body performs cannot race a reset that arrives between the
-        // "will wipe" decision and the wipe itself.
-        val performed = bootLifecycleGate.runBoot {
-            bootGate.run {
-                val manager = RootfsManager.getInstance(context)
-                manager.installBootTransaction(bootLifecycleGate)
-                try { bootCriticalSection(context) } finally { bootLifecycleGate.releaseCurrentThread() }
-            }
+        val manager = RootfsManager.getInstance(context)
+        var performed = false
+        manager.runBootTransaction { permit ->
+            performed = bootGate.run { bootCriticalSection(context, permit) }
         }
         if (!performed) Log.d(TAG, "Already booted (concurrent entrant)")
     }
 
     /**
      * [boot]'s one-shot body — rootfs install/repair, env, bind mounts, offload
-     * server. Split out so [boot] is only "fast path + gate"; never call this
-     * directly (it is the thing [bootGate] exists to serialize).
+     * server. Runs under the manager transaction; never call it directly.
      */
-    private suspend fun bootCriticalSection(context: Context) {
+    private suspend fun bootCriticalSection(context: Context, permit: BootTransaction.Permit) {
         bootContext = context.applicationContext
         rootfsManager = RootfsManager.getInstance(context)
         // [meta1028 D3-F02] Wire the rebuild notification FIRST: a
@@ -161,7 +143,7 @@ object PRootKernel {
         rootfsManager.afterRootfsReinstalled = {
             onRootfsReinstalled(context)
         }
-        rootfsManager.installIfNeeded()
+        rootfsManager.installIfNeededWithinBootTransaction(permit)
         rootfsManager.installProotIfNeeded()
 
         // [T-rootfs-integrity] Verify critical files survived extraction.
@@ -173,7 +155,7 @@ object PRootKernel {
         val health = rootfsManager.verifyIntegrity()
         if (!health.healthy) {
             Log.w(TAG, "Rootfs integrity check failed: missing=${health.missing}")
-            val repaired = rootfsManager.autoRepair()
+            val repaired = rootfsManager.autoRepairWithinBootTransaction(permit)
             if (repaired) {
                 Log.i(TAG, "Rootfs auto-repair succeeded")
             } else {
@@ -1658,81 +1640,32 @@ internal fun normalizeLinuxPath(path: String): String? {
 internal fun hasDotDotSegment(path: String): Boolean = path.split('/').any { it == ".." }
 
 /**
- * Boot/reset transaction gate ([A04]).
- *
- * `RootfsManager.reset()` used to take only `lifecycleMutex`, while
- * `PRootKernel.boot()` took only `BootOnceGate`; a command that auto-booted
- * during a reset could therefore run `installIfNeeded` (which deletes and
- * re-extracts the rootfs) concurrently with the reset's identical delete +
- * extract. This gate is the single serialization point for every operation
- * that can delete/re-create the rootfs, and it is deliberately NOT
- * `lifecycleMutex`: the install body itself takes that mutex, so reusing it as
- * the boot gate would deadlock the first install.
- *
- * Ownership is thread-scoped because [RootfsManager] calls `withContext(IO)`
- * inside its critical sections: a thread-local keeps "already inside the
- * transaction" true across that hop in a JVM-testable way, and lets
- * `autoRepair`'s Stage-3 reset re-enter without waiting on itself.
- *
- * A boot queued behind a reset runs AFTER it (the reset rebuilt the tree and
- * re-armed the boot latch, so the boot body is exactly what has to re-apply
- * the stubs / mounts / overlay the wipe removed); a queued install waits the
- * same way. The reset counter is the generation marker: it records how many
- * resets went through this gate, so a caller can tell "the tree I am about to
- * touch is the one the last reset produced".
+ * Permanent rootfs lifecycle gate. Ownership is an opaque explicit reference,
+ * never a physical thread or inherited coroutine context. Mutex.holdsLock uses
+ * reference identity, so a foreign or expired permit cannot authorize entry.
  */
-internal class BootTransaction {
-    private val mutex = Mutex()
-    private val ownerThread = ThreadLocal<Boolean>()
-    private val resets = java.util.concurrent.atomic.AtomicLong(0)
+internal class BootTransaction(private val mutex: Mutex = Mutex()) {
+    internal sealed interface Permit
+    private class HeldPermit : Permit
 
-    /** True when this thread already holds the transaction (re-entrant call). */
-    fun ownsCurrentThread(): Boolean = ownerThread.get() == true
-
-    internal fun releaseCurrentThread() {
-        ownerThread.remove()
+    suspend fun <T> runExclusive(block: suspend (Permit) -> T): T {
+        val permit = HeldPermit()
+        return mutex.withLock(permit) { block(permit) }
     }
 
-    /**
-     * Runs [block] under the transaction, or immediately when this thread
-     * already owns it.
-     *
-     * Re-entrancy is what makes the autoRepair Stage-3 shape safe: the reset
-     * happens INSIDE the boot's transaction, so waiting on the lock this
-     * thread already holds would self-deadlock.
-     */
-    suspend fun <T> runExclusive(block: suspend () -> T): T {
-        if (ownsCurrentThread()) return block()
-        return mutex.withLock {
-            ownerThread.set(true)
-            try { block() } finally { ownerThread.remove() }
+    fun requirePermit(permit: Permit) {
+        check(permit is HeldPermit && mutex.holdsLock(permit)) {
+            "rootfs lifecycle permit is foreign or no longer held"
         }
     }
 
-    /**
-     * The boot path: runs [block] under the transaction. A boot that waited
-     * behind a reset runs AFTER it — the reset re-armed the boot latch and
-     * rebuilt the tree, so the boot's body is exactly what has to re-apply
-     * the stubs / mounts / overlay the wipe removed.
-     */
-    suspend fun runBoot(block: suspend () -> Unit): Boolean {
-        runExclusive { block() }
+    suspend fun runBoot(block: suspend (Permit) -> Unit): Boolean {
+        runExclusive(block)
         return true
     }
 
-    /** The install path (a manual install request, not the boot body). */
-    suspend fun runInstall(block: suspend () -> Unit) {
-        runExclusive { block() }
-    }
-
-    /** The reset path. Every reset owns the gate ahead of any queued work. */
-    suspend fun runReset(block: suspend () -> Unit) {
-        resets.incrementAndGet()
-        runExclusive { block() }
-    }
-
-    /** Test/diagnostic read: how many resets have run through this gate. */
-    internal fun resetCount(): Long = resets.get()
+    suspend fun runInstall(block: suspend (Permit) -> Unit) { runExclusive(block) }
+    suspend fun runReset(block: suspend (Permit) -> Unit) { runExclusive(block) }
 }
 
 /**

@@ -120,8 +120,10 @@ class PRootKernelBootGateTest {
         val bootBody = declarationSlice(src, "suspend fun boot(")
         assertTrue("boot() must run its body through the gate:\n$bootBody", bootBody.contains("bootGate.run {"))
         assertTrue(
-            "boot() must keep its lock-free fast path:\n$bootBody",
-            bootBody.contains("if (isBooted)"),
+            "boot() acquires the manager lifecycle transaction before entering the one-shot gate:\n$bootBody",
+            bootBody.contains("manager.runBootTransaction { permit ->") &&
+                bootBody.contains("bootGate.run { bootCriticalSection(context, permit) }") &&
+                !bootBody.contains("if (isBooted)"),
         )
         assertTrue(
             "isBooted must BE the gate's flag, not a second copy:\n$src",
@@ -137,7 +139,7 @@ class PRootKernelBootGateTest {
         )
         assertTrue(
             "the critical section must be private — only the gate may run it:\n$src",
-            src.contains("private suspend fun bootCriticalSection(context: Context)"),
+            src.contains("private suspend fun bootCriticalSection(context: Context, permit: BootTransaction.Permit)"),
         )
         // Suspend-ness is part of the contract, not a detail: the body awaits
         // RootfsManager's suspend API, and the first version of this refactor
@@ -148,7 +150,7 @@ class PRootKernelBootGateTest {
         // signature-level error in a body it never extracts is invisible.
         val criticalSection = declarationSlice(src, "fun bootCriticalSection(")
         val suspendCalls = listOf(
-            "installIfNeeded(", "installProotIfNeeded(", "autoRepair(",
+            "installIfNeededWithinBootTransaction(", "installProotIfNeeded(", "autoRepairWithinBootTransaction(",
             "applyDefaultMountOverlay(", "retryFailedApkWorld(", "dumpApkWorld(",
         ).filter { criticalSection.contains(it) }
         assertTrue(
@@ -179,7 +181,8 @@ class PRootKernelBootGateTest {
         assertTrue(
             "the hook must be installed BEFORE the first installIfNeeded(), or a reset during " +
                 "the very first boot has nobody to notify:\n$criticalSection",
-            criticalSection.indexOf("afterRootfsReinstalled =") < criticalSection.indexOf("installIfNeeded()"),
+            criticalSection.indexOf("afterRootfsReinstalled =") >= 0 &&
+                criticalSection.indexOf("afterRootfsReinstalled =") < criticalSection.indexOf("installIfNeededWithinBootTransaction(permit)")
         )
     }
 

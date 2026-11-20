@@ -18,6 +18,7 @@ import com.rikkaminis.app.sandbox.hasDotDotSegment
 import com.rikkaminis.app.sandbox.normalizeLinuxPath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
@@ -99,7 +100,7 @@ class ModelUseOffloadHandler(
         if (callContext == null) {
             return runBlocking { dispatchCall() }
         }
-        if (callContext.isCancelled) return null
+        if (callContext.isCancelled) throw CancellationException("offload request cancelled")
         return runBlocking {
             // A supervisor job keeps the dispatch's cancellation from tearing
             // down this runBlocking (the handler must still answer, just with
@@ -107,16 +108,23 @@ class ModelUseOffloadHandler(
             // cancelling it runs dispatchOnce's `finally` — that is what writes
             // `cancel` to :modelservice and settles its run dir.
             val supervisor = kotlinx.coroutines.SupervisorJob()
-            val dispatch = kotlinx.coroutines.CoroutineScope(supervisor + coroutineContext)
-                .async { dispatchCall() }
+            val dispatch = kotlinx.coroutines.CoroutineScope(coroutineContext + supervisor)
+                .async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if (callContext.isCancelled) throw CancellationException("offload request cancelled")
+                    dispatchCall()
+                }
             val listener = { dispatch.cancel(CancellationException("offload request cancelled")) }
             callContext.addCancellationListener(listener)
             try {
+                // Registration precedes start: cancellation cannot miss the
+                // child while it is queued to begin on runBlocking's event loop.
+                dispatch.start()
                 withContext(NonCancellable) {
                     try {
                         dispatch.await()
                     } catch (c: CancellationException) {
-                        if (callContext.isCancelled) null else throw c
+                        throw c
                     }
                 }
             } finally {

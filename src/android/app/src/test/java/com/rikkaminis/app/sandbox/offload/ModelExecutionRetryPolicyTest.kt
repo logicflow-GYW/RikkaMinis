@@ -1,5 +1,6 @@
 package com.rikkaminis.app.sandbox.offload
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -86,6 +87,46 @@ class ModelExecutionRetryPolicyTest {
     }
 
     @Test
+    fun `cancellation after a retryable rejection does not issue another dispatch`() {
+        var dispatches = 0
+        var cancelled = false
+        try {
+            runBlocking {
+                dispatchWithRetry(
+                    attempt = {
+                        dispatches++
+                        ModelDispatchAttempt("""{"error":"stale_key_cache"}""", workerDied = false)
+                    },
+                    waitBeforeRetry = { },
+                    shouldContinue = { dispatches < 1 },
+                )
+            }
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+        assertTrue("cancellation must stop before retry", cancelled)
+        assertEquals("no duplicate provider attempt after cancellation", 1, dispatches)
+    }
+
+    @Test
+    fun `a cancelled call is not sent even if cancellation preceded dispatch`() {
+        var dispatches = 0
+        var cancelled = false
+        try {
+            runBlocking {
+                dispatchWithRetry(
+                    attempt = { dispatches++; ModelDispatchAttempt("{}", workerDied = false) },
+                    shouldContinue = { false },
+                )
+            }
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+        assertTrue(cancelled)
+        assertEquals(0, dispatches)
+    }
+
+    @Test
     fun `a rejection-only sequence still caps at three dispatches`() {
         // The typed budget is unchanged by the split: initial + 2 retries.
         val worker = { ModelDispatchAttempt("""{"error":"worker_queue_full"}""", workerDied = false) }
@@ -99,6 +140,7 @@ class ModelExecutionRetryPolicyTest {
         assertEquals(3, dispatches)
         assertEquals("""{"error":"worker_queue_full"}""", out.resultJson)
     }
+
 
     @Test
     fun `death-only sequence caps at the death budget`() {
