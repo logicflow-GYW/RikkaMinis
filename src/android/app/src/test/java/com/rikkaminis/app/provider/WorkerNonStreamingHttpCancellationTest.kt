@@ -6,6 +6,7 @@ import com.rikkaminis.app.provider.gemini.GeminiProvider
 import com.rikkaminis.app.provider.openai.OpenAIProvider
 import com.rikkaminis.app.sandbox.offload.ModelExecutionCancellationRace
 import com.rikkaminis.app.sandbox.offload.ModelExecutionStopException
+import com.rikkaminis.app.sandbox.offload.isExplicitWorkerCancellation
 import com.rikkaminis.app.sandbox.offload.nonStreamingFailureResult
 import com.rikkaminis.app.sandbox.offload.withModelExecutionCancellation
 import kotlinx.coroutines.CoroutineScope
@@ -145,24 +146,35 @@ class WorkerNonStreamingHttpCancellationTest {
         ("data: {\"choices\":[{\"delta\":{\"content\":\"$text\"},\"finish_reason\":\"stop\"}]}\n\n" +
             "data: [DONE]\n\n").toByteArray()
 
+    private val published = java.util.concurrent.atomic.AtomicInteger()
+
     private fun launchRun(
         scope: CoroutineScope,
         cancelFile: File,
         race: ModelExecutionCancellationRace,
         call: suspend () -> Any,
-        publish: (Any) -> Unit = { error("cancelled request published") },
+        publish: (Any) -> Unit = { published.incrementAndGet() },
     ): Deferred<Any> = scope.async(Dispatchers.IO) {
-        withModelExecutionCancellation(
-            cancelFile = cancelFile,
-            pollMs = 10L,
-            cancellation = { ModelExecutionStopException() },
-            race = race,
-            block = { ensureBeforeDispatch ->
-                ensureBeforeDispatch()
-                call()
-            },
-            publish = publish,
-        )
+        try {
+            withModelExecutionCancellation(
+                cancelFile = cancelFile,
+                pollMs = 10L,
+                cancellation = { ModelExecutionStopException() },
+                race = race,
+                block = { ensureBeforeDispatch ->
+                    ensureBeforeDispatch()
+                    call()
+                },
+                publish = publish,
+            )
+        } catch (t: Throwable) {
+            // Mirrors ModelExecutionService's executor shell: only THIS run's stop
+            // marker may convert a transport failure into a cancellation. Closing
+            // the socket underneath `call.execute()` surfaces as a plain
+            // SocketException, so the shell — not the provider — owns the verdict.
+            if (isExplicitWorkerCancellation(race)) throw ModelExecutionStopException()
+            throw t
+        }
     }
 
     private suspend fun cancelAndVerify(

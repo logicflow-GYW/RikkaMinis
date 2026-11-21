@@ -536,11 +536,13 @@ object ModelExecutionDispatcher {
     private suspend fun settleExplicitlyAbandonedRun(dir: File): Boolean {
         var reclaimed = false
         val settled = internalRunCancelCleanup(
-            writeCancel = {
-                ModelExecutionMailbox.writeCancel(dir)
-                File(dir, ModelExecutionService.ABANDON_FILE).createNewFile()
-            },
+            // Frozen shape (ModelExecutionAbandonedPollTest): the cancel is step one.
+            writeCancel = { ModelExecutionMailbox.writeCancel(dir) },
             cleanup = {
+                // Step two, still under NonCancellable and before any wait: tell the
+                // worker this result was explicitly abandoned, so its ACK barrier can
+                // answer instead of burning the full 8s client-ack window.
+                runCatching { File(dir, ModelExecutionService.ABANDON_FILE).createNewFile() }
                 val handshake = awaitExplicitAbandonmentHandshake(
                     abandonAckPresent = { File(dir, ModelExecutionService.ABANDON_ACK_FILE).isFile },
                     resultPresent = { File(dir, ModelExecutionMailbox.FILE_RESULT).isFile },
