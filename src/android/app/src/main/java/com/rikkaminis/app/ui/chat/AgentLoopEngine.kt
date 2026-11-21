@@ -2949,9 +2949,16 @@ internal class AgentLoopEngine(
             // Visible content/tool output consumes this continuation. An
             // empty turn may switch providers or retry at the outer-loop level,
             // so keep intent until that request is genuinely answered.
-            if (turnTextSb.isNotBlank() || toolCalls.isNotEmpty()) {
-                pendingLengthWallTail = null
-            }
+            //
+            // [D04-SEAM] The decision is made AFTER the seam merge below, on
+            // the post-seam turn text — not here on the raw stream buffer. A
+            // model that backs up to an earlier anchor and re-emits ONLY text
+            // it already produced has a non-empty raw buffer while
+            // mergeLengthWallSeam trims the whole turn to nothing. Consuming
+            // intent on the raw value sent the very next retry / one-shot
+            // request without the request-aware adaptation (assistant-final
+            // prefill on shapes where prefill is illegal) and made the
+            // empty-turn recovery read "no new content" as a stalled model.
             // [fix/prewindow-budget-1015] usage → 校准窗口回填，流结束后恰好
             // 一次（移出 chunk 处理器：一次流可能吐多帧 usage，会把窗口灌成
             // 近似重复样本）。用 lastUsage 的最终帧；本地端用预检时对同一
@@ -3072,6 +3079,13 @@ internal class AgentLoopEngine(
                 }
             } else {
                 loopState.accumulatedText += turnTextRaw
+            }
+            // [D04-SEAM] One consume point, post-seam: `turnText` is this turn's
+            // body after the duplicated seam was removed (a fully duplicated
+            // continuation leaves it blank). Tool calls are real progress
+            // regardless of text, so they consume intent too.
+            if (turnText.isNotBlank() || toolCalls.isNotEmpty()) {
+                pendingLengthWallTail = null
             }
             // [fix/eof-stub-continuation] EOF-stub continuations behave like
             // length-wall continuations for seam-dedup purposes: the next

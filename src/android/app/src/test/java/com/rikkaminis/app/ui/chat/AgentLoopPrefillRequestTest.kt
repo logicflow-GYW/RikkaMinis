@@ -5,6 +5,7 @@ import com.rikkaminis.app.data.model.*
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.anthropic.AnthropicProvider
 import com.rikkaminis.app.sandbox.offload.TranscriptCommitHandle
+import com.rikkaminis.app.tools.ToolExecutionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -429,5 +430,91 @@ class AgentLoopPrefillRequestTest {
         assertEquals("enabled", host.bodies[1].getJSONObject("thinking").getString("type"))
         assertEquals("user", lastRole(host.bodies[1])); assertEquals(3, reads)
         assertOneAnswer(fake, "head+tail")
+    }
+
+    // ── [D04-SEAM] the continuation intent is consumed by POST-seam content ──
+    // A model that backs up to an earlier anchor and re-emits only what is
+    // already visible has a NON-empty raw buffer while mergeLengthWallSeam
+    // trims the whole turn. Consuming intent on the raw buffer sent the next
+    // retry / one-shot request without the request-aware adaptation (legal
+    // prefill decides assistant-final vs request-local USER reminder) and made
+    // the empty-turn recovery read "no new content yet" as a stalled model.
+    /** Long enough to be a real seam (>= 3 chars) and inside the 80-char tail. */
+    private val seamHead = "the quick brown fox jumps over the lazy dog"
+
+    private fun reminderCount(body: JSONObject): Int =
+        Regex("cut off mid-sentence").findAll(body.getJSONArray("messages").toString()).count()
+
+    @Test fun fullyDuplicatedContinuationKeepsRequestAwareAdaptationOnRetry() = runTest(dispatcher) {
+        for ((id, level) in listOf("claude-sonnet-4-6" to ThinkingLevel.OFF,
+            "claude-sonnet-4-6" to ThinkingLevel.HIGH, "claude-haiku-4-5" to ThinkingLevel.HIGH)) {
+            val fake = FakeAgentLoopHost(thinkingLevel = level)
+            fake.scripts.add(segment(seamHead, "max_tokens"))
+            // Model re-emits exactly the visible text: the seam trims it ALL.
+            fake.scripts.add(segment(seamHead, "max_tokens"))
+            fake.scripts.add(segment("+tail", "end_turn"))
+            val host = WireHost(fake)
+            engine(host).runAgentLoop(provider(id), null)
+            assertEquals("$id/$level requests", 3, host.bodies.size)
+            assertEquals("$id/$level retry keeps the request-local reminder", "user", lastRole(host.bodies[2]))
+            assertEquals("$id/$level reminder count", 1, reminderCount(host.bodies[2]))
+            assertOneAnswer(fake, seamHead + "+tail")
+        }
+    }
+
+    @Test fun fullyDuplicatedContinuationThenEndTurnKeepsIntentForOneShot() = runTest(dispatcher) {
+        val fake = FakeAgentLoopHost(thinkingLevel = ThinkingLevel.OFF)
+        fake.scripts.add(segment(seamHead, "max_tokens"))
+        fake.scripts.add(segment(seamHead, "end_turn"))   // duplicate-only clean finish
+        fake.scripts.add(segment("+tail", "end_turn"))
+        val host = WireHost(fake)
+        engine(host).runAgentLoop(provider("claude-sonnet-4-6"), null)
+        assertEquals(3, host.bodies.size)
+        assertEquals("user", lastRole(host.bodies[2]))
+        assertEquals(1, reminderCount(host.bodies[2]))
+        val nudge = JSONObject.quote(EmptyTurnRecovery.REMINDER).trim('"')
+        assertTrue("existing one-shot nudge rides along",
+            host.bodies[2].getJSONArray("messages").toString().contains(nudge))
+        assertOneAnswer(fake, seamHead + "+tail")
+    }
+
+    @Test fun seamWithRealNewTailStillConsumesIntent() = runTest(dispatcher) {
+        // Punctuation/whitespace-led re-emission of the tail PLUS new text: the
+        // seam is trimmed, but the turn does carry new content, so the intent is
+        // consumed and a legal legacy prefill stays assistant-final.
+        val continuation = "，\n" + seamHead.takeLast(24) + " and then"
+        val fake = FakeAgentLoopHost(thinkingLevel = ThinkingLevel.OFF)
+        fake.scripts.add(segment(seamHead, "max_tokens"))
+        fake.scripts.add(segment(continuation, "max_tokens"))
+        fake.scripts.add(segment("+tail", "end_turn"))
+        val host = WireHost(fake)
+        engine(host).runAgentLoop(provider("claude-3-7-sonnet-20250219"), null)
+        assertEquals(3, host.bodies.size)
+        assertEquals("intent consumed: no request-local reminder", 0, reminderCount(host.bodies[2]))
+        assertEquals("assistant", lastRole(host.bodies[2]))
+        assertOneAnswer(fake, seamHead + " and then+tail")
+    }
+
+    @Test fun toolOnlyContinuationConsumesIntent() = runTest(dispatcher) {
+        val tool = AgentToolDefinition("shell", "test tool", mapOf("cmd" to AgentToolParam("string", "command")))
+        val fake = FakeAgentLoopHost(agentTools = listOf(tool), thinkingLevel = ThinkingLevel.OFF)
+        fake.scripts.add(segment(seamHead, "max_tokens"))
+        fake.scripts.add(TurnScript(listOf(LLMStreamChunk.Started,
+            LLMStreamChunk.ToolUseStart("t1", "shell"),
+            LLMStreamChunk.ToolCallComplete("t1", "shell", JSONObject("{\"cmd\":\"echo once\"}")),
+            LLMStreamChunk.Finished("tool_use"))))
+        fake.toolResults.add(ToolExecutionResult(output = "ok", success = true, toolTitle = "shell"))
+        fake.scripts.add(segment("+tail", "end_turn"))
+        val host = WireHost(fake)
+        // A prefill-banning shape: kept intent would show up as the
+        // request-local USER reminder, consumed intent as none at all (the
+        // tool_result tail is a USER message either way).
+        engine(host).runAgentLoop(provider("claude-sonnet-4-6"), null)
+        assertEquals(1, fake.toolExecutions.size)
+        assertEquals(3, host.bodies.size)
+        assertEquals("tool progress consumed the continuation intent", 0, reminderCount(host.bodies[2]))
+        assertTrue("tool result rode into the next request",
+            host.bodies[2].toString().contains("tool_result"))
+        assertEquals(seamHead + "+tail", fake.finalAssistantText)
     }
 }
