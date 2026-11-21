@@ -171,40 +171,46 @@ class ModelExecutionService : Service() {
             true, // fairness: FIFO waiters — queue position is honest
         )
 
+        // Process.killProcess and executionSlots span Service recreation. Keep
+        // admission, ACKs, counters and the reap decision under one process lock;
+        // stopSelf/onDestroy may replace the receiver while old run threads live.
+        /** Worker-side registry: number of requests currently being executed. */
+        private val activeRequests = AtomicInteger(0)
+
+        /** Worker-side lifecycle state (authoritative; main process only inspects state.json). */
+        @Volatile
+        private var lifecycleState = ModelExecutionWorkerState.ACTIVE
+
+        /**
+         * TF-H: lifecycle lock — guards the composite check of
+         * activeRequests / queuedRequests / pending ACKs / lifecycleState and the
+         * self-reap decision. The old code computed a quiescence snapshot outside
+         * the lock and then called killProcess() on it, so a NEW request that
+         * arrived between the snapshot and the kill could be killed by the old
+         * finishing thread. Everyone who mutates the counters or decides to die
+         * uses this lock.
+         */
+        private val lifecycleLock = Any()
+
+        /** TF-H: number of requests enqueued waiting on the execution mutex. */
+        private val queuedRequests = AtomicInteger(0)
+
+        /**
+         * TF-H: per-run ACK tokens, keyed by runId. A streaming worker registers
+         * one token when it commits its response and releases it exactly once when
+         * the client.ack for that run is observed (or on late ack / controlled
+         * drain). The lifecycle only self-reaps when every token is released.
+         */
+        private val pendingAckTokens = ConcurrentHashMap<String, AtomicBoolean>()
+
+        /** TF-H: request generation, incremented per run; used to invalidate
+         *  stale snapshot decisions. */
+        private val requestGeneration = AtomicLong(0L)
+
+        @Volatile
+        private var keyCachePoisoned = false
+
     }
-
-    /** Worker-side registry: number of requests currently being executed. */
-    private val activeRequests = AtomicInteger(0)
-
-    /** Worker-side lifecycle state (authoritative; main process only inspects state.json). */
-    @Volatile
-    private var lifecycleState = ModelExecutionWorkerState.ACTIVE
-
-    /**
-     * TF-H: lifecycle lock — guards the composite check of
-     * activeRequests / queuedRequests / pending ACKs / lifecycleState and the
-     * self-reap decision. The old code computed a quiescence snapshot outside
-     * the lock and then called killProcess() on it, so a NEW request that
-     * arrived between the snapshot and the kill could be killed by the old
-     * finishing thread. Everyone who mutates the counters or decides to die
-     * uses this lock.
-     */
-    private val lifecycleLock = Any()
-
-    /** TF-H: number of requests enqueued waiting on the execution mutex. */
-    private val queuedRequests = AtomicInteger(0)
-
-    /**
-     * TF-H: per-run ACK tokens, keyed by runId. A streaming worker registers
-     * one token when it commits its response and releases it exactly once when
-     * the client.ack for that run is observed (or on late ack / controlled
-     * drain). The lifecycle only self-reaps when every token is released.
-     */
-    private val pendingAckTokens = ConcurrentHashMap<String, AtomicBoolean>()
-
-    /** TF-H: request generation, incremented per run; used to invalidate
-     *  stale snapshot decisions. */
-    private val requestGeneration = AtomicLong(0L)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -746,6 +752,7 @@ class ModelExecutionService : Service() {
 
     /** Kill our own process — only ever called after quiescence confirmation. */
     private fun selfReap() {
+        check(Thread.holdsLock(lifecycleLock)) { "process reap requires the lifecycle lock" }
         runCatching { android.os.Process.killProcess(android.os.Process.myPid()) }
     }
 
@@ -797,8 +804,6 @@ class ModelExecutionService : Service() {
      *     streams past POISON_REAP_WAIT_MS, the watchdog gives up and the
      *     normal finishRequest lifecycle owns the eventual death.
      */
-    @Volatile
-    private var keyCachePoisoned = false
 
     /**
      * [T-worker-key-intent-handoff] True when this request must fall back to the
@@ -843,10 +848,12 @@ class ModelExecutionService : Service() {
             var waitedMs = 0L
             while (waitedMs < POISON_REAP_WAIT_MS) {
                 try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
-                if (activeRequests.get() == 0) {
-                    Log.i(TAG, "poisoned worker self-reaping (drained), pid=$pid")
-                    selfReap()
-                    return@Thread
+                synchronized(lifecycleLock) {
+                    if (activeRequests.get() == 0 && queuedRequests.get() == 0 && pendingAckTokens.isEmpty()) {
+                        Log.i(TAG, "poisoned worker self-reaping (drained), pid=$pid")
+                        selfReap()
+                        return@Thread
+                    }
                 }
                 waitedMs += 500
             }
