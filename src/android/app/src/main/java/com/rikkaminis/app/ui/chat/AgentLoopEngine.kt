@@ -1430,11 +1430,9 @@ internal class AgentLoopEngine(
                 )
             }
             var preflightMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
-            // Budget the possible reminder before deciding whether it is needed.
-            // It is a projection only; folding the answer still sees one entry.
-            if (continuationRequestReminder != null) {
-                preflightMessages = preflightMessages + continuationRequestReminder
-            }
+            // Do not budget a hypothetical reminder yet: a legal assistant
+            // prefill does not send those extra tokens. The request branch below
+            // adds and re-budgets it only when this provider/cap requires it.
             // [audit2 BUG-02] Window / output budget follow the provider that
             // will actually serve this turn, same reason as `currentCtxKey`.
             val preflightMaxTokens = host.dynamicMaxTokens(loopState.currentProvider, loopState.lastContextTokens)
@@ -1729,26 +1727,30 @@ internal class AgentLoopEngine(
                         } else {
                             preflightMessages
                         }
-                        // Fallback/overshoot can replace the cap or snapshot.
-                        // First charge the reminder conservatively; never grow a
-                        // cap deliberately shrunk by preflight/400 recovery. A
-                        // legacy HIGH request may now omit thinking at <=1024.
-                        val withReminder = RequestBudgetRecompute.forProvider(
-                            messages = baseMessages + continuationRequestReminder,
-                            systemPrompt = systemPrompt,
-                            tools = host.agentTools,
-                            calibrationRatioPercent = calibrationRatioFor(loopState.currentProvider),
-                            windowTokens = host.effectiveContextWindowTokens() ?: 0,
-                            providerMaxTokens = maxTokens,
-                            outputFloor = MIN_MAX_TOKENS_CONST,
-                        )
-                        maxTokens = minOf(maxTokens, withReminder.maxTokens)
-                        val canPrefill = loopState.currentProvider.supportsPrefillForRequest(
+                        var canPrefill = loopState.currentProvider.supportsPrefillForRequest(
                             maxTokens, requestThinkingLevel,
                         )
+                        if (!canPrefill) {
+                            // Only charge an actual user reminder, not a
+                            // hypothetical one on a legal prefill. Never grow
+                            // a cap already shrunk by preflight/400 recovery.
+                            val withReminder = RequestBudgetRecompute.forProvider(
+                                messages = baseMessages + continuationRequestReminder,
+                                systemPrompt = systemPrompt,
+                                tools = host.agentTools,
+                                calibrationRatioPercent = calibrationRatioFor(loopState.currentProvider),
+                                windowTokens = host.effectiveContextWindowTokens() ?: 0,
+                                providerMaxTokens = maxTokens,
+                                outputFloor = MIN_MAX_TOKENS_CONST,
+                            )
+                            maxTokens = minOf(maxTokens, withReminder.maxTokens)
+                            // Shrinking to <=1024 omits legacy thinking; query
+                            // again at that actual wire cap, using the SAME level.
+                            canPrefill = loopState.currentProvider.supportsPrefillForRequest(
+                                maxTokens, requestThinkingLevel,
+                            )
+                        }
                         preflightMessages = if (canPrefill) baseMessages else baseMessages + continuationRequestReminder
-                        // Estimate the actual projection sent below, not the
-                        // conservatively reserved reminder or the previous model.
                         rawEstimate = ContextEstimator.estimateRequestTokens(
                             messages = preflightMessages,
                             systemPrompt = systemPrompt,
@@ -2922,10 +2924,12 @@ internal class AgentLoopEngine(
                     }
                 }
             }  // end while (!collectDone)
-            // Consumed by this completed turn, including a partial-stream
-            // terminal. A NEW length wall below may arm the next turn again.
-            pendingLengthWallTail = null
-
+            // Visible content/tool output consumes this continuation. An
+            // empty turn may switch providers or retry at the outer-loop level,
+            // so keep intent until that request is genuinely answered.
+            if (turnTextSb.isNotBlank() || toolCalls.isNotEmpty()) {
+                pendingLengthWallTail = null
+            }
             // [fix/prewindow-budget-1015] usage → 校准窗口回填，流结束后恰好
             // 一次（移出 chunk 处理器：一次流可能吐多帧 usage，会把窗口灌成
             // 近似重复样本）。用 lastUsage 的最终帧；本地端用预检时对同一
@@ -3405,6 +3409,17 @@ internal class AgentLoopEngine(
             // terminal persist writes (and drops the "<system-reminder>…continue"
             // turns the continuation branch injected, which used to stay in the
             // transcript forever). Non-continuation turns take the plain append.
+            // EmptyTurnRecovery expects the USER turn actually answered to
+            // sit behind its empty assistant shell. Materialise that anchor
+            // only here (after blocked/error-shaped fallback exits), and consume
+            // intent: its one-shot recovery now owns the following request.
+            if (continuationRequestReminder != null &&
+                preflightMessages.lastOrNull() === continuationRequestReminder &&
+                turnText.isBlank() && toolCalls.isEmpty()
+            ) {
+                host.agentHistory.add(continuationRequestReminder)
+                pendingLengthWallTail = null
+            }
             val turnAssistantMessage = LLMMessage(
                 role = LLMMessage.Role.ASSISTANT,
                 content = turnText,

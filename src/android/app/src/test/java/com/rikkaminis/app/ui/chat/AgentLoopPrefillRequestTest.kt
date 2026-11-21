@@ -159,6 +159,41 @@ class AgentLoopPrefillRequestTest {
         fallbackCase("claude-sonnet-4-6", "claude-haiku-4-5", listOf("user", "user", "assistant"))
     }
 
+    @Test fun emptyReminderResponseStillUsesExistingOneShotRecovery() = runTest(dispatcher) {
+        val fake = FakeAgentLoopHost(thinkingLevel = ThinkingLevel.OFF)
+        fake.scripts.add(segment("head", "max_tokens")); fake.scripts.add(segment("", "end_turn"))
+        fake.scripts.add(segment("+tail", "end_turn"))
+        val host = WireHost(fake)
+        engine(host).runAgentLoop(provider("claude-sonnet-4-6"), null)
+        assertEquals(3, host.bodies.size)
+        assertEquals("user", lastRole(host.bodies[2]))
+        assertOneAnswer(fake, "head+tail")
+    }
+
+    @Test fun blockedOuterFallbackKeepsIntentAndRequeriesNewMember() = runTest(dispatcher) {
+        val fake = FakeAgentLoopHost(thinkingLevel = ThinkingLevel.OFF)
+        fake.scripts.add(segment("head", "max_tokens")); fake.scripts.add(segment("", "content_filter"))
+        fake.scripts.add(segment("+tail", "end_turn"))
+        val host = WireHost(fake)
+        engine(host).runAgentLoop(provider("claude-sonnet-4-6"), null,
+            fallbackProviders = listOf(FallbackCandidate(provider("claude-haiku-4-5"), "fallback")))
+        assertEquals(listOf("user", "user", "assistant"), host.bodies.map { lastRole(it) })
+        assertOneAnswer(fake, "head+tail")
+    }
+
+    @Test fun legalPrefillDoesNotLoseBudgetForReminderItNeverSends() = runTest(dispatcher) {
+        val fake = FakeAgentLoopHost(thinkingLevel = ThinkingLevel.OFF)
+        fake.scripts.add(segment("head", "max_tokens")); fake.scripts.add(segment("+tail", "end_turn"))
+        val host = WireHost(fake, cap = { 4096 }, window = {
+            if (fake.streamRequests.isEmpty()) 200_000 else
+                ContextEstimator.estimateRequestTokens(fake.agentHistory, null, emptyList()).toInt() +
+                    ContextEstimator.PREFLIGHT_MARGIN_TOKENS.toInt() + 4096
+        })
+        engine(host).runAgentLoop(provider("claude-haiku-4-5"), null)
+        assertEquals(4096, host.bodies[1].getInt("max_tokens"))
+        assertEquals("assistant", lastRole(host.bodies[1])); assertOneAnswer(fake, "head+tail")
+    }
+
     @Test fun sameCapturedThinkingInputFeedsQueryAndActualRequest() = runTest(dispatcher) {
         val fake = FakeAgentLoopHost(thinkingLevel = ThinkingLevel.OFF)
         fake.scripts.add(segment("head", "max_tokens")); fake.scripts.add(segment("+tail", "end_turn"))
