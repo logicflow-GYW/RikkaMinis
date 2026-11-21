@@ -1145,6 +1145,10 @@ internal class AgentLoopEngine(
         // 400-and-retry repeatedly. The property the KDoc promises is "one
         // bounded shrink per user turn", so the object has to outlive the turn.
         val overshootRetry = ContextOvershootRetry()
+        // A wall records intent, NOT a capability decision for the previous
+        // request. The next preflight/retry may change its cap or provider.
+        // Request-only reminders never enter the persisted transcript.
+        var pendingLengthWallTail: String? = null
         // [audit3 F-02] LABELED loop — do not drop the `turnLoop@`.
         // Two execution-budget gates live INSIDE this turn body's retry loop
         // (`while (!collectDone)` further down): the deadline gate and the
@@ -1417,7 +1421,20 @@ internal class AgentLoopEngine(
             // 仍带全量未压缩历史 + 最小输出 → 仍然必然 400（该缺口会让
             // "裁剪后按最小输出重试"的承诺在本 turn 落空）。SHRINK_OUTPUT /
             // PASS 不进管线，值与 val 时代逐字一致。
+            val continuationRequestReminder = pendingLengthWallTail?.let { tail ->
+                val reminder = lengthWallReminder(tail)
+                LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = reminder,
+                    contentParts = listOf(AgentContentPart.Text(reminder)),
+                )
+            }
             var preflightMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+            // Budget the possible reminder before deciding whether it is needed.
+            // It is a projection only; folding the answer still sees one entry.
+            if (continuationRequestReminder != null) {
+                preflightMessages = preflightMessages + continuationRequestReminder
+            }
             // [audit2 BUG-02] Window / output budget follow the provider that
             // will actually serve this turn, same reason as `currentCtxKey`.
             val preflightMaxTokens = host.dynamicMaxTokens(loopState.currentProvider, loopState.lastContextTokens)
@@ -1702,6 +1719,43 @@ internal class AgentLoopEngine(
                     )
                     loopState.currentTranscriptTurnId = attemptTurnId
                     loopState.pendingTranscriptCommits.add(attemptCommitHandle)
+                    // Capture the EFFECTIVE host level exactly once per attempt:
+                    // query and worker get the same input, and each uses the
+                    // real provider clamp/emitter rather than a cached last call.
+                    val requestThinkingLevel = host.thinkingLevel
+                    if (continuationRequestReminder != null) {
+                        val baseMessages = if (preflightMessages.lastOrNull() === continuationRequestReminder) {
+                            preflightMessages.dropLast(1)
+                        } else {
+                            preflightMessages
+                        }
+                        // Fallback/overshoot can replace the cap or snapshot.
+                        // First charge the reminder conservatively; never grow a
+                        // cap deliberately shrunk by preflight/400 recovery. A
+                        // legacy HIGH request may now omit thinking at <=1024.
+                        val withReminder = RequestBudgetRecompute.forProvider(
+                            messages = baseMessages + continuationRequestReminder,
+                            systemPrompt = systemPrompt,
+                            tools = host.agentTools,
+                            calibrationRatioPercent = calibrationRatioFor(loopState.currentProvider),
+                            windowTokens = host.effectiveContextWindowTokens() ?: 0,
+                            providerMaxTokens = maxTokens,
+                            outputFloor = MIN_MAX_TOKENS_CONST,
+                        )
+                        maxTokens = minOf(maxTokens, withReminder.maxTokens)
+                        val canPrefill = loopState.currentProvider.supportsPrefillForRequest(
+                            maxTokens, requestThinkingLevel,
+                        )
+                        preflightMessages = if (canPrefill) baseMessages else baseMessages + continuationRequestReminder
+                        // Estimate the actual projection sent below, not the
+                        // conservatively reserved reminder or the previous model.
+                        rawEstimate = ContextEstimator.estimateRequestTokens(
+                            messages = preflightMessages,
+                            systemPrompt = systemPrompt,
+                            tools = host.agentTools,
+                        )
+                        preflightEstimate = rawEstimate * calibrationRatioFor(loopState.currentProvider) / 100
+                    }
                     host.streamChatTurnOffloaded(
                         provider = loopState.currentProvider,
                         messages = preflightMessages,
@@ -1717,7 +1771,7 @@ internal class AgentLoopEngine(
                         // was a SECOND, independent answer to the same question —
                         // and the one that let the navbar badge disagree with the
                         // wire. One expression, one answer.
-                        thinkingLevel = host.thinkingLevel,
+                        thinkingLevel = requestThinkingLevel,
                         // [surgery-1120 A-01] This attempt's identity + the
                         // rendezvous the engine settles after the transcript
                         // row is durable. The handle is created HERE (before
@@ -2868,6 +2922,9 @@ internal class AgentLoopEngine(
                     }
                 }
             }  // end while (!collectDone)
+            // Consumed by this completed turn, including a partial-stream
+            // terminal. A NEW length wall below may arm the next turn again.
+            pendingLengthWallTail = null
 
             // [fix/prewindow-budget-1015] usage → 校准窗口回填，流结束后恰好
             // 一次（移出 chunk 处理器：一次流可能吐多帧 usage，会把窗口灌成
@@ -3596,67 +3653,10 @@ internal class AgentLoopEngine(
                                 TAG_STREAM,
                                 "runAgentLoop turn=$turn finish=length — truncated (${turnText.length} chars), continuing loop to let the model finish (${loopState.lengthWallContinues}/${com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.lengthWallContinues()})",
                             )
-                        // [T-length-wall-prefill] When the provider accepts
-                        // an assistant-final prefill, the truncated assistant
-                        // text is ALREADY the last message in host.agentHistory
-                        // (added above), so continuing the loop re-sends it as
-                        // the final message with NO synthetic user message —
-                        // the model is forced to continue the unfinished
-                        // assistant turn and has no room to back up and
-                        // re-emit already-output text (the ROOT cause of
-                        // length-wall seam duplication, which the reminder +
-                        // seam-trim below could only patch after the fact).
-                        // mergeLengthWallSeam stays as belt-and-braces for
-                        // models that repeat even under prefill.
-                        if (loopState.currentProvider?.supportsPrefill == true) {
-                            AppLogger.info(
-                                TAG_STREAM,
-                                "runAgentLoop turn=$turn finish=length — prefill continuation (no reminder) via ${loopState.currentProvider.name}",
-                            )
-                            continue
-                        }
-                        // [T-length-wall-reminder] Prefill NOT supported
-                        // (strict relay requiring a final USER message): inject
-                        // a continuation instruction as a synthetic USER message
-                        // (same delivery pattern as resume()'s stop-continue
-                        // reminder). Without it the next request presents the
-                        // truncated reply as bare context and models frequently
-                        // back up to an earlier semantic anchor, re-emitting a
-                        // phrase they already output — the field-observed
-                        // mid-sentence duplication. The reminder anchors the
-                        // exact cut point and forbids repetition.
-                        // mergeLengthWallSeam below remains the belt-and-
-                        // braces guard for models that repeat anyway.
-                        //
-                        // Not persisted to DB (unlike resume()'s reminder):
-                        // this is a transient in-loop instruction. Guard
-                        // against stacking: if the history tail already
-                        // carries one of these reminders (double wall), drop
-                        // the old one first so consecutive length-walls do
-                        // not pile up reminder turns.
-                        // [fix/audit-b20 / T1-LOW-2] The reminder from a previous
-                        // length-wall sits *behind* this turn's assistant
-                        // message (added above), so the tail check could never
-                        // match and consecutive walls stacked. Look one entry
-                        // back and drop it there.
-                        val prevTailIdx = host.agentHistory.size - 2
-                        val prevTail = host.agentHistory.getOrNull(prevTailIdx)
-                        // [R5-C2] Same family predicate the error-shaped branch
-                        // ORs in — one source per reminder family, instead of a
-                        // second copy of the marker text drifting here.
-                        val tailIsLengthWallReminder =
-                            ContinuationHistoryMerge.isLengthWallReminder(prevTail)
-                        if (tailIsLengthWallReminder) {
-                            host.agentHistory.removeAt(prevTailIdx)
-                        }
-                        val reminder = lengthWallReminder(turnText.takeLast(80))
-                        host.agentHistory.add(
-                            LLMMessage(
-                                role = LLMMessage.Role.USER,
-                                content = reminder,
-                                contentParts = listOf(AgentContentPart.Text(reminder)),
-                            )
-                        )
+                        // Resolve prefill only at the NEXT actual request,
+                        // after preflight and every fallback/retry. Seam merging,
+                        // one bubble/row, and the existing reminder stay shared.
+                        pendingLengthWallTail = turnText.takeLast(80)
                         continue
                         } // [feat/hermes-tier1] else — continuation budget branch
                     }
