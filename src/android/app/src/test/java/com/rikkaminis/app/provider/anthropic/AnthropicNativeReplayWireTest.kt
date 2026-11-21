@@ -372,17 +372,20 @@ class AnthropicNativeReplayWireTest {
         assertEquals(AnthropicReplay.State.UNAVAILABLE, terminal.anthropicReplay?.state)
     }
 
-    @Test fun imageToolResultsKeepPublicBytesWhilePrivateCapsuleIsDeclined() = runBlocking {
+    @Test fun imageToolResultsKeepPublicPlaceholderWhilePrivateCapsuleIsDeclined() = runBlocking {
         val t = transport()
-        t.provider.model = t.provider.model.copy(inputModalities = listOf("text", "image"))
+        // Android's return-default-values unit-test jar cannot encode Base64.
+        // This is the real text-only image policy, not an emulated encoder;
+        // the independent JVM image-byte probe covers the vision arm separately.
+        t.provider.model = t.provider.model.copy(inputModalities = listOf("text"))
         val valid = history(AnthropicReplayCodec.complete(source, blocks()))
         val user = valid.last().copy(contentParts = listOf(AgentContentPart.ToolResult(
             "tool_1", "lookup", "actual-image-result", imageData = byteArrayOf(1, 2, 3), imageMimeType = "image/png")))
         val wire = next(t, valid.dropLast(1) + user)
         assertNoPrivate(wire)
         assertTrue("tool result text survives", wire.contains("actual-image-result"))
-        assertTrue("tool result image survives", wire.contains("AQID"))
-        assertTrue(wire.contains("image/png"))
+        assertTrue("tool result image placeholder survives",
+            wire.contains(com.rikkaminis.app.provider.VISION_UNSUPPORTED_PLACEHOLDER))
     }
 
     @Test fun errorInsideSuccessfulHttpAndInvalidJsonNeverExposeCapsule() = runBlocking {
