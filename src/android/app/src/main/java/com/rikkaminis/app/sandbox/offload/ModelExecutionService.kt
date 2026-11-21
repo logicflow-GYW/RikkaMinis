@@ -568,8 +568,11 @@ class ModelExecutionService : Service() {
         // finalizes its OWN run dir (state + terminal); the self-reap
         // decision is re-taken by every finisher against the CURRENT
         // counters, so the LAST one out correctly reaps a drained worker.
-        // The generation check survives ONLY inside maybeSelfReapLocked as a
-        // belt-and-suspenders re-verify before killProcess.
+        // The run's admission generation is not this completion snapshot's
+        // generation: concurrent runs may finish in reverse order. Sample the
+        // CURRENT generation under the same lifecycleLock as the counters and
+        // admission, retaining maybeSelfReapLocked's snapshot re-verification.
+        val reapGeneration = requestGeneration.get()
         val dirMissing = !dir.isDirectory
         if (dirMissing) {
             Log.w(
@@ -588,7 +591,7 @@ class ModelExecutionService : Service() {
                 quiescence = quiescence,
             )
             lifecycleState = next
-            maybeSelfReapLocked(dir, next, quiescence, runId, generation)
+            maybeSelfReapLocked(dir, next, quiescence, runId, reapGeneration)
             return next
         }
 
@@ -613,7 +616,7 @@ class ModelExecutionService : Service() {
         ModelExecutionMailbox.writeState(dir, next, activeRequests.get(), unacked = pendingAckTokens.size)
         ModelExecutionRunDir.writeTerminal(dir)
         if (ModelExecutionLifecycle.shouldKill(next, quiescence)) {
-            maybeSelfReapLocked(dir, next, quiescence, runId, generation)
+            maybeSelfReapLocked(dir, next, quiescence, runId, reapGeneration)
         } else {
             Log.i(
                 TAG,
@@ -631,12 +634,12 @@ class ModelExecutionService : Service() {
      * allowing self-reap. Without this, the lock-free old code killed a worker
      * right after a new request had revived it.
      *
-     * [feat/provider-exec-concurrency] The generation re-verify is now a
-     * belt-and-suspenders ONLY: the primary safety under concurrency is the
-     * counter re-check (active==0 && queued==0 && acks empty). Generation is
-     * still consulted — a request that arrived AFTER this finisher captured
-     * its snapshot must block the reap — but it no longer replaces the
-     * counter check (see finishRequestLocked KDoc for the leak it caused).
+     * [feat/provider-exec-concurrency] capturedGeneration belongs to the
+     * CURRENT locked completion snapshot, not the finishing run's admission.
+     * Re-verify it together with the counters (active==0 && queued==0 && acks
+     * empty). Admission uses the same lock, so an older run may safely reap
+     * when it is the last finisher. Delayed controlled-drain generations keep
+     * their separate stale-timer protection.
      */
     private fun maybeSelfReapLocked(
         dir: File,
