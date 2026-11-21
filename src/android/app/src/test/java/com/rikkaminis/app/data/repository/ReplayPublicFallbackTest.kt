@@ -103,7 +103,11 @@ class ReplayPublicFallbackTest {
             assertNoPrivate("preview", preview)
             assertNull("no preview write for a row nothing public survives", preview)
         }
-        assertEquals(listOf("previous", "previous"), rows.previews)
+        assertEquals(
+            "the malformed rows wrote nothing — the previous preview survives",
+            listOf("previous"),
+            rows.previews,
+        )
     }
 
     @Test
