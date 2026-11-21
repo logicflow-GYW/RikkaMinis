@@ -24,7 +24,13 @@ object AnthropicReplayPublicProjection {
      * Call BEFORE wrapping this string in export.content or RPC.parts.
      */
     fun partsJson(raw: String): String {
-        if (raw.length > MAX_INPUT_CHARS) return "[]"
+        if (raw.length > MAX_INPUT_CHARS) {
+            // Oversized rows are never parsed (that is the unbounded path). One
+            // bounded structural scan decides: a confirmed private type or an
+            // exhausted scan budget ⇒ unusable projection; otherwise the legacy
+            // readable fallback stays.
+            return if (inspectStructure(raw) == 0) raw else "[]"
+        }
         val inspection = inspectStructure(raw)
         if (inspection == 2) return "[]"
         val parts = try {

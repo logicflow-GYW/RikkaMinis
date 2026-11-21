@@ -71,8 +71,14 @@ class AnthropicReplayPublicProjectionTest {
             .put(JSONObject().put("type", "anthropicReplayV1").put("value", JSONObject().put("data", "DATA_SYNTH_D05"))).toString()
         assertTrue(raw.toByteArray(Charsets.UTF_8).size in 480_000..500_000)
         assertEquals(publicText, JSONArray(project(raw)).getJSONObject(0).getString("value"))
+        // Deep nesting: the scan budget is exhausted, so the row is unusable
+        // rather than echoed raw.
         assertEquals("[]", project("[".repeat(100) + "]".repeat(100)))
-        assertEquals("[]", project("x".repeat(1_000_001)))
+        // Oversized but ordinary rows keep their readable fallback; oversized
+        // rows that DO carry the private type stay unusable.
+        val oversized = "x".repeat(1_000_001)
+        assertEquals(oversized, project(oversized))
+        assertEquals("[]", project("""[{"type":"anthropicReplayV1","value":{"data":"DATA_SYNTH_D05"},"pad":"${"y".repeat(1_000_001)}"}"""))
     }
 
     @Test fun projectionHelperDescriptionDoesNotHoldInputs() {
