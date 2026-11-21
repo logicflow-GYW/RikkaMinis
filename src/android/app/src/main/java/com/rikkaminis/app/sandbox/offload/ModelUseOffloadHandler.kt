@@ -592,7 +592,9 @@ class ModelUseOffloadHandler(
             ModelExecutionDispatcher.dispatch(context, remoteRequestJson, apiKey = WorkerKeyHandoff.keyFor(context, instance.id))
         }
         if (remoteResult != null) {
-            val remote = try { JSONObject(remoteResult) } catch (e: Throwable) { null }
+            // This path only projects public fields. Strip the capsule before
+            // Android's JSON parser can reject an exact number inside it.
+            val remote = try { AnthropicReplayIpc.publicResultObject(remoteResult) } catch (_: Throwable) { null }
             if (remote != null) {
                 // [fix/audit3-1015 F-10] The image endpoint auto-probe runs in
                 // :modelservice now; its answer rides back on the result and is

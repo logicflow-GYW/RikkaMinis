@@ -79,7 +79,7 @@ object ModelExecutionDispatcher {
         // because ProviderBoundary forbids provider calls in the app process.
         passthroughRequest: JSONObject? = null,
     ): String {
-        return JSONObject().apply {
+        return AnthropicReplayIpc.encodeRequest(JSONObject().apply {
             put("instance_id", instance.id)
             put("instance_label", instance.label)
             put("provider_type", instance.providerType.name)
@@ -326,7 +326,7 @@ object ModelExecutionDispatcher {
                     customRules.forEach { put(ThinkingRuleCoding.encodeRuleJson(it)) }
                 })
             }
-        }.toString()
+        }, messages)
     }
 
     /**
