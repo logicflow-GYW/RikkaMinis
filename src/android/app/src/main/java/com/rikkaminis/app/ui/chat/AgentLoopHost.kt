@@ -3,6 +3,7 @@ package com.rikkaminis.app.ui.chat
 import com.rikkaminis.app.agent.ToolLoopDetector
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
+import com.rikkaminis.app.data.model.AnthropicReplay
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.LLMUsage
@@ -121,6 +122,7 @@ internal interface AgentLoopHost {
         // [surgery-1120 A-01] Stable row id for this streamed attempt, derived
         // from its turn identity. Null keeps the existing random UUID.
         stableId: String? = null,
+        anthropicReplay: AnthropicReplay? = null,
     ): String?
     /**
      * [fix/early-turn-persist] Refresh an assistant row that was already
@@ -134,6 +136,7 @@ internal interface AgentLoopHost {
         dbId: String,
         parts: List<AgentContentPart>,
         toolBlockMeta: Map<String, AssistantBlock>,
+        anthropicReplay: AnthropicReplay? = null,
     )
     /**
      * [T-sensitive-transcript] [transcriptRedactions] maps tool-call id to the

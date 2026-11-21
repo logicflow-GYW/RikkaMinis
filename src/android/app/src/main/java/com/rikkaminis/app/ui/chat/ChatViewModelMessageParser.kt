@@ -67,7 +67,7 @@ data class ParsedRow(
 fun tryParsePartsJson(partsJson: String): List<ParsedPart>? {
     if (partsJson.isBlank()) return emptyList()
     return try {
-        val array = JSONArray(partsJson)
+        val array = JSONArray(com.rikkaminis.app.data.AnthropicReplayPublicProjection.partsJson(partsJson))
         val result = ArrayList<ParsedPart>(array.length())
         for (i in 0 until array.length()) {
             val obj = array.getJSONObject(i)

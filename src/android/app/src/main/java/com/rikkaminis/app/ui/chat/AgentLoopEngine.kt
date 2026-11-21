@@ -3,6 +3,7 @@ package com.rikkaminis.app.ui.chat
 import com.rikkaminis.app.agent.Level
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
+import com.rikkaminis.app.data.model.AnthropicReplay
 import com.rikkaminis.app.guard.GuardVerdict
 import com.rikkaminis.app.guard.ToolLoopScope
 import com.rikkaminis.app.provider.ToolJsonRepair
@@ -456,6 +457,7 @@ internal object ContinuationHistoryMerge {
                 incoming.reasoningContent == null -> prev.reasoningContent
                 else -> prev.reasoningContent + incoming.reasoningContent
             },
+            anthropicReplay = null,
         )
         // Indices above were collected tail-first and all sit above `idx`.
         reminderIdx.forEach { history.removeAt(it) }
@@ -1182,6 +1184,9 @@ internal class AgentLoopEngine(
                 break
             }
             // Sanitize history before each API call (mirrors iOS pre-API validation)
+            // Pair before sanitize may synthesize missing results.
+            val guardedHistory = guardAnthropicReplayHistory(host.agentHistory)
+            for (i in guardedHistory.indices) host.agentHistory[i] = guardedHistory[i]
             host.sanitizeAgentHistory()
 
             // T9: per-turn trace hook
@@ -1430,7 +1435,7 @@ internal class AgentLoopEngine(
                     contentParts = listOf(AgentContentPart.Text(reminder)),
                 )
             }
-            var preflightBaseMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+            var preflightBaseMessages = host.applyRequestImageBudget(guardAnthropicReplayHistory(host.effectiveAgentHistory(), host.agentHistory))
             var preflightMessages = preflightBaseMessages
             // Do not budget a hypothetical reminder yet: a legal assistant
             // prefill does not send those extra tokens. The request branch below
@@ -1483,7 +1488,7 @@ internal class AgentLoopEngine(
                 // 重捕后同步重算本地估算：400-teacher 与流结束的 usage
                 // 校准回填都以 rawEstimate 为 localEstimate，必须对应
                 // 实际发出的（压缩后）请求，否则观测比值系统性失真。
-                preflightBaseMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+                preflightBaseMessages = host.applyRequestImageBudget(guardAnthropicReplayHistory(host.effectiveAgentHistory(), host.agentHistory))
                 preflightMessages = preflightBaseMessages
                 rawEstimate = ContextEstimator.estimateRequestTokens(
                     messages = preflightMessages,
@@ -1618,6 +1623,7 @@ internal class AgentLoopEngine(
             // callbackFlow wraps throws into CancellationException(cause=LLMError),
             // so we catch at collect level and unwrap.
             var collectDone = false
+            var turnReplay: AnthropicReplay? = null
             var retryAttempt = 0  // per-turn auto-retry counter (resets on each new turn)
             // [surgery-1120 A-01] Per-attempt stream identity/handle. The
             // handle of a FAILED attempt is discarded at the top of the next
@@ -1629,6 +1635,8 @@ internal class AgentLoopEngine(
             // user turn, above the `turnLoop@` (see its declaration site) — not
             // here, where every new turn used to re-arm it.
             while (!collectDone) {
+                turnReplay = null
+                val replayAttempt = AnthropicReplayAttempt()
                 // A retry/fallback re-enters here with the previous attempt's
                 // handle still pending and no row written (the row is only
                 // written after a successful collect). Its streamed output was
@@ -1803,6 +1811,7 @@ internal class AgentLoopEngine(
                         turnId = attemptTurnId,
                         transcriptCommit = attemptCommitHandle,
                     ).collect { chunk ->
+                replayAttempt.observe(chunk)
                 // [stream-timing 2026-09-14] one-shot marks: Started (server
                 // accepted the request) and the first user-visible content chunk.
                 if (streamStartedMs < 0 && chunk is LLMStreamChunk.Started) {
@@ -2232,6 +2241,8 @@ internal class AgentLoopEngine(
                     }
                 }
                     }  // end collect
+                    currentCoroutineContext().ensureActive()
+                    turnReplay = replayAttempt.finish(toolCalls)
                     // [stream-timing 2026-09-14] Summary for the consumer-visible
                     // stream: `dur` = request → last chunk, `firstContent` = the
                     // user-visible latency (first Text / Thinking / ToolStart).
@@ -2283,6 +2294,7 @@ internal class AgentLoopEngine(
                         host.resetAutoRetry()
                     }
                 } catch (e: Exception) {
+                    turnReplay = null
                     currentCoroutineContext().ensureActive()
                     if (e is CancellationException && e.cause == null) throw e  // real job cancellation
                     val actual = unwrapFlowExceptionImpl(e)
@@ -2371,7 +2383,7 @@ internal class AgentLoopEngine(
                         // agentHistory, and `preflightMessages` was captured
                         // before it. Sending the stale snapshot would re-send the
                         // exact request that just 400'd.
-                        preflightBaseMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+                        preflightBaseMessages = host.applyRequestImageBudget(guardAnthropicReplayHistory(host.effectiveAgentHistory(), host.agentHistory))
                         preflightMessages = preflightBaseMessages
                         val rawReEstimate = ContextEstimator.estimateRequestTokens(
                             messages = preflightMessages,
@@ -3451,7 +3463,8 @@ internal class AgentLoopEngine(
                 contentParts = assistantParts,
                 reasoningContent = turnReasoningContent,
             )
-            if (!ContinuationHistoryMerge.mergeIntoPreviousAssistant(host.agentHistory, turnAssistantMessage)) {
+            val mergedContinuation = ContinuationHistoryMerge.mergeIntoPreviousAssistant(host.agentHistory, turnAssistantMessage)
+            if (!mergedContinuation) {
                 host.agentHistory.add(turnAssistantMessage)
             }
             fun removeEmptyContinuationTurn(): Boolean {
@@ -4505,6 +4518,7 @@ internal class AgentLoopEngine(
                     name, args, loopState.toolInputChunkRings[id]?.lastOrNull(), host.agentTools,
                 )
                 if (repairs.isNotEmpty()) {
+                    turnReplay = null
                     AppLogger.warning(
                         "ToolPreflight",
                         "[ToolRepair] REPAIRED tool=$name id=$id strategies=[${repairs.joinToString(", ")}] " +
@@ -4624,6 +4638,7 @@ internal class AgentLoopEngine(
             }
 
             // ============================ Pass 2 ============================
+            val replayRefused = java.util.concurrent.atomic.AtomicBoolean(false)
             val resultsById = LinkedHashMap<String, ToolExecutionResult>()
             // [T-tool-duration-per-call] Wall time measured around each actual
             // host.executeTool call. Pass 3 used to derive durationMs as
@@ -4676,6 +4691,7 @@ internal class AgentLoopEngine(
                             // refusal here can only come from a stopped session).
                             val guardVerdict = ToolLoopScope.beforeCall(guardSessionId, p.name, p.argsStr)
                             val r = if (guardVerdict is GuardVerdict.Refuse) {
+                                replayRefused.set(true)
                                 ToolLoopScope.refusal(p.name, guardVerdict.reason)
                             } else {
                                 ToolLoopScope.afterCall(
@@ -4762,6 +4778,7 @@ internal class AgentLoopEngine(
                     // pinned verbatim by the loop shape gate.
                     val guardVerdict = ToolLoopScope.beforeCall(guardSessionId, p.name, p.argsStr)
                     if (guardVerdict is GuardVerdict.Refuse) {
+                        replayRefused.set(true)
                         resultsById[p.id] = ToolLoopScope.refusal(p.name, guardVerdict.reason)
                     } else {
                         resultsById[p.id] = host.executeTool(p.name, p.argsStr, p.id, loopState.allToolBlocks, loopState.assistantId, loopState.accumulatedText)
@@ -4933,9 +4950,20 @@ internal class AgentLoopEngine(
             // instead of inserting a second row for the same turn. Copy to a
             // local val first: the var is captured by the dispatch block
             // above, so it no longer smart-casts.
+            // Native groups are published only after every REAL execution returned.
+            // Any synthetic result (Pass 1 refusal/dedupe), redaction, fold or
+            // changed public projection invalidates the entire capsule.
+            val completedReplay = turnReplay?.takeIf {
+                !mergedContinuation && trimmedSeamChars == 0 && !partialStreamFailure && !replayRefused.get() &&
+                    traceObserver.t7BudgetStopReason == null && resultsById.values.all { result -> result.outcomeKnown } &&
+                    pending.size == toolCalls.size && transcriptRedactions.isEmpty() &&
+                    resultParts.filterIsInstance<AgentContentPart.ToolResult>().map { r -> r.id to r.name } ==
+                        toolCalls.map { call -> call.first to call.second } &&
+                    replayMatchesPublic(it, turnParts)
+            }
             val earlyId = earlyAssistantDbId
             val assistantDbId = if (earlyId != null) {
-                host.updatePersistedAssistantTurn(earlyId, turnParts, blockMeta)
+                host.updatePersistedAssistantTurn(earlyId, turnParts, blockMeta, anthropicReplay = completedReplay)
                 // [surgery-1120 A-01] The early row already exists; this update
                 // is its completion. Commit the plan for it.
                 commitTranscriptRow(loopState, earlyId)
@@ -4950,6 +4978,7 @@ internal class AgentLoopEngine(
                     modelId = loopState.currentProvider.model.id,
                     entryId = host.activeEntryId,
                     stableId = plannedId,
+                    anthropicReplay = completedReplay,
                 ).also { rowId ->
                     if (rowId != null) loopState.transcriptRowIndex += 1
                     commitTranscriptRow(loopState, rowId)
@@ -4978,6 +5007,19 @@ internal class AgentLoopEngine(
                 contentParts = resultParts,
                 dbMessageId = toolResultDbId,
             ))
+
+            // Publish metadata only after the paired results row is durable.
+            if (completedReplay != null && assistantDbId != null && toolResultDbId != null) {
+                val replayIndex = host.agentHistory.indexOfLast {
+                    it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == assistantDbId
+                }
+                if (replayIndex >= 0) {
+                    host.agentHistory[replayIndex] = host.agentHistory[replayIndex].copy(
+                        contentParts = turnParts,
+                        anthropicReplay = completedReplay,
+                    )
+                }
+            }
 
             // [fix/rv1014-g1] Auto-title after first exchange — semantic
             // condition (mirrors iOS host.generateSessionTitleIfNeeded). Same

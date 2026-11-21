@@ -11,6 +11,7 @@ package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.agent.runtime.AgentRunEvent
 import com.rikkaminis.app.data.model.AgentContentPart
+import com.rikkaminis.app.data.model.AnthropicReplay
 import com.rikkaminis.app.data.repository.ChatRepository
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMUsage
@@ -52,7 +53,8 @@ import kotlinx.coroutines.launch
 internal fun ChatViewModel.buildAssistantPartsJson(
     parts: List<AgentContentPart>,
     toolBlockMeta: Map<String, AssistantBlock>,
-): String = buildAssistantTurnPartsJson(parts, toolBlockMeta)
+    anthropicReplay: AnthropicReplay? = null,
+): String = buildAssistantTurnPartsJson(parts, toolBlockMeta, anthropicReplay)
 
 
 internal suspend fun ChatViewModel.persistAssistantTurn(
@@ -69,9 +71,10 @@ internal suspend fun ChatViewModel.persistAssistantTurn(
     // derives the same id from the run dir's turn id, so a crash between the
     // insert and the commit marker finds the row instead of duplicating it.
     stableId: String? = null,
+    anthropicReplay: AnthropicReplay? = null,
 ): String? {
     if (parts.isEmpty()) return null
-    val partsJson = buildAssistantPartsJson(parts, toolBlockMeta)
+    val partsJson = buildAssistantPartsJson(parts, toolBlockMeta, anthropicReplay)
     val tokenJson = usage?.let { buildUsageJson(it) }
     // [T-persistence-failed] Emission point for the state machine's
     // PersistenceFailed event [backlog item 14]: the reducer / recovery policy
@@ -109,6 +112,7 @@ internal suspend fun ChatViewModel.updatePersistedAssistantTurn(
     dbId: String,
     parts: List<AgentContentPart>,
     toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
+    anthropicReplay: AnthropicReplay? = null,
 ) {
     if (parts.isEmpty()) return
     // [fix/early-persist-row-cap] Same 500 KB row ceiling the append path
@@ -117,7 +121,7 @@ internal suspend fun ChatViewModel.updatePersistedAssistantTurn(
     // that skips the guard the append had already enforced on the same row.
     chatRepository.updateMessageParts(
         dbId,
-        ChatRepository.capPartsJsonForRow(buildAssistantPartsJson(parts, toolBlockMeta)),
+        ChatRepository.capPartsJsonForRow(buildAssistantPartsJson(parts, toolBlockMeta, anthropicReplay)),
     )
 }
 

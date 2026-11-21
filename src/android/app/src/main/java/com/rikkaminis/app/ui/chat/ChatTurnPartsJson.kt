@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.chat
 
 import com.rikkaminis.app.data.model.AgentContentPart
+import com.rikkaminis.app.data.model.AnthropicReplay
 import com.rikkaminis.app.data.model.LLMUsage
 
 /**
@@ -28,7 +29,8 @@ import com.rikkaminis.app.data.model.LLMUsage
 internal fun buildAssistantTurnPartsJson(
     parts: List<AgentContentPart>,
     toolBlockMeta: Map<String, AssistantBlock>,
-): String = buildString {
+    anthropicReplay: AnthropicReplay? = null,
+): String = appendAnthropicReplayPart(buildString {
     append("[")
     // [audit-0917] Track what was actually emitted instead of using the loop
     // index. A skipped part (blank-name ToolUse) left the separator decision
@@ -59,7 +61,7 @@ internal fun buildAssistantTurnPartsJson(
         }
     }
     append("]")
-}
+}, anthropicReplay)
 
 /**
  * Build a JSON parts array matching the ChatRepository schema so a

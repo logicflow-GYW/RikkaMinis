@@ -1669,19 +1669,35 @@ class ChatViewModel(
         }
         override val agentHistory: MutableList<LLMMessage> get() = this@ChatViewModel.agentHistory
         override val agentTools: List<AgentToolDefinition> get() = this@ChatViewModel.agentTools
-        override fun sanitizeAgentHistory() = this@ChatViewModel.sanitizeAgentHistory()
+        override fun sanitizeAgentHistory() {
+            val guarded = guardAnthropicReplayHistory(agentHistory)
+            for (i in guarded.indices) agentHistory[i] = guarded[i]
+            this@ChatViewModel.sanitizeAgentHistory()
+        }
         override fun effectiveContextWindowTokens(): Int? = this@ChatViewModel.effectiveContextWindowTokens()
-        override fun effectiveAgentHistory(): List<LLMMessage> = this@ChatViewModel.effectiveAgentHistory()
+        override fun effectiveAgentHistory(): List<LLMMessage> =
+            this@ChatViewModel.guardEffectiveAnthropicReplayHistory(this@ChatViewModel.effectiveAgentHistory())
         override fun applyRequestImageBudget(messages: List<LLMMessage>): List<LLMMessage> =
             this@ChatViewModel.applyRequestImageBudget(messages)
         override fun checkContextBeforeSend(): Boolean = this@ChatViewModel.checkContextBeforeSend()
         override fun isContextExhausted(): Boolean = this@ChatViewModel.isContextExhausted()
-        override fun offloadContextIfNeeded(contextWindow: Int, lastContextTokens: Int, force: Boolean): Int? =
-            this@ChatViewModel.offloadContextIfNeeded(contextWindow, lastContextTokens, force)
-        override fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int) =
+        override fun offloadContextIfNeeded(contextWindow: Int, lastContextTokens: Int, force: Boolean): Int? {
+            val result = this@ChatViewModel.offloadContextIfNeeded(contextWindow, lastContextTokens, force)
+            if (result != null) clearAnthropicReplays(agentHistory)
+            return result
+        }
+        override fun trimContextHistoryWindow(contextWindow: Int, lastContextTokens: Int) {
+            val before = agentHistory.toList()
             this@ChatViewModel.trimContextHistoryWindow(contextWindow, lastContextTokens)
-        override suspend fun maybeAutoCompactInLoop(contextWindow: Int, lastContextTokens: Int): Boolean =
-            this@ChatViewModel.maybeAutoCompactInLoop(contextWindow, lastContextTokens)
+            if (before.size != agentHistory.size || before.indices.any { before[it] !== agentHistory[it] }) {
+                clearAnthropicReplays(agentHistory)
+            }
+        }
+        override suspend fun maybeAutoCompactInLoop(contextWindow: Int, lastContextTokens: Int): Boolean {
+            val compacted = this@ChatViewModel.maybeAutoCompactInLoop(contextWindow, lastContextTokens)
+            if (compacted) clearAnthropicReplays(agentHistory)
+            return compacted
+        }
         override fun unavailableGroupMembers(): List<String> = this@ChatViewModel.unavailableGroupMembers()
         override suspend fun addAssistantPlaceholder(assistantId: String, thinkingLevel: ThinkingLevel?) {
             // [T-android-stream-flush-review] Restores the placeholder-bubble
@@ -1717,12 +1733,13 @@ class ChatViewModel(
         override suspend fun persistAssistantTurn(
             parts: List<AgentContentPart>, usage: LLMUsage?, reasoningContent: String?,
             toolBlockMeta: Map<String, AssistantBlock>, modelId: String?, entryId: String?,
-            stableId: String?,
+            stableId: String?, anthropicReplay: com.rikkaminis.app.data.model.AnthropicReplay?,
         ): String? = this@ChatViewModel.persistAssistantTurn(
-            parts, usage, reasoningContent, toolBlockMeta, modelId, entryId, stableId)
+            parts, usage, reasoningContent, toolBlockMeta, modelId, entryId, stableId, anthropicReplay)
         override suspend fun updatePersistedAssistantTurn(
             dbId: String, parts: List<AgentContentPart>, toolBlockMeta: Map<String, AssistantBlock>,
-        ) = this@ChatViewModel.updatePersistedAssistantTurn(dbId, parts, toolBlockMeta)
+            anthropicReplay: com.rikkaminis.app.data.model.AnthropicReplay?,
+        ) = this@ChatViewModel.updatePersistedAssistantTurn(dbId, parts, toolBlockMeta, anthropicReplay)
         override suspend fun persistToolResultMessage(
             parts: List<AgentContentPart>,
             transcriptRedactions: Map<String, String>,
@@ -5219,12 +5236,13 @@ class ChatViewModel(
         resizeImageBytes(rawBytes, mimeType, maxEdge = 2000)
 
     internal fun MessageEntity.toLLMMessage(): LLMMessage {
-        val parts = parsePartsJson(partsJson).stripOrphanThinkClosersForRole(role)
-        val malformed = parts.isEmpty() && partsJson.isNotBlank()
+        val parsed = tryParsePartsJson(partsJson)
+        val parts = parsed?.stripOrphanThinkClosersForRole(role) ?: emptyList()
+        val malformed = parsed == null && partsJson.isNotBlank()
         return buildSingleLlmMessage(
             this, partsJson, parts, malformed, mediaStore.mediaBaseDir,
             ::inferenceImageResizer,
-        )
+        ).copy(anthropicReplay = null) // Single-row partial rebuild has no paired-results proof.
     }
 
     internal fun buildLlmMessages(parsed: List<ParsedRow>): List<LLMMessage> =
