@@ -12,6 +12,8 @@ sealed class LLMStreamChunk {
          *  finish_reason (EOF / connection drop mid-stream). Distinct from a
          *  clean finish where stopReason is legitimately null. */
         val truncated: Boolean = false,
+        /** Optional immutable Anthropic-native block carrier; null preserves old wire shape. */
+        val anthropicReplay: AnthropicReplay? = null,
     ) : LLMStreamChunk()
 
     /** Thinking/reasoning streaming event */

@@ -29,6 +29,8 @@ data class LLMMessage(
      * reasoning_content once `thinking` is enabled.
      */
     val reasoningContent: String? = null,
+    /** Optional, unactivated Anthropic-native block carrier; null means legacy/absent. */
+    val anthropicReplay: AnthropicReplay? = null,
 ) {
     enum class Role(val value: String) {
         USER("user"),
@@ -65,6 +67,8 @@ data class LLMResponse(
     val stopReason: String?,
     val usage: LLMUsage?,
     val mediaAttachments: List<LLMMediaAttachment> = emptyList(),
+    /** Optional, unactivated Anthropic-native block carrier; null means legacy/absent. */
+    val anthropicReplay: AnthropicReplay? = null,
 )
 
 /** Mirrors iOS LLMMediaAttachment (LLMTypes.swift). */
