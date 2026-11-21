@@ -3499,6 +3499,14 @@ internal class AgentLoopEngine(
 
             // If no tool calls, we're done
             if (toolCalls.isEmpty()) {
+                // [FIX-D01] Context exhaustion is a declared failure, not EOF
+                // or an output wall. Keep partial text and defer the banner to
+                // this turn's single persist (which also owns an empty row).
+                // Mark it before verify/residue nudges can revive the run.
+                if (TruncatedToolCallPolicy.isContextWindowTruncated(turnFinishReason)) {
+                    loopState.pendingInlineError = host.string(R.string.error_context_window_exceeded)
+                    loopState.terminalErrorSurfaced = true
+                }
                 // [T-length-wall-continue] finish_reason="length" means the
                 // output was truncated mid-stream, NOT that the model finished.
                 // The truncated content is already in host.agentHistory (added above)
