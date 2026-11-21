@@ -511,14 +511,13 @@ internal fun copySessionDirTree(srcDir: File, dstDir: File): Pair<Int, List<Stri
  * copySessionArtifacts already mirrors), so a literal replace of the source
  * id covers every present and future sid-embedded form uniformly.
  *
- * A blanket literal replace is safe here: session ids are random UUIDs, whose
- * characters `[0-9a-f-]` include no JSON structural characters, so the
- * replacement can never corrupt the JSON syntax; and a UUID appearing in user
- * text is astronomically unlikely (and would reference source-session
- * resources anyway, making the remap semantically right).
+ * Strip the private replay group BEFORE the existing literal media/text remap.
+ * A fork keeps ordinary conversation, not native signed-tool continuity; opaque
+ * values must never be rewritten with a new session id. Ordinary text keeps its
+ * historical replacement behaviour.
  *
  * Top-level (not a method on [SessionForkManager]) so it can be JVM-tested
  * without Android/Room classes.
  */
 internal fun remapForkedPartsJson(partsJson: String, sourceSessionId: String, newSessionId: String): String =
-    partsJson.replace(sourceSessionId, newSessionId)
+    AnthropicReplayPublicProjection.partsJson(partsJson).replace(sourceSessionId, newSessionId)

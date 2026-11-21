@@ -48,6 +48,30 @@ class SessionForkMediaRemapTest {
     }
 
     @Test
+    fun privateReplayIsRemovedBeforeForkMediaAndTextReplacement() {
+        val public = JSONArray(userMediaRefPartsJson())
+        public.put(org.json.JSONObject().put("type", "anthropicReplayV1").put("value",
+            org.json.JSONObject().put("signature", "SIG_SYNTH_D05-$srcSid").put("data", "DATA_SYNTH_D05-$srcSid")))
+        public.put(org.json.JSONObject().put("type", "text").put("value", "source=$srcSid"))
+        val out = remapForkedPartsJson(public.toString(), srcSid, newSid)
+        assertFalse(out.contains("SIG_SYNTH_D05"))
+        assertFalse(out.contains("DATA_SYNTH_D05"))
+        val parts = JSONArray(out)
+        assertEquals(3, parts.length())
+        assertEquals("2026/10/14/$newSid/$mediaId.jpg", parts.getJSONObject(1).getJSONObject("value").getString("relativePath"))
+        assertEquals("source=$newSid", parts.getJSONObject(2).getString("value"))
+    }
+
+    @Test
+    fun forkKeepsOrdinaryUnknownAndRejectsMalformedPrivateRow() {
+        val unknown = """[{"type":"futurePart","value":"anthropicReplayV1"}]"""
+        assertEquals(unknown, remapForkedPartsJson(unknown, srcSid, newSid))
+        val bad = """[{"type":"anthropicReplayV1","value":{"data":"DATA_SYNTH_D05"}"""
+        assertEquals("[]", remapForkedPartsJson(bad, srcSid, newSid))
+        assertEquals("legacy $newSid [", remapForkedPartsJson("legacy $srcSid [", srcSid, newSid))
+    }
+
+    @Test
     fun `user mediaRef relativePath is remapped to the new session`() {
         val out = remapForkedPartsJson(userMediaRefPartsJson(), srcSid, newSid)
 
