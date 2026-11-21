@@ -27,6 +27,7 @@ import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.TOOL_LOG_INPUT_STEP_CHARS
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import com.rikkaminis.app.provider.extractHttpErrorMessage
+import com.rikkaminis.app.provider.executeOrCancel
 import com.rikkaminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -140,11 +141,9 @@ class AnthropicProvider(
     ): LLMResponse = withContext(Dispatchers.IO) {
         val body = buildRequestBody(messages, systemPrompt, maxTokens, stream = false, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
         val request = buildRequest(body.toString(), body)
-        // [fix/audit-s4m1] response was never closed on success OR error — the
-        // .use{} guarantees release on all three paths (success / mapHttpError
-        // throw / any other exception). Previously every non-streaming call
-        // leaked a Response + connection handle.
-        client.newCall(request).execute().use { response ->
+        // The consume overload keeps cancellation armed through headers AND the
+        // blocking body read, and owns/closes the Response on every exit.
+        client.newCall(request).executeOrCancel { response ->
             val responseBody = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {
