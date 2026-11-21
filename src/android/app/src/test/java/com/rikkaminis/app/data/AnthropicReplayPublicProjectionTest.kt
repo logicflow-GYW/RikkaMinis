@@ -11,8 +11,7 @@ class AnthropicReplayPublicProjectionTest {
     @Test fun removesWholePrivatePartsAndKeepsPublicOrder() {
         val raw = """[{"type":"text","value":"你好 🌍"},{"type":"anthropicReplayV1","value":{"signature":"SIG_SYNTH_D05","data":"DATA_SYNTH_D05"}},{"type":"toolUse","value":{"input":"{}","toolUseId":"c"}},{"type":"toolResult","value":{"output":"done","toolUseId":"c"}}]"""
         val out = project(raw)
-        assertFalse(out.contains("SIG_SYNTH_D05"))
-        assertFalse(out.contains("DATA_SYNTH_D05"))
+        assertFalse(out.contains("SIG_SYNTH_D05")); assertFalse(out.contains("DATA_SYNTH_D05"))
         val parts = JSONArray(out)
         assertEquals(listOf("text", "toolUse", "toolResult"), (0 until parts.length()).map { parts.getJSONObject(it).getString("type") })
         assertEquals("你好 🌍", parts.getJSONObject(0).getString("value"))
@@ -26,9 +25,7 @@ class AnthropicReplayPublicProjectionTest {
             .put(JSONObject().put("type", "ImageData").put("data", "public-image"))
             .put(JSONObject().put("type", "anthropicReplayV10").put("value", "ordinary"))
             .put(JSONObject().put("type", "toolUse").put("value", JSONObject().put("input", sample))).toString()
-        assertEquals(raw, project(raw))
-        assertEquals("[]", project("[]"))
-        assertEquals("plain anthropicReplayV1", project("plain anthropicReplayV1"))
+        assertEquals(raw, project(raw)); assertEquals("[]", project("[]")); assertEquals("plain anthropicReplayV1", project("plain anthropicReplayV1"))
     }
 
     @Test fun malformedPrivateRowsNeverUseRawFallback() {
@@ -38,15 +35,10 @@ class AnthropicReplayPublicProjectionTest {
             """[{'type':'anthropicReplayV1','value':{'signature':'SIG_SYNTH_D05'}""",
             """[{type:anthropicReplayV1,value:{data:DATA_SYNTH_D05}""",
             """[] {"type":"anthropicReplayV1","data":"DATA_SYNTH_D05"}""",
-            """[{"type" /* accepted by Android */ : /* comment */ "anthropicReplayV1","data":"DATA_SYNTH_D05"""",
-            """[{"type"=>"anthropicReplayV1";"data":"DATA_SYNTH_D05"""",
+            """[{"type" /* accepted by Android */ : /* comment */ "anthropicReplayV1","data":"DATA_SYNTH_D05""",
+            """[{"type"=>"anthropicReplayV1";"data":"DATA_SYNTH_D05""",
         )
-        for (raw in bad) {
-            val out = project(raw)
-            assertEquals("[]", out)
-            assertFalse(out.contains("SIG_SYNTH_D05"))
-            assertFalse(out.contains("DATA_SYNTH_D05"))
-        }
+        for (raw in bad) { val out = project(raw); assertEquals("[]", out); assertFalse(out.contains("SIG_SYNTH_D05")); assertFalse(out.contains("DATA_SYNTH_D05")) }
     }
 
     @Test fun malformedOrdinaryRowsKeepTheirReadableFallback() {
@@ -60,9 +52,7 @@ class AnthropicReplayPublicProjectionTest {
 
     @Test fun escapedPrivateTypeIsRemovedWithoutChangingPublicValues() {
         val raw = """[{"type":"text","value":"e\u0301 / é / 日本語"},{"type":"anthropicReplay\u00561","value":{"data":"DATA_SYNTH_D05"}}]"""
-        val out = JSONArray(project(raw))
-        assertEquals(1, out.length())
-        assertEquals("e\u0301 / é / 日本語", out.getJSONObject(0).getString("value"))
+        val out = JSONArray(project(raw)); assertEquals(1, out.length()); assertEquals("e\u0301 / é / 日本語", out.getJSONObject(0).getString("value"))
     }
 
     @Test fun nearRowCapRetainsPublicPayloadAndBoundsOversizedOrDeepInput() {
@@ -71,23 +61,16 @@ class AnthropicReplayPublicProjectionTest {
             .put(JSONObject().put("type", "anthropicReplayV1").put("value", JSONObject().put("data", "DATA_SYNTH_D05"))).toString()
         assertTrue(raw.toByteArray(Charsets.UTF_8).size in 480_000..500_000)
         assertEquals(publicText, JSONArray(project(raw)).getJSONObject(0).getString("value"))
-        // Deep nesting: the scan budget is exhausted, so the row is unusable
-        // rather than echoed raw.
         assertEquals("[]", project("[".repeat(100) + "]".repeat(100)))
-        // Oversized but ordinary rows keep their readable fallback; oversized
-        // rows that DO carry the private type stay unusable.
-        val oversized = "x".repeat(1_000_001)
-        assertEquals(oversized, project(oversized))
-        assertEquals("[]", project("""[{"type":"anthropicReplayV1","value":{"data":"DATA_SYNTH_D05"},"pad":"${"y".repeat(1_000_001)}"}"""))
+        val oversized = "x".repeat(1_000_001); assertEquals(oversized, project(oversized))
+        assertEquals("[]", project("""[{"type":"anthropicReplayV1","value":{"data":"DATA_SYNTH_D05"},"pad":"${"y".repeat(1_000_001)}"}]"""))
     }
 
     @Test fun malformedNestedPrivateMarkerAndPlainBracketNotesRemainReadable() {
         val nestedTool = "[{\"type\":\"toolUse\",\"value\":{\"toolUseId\":\"r\",\"name\":\"draw\",\"input\":{\"type\":\"anthropicReplayV1\",\"label\":\"PUBLIC_ARGUMENT\"}}}"
         val notes = "Notes: " + "[".repeat(65) + " literal brackets"
-        assertEquals(nestedTool, project(nestedTool))
-        assertNull(AnthropicReplayPublicProjection.project(nestedTool).parts)
-        assertEquals(notes, project(notes))
-        assertNull(AnthropicReplayPublicProjection.project(notes).parts)
+        assertEquals(nestedTool, project(nestedTool)); assertNull(AnthropicReplayPublicProjection.project(nestedTool).parts)
+        assertEquals(notes, project(notes)); assertNull(AnthropicReplayPublicProjection.project(notes).parts)
     }
 
     @Test fun confirmedPrivateCandidatesNeverTakeReadableRawFallback() {
@@ -97,20 +80,18 @@ class AnthropicReplayPublicProjectionTest {
     }
 
     @Test fun lenientPublicSyntaxAndPreciseNumbersArePreserved() {
-        val androidLenient = listOf(
-            "[{kind/* note */:ordinary}]",
-            "[{kind:>ordinary}]",
-            "[{kind:'one\'s'}]",
-            "[{kind=>ordinary}]",
-            "[{kind # note\n:ordinary}]",
-            "[{kind: // note\nordinary}]",
-            "[{kind:'ordinary'}] extra",
+        val publicCases = listOf(
+            "[{kind/* note */:ordinary}]", "[{kind:>ordinary}]", "[{kind:'one\\'s'}]", "[{kind=>ordinary}]",
+            "[{kind # note\\n:ordinary}]", "[{kind: // note\\nordinary}]", "[{kind:'ordinary'}] extra",
         )
-        for (raw in androidLenient) assertSame(raw, project(raw))
+        for (raw in publicCases) assertSame(raw, project(raw))
+        val privateCases = listOf("[{type:anthropicReplayV1/}]", "[{type:anthropicReplayV1# note\\n}]",
+            "[{type:anthropicReplayV1\\\\}]", "[{type:anthropicReplayV1/* note */}]")
+        for (raw in privateCases) { assertEquals("[]", project(raw)); assertFalse(project(raw).contains("anthropicReplayV1")) }
+        val nulPrivate = "[{type:anthropicReplayV1" + 0.toChar() + "}]"
+        assertEquals("[]", project(nulPrivate))
         val precise = """[{"type":"futurePart","value":0.1234567890123456789},{"type":"anthropicReplayV1","value":null}]"""
-        val out = project(precise)
-        assertTrue(out.contains("0.1234567890123456789"))
-        assertFalse(out.contains("anthropicReplayV1"))
+        val out = project(precise); assertTrue(out.contains("0.1234567890123456789")); assertFalse(out.contains("anthropicReplayV1"))
     }
 
     @Test fun projectionHelperDescriptionDoesNotHoldInputs() {

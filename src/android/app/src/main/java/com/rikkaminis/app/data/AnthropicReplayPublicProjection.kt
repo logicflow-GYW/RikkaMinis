@@ -5,7 +5,6 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.json.JSONArray
-import org.json.JSONObject
 
 /** Public/portable parts view. Private replay is removed as a whole part. */
 object AnthropicReplayPublicProjection {
@@ -96,6 +95,7 @@ object AnthropicReplayPublicProjection {
         private var i = if (raw.startsWith('\ufeff')) 1 else 0
         private val stack = ArrayList<Frame>()
         private var privateType = false
+        private var nulAfterPrivateType = false
 
         fun scan(): Verdict {
             skipTrivia()
@@ -147,12 +147,17 @@ object AnthropicReplayPublicProjection {
                         if (i < raw.length && raw[i] == '>') i++
                     }
                     else -> {
+                        if (c == '\u0000' && stack.any { it.typeValue }) return Verdict.UNSAFE
                         val token = token()
                         if (frame?.directPart == true) {
                             if (frame.typeValue) {
                                 if (token == PART_TYPE) privateType = true
-                                // An unfinished possible type cannot be proven public.
-                                if (token != null && i == raw.length && PART_TYPE.startsWith(token)) {
+                                // AOSP's lenient readLiteral and Maven's literal
+                                // parser disagree when bare type tokens touch
+                                // NUL or non-JSON separators. Once the private
+                                // discriminator is the token prefix, do not let
+                                // either parser's boundary guess authorize echo.
+                                if (token?.startsWith(PART_TYPE) == true && token != PART_TYPE) {
                                     return Verdict.UNSAFE
                                 }
                             }
@@ -214,7 +219,7 @@ object AnthropicReplayPublicProjection {
             // A bare unsupported delimiter must still make progress. Keeping
             // an unfinished short token lets the type-value arm fail closed.
             if (quote == null && text.isEmpty() && i < raw.length) i++
-            return if (short) text.toString() else null
+            return text.toString()
         }
     }
 }
