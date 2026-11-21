@@ -266,11 +266,18 @@ class AnthropicReplayHistoryStorageTest {
         assertFalse(message.content.contains("SENTINEL"))
         assertEquals(2, tryParsePartsJson(raw)!!.size)
     }
-    @Test fun exactToolInputSurvivesAndroidRoundedPublicProjection() {
+    @Test fun exactToolInputRemainsPrivateButLossyPublicProjectionNeverQualifies() {
         val input = """{"big":123456789012345678901234567890,"fraction":0.12345678901234567890123456789}"""
         val replay = capsule(input)
         val raw = buildAssistantTurnPartsJson(public(input), emptyMap(), replay)
-        assertEquals(replay.blocksCopy(), single(raw).anthropicReplay!!.blocksCopy())
+        val stored = AnthropicReplayCodec.decode(Json.parseToJsonElement(raw).jsonArray.last().jsonObject["value"])
+        assertEquals(replay.blocksCopy(), stored.blocksCopy()) // Storage never rewrites private tokens.
+        val projected = Json.parseToJsonElement(JSONObject(input).toString())
+        if (projected == Json.parseToJsonElement(input)) {
+            assertEquals(replay.blocksCopy(), single(raw).anthropicReplay!!.blocksCopy())
+        } else {
+            assertNull("a different actual/public numeric value is not replay evidence", single(raw).anthropicReplay)
+        }
     }
     @Test fun opaqueToolExponentCanBeStoredWithoutLosingItsToken() {
         // Android rejects this input before the legacy ToolUse can carry it;

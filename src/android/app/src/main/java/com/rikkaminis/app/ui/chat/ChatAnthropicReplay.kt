@@ -103,24 +103,13 @@ private fun List<Pair<String, String>>.coalesceText(): List<Pair<String, String>
     return out
 }
 
-// This is ONLY the legacy display/execution projection comparison. The capsule
-// itself is always encoded/decoded by the exact kotlinx tree. Android may round
-// numbers in the public JSONObject; compare against that same projection, never
-// feed its rounded tokens back into the native payload.
+// Compare exact native tokens with the values actually executed/persisted by
+// the legacy JSONObject path, NEVER with a second lossy native projection.
+// Token equality is deliberately conservative: e.g. 1.0 -> 1 also declines.
+// The private capsule itself is neither rounded nor rewritten.
 private fun publicInputEquals(expected: kotlinx.serialization.json.JsonElement?, actual: JSONObject): Boolean = try {
-    samePublicValue(JSONObject(expected.toString()), actual)
+    expected is JsonObject && expected == Json.parseToJsonElement(actual.toString())
 } catch (_: Exception) { false }
-
-private fun samePublicValue(a: Any?, b: Any?): Boolean = when {
-    a is JSONObject && b is JSONObject -> {
-        val keys = a.keys().asSequence().toSet()
-        keys == b.keys().asSequence().toSet() && keys.all { samePublicValue(a.opt(it), b.opt(it)) }
-    }
-    a is org.json.JSONArray && b is org.json.JSONArray -> a.length() == b.length() &&
-        (0 until a.length()).all { samePublicValue(a.opt(it), b.opt(it)) }
-    a is Number && b is Number -> a.toString() == b.toString()
-    else -> a == b
-}
 
 /** No new public part variant: one private envelope appended after the old byte-stable array. */
 internal fun appendAnthropicReplayPart(publicJson: String, replay: AnthropicReplay?): String {
@@ -174,23 +163,56 @@ internal fun readAnthropicReplayPart(raw: String, role: String, parts: List<Pars
     return replay.takeIf { rawPublic.size == parts.size && replayMatchesPublic(it, rawPublic) }
 }
 
+/** Stable row identity survives harmless VM copies; synthesized rows must be the same object. */
+private fun sameHistoryRow(a: LLMMessage?, b: LLMMessage?): Boolean = when {
+    a == null || b == null -> a == null && b == null
+    a.dbMessageId != null -> a.dbMessageId == b.dbMessageId && a.role == b.role
+    else -> a === b
+}
+
 /** Pairing must be real BEFORE sanitize can invent placeholders. Changed projections lose metadata. */
 internal fun guardAnthropicReplayHistory(
     messages: List<LLMMessage>,
     original: List<LLMMessage> = messages,
-): List<LLMMessage> {
-    val rewritten = messages.size != original.size || messages.indices.any { messages[it] !== original[it] }
-    return messages.mapIndexed { index, message ->
-        val replay = message.anthropicReplay ?: return@mapIndexed message
-        val next = messages.getOrNull(index + 1)
-        val uses = nativeTools(replay)
-        val results = next?.contentParts?.filterIsInstance<AgentContentPart.ToolResult>().orEmpty()
-        val paired = next?.role == LLMMessage.Role.USER && uses.isNotEmpty() &&
-            uses == results.map { it.id to it.name } &&
-            results.none { it.content == SANITIZE_PLACEHOLDER_RESULT_CONTENT }
-        if (rewritten || message.role != LLMMessage.Role.ASSISTANT || !paired ||
-            !replayMatchesPublic(replay, message.contentParts)) message.copy(anthropicReplay = null) else message
+    compactedThroughIndex: Int = -1,
+): List<LLMMessage> = messages.mapIndexed { index, message ->
+    val replay = message.anthropicReplay ?: return@mapIndexed message
+    val next = messages.getOrNull(index + 1)
+    val uses = nativeTools(replay)
+    val results = next?.contentParts?.filterIsInstance<AgentContentPart.ToolResult>().orEmpty()
+    val paired = next?.role == LLMMessage.Role.USER && uses.isNotEmpty() &&
+        uses == results.map { it.id to it.name } &&
+        results.none { it.content == SANITIZE_PLACEHOLDER_RESULT_CONTENT }
+    // Match THIS assistant and its adjacent real result, not unrelated copies
+    // elsewhere (e.g. an already-existing compact summary injected on every
+    // request). Keep the predecessor row edge so slicing cannot detach a group
+    // from its immediate context. Actual compact/trim/offload still explicitly
+    // clear old groups; this is NOT preserved-thinking/full-prefix proof.
+    val sourceIndex = original.indices.singleOrNull { sameHistoryRow(message, original[it]) }
+    val unchanged = sourceIndex != null && sourceIndex > compactedThroughIndex &&
+        messages.count { sameHistoryRow(message, it) } == 1 &&
+        sameHistoryRow(messages.getOrNull(index - 1), original.getOrNull(sourceIndex - 1)) &&
+        sameHistoryRow(next, original.getOrNull(sourceIndex + 1)) &&
+        message.copy(contentParts = emptyList(), anthropicReplay = null) ==
+            original[sourceIndex].copy(contentParts = emptyList(), anthropicReplay = null) &&
+        replayMatchesPublic(replay, original[sourceIndex].contentParts) &&
+        next?.copy(anthropicReplay = null) == original.getOrNull(sourceIndex + 1)?.copy(anthropicReplay = null)
+    if (!unchanged || message.role != LLMMessage.Role.ASSISTANT || !paired ||
+        !replayMatchesPublic(replay, message.contentParts)) message.copy(anthropicReplay = null) else message
+}
+
+/** Existing marker state supplies the old compacted range; no new generation/journal. */
+internal fun ChatViewModel.guardEffectiveAnthropicReplayHistory(messages: List<LLMMessage>): List<LLMMessage> {
+    val marker = _cachedLatestMarker.takeUnless { _compactSummary.value.isNullOrBlank() }
+    val compactedThrough = if (marker == null) -1 else {
+        val firstKept = if (marker.version < 2) marker.firstKeptMessageId ?: marker.boundaryMessageId else null
+        if (firstKept != null) {
+            agentHistory.indexOfFirst { it.dbMessageId == firstKept }.takeIf { it >= 0 }?.minus(1)
+        } else {
+            marker.lastCompactedMessageId?.let { id -> agentHistory.indexOfLast { it.dbMessageId == id }.takeIf { it >= 0 } }
+        } ?: Int.MAX_VALUE // Unresolvable marker cannot prove any group post-compact.
     }
+    return guardAnthropicReplayHistory(messages, agentHistory, compactedThrough)
 }
 
 internal fun clearAnthropicReplays(messages: MutableList<LLMMessage>) {

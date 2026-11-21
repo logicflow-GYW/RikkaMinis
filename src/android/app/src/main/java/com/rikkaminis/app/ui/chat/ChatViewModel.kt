@@ -1676,7 +1676,7 @@ class ChatViewModel(
         }
         override fun effectiveContextWindowTokens(): Int? = this@ChatViewModel.effectiveContextWindowTokens()
         override fun effectiveAgentHistory(): List<LLMMessage> =
-            guardAnthropicReplayHistory(this@ChatViewModel.effectiveAgentHistory(), agentHistory)
+            this@ChatViewModel.guardEffectiveAnthropicReplayHistory(this@ChatViewModel.effectiveAgentHistory())
         override fun applyRequestImageBudget(messages: List<LLMMessage>): List<LLMMessage> =
             this@ChatViewModel.applyRequestImageBudget(messages)
         override fun checkContextBeforeSend(): Boolean = this@ChatViewModel.checkContextBeforeSend()
