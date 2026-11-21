@@ -1778,7 +1778,9 @@ object ConfigBackup {
                     // a stale enum / out-of-range number is reported instead of
                     // being forced into prefs.
                     field.valueSchema.validate(value)
-                    field.write(value)
+                    // defaults.* writers also submit ProviderConfig snapshots;
+                    // include only their synchronous submissions in this import.
+                    persistence.capture { field.write(value) }
                     applied++
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
