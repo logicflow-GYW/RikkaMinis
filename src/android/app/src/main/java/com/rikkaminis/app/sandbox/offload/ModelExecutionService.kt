@@ -171,40 +171,46 @@ class ModelExecutionService : Service() {
             true, // fairness: FIFO waiters — queue position is honest
         )
 
+        // Process.killProcess and executionSlots span Service recreation. Keep
+        // admission, ACKs, counters and the reap decision under one process lock;
+        // stopSelf/onDestroy may replace the receiver while old run threads live.
+        /** Worker-side registry: number of requests currently being executed. */
+        private val activeRequests = AtomicInteger(0)
+
+        /** Worker-side lifecycle state (authoritative; main process only inspects state.json). */
+        @Volatile
+        private var lifecycleState = ModelExecutionWorkerState.ACTIVE
+
+        /**
+         * TF-H: lifecycle lock — guards the composite check of
+         * activeRequests / queuedRequests / pending ACKs / lifecycleState and the
+         * self-reap decision. The old code computed a quiescence snapshot outside
+         * the lock and then called killProcess() on it, so a NEW request that
+         * arrived between the snapshot and the kill could be killed by the old
+         * finishing thread. Everyone who mutates the counters or decides to die
+         * uses this lock.
+         */
+        private val lifecycleLock = Any()
+
+        /** TF-H: number of requests enqueued waiting on the execution mutex. */
+        private val queuedRequests = AtomicInteger(0)
+
+        /**
+         * TF-H: per-run ACK tokens, keyed by runId. A streaming worker registers
+         * one token when it commits its response and releases it exactly once when
+         * the client.ack for that run is observed (or on late ack / controlled
+         * drain). The lifecycle only self-reaps when every token is released.
+         */
+        private val pendingAckTokens = ConcurrentHashMap<String, AtomicBoolean>()
+
+        /** TF-H: request generation, incremented per run; used to invalidate
+         *  stale snapshot decisions. */
+        private val requestGeneration = AtomicLong(0L)
+
+        @Volatile
+        private var keyCachePoisoned = false
+
     }
-
-    /** Worker-side registry: number of requests currently being executed. */
-    private val activeRequests = AtomicInteger(0)
-
-    /** Worker-side lifecycle state (authoritative; main process only inspects state.json). */
-    @Volatile
-    private var lifecycleState = ModelExecutionWorkerState.ACTIVE
-
-    /**
-     * TF-H: lifecycle lock — guards the composite check of
-     * activeRequests / queuedRequests / pending ACKs / lifecycleState and the
-     * self-reap decision. The old code computed a quiescence snapshot outside
-     * the lock and then called killProcess() on it, so a NEW request that
-     * arrived between the snapshot and the kill could be killed by the old
-     * finishing thread. Everyone who mutates the counters or decides to die
-     * uses this lock.
-     */
-    private val lifecycleLock = Any()
-
-    /** TF-H: number of requests enqueued waiting on the execution mutex. */
-    private val queuedRequests = AtomicInteger(0)
-
-    /**
-     * TF-H: per-run ACK tokens, keyed by runId. A streaming worker registers
-     * one token when it commits its response and releases it exactly once when
-     * the client.ack for that run is observed (or on late ack / controlled
-     * drain). The lifecycle only self-reaps when every token is released.
-     */
-    private val pendingAckTokens = ConcurrentHashMap<String, AtomicBoolean>()
-
-    /** TF-H: request generation, incremented per run; used to invalidate
-     *  stale snapshot decisions. */
-    private val requestGeneration = AtomicLong(0L)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -568,8 +574,11 @@ class ModelExecutionService : Service() {
         // finalizes its OWN run dir (state + terminal); the self-reap
         // decision is re-taken by every finisher against the CURRENT
         // counters, so the LAST one out correctly reaps a drained worker.
-        // The generation check survives ONLY inside maybeSelfReapLocked as a
-        // belt-and-suspenders re-verify before killProcess.
+        // The run's admission generation is not this completion snapshot's
+        // generation: concurrent runs may finish in reverse order. Sample the
+        // CURRENT generation under the same lifecycleLock as the counters and
+        // admission, retaining maybeSelfReapLocked's snapshot re-verification.
+        val reapGeneration = requestGeneration.get()
         val dirMissing = !dir.isDirectory
         if (dirMissing) {
             Log.w(
@@ -588,7 +597,7 @@ class ModelExecutionService : Service() {
                 quiescence = quiescence,
             )
             lifecycleState = next
-            maybeSelfReapLocked(dir, next, quiescence, runId, generation)
+            maybeSelfReapLocked(dir, next, quiescence, runId, reapGeneration)
             return next
         }
 
@@ -613,7 +622,7 @@ class ModelExecutionService : Service() {
         ModelExecutionMailbox.writeState(dir, next, activeRequests.get(), unacked = pendingAckTokens.size)
         ModelExecutionRunDir.writeTerminal(dir)
         if (ModelExecutionLifecycle.shouldKill(next, quiescence)) {
-            maybeSelfReapLocked(dir, next, quiescence, runId, generation)
+            maybeSelfReapLocked(dir, next, quiescence, runId, reapGeneration)
         } else {
             Log.i(
                 TAG,
@@ -631,12 +640,12 @@ class ModelExecutionService : Service() {
      * allowing self-reap. Without this, the lock-free old code killed a worker
      * right after a new request had revived it.
      *
-     * [feat/provider-exec-concurrency] The generation re-verify is now a
-     * belt-and-suspenders ONLY: the primary safety under concurrency is the
-     * counter re-check (active==0 && queued==0 && acks empty). Generation is
-     * still consulted — a request that arrived AFTER this finisher captured
-     * its snapshot must block the reap — but it no longer replaces the
-     * counter check (see finishRequestLocked KDoc for the leak it caused).
+     * [feat/provider-exec-concurrency] capturedGeneration belongs to the
+     * CURRENT locked completion snapshot, not the finishing run's admission.
+     * Re-verify it together with the counters (active==0 && queued==0 && acks
+     * empty). Admission uses the same lock, so an older run may safely reap
+     * when it is the last finisher. Delayed controlled-drain generations keep
+     * their separate stale-timer protection.
      */
     private fun maybeSelfReapLocked(
         dir: File,
@@ -743,6 +752,7 @@ class ModelExecutionService : Service() {
 
     /** Kill our own process — only ever called after quiescence confirmation. */
     private fun selfReap() {
+        check(Thread.holdsLock(lifecycleLock)) { "process reap requires the lifecycle lock" }
         runCatching { android.os.Process.killProcess(android.os.Process.myPid()) }
     }
 
@@ -794,8 +804,6 @@ class ModelExecutionService : Service() {
      *     streams past POISON_REAP_WAIT_MS, the watchdog gives up and the
      *     normal finishRequest lifecycle owns the eventual death.
      */
-    @Volatile
-    private var keyCachePoisoned = false
 
     /**
      * [T-worker-key-intent-handoff] True when this request must fall back to the
@@ -840,10 +848,12 @@ class ModelExecutionService : Service() {
             var waitedMs = 0L
             while (waitedMs < POISON_REAP_WAIT_MS) {
                 try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
-                if (activeRequests.get() == 0) {
-                    Log.i(TAG, "poisoned worker self-reaping (drained), pid=$pid")
-                    selfReap()
-                    return@Thread
+                synchronized(lifecycleLock) {
+                    if (activeRequests.get() == 0 && queuedRequests.get() == 0 && pendingAckTokens.isEmpty()) {
+                        Log.i(TAG, "poisoned worker self-reaping (drained), pid=$pid")
+                        selfReap()
+                        return@Thread
+                    }
                 }
                 waitedMs += 500
             }
