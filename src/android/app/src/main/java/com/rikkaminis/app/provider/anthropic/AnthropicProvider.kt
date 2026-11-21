@@ -72,10 +72,16 @@ class AnthropicProvider(
     override val name = "Anthropic"
     override var instanceContext: com.rikkaminis.app.data.model.ProviderInstance? = null
     override val defaultMaxOutputTokens: Int get() = 64_000
-    // Anthropic Messages API: a truncated (max_tokens) reply is continued by
-    // appending the partial assistant content back into messages and re-sending
-    // (see "Stop reasons and fallback" → max_tokens → continue the response).
-    override val supportsPrefill: Boolean get() = true
+    // There is no unconditional prefill capability: generation AND this
+    // request's actual thinking emission determine whether assistant-final is legal.
+    override val supportsPrefill: Boolean get() = false
+
+    override fun supportsPrefillForRequest(maxTokens: Int, thinkingLevel: ThinkingLevel): Boolean {
+        val plan = buildRequestPlan(maxTokens, null, clampThinkingLevel(thinkingLevel))
+        val thinkingType = plan.optJSONObject("thinking")?.optString("type")
+        return modelAllowsLegacyPrefill(model.id) &&
+            (thinkingType == null || thinkingType == "disabled")
+    }
 
     /**
      * [T-android-enhanced-cache] Enhanced Cache toggle — when true, every
@@ -652,20 +658,17 @@ class AnthropicProvider(
         })
     }
 
-    private fun buildRequestBody(
-        messages: List<LLMMessage>,
-        systemPrompt: String?,
+    /** One emitter for wire parameters and request-aware capability queries.
+     * Keep max_tokens and legacy budget derivation together: both must read
+     * the same clamped value, including out-of-band calls above the model cap.
+     * The public entry already clamps thinking; the query performs that same clamp.
+     */
+    private fun buildRequestPlan(
         maxTokens: Int,
-        stream: Boolean,
         temperature: Double?,
-        imageParts: List<LLMMessage.ImagePart>,
-        tools: List<AgentToolDefinition> = emptyList(),
-        // [T-android-thinking-level-arch] Already clamped to the model ceiling by
-        // LLMProvider.streamMessage/sendMessage before reaching here.
-        thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+        thinkingLevel: ThinkingLevel,
     ): JSONObject {
         val body = JSONObject()
-        body.put("model", model.id)
         // Defense-in-depth clamp: upstream dynamicMaxTokens() is already in
         // range; this guards out-of-band callers (sub-agent budgets, synthesized
         // requests) from a deterministic 400 on over-range max_tokens.
@@ -680,7 +683,6 @@ class AnthropicProvider(
         // budget_tokens=65536 and got a deterministic 400.
         val cappedMaxTokens = clampOutboundMaxTokens(maxTokens, effectiveMaxOutputTokens(model))
         body.put("max_tokens", cappedMaxTokens)
-        body.put("stream", stream)
 
         if (temperature != null && !thinkingLevel.isEnabled && !modelRejectsTemperature(model.id)) {
             // Anthropic's documented temperature range is 0..1.
@@ -762,6 +764,25 @@ class AnthropicProvider(
             // absence is fine there.
             body.put("thinking", JSONObject().put("type", "disabled"))
         }
+
+        return body
+    }
+
+    private fun buildRequestBody(
+        messages: List<LLMMessage>,
+        systemPrompt: String?,
+        maxTokens: Int,
+        stream: Boolean,
+        temperature: Double?,
+        imageParts: List<LLMMessage.ImagePart>,
+        tools: List<AgentToolDefinition> = emptyList(),
+        // [T-android-thinking-level-arch] Already clamped to the model ceiling by
+        // LLMProvider.streamMessage/sendMessage before reaching here.
+        thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+    ): JSONObject {
+        val body = buildRequestPlan(maxTokens, temperature, thinkingLevel)
+        body.put("model", model.id)
+        body.put("stream", stream)
 
         // System prompt blocks — mirrors iOS AnthropicProvider.resolveSystemPrompt.
         val systemArray = resolveSystemPrompt(systemPrompt)
@@ -1328,10 +1349,22 @@ class AnthropicProvider(
             return major to minor
         }
 
-        /**
-         * Claude models from 4.6 onward reject the `temperature` parameter.
-         * Returns true when the model id parses as Claude version >= 4.6.
+        /** Only identified legacy generations get the optimisation. Unknown
+         * ids/versions stay on the reminder path, even if a relay's label
+         * happens to contain Claude plus some old-looking version digits.
          */
+        private fun modelAllowsLegacyPrefill(modelId: String): Boolean {
+            val legacyVersion = parseClaudeVersion(modelId) in setOf(
+                2 to 0, 2 to 1, 3 to 0, 3 to 5, 3 to 7,
+                4 to 0, 4 to 1, 4 to 5,
+            )
+            val identifiedClaude = Regex(
+                """(?:anthropic[/.])?claude-(?:(?:haiku|sonnet|opus)-\d+(?:[-.]\d+)?(?:-\d{8})?|\d+(?:[-.]\d+)?-(?:haiku|sonnet|opus)(?:-\d{8})?|2(?:[.-]1)?)""",
+            ).matches(modelId.lowercase())
+            return legacyVersion && identifiedClaude
+        }
+
+        /** Claude models from 4.6 onward reject `temperature`. */
         fun modelRejectsTemperature(modelId: String): Boolean {
             val (major, minor) = parseClaudeVersion(modelId) ?: return false
             return major > 4 || (major == 4 && minor >= 6)

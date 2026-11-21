@@ -1145,6 +1145,10 @@ internal class AgentLoopEngine(
         // 400-and-retry repeatedly. The property the KDoc promises is "one
         // bounded shrink per user turn", so the object has to outlive the turn.
         val overshootRetry = ContextOvershootRetry()
+        // A wall records intent, NOT a capability decision for the previous
+        // request. The next preflight/retry may change its cap or provider.
+        // Request-only reminders never enter the persisted transcript.
+        var pendingLengthWallTail: String? = null
         // [audit3 F-02] LABELED loop — do not drop the `turnLoop@`.
         // Two execution-budget gates live INSIDE this turn body's retry loop
         // (`while (!collectDone)` further down): the deadline gate and the
@@ -1417,7 +1421,20 @@ internal class AgentLoopEngine(
             // 仍带全量未压缩历史 + 最小输出 → 仍然必然 400（该缺口会让
             // "裁剪后按最小输出重试"的承诺在本 turn 落空）。SHRINK_OUTPUT /
             // PASS 不进管线，值与 val 时代逐字一致。
-            var preflightMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+            val continuationRequestReminder = pendingLengthWallTail?.let { tail ->
+                val reminder = lengthWallReminder(tail) +
+                    if (loopState.didInjectEmptyToolReminder) EmptyTurnRecovery.REMINDER else ""
+                LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = reminder,
+                    contentParts = listOf(AgentContentPart.Text(reminder)),
+                )
+            }
+            var preflightBaseMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+            var preflightMessages = preflightBaseMessages
+            // Do not budget a hypothetical reminder yet: a legal assistant
+            // prefill does not send those extra tokens. The request branch below
+            // adds and re-budgets it only when this provider/cap requires it.
             // [audit2 BUG-02] Window / output budget follow the provider that
             // will actually serve this turn, same reason as `currentCtxKey`.
             val preflightMaxTokens = host.dynamicMaxTokens(loopState.currentProvider, loopState.lastContextTokens)
@@ -1437,6 +1454,45 @@ internal class AgentLoopEngine(
             // fallback both mis-estimates the window and re-observes samples
             // under the wrong key.
             var preflightEstimate = rawEstimate * calibrationRatioFor(loopState.currentProvider) / 100
+            suspend fun recoverPreflightHistory(pressureEstimate: Long) {
+                val windowNow = host.effectiveContextWindowTokens() ?: 0
+                val pressureReading = pressureEstimate.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                val postOffload = host.offloadContextIfNeeded(
+                    contextWindow = windowNow,
+                    lastContextTokens = pressureReading,
+                    force = true,
+                )
+                val compacted = host.maybeAutoCompactInLoop(
+                    contextWindow = windowNow,
+                    lastContextTokens = postOffload ?: pressureReading,
+                )
+                if (!compacted) {
+                    host.trimContextHistoryWindow(
+                        contextWindow = windowNow,
+                        lastContextTokens = postOffload ?: pressureReading,
+                    )
+                }
+                // 裁剪后按最小输出重试一次：trim 的预算本身按 window 收，
+                // 若裁后仍超（尾部太大），下一轮预检会再次禁发并走同样
+                // 管线 —— 不会死循环（每轮都实际收缩历史）。
+                // [fix/prewindow-budget-1015] 重捕请求消息：管线写入的
+                // compact marker（effectiveAgentHistory 在请求时做
+                // summary+tail 投影）与 trim 砍掉的历史，只有重新调用
+                // effectiveAgentHistory 才能取到 —— 上面 :643 捕获的快照
+                // 是管线前的投影，直接发出去等于压缩白跑（本 turn 仍 400）。
+                // 重捕后同步重算本地估算：400-teacher 与流结束的 usage
+                // 校准回填都以 rawEstimate 为 localEstimate，必须对应
+                // 实际发出的（压缩后）请求，否则观测比值系统性失真。
+                preflightBaseMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+                preflightMessages = preflightBaseMessages
+                rawEstimate = ContextEstimator.estimateRequestTokens(
+                    messages = preflightMessages,
+                    systemPrompt = systemPrompt,
+                    tools = host.agentTools,
+                )
+                preflightEstimate = rawEstimate * calibrationRatioFor(loopState.currentProvider) / 100
+            }
+
             val preflightVerdict = preflightContextBudget(
                 window = host.effectiveContextWindowTokens() ?: 0,
                 estimatedInput = preflightEstimate,
@@ -1459,41 +1515,7 @@ internal class AgentLoopEngine(
                     // 读数用预检估算（loopState.lastContextTokens 可能刚被
                     // window-mgmt 清零，而预检估算恰恰是此刻唯一可信的压力
                     // 证据 —— 本地口径，与 provider 无关）。
-                    val windowNow = host.effectiveContextWindowTokens() ?: 0
-                    val pressureReading = preflightEstimate.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-                    val postOffload = host.offloadContextIfNeeded(
-                        contextWindow = windowNow,
-                        lastContextTokens = pressureReading,
-                        force = true,
-                    )
-                    val compacted = host.maybeAutoCompactInLoop(
-                        contextWindow = windowNow,
-                        lastContextTokens = postOffload ?: pressureReading,
-                    )
-                    if (!compacted) {
-                        host.trimContextHistoryWindow(
-                            contextWindow = windowNow,
-                            lastContextTokens = postOffload ?: pressureReading,
-                        )
-                    }
-                    // 裁剪后按最小输出重试一次：trim 的预算本身按 window 收，
-                    // 若裁后仍超（尾部太大），下一轮预检会再次禁发并走同样
-                    // 管线 —— 不会死循环（每轮都实际收缩历史）。
-                    // [fix/prewindow-budget-1015] 重捕请求消息：管线写入的
-                    // compact marker（effectiveAgentHistory 在请求时做
-                    // summary+tail 投影）与 trim 砍掉的历史，只有重新调用
-                    // effectiveAgentHistory 才能取到 —— 上面 :643 捕获的快照
-                    // 是管线前的投影，直接发出去等于压缩白跑（本 turn 仍 400）。
-                    // 重捕后同步重算本地估算：400-teacher 与流结束的 usage
-                    // 校准回填都以 rawEstimate 为 localEstimate，必须对应
-                    // 实际发出的（压缩后）请求，否则观测比值系统性失真。
-                    preflightMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
-                    rawEstimate = ContextEstimator.estimateRequestTokens(
-                        messages = preflightMessages,
-                        systemPrompt = systemPrompt,
-                        tools = host.agentTools,
-                    )
-                    preflightEstimate = rawEstimate * calibrationRatioFor(loopState.currentProvider) / 100
+                    recoverPreflightHistory(preflightEstimate)
                     MIN_MAX_TOKENS_CONST
                 }
                 PreflightVerdict.Decision.PASS -> preflightMaxTokens
@@ -1508,11 +1530,10 @@ internal class AgentLoopEngine(
             // now-updated window). Leaving `maxTokens` as captured is what sent
             // a 64K `max_tokens` to a 4K-output fallback member (HTTP 400).
             //
-            // `preflightMessages` is deliberately NOT re-derived here: the image
-            // budget is provider-independent and the var already holds the exact
-            // list the next attempt will carry (it is what the request site
-            // reads), so re-fetching the history mid-retry could only introduce
-            // a divergence between the estimate and the bytes on the wire.
+            // Reuse the unadapted base snapshot on a member switch. The final
+            // request stage derives that member's reminder projection afresh;
+            // reusing the previous member's projection would retain its nudge
+            // or budget a user turn the new member will never send.
             fun rebudgetForSwitchedProvider(site: String) {
                 // The member we left reported ITS input口径; carrying that
                 // reading into the new member's window is the T321 shape. The
@@ -1523,7 +1544,7 @@ internal class AgentLoopEngine(
                 loopState.lastContextTokens = 0
                 host.setLastTurnContextTokens(0)
                 val rebudget = RequestBudgetRecompute.forProvider(
-                    messages = preflightMessages,
+                    messages = preflightBaseMessages,
                     systemPrompt = systemPrompt,
                     tools = host.agentTools,
                     calibrationRatioPercent = calibrationRatioFor(loopState.currentProvider),
@@ -1534,9 +1555,8 @@ internal class AgentLoopEngine(
                     ),
                     outputFloor = MIN_MAX_TOKENS_CONST,
                 )
-                // Re-derived from the same message list, so it stays the
-                // invariant `rawEstimate ⇔ preflightMessages` the calibration
-                // backfill and the 400-teacher both read.
+                // The final request stage below updates estimates once more
+                // if it adds a necessary reminder to this base snapshot.
                 rawEstimate = rebudget.rawEstimateTokens
                 preflightEstimate = rebudget.calibratedEstimateTokens
                 maxTokens = rebudget.maxTokens
@@ -1702,6 +1722,63 @@ internal class AgentLoopEngine(
                     )
                     loopState.currentTranscriptTurnId = attemptTurnId
                     loopState.pendingTranscriptCommits.add(attemptCommitHandle)
+                    // Capture the EFFECTIVE host level exactly once per attempt:
+                    // query and worker get the same input, and each uses the
+                    // real provider clamp/emitter rather than a cached last call.
+                    val requestThinkingLevel = host.thinkingLevel
+                    if (continuationRequestReminder != null) {
+                        // Base snapshots never contain this attempt's synthetic
+                        // reminder. Retry/fallback derive a new projection rather
+                        // than treating the previous projection as user history.
+                        var baseMessages = preflightBaseMessages
+                        var canPrefill = loopState.currentProvider.supportsPrefillForRequest(
+                            maxTokens, requestThinkingLevel,
+                        )
+                        if (!canPrefill) {
+                            val withReminder = RequestBudgetRecompute.forProvider(
+                                messages = baseMessages + continuationRequestReminder,
+                                systemPrompt = systemPrompt,
+                                tools = host.agentTools,
+                                calibrationRatioPercent = calibrationRatioFor(loopState.currentProvider),
+                                windowTokens = host.effectiveContextWindowTokens() ?: 0,
+                                providerMaxTokens = maxTokens,
+                                outputFloor = MIN_MAX_TOKENS_CONST,
+                            )
+                            maxTokens = minOf(maxTokens, withReminder.maxTokens)
+                            if (withReminder.verdict.decision == PreflightVerdict.Decision.NEEDS_COMPACTION) {
+                                // This reminder was required at the preflight
+                                // cap. Do not let shrinking max_tokens make the
+                                // earlier NEEDS_COMPACTION verdict disappear;
+                                // run the shared recovery pipeline first, then
+                                // derive capability from the new base and cap.
+                                recoverPreflightHistory(withReminder.calibratedEstimateTokens)
+                                baseMessages = preflightBaseMessages
+                            }
+                            canPrefill = loopState.currentProvider.supportsPrefillForRequest(
+                                maxTokens, requestThinkingLevel,
+                            )
+                        }
+                        preflightMessages = if (canPrefill) baseMessages else baseMessages + continuationRequestReminder
+                        rawEstimate = ContextEstimator.estimateRequestTokens(
+                            messages = preflightMessages,
+                            systemPrompt = systemPrompt,
+                            tools = host.agentTools,
+                        )
+                        preflightEstimate = rawEstimate * calibrationRatioFor(loopState.currentProvider) / 100
+                        val actualProjectionVerdict = preflightContextBudget(
+                            window = host.effectiveContextWindowTokens() ?: 0,
+                            estimatedInput = preflightEstimate,
+                            requestedMaxTokens = maxTokens,
+                            outputFloor = MIN_MAX_TOKENS_CONST,
+                        )
+                        if (actualProjectionVerdict.decision == PreflightVerdict.Decision.NEEDS_COMPACTION) {
+                            // A no-op/insufficient recovery cannot authorise an
+                            // over-budget send. No upstream attempt has happened.
+                            throw com.rikkaminis.app.data.model.LLMError.ProviderError(
+                                "Continuation exceeds the context budget after recovery; shorten the conversation or choose a larger context window",
+                            )
+                        }
+                    }
                     host.streamChatTurnOffloaded(
                         provider = loopState.currentProvider,
                         messages = preflightMessages,
@@ -1717,7 +1794,7 @@ internal class AgentLoopEngine(
                         // was a SECOND, independent answer to the same question —
                         // and the one that let the navbar badge disagree with the
                         // wire. One expression, one answer.
-                        thinkingLevel = host.thinkingLevel,
+                        thinkingLevel = requestThinkingLevel,
                         // [surgery-1120 A-01] This attempt's identity + the
                         // rendezvous the engine settles after the transcript
                         // row is durable. The handle is created HERE (before
@@ -2294,7 +2371,8 @@ internal class AgentLoopEngine(
                         // agentHistory, and `preflightMessages` was captured
                         // before it. Sending the stale snapshot would re-send the
                         // exact request that just 400'd.
-                        preflightMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+                        preflightBaseMessages = host.applyRequestImageBudget(host.effectiveAgentHistory())
+                        preflightMessages = preflightBaseMessages
                         val rawReEstimate = ContextEstimator.estimateRequestTokens(
                             messages = preflightMessages,
                             systemPrompt = systemPrompt,
@@ -2868,7 +2946,19 @@ internal class AgentLoopEngine(
                     }
                 }
             }  // end while (!collectDone)
-
+            // Visible content/tool output consumes this continuation. An
+            // empty turn may switch providers or retry at the outer-loop level,
+            // so keep intent until that request is genuinely answered.
+            //
+            // [D04-SEAM] The decision is made AFTER the seam merge below, on
+            // the post-seam turn text — not here on the raw stream buffer. A
+            // model that backs up to an earlier anchor and re-emits ONLY text
+            // it already produced has a non-empty raw buffer while
+            // mergeLengthWallSeam trims the whole turn to nothing. Consuming
+            // intent on the raw value sent the very next retry / one-shot
+            // request without the request-aware adaptation (assistant-final
+            // prefill on shapes where prefill is illegal) and made the
+            // empty-turn recovery read "no new content" as a stalled model.
             // [fix/prewindow-budget-1015] usage → 校准窗口回填，流结束后恰好
             // 一次（移出 chunk 处理器：一次流可能吐多帧 usage，会把窗口灌成
             // 近似重复样本）。用 lastUsage 的最终帧；本地端用预检时对同一
@@ -2989,6 +3079,13 @@ internal class AgentLoopEngine(
                 }
             } else {
                 loopState.accumulatedText += turnTextRaw
+            }
+            // [D04-SEAM] One consume point, post-seam: `turnText` is this turn's
+            // body after the duplicated seam was removed (a fully duplicated
+            // continuation leaves it blank). Tool calls are real progress
+            // regardless of text, so they consume intent too.
+            if (turnText.isNotBlank() || toolCalls.isNotEmpty()) {
+                pendingLengthWallTail = null
             }
             // [fix/eof-stub-continuation] EOF-stub continuations behave like
             // length-wall continuations for seam-dedup purposes: the next
@@ -3357,6 +3454,22 @@ internal class AgentLoopEngine(
             if (!ContinuationHistoryMerge.mergeIntoPreviousAssistant(host.agentHistory, turnAssistantMessage)) {
                 host.agentHistory.add(turnAssistantMessage)
             }
+            fun removeEmptyContinuationTurn(): Boolean {
+                if (continuationRequestReminder == null || turnText.isNotBlank() || toolCalls.isNotEmpty() ||
+                    host.agentHistory.lastOrNull() !== turnAssistantMessage
+                ) return false
+                // Drop only the shell created above, never a matching real user
+                // message. Preserve thinking from a thinking-only empty segment
+                // on the answer it was continuing, not as a second assistant row.
+                host.agentHistory.removeAt(host.agentHistory.lastIndex)
+                val previous = host.agentHistory.lastOrNull()
+                if (previous?.role == LLMMessage.Role.ASSISTANT && previous.dbMessageId == null && turnReasoningContent != null) {
+                    host.agentHistory[host.agentHistory.lastIndex] = previous.copy(
+                        reasoningContent = previous.reasoningContent.orEmpty() + turnReasoningContent,
+                    )
+                }
+                return true
+            }
 
             // T321: empty-turn diagnostic — fires when GPT-5.5 (or any other
             // provider) returns a turn with no visible text AND no tool calls.
@@ -3499,7 +3612,7 @@ internal class AgentLoopEngine(
                             // history across retries. Same three-field predicate
                             // as the nudge paths (a shell carrying
                             // reasoningContent is NOT blank and is kept).
-                            dropTrailingBlankAssistantShell(host.agentHistory)
+                            if (!removeEmptyContinuationTurn()) dropTrailingBlankAssistantShell(host.agentHistory)
                             continue
                         }
                         if (contextExhausted) {
@@ -3596,67 +3709,10 @@ internal class AgentLoopEngine(
                                 TAG_STREAM,
                                 "runAgentLoop turn=$turn finish=length — truncated (${turnText.length} chars), continuing loop to let the model finish (${loopState.lengthWallContinues}/${com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.lengthWallContinues()})",
                             )
-                        // [T-length-wall-prefill] When the provider accepts
-                        // an assistant-final prefill, the truncated assistant
-                        // text is ALREADY the last message in host.agentHistory
-                        // (added above), so continuing the loop re-sends it as
-                        // the final message with NO synthetic user message —
-                        // the model is forced to continue the unfinished
-                        // assistant turn and has no room to back up and
-                        // re-emit already-output text (the ROOT cause of
-                        // length-wall seam duplication, which the reminder +
-                        // seam-trim below could only patch after the fact).
-                        // mergeLengthWallSeam stays as belt-and-braces for
-                        // models that repeat even under prefill.
-                        if (loopState.currentProvider?.supportsPrefill == true) {
-                            AppLogger.info(
-                                TAG_STREAM,
-                                "runAgentLoop turn=$turn finish=length — prefill continuation (no reminder) via ${loopState.currentProvider.name}",
-                            )
-                            continue
-                        }
-                        // [T-length-wall-reminder] Prefill NOT supported
-                        // (strict relay requiring a final USER message): inject
-                        // a continuation instruction as a synthetic USER message
-                        // (same delivery pattern as resume()'s stop-continue
-                        // reminder). Without it the next request presents the
-                        // truncated reply as bare context and models frequently
-                        // back up to an earlier semantic anchor, re-emitting a
-                        // phrase they already output — the field-observed
-                        // mid-sentence duplication. The reminder anchors the
-                        // exact cut point and forbids repetition.
-                        // mergeLengthWallSeam below remains the belt-and-
-                        // braces guard for models that repeat anyway.
-                        //
-                        // Not persisted to DB (unlike resume()'s reminder):
-                        // this is a transient in-loop instruction. Guard
-                        // against stacking: if the history tail already
-                        // carries one of these reminders (double wall), drop
-                        // the old one first so consecutive length-walls do
-                        // not pile up reminder turns.
-                        // [fix/audit-b20 / T1-LOW-2] The reminder from a previous
-                        // length-wall sits *behind* this turn's assistant
-                        // message (added above), so the tail check could never
-                        // match and consecutive walls stacked. Look one entry
-                        // back and drop it there.
-                        val prevTailIdx = host.agentHistory.size - 2
-                        val prevTail = host.agentHistory.getOrNull(prevTailIdx)
-                        // [R5-C2] Same family predicate the error-shaped branch
-                        // ORs in — one source per reminder family, instead of a
-                        // second copy of the marker text drifting here.
-                        val tailIsLengthWallReminder =
-                            ContinuationHistoryMerge.isLengthWallReminder(prevTail)
-                        if (tailIsLengthWallReminder) {
-                            host.agentHistory.removeAt(prevTailIdx)
-                        }
-                        val reminder = lengthWallReminder(turnText.takeLast(80))
-                        host.agentHistory.add(
-                            LLMMessage(
-                                role = LLMMessage.Role.USER,
-                                content = reminder,
-                                contentParts = listOf(AgentContentPart.Text(reminder)),
-                            )
-                        )
+                        // Resolve prefill only at the NEXT actual request,
+                        // after preflight and every fallback/retry. Seam merging,
+                        // one bubble/row, and the existing reminder stay shared.
+                        pendingLengthWallTail = turnText.takeLast(80)
                         continue
                         } // [feat/hermes-tier1] else — continuation budget branch
                     }
@@ -3858,6 +3914,14 @@ internal class AgentLoopEngine(
                     // the old all-ToolResult guard skipped — those fell through to
                     // the error hint with no retry), else a standalone reminder
                     // turn; an assistant tail (or an already-fired guard) gives up.
+                    if (continuationRequestReminder != null && !loopState.didInjectEmptyToolReminder) {
+                        // This USER reminder was request-local, not a user row in
+                        // history. Keep intent and let the existing one-shot flag
+                        // add its nudge to the NEXT request-local projection.
+                        loopState.didInjectEmptyToolReminder = true
+                        removeEmptyContinuationTurn()
+                        continue
+                    }
                     val recoveryPlan = if (loopState.didInjectEmptyToolReminder) EmptyTurnRecovery.Plan.GiveUp
                         else EmptyTurnRecovery.plan(host.agentHistory, alreadyFired = false)
                     when (val plan = recoveryPlan) {
@@ -4027,7 +4091,7 @@ internal class AgentLoopEngine(
                         TAG_STREAM,
                         "runAgentLoop turn=$turn EOF-truncated stream with no visible content — one-shot retry (drop empty turn)",
                     )
-                    host.agentHistory.removeAt(host.agentHistory.size - 1)
+                    if (!removeEmptyContinuationTurn()) host.agentHistory.removeAt(host.agentHistory.size - 1)
                     continue
                 }
 
