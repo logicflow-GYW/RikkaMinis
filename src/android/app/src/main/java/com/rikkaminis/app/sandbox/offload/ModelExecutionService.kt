@@ -1028,7 +1028,7 @@ class ModelExecutionService : Service() {
         }
         val apiKey = WorkerKeyHandoff.pickKey(carriedApiKey) {
             try {
-                com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
+                com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this@ModelExecutionService, "provider_secrets")
                     .getString("apikey_${instance.id}", null)
             } catch (_: Exception) { null }
         }
@@ -1043,7 +1043,7 @@ class ModelExecutionService : Service() {
         // ── Build provider ──
         ensureBeforeDispatch()
         val provider = com.rikkaminis.app.provider.ProviderFactory.create(
-            instance = instance, apiKey = apiKey, model = model, context = this,
+            instance = instance, apiKey = apiKey, model = model, context = this@ModelExecutionService,
             requestThinkingRules = requestThinkingRules,
         )
         // [FIX-1 / F-191] Same cross-process stamp as the streaming path above.
