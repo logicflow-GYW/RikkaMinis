@@ -30,6 +30,7 @@ import com.rikkaminis.app.provider.hasWirePayload
 import com.rikkaminis.app.provider.sseDataPayload
 import com.rikkaminis.app.provider.nonStreamCeilingCutLogLine
 import com.rikkaminis.app.provider.nonStreamOutputCeilingCut
+import com.rikkaminis.app.provider.executeOrCancel
 import com.rikkaminis.app.provider.LegacyMediaPlan
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
@@ -45,6 +46,7 @@ import com.rikkaminis.app.provider.thinking.ReasoningEchoPolicy
 import com.rikkaminis.app.provider.thinking.ThinkingResolveContext
 import com.rikkaminis.app.provider.thinking.ThinkingRuleResolver
 import com.rikkaminis.app.provider.thinking.RequestThinkingRules
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -1807,8 +1809,7 @@ class OpenAIProvider constructor(
                 "headerOverrides=[${headers.keys.sorted().joinToString(",")}]",
         )
 
-        val response = client.newCall(builder.build()).execute()
-        response.use { resp ->
+        client.newCall(builder.build()).executeOrCancel { resp ->
             RawPassthroughResult(
                 data = resp.body?.bytes() ?: ByteArray(0),
                 status = resp.code,
@@ -1913,11 +1914,13 @@ class OpenAIProvider constructor(
                     "size=$size quality=$quality respFormat=${if (triedWithoutFormat) "<none>" else "b64_json"}",
             )
 
-            val response = client.newCall(request).execute()
-            val statusCode = response.code
-            val responseBody = response.body?.string() ?: ""
-            val retryAfterMs = parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis())
-            response.close()
+            val (statusCode, responseBody, retryAfterMs) = client.newCall(request).executeOrCancel { response ->
+                Triple(
+                    response.code,
+                    response.body?.string() ?: "",
+                    parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis()),
+                )
+            }
 
             // Some providers (xAI) don't support b64_json — retry without it once.
             if (!triedWithoutFormat && statusCode == 400 &&
@@ -1959,7 +1962,7 @@ class OpenAIProvider constructor(
      * a route-missing error so auto-mode falls back instead of caching the
      * wrong endpoint.
      */
-    private fun parseImageGenerationsResult(json: JSONObject): LLMResponse {
+    private suspend fun parseImageGenerationsResult(json: JSONObject): LLMResponse {
         val dataArray = json.optJSONArray("data")
         if (dataArray == null) {
             if (json.has("choices")) {
@@ -2002,7 +2005,7 @@ class OpenAIProvider constructor(
                         // close() sat after bytes(), so an IOException there
                         // skipped it and leaked the connection instead of
                         // returning it to the pool.
-                        imageDownloadClient.newCall(dlReq).execute().use { dlResp ->
+                        imageDownloadClient.newCall(dlReq).executeOrCancel { dlResp ->
                             // [R5-E1 E-F-05] The SECOND hop carries its own
                             // status code and nothing was reading it: only the
                             // size ceiling and a non-empty body were checked, so
@@ -2076,6 +2079,7 @@ class OpenAIProvider constructor(
                             }
                         }
                     } catch (e: Exception) {
+                        if (e is CancellationException) throw e
                         // redactURL masks known query keys, but object-store signing
                         // fields are vendor-specific. OkHttp's redact() keeps only
                         // the origin; a parse failure must not print the raw input.
