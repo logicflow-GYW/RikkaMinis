@@ -119,6 +119,30 @@ class ChatDebugMessagePartsTest {
         assertEquals("not json", broken.getString("content"))
     }
 
+    @Test
+    fun privateReplayIsAbsentFromAllRpcViews() {
+        val raw = """[{"type":"text","value":"公开 متن"},{"type":"anthropicReplayV1","value":{"signature":"SIG_SYNTH_D05","data":"DATA_SYNTH_D05"}},{"type":"toolUse","value":{"toolUseId":"c","name":"file_read"}},{"type":"toolResult","value":{"toolUseId":"c","output":"ok"}},{"type":"futurePart","value":"keep"}]"""
+        for (includeTools in listOf(false, true)) {
+            val out = ChatDebugMethods.messageToJson(msg(raw), includeTools, true)
+            assertFalse(out.toString().contains("SIG_SYNTH_D05"))
+            assertFalse(out.toString().contains("DATA_SYNTH_D05"))
+            assertEquals("公开 متن", out.getString("content"))
+            assertEquals(4, out.getJSONArray("parts").length())
+            assertEquals("futurePart", out.getJSONArray("parts").getJSONObject(3).getString("type"))
+            if (includeTools) assertEquals(2, out.getJSONArray("toolCalls").length())
+        }
+    }
+
+    @Test
+    fun malformedReplayCannotRideRpcRawFallback() {
+        val raw = """[{"type":"anthropicReplayV1","value":{"signature":"SIG_SYNTH_D05","data":"DATA_SYNTH_D05"}"""
+        val out = ChatDebugMethods.messageToJson(msg(raw), true, true)
+        assertFalse(out.toString().contains("SIG_SYNTH_D05"))
+        assertFalse(out.toString().contains("DATA_SYNTH_D05"))
+        assertEquals(0, out.getJSONArray("parts").length())
+        assertEquals("not json", ChatDebugMethods.messageToJson(msg("not json"), true, false).getString("content"))
+    }
+
     // ── layer 2: wiring, as source shape (with negative controls) ─────────────
 
     private val debugRel = "src/android/app/src/main/java/com/rikkaminis/app/debug/ChatDebugMethods.kt"

@@ -4,6 +4,7 @@ import android.util.Log
 import com.rikkaminis.app.config.ConfigAccess
 import com.rikkaminis.app.config.ConfigRegistry
 import com.rikkaminis.app.config.ConfigValue
+import com.rikkaminis.app.data.AnthropicReplayPublicProjection
 import com.rikkaminis.app.data.model.FallbackStrategy
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ModelGroup
@@ -3054,7 +3055,7 @@ object ConfigBackup {
         // is the import-side size authority — see sanitizeIncomingParts.
         if (partsJson.isNullOrBlank()) return null
         val arr = try {
-            JSONArray(partsJson)
+            JSONArray(AnthropicReplayPublicProjection.partsJson(partsJson))
         } catch (t: Throwable) {
             return null
         }
@@ -3154,8 +3155,9 @@ object ConfigBackup {
      *
      * [sanitizeChatParts] answers `null` for two different worlds and this
      * keeps them apart:
-     *  - unparseable payload → hand the ORIGINAL string on (the row-size
-     *    ceiling below still applies; the row is not ours to reinterpret);
+     *  - unparseable legacy payload → hand the original string on unless a
+     *    private replay type is confirmed (that whole row projects to empty);
+     *    the row-size ceiling below still applies;
      *  - parsed, but nothing survivable (its only parts were media pointers) →
      *    an empty string, so the row exists without a dead attachment.
      *
@@ -3174,8 +3176,9 @@ object ConfigBackup {
      */
     internal fun sanitizeIncomingParts(raw: String): String {
         if (raw.isBlank()) return raw
-        sanitizeChatParts(raw, slimText = false)?.let { return it }
-        return if (runCatching { JSONArray(raw) }.isSuccess) "" else raw
+        val publicPartsJson = AnthropicReplayPublicProjection.partsJson(raw)
+        sanitizeChatParts(publicPartsJson, slimText = false)?.let { return it }
+        return if (runCatching { JSONArray(publicPartsJson) }.isSuccess) "" else publicPartsJson
     }
 
     /** [T-backup-chat-slim] Cuts model reasoning content to a sane size.
