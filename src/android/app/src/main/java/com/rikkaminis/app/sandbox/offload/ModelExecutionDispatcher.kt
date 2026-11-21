@@ -47,7 +47,7 @@ object ModelExecutionDispatcher {
     private const val REAP_POLL_MS = 50L
 
     /** Default base directory for request/result staging. */
-    private const val STAGING_ROOT = "model-exec"
+    private const val STAGING_ROOT = StreamOwnership.STAGING_ROOT
 
     /**
      * Build the serialized request JSON for a model run. Pure function —

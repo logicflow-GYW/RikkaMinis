@@ -59,9 +59,14 @@ internal object StreamScan {
     /**
      * Scan [file] once. [maxBytes] caps the read; a file longer than that is
      * scanned only up to the last complete line inside the budget and reported
-     * `complete = false`.
+     * `complete = false`. Terminal-only probes set [collectText] to false so
+     * visible text is not aggregated into memory.
      */
-    fun scan(file: File, maxBytes: Long = Long.MAX_VALUE): Result {
+    fun scan(
+        file: File,
+        maxBytes: Long = Long.MAX_VALUE,
+        collectText: Boolean = true,
+    ): Result {
         if (!file.isFile || file.length() <= 0L) {
             return Result("", done = false, error = false, complete = true, droppedFrames = 0)
         }
@@ -86,7 +91,7 @@ internal object StreamScan {
                             ChatStreamJsonl.isError(line) -> error = true
                             else -> {
                                 val chunk = ChatStreamJsonl.decode(line)
-                                if (chunk is LLMStreamChunk.Text) sb.append(chunk.text)
+                                if (collectText && chunk is LLMStreamChunk.Text) sb.append(chunk.text)
                             }
                         }
                     }

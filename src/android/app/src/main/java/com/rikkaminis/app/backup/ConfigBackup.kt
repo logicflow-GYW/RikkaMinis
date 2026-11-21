@@ -2302,13 +2302,18 @@ object ConfigBackup {
         // No cross-store rollback is implied; a later snapshot can also carry
         // earlier changes, so count failed writes, not "lost providers".
         val writes = persistence.await()
-        val lostWrites = writes.count { it == ConfigWrite.NEITHER }
+        // Each submitted snapshot is a FULL Provider/Group config in FIFO order.
+        // A later BOTH therefore also confirms every earlier captured mutation;
+        // do not report a healed transient failure as a reason to roll back.
+        val lastFullyConfirmed = writes.indexOfLast { it == ConfigWrite.BOTH }
+        val unresolvedWrites = writes.drop(lastFullyConfirmed + 1)
+        val lostWrites = unresolvedWrites.count { it == ConfigWrite.NEITHER }
         if (lostWrites > 0) {
             val failure = "Providers/groups: $lostWrites configuration write(s) not confirmed by either storage copy."
             fatal = fatal?.let { "$it\n$failure" } ?: failure
         }
-        val dbOnly = writes.count { it == ConfigWrite.DB_ONLY }
-        val mirrorOnly = writes.count { it == ConfigWrite.MIRROR_ONLY }
+        val dbOnly = unresolvedWrites.count { it == ConfigWrite.DB_ONLY }
+        val mirrorOnly = unresolvedWrites.count { it == ConfigWrite.MIRROR_ONLY }
         val providerPersistenceWarning = buildList {
             if (dbOnly > 0) add("$dbOnly write(s) confirmed by the provider database only; the compatibility mirror is unconfirmed.")
             if (mirrorOnly > 0) add("$mirrorOnly write(s) confirmed by the compatibility mirror only; the provider database is unconfirmed.")

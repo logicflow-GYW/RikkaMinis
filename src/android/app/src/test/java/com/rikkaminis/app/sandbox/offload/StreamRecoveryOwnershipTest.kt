@@ -127,6 +127,45 @@ class StreamRecoveryOwnershipTest {
         assertEquals("", scan.text)
     }
 
+    @Test
+    fun `a terminal-only scan does not aggregate otherwise valid visible text`() {
+        val d = runDir("run-reap-probe-text", text = "visible but not needed for a terminal probe")
+        val scan = StreamScan.scan(
+            File(d, ModelExecutionService.STREAM_FILE),
+            maxBytes = PartialStreamRecovery.MAX_SCAN_BYTES,
+            collectText = false,
+        )
+        assertEquals("", scan.text)
+        assertTrue(scan.complete)
+        assertTrue(scan.done)
+    }
+
+    @Test
+    fun `reaper scans without aggregating text and preserves an over-budget spool`() {
+        val d = runDir("run-reap-budget", text = "x".repeat(PartialStreamRecovery.MAX_SCAN_BYTES.toInt()), done = false)
+        val stream = File(d, ModelExecutionService.STREAM_FILE)
+        val scan = StreamScan.scan(
+            stream,
+            maxBytes = PartialStreamRecovery.MAX_SCAN_BYTES,
+            collectText = false,
+        )
+        assertFalse("an over-budget spool cannot be certified complete", scan.complete)
+        assertEquals("a DONE-only probe must not aggregate the visible answer", "", scan.text)
+        assertTrue("unknown past the budget is not permission to delete", ModelExecutionOrphanReaper.shouldLeaveToRecovery(d))
+        assertEquals(0, ModelExecutionOrphanReaper.reapOrphansIn(root))
+        assertTrue(d.exists())
+    }
+
+    @Test
+    fun `short malformed terminal tail is still reclaimed rather than reserved forever`() {
+        val d = runDir("run-reap-partial-tail", text = "incomplete", done = false)
+        File(d, ModelExecutionService.STREAM_FILE).appendText("{bad-tail")
+        age(d)
+        assertFalse(ModelExecutionOrphanReaper.shouldLeaveToRecovery(d))
+        assertEquals(1, ModelExecutionOrphanReaper.reapOrphansIn(root))
+        assertFalse(d.exists())
+    }
+
     // ── ownership ─────────────────────────────────────────────────────────
 
     @Test

@@ -99,8 +99,8 @@ object ModelExecutionOrphanReaper {
      * such a dir would destroy the content before (or instead of) the
      * cold-start recovery that now knows how to insert it. So: a dir carrying a
      * `meta.json` identity with NO committed `transcript.json` is left to
-     * [PartialStreamRecovery]; every other terminal dir keeps the old behaviour
-     * (the marker check is per-run and free — one file existence test).
+     * [PartialStreamRecovery] when clean or not fully inspectable within the
+     * bounded probe; a fully scanned error/non-chat terminal is still reaped.
      *
      * JVM-testable: the file layout is the whole input.
      */
@@ -117,7 +117,15 @@ object ModelExecutionOrphanReaper {
          * already passed the age + terminal gates.
          */
         hasCleanDone: () -> Boolean = {
-            StreamScan.scan(File(dir, ModelExecutionService.STREAM_FILE)).done
+            val stream = File(dir, ModelExecutionService.STREAM_FILE)
+            val scan = StreamScan.scan(
+                stream,
+                maxBytes = PartialStreamRecovery.MAX_SCAN_BYTES,
+                collectText = false,
+            )
+            // A budget-limited scan cannot prove the unread suffix has no DONE.
+            // A short malformed tail, however, is the existing error shape.
+            stream.length() > PartialStreamRecovery.MAX_SCAN_BYTES || scan.done
         },
     ): Boolean {
         // No transcript identity ⇒ not a chat stream (title / QuickTest /

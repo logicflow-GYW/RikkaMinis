@@ -136,4 +136,62 @@ class RestorePersistenceTest {
         assertEquals(listOf("Queued"), store.dao.savedInstances.map { it.label })
         assertTrue(store.mirror.disk!!.contains("Queued"))
     }
+
+    @Test
+    fun `a later fully confirmed snapshot supersedes an earlier failed restore write`() = runBlocking {
+        val store = RestoreTestStore()
+        store.repo.awaitConfigLoaded()
+        store.holdSubmissions = true
+        val restore = async(start = CoroutineStart.UNDISPATCHED) {
+            ConfigBackup.import(
+                store.repo,
+                restoreDocument(
+                    providers = JSONArray().put(sourceProvider("Provider")),
+                    groups = JSONArray().put(JSONObject().put("id", "new").put("name", "New")),
+                ),
+            )
+        }
+        assertEquals("provider + group snapshots", 2, store.queue.size)
+        store.dao.acceptsWrite = false
+        store.mirror.acceptsWrite = false
+        store.queue.remove().run()
+        store.dao.acceptsWrite = true
+        store.mirror.acceptsWrite = true
+        store.queue.remove().run()
+
+        val report = restore.await()
+        assertNull("the second FULL snapshot confirms the first mutation too", report.fatal)
+        assertNull(report.providerPersistenceWarning)
+        assertEquals(listOf("Provider"), store.dao.savedInstances.map { it.label })
+        assertEquals(listOf("new"), store.dao.savedGroups.map { it.id })
+        assertTrue(store.mirror.disk!!.contains("Provider"))
+        assertTrue(store.mirror.disk!!.contains("New"))
+    }
+
+    @Test
+    fun `a failed successor is not hidden by an earlier fully confirmed snapshot`() = runBlocking {
+        val store = RestoreTestStore()
+        store.repo.awaitConfigLoaded()
+        store.holdSubmissions = true
+        val restore = async(start = CoroutineStart.UNDISPATCHED) {
+            ConfigBackup.import(
+                store.repo,
+                restoreDocument(
+                    providers = JSONArray().put(sourceProvider("First")),
+                    groups = JSONArray().put(JSONObject().put("id", "later").put("name", "Unconfirmed")),
+                ),
+            )
+        }
+        assertEquals(2, store.queue.size)
+        store.queue.remove().run()
+        store.dao.acceptsWrite = false
+        store.mirror.acceptsWrite = false
+        store.queue.remove().run()
+
+        val report = restore.await()
+        assertNotNull("a previous success cannot confirm a later mutation", report.fatal)
+        assertNull(report.providerPersistenceWarning)
+        assertTrue(store.dao.savedGroups.none { it.id == "later" })
+        assertFalse(store.mirror.disk!!.contains("Unconfirmed"))
+    }
 }

@@ -956,11 +956,13 @@ internal class AgentLoopEngine(
      * dirs must be marked "delivered, nothing to insert" instead of being left
      * for cold-start recovery.
      */
-    private fun discardTranscriptCommits(loopState: AgentLoopState) {
+    private suspend fun discardTranscriptCommits(loopState: AgentLoopState) {
         if (loopState.pendingTranscriptCommits.isEmpty()) return
         val pending = loopState.pendingTranscriptCommits.toList()
         loopState.pendingTranscriptCommits.clear()
-        pending.forEach { handle -> runCatching { handle.discard() } }
+        withContext(Dispatchers.IO) {
+            pending.forEach { handle -> runCatching { handle.discard() } }
+        }
     }
 
     private suspend fun discardTranscriptCommit(loopState: AgentLoopState, handle: TranscriptCommitHandle?) {
