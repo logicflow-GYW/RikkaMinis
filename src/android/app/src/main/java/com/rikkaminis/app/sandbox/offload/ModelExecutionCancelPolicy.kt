@@ -1,5 +1,6 @@
 package com.rikkaminis.app.sandbox.offload
 
+import com.rikkaminis.app.provider.CallDispatchGuard
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineStart
@@ -10,6 +11,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -183,7 +185,11 @@ suspend fun <T> withModelExecutionCancellation(
             currentCoroutineContext().ensureActive()
         }
         ensureBeforeDispatch()
-        val value = block(::ensureBeforeDispatch)
+        // Inherit through provider withContext/Call children, never through a
+        // thread-local or cached provider field shared by concurrent runs.
+        val value = withContext(CallDispatchGuard(::ensureBeforeDispatch)) {
+            block(::ensureBeforeDispatch)
+        }
         currentCoroutineContext().ensureActive()
         if (!race.tryComplete(cancelFile)) throw cancellation()
         publish(value)

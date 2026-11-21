@@ -10,6 +10,14 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import okhttp3.Call
 import okhttp3.Response
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+
+/** Request-scoped preflight for each blocking HTTP dispatch; absent for direct UI callers. */
+internal class CallDispatchGuard(val ensureBeforeDispatch: suspend () -> Unit) :
+    AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<CallDispatchGuard>
+}
 
 /**
  * [FIX-1 / F-209] Blocking `Call.execute()` with a coroutine-cancellation hook.
@@ -64,7 +72,8 @@ internal suspend fun Call.executeOrCancel(): Response = withCallCancellation { e
 /**
  * [R5-F-03] Keep cancellation armed through headers, body consumption and parsing.
  * Unlike the headers-only overload, this owns and closes the response on every
- * exit. Only model-list fetchers opt in; streaming callers keep their ownership.
+ * exit. Non-streaming provider calls and model-list fetchers opt in;
+ * streaming callers keep their ownership.
  */
 internal suspend fun <T> Call.executeOrCancel(consume: suspend (Response) -> T): T =
     withCallCancellation {
@@ -75,6 +84,9 @@ internal suspend fun <T> Call.executeOrCancel(consume: suspend (Response) -> T):
     }
 
 private suspend fun <T> Call.withCallCancellation(block: suspend () -> T): T = coroutineScope {
+    // Each retry/download creates a new Call but inherits only THIS run's guard.
+    // Check synchronously before execute: the marker may precede the next poll.
+    currentCoroutineContext()[CallDispatchGuard]?.ensureBeforeDispatch?.invoke()
     // The scope coroutine is a child of the caller, so it dies with it — that
     // is the signal the watcher's completion handler reads below.
     val scopeJob = currentCoroutineContext().job
