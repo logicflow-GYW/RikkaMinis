@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteConstraintException
 import com.rikkaminis.app.agent.InterruptedTailDetector
 import com.rikkaminis.app.agent.InterruptedTailPartKind
 import com.rikkaminis.app.agent.InterruptedTailSnapshot
+import com.rikkaminis.app.data.AnthropicReplayPublicProjection
 import com.rikkaminis.app.diagnostics.MemorySpikeRecorder
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.data.db.ChatDao
@@ -882,8 +883,14 @@ class ChatRepository(
     }
 
     private fun extractTextPreview(partsJson: String): String? {
+        // [D05 public fallback] One projection decides what this face may read:
+        // the private replay part is removed as a whole part before any parse,
+        // and the non-array legacy fallback below is the PROJECTED spelling —
+        // never the original row.
+        val projection = AnthropicReplayPublicProjection.project(partsJson)
+        val array = projection.parts
+            ?: return projection.partsJson.takeIf { it.isNotBlank() }?.let(::cleanPreview)
         try {
-            val array = org.json.JSONArray(partsJson)
             var hasMedia = false
             // T-android-session-last-message-tool-call: also track the most
             // recent tool_use so a mid-tool-call assistant turn (no text yet)
@@ -908,7 +915,7 @@ class ChatRepository(
             if (hasMedia) return "[Image]"
             if (lastToolUse != null) return summarizeToolUse(lastToolUse)
         } catch (_: Exception) {
-            if (partsJson.isNotBlank()) return cleanPreview(partsJson)
+            return cleanPreview(projection.partsJson)
         }
         return null
     }
@@ -1308,8 +1315,9 @@ class ChatRepository(
      *   4. "[Tool result: …]" summaries when any toolResult exists
      */
     private fun extractTextForOffload(partsJson: String, role: String): String {
+        val projection = AnthropicReplayPublicProjection.project(partsJson)
+        val arr = projection.parts ?: return stripSystemReminders(projection.partsJson)
         return try {
-            val arr = org.json.JSONArray(partsJson)
             val texts = mutableListOf<String>()
             var hasMedia = false
             val toolUses = mutableListOf<org.json.JSONObject>()
@@ -1355,7 +1363,7 @@ class ChatRepository(
             }
             ""
         } catch (_: Exception) {
-            stripSystemReminders(partsJson)
+            stripSystemReminders(projection.partsJson)
         }
     }
 
@@ -1527,6 +1535,9 @@ class ChatRepository(
 
         internal fun buildTruncatedPartsJson(original: String): String {
             val marker = truncationMarker(original)
+            // The prefix becomes visible text: project the whole row before
+            // cutting it, while keeping the original length for diagnostics.
+            val publicJson = AnthropicReplayPublicProjection.partsJson(original)
 
             fun wrap(text: String): String =
                 org.json.JSONArray()
@@ -1542,7 +1553,7 @@ class ChatRepository(
             var out = wrap(marker)
             var guard = 0
             while (budget > 0 && guard < 16) {
-                out = wrap(takeByUtf8Bytes(original, budget) + marker)
+                out = wrap(takeByUtf8Bytes(publicJson, budget) + marker)
                 val size = out.toByteArray(Charsets.UTF_8).size
                 if (size <= MAX_MESSAGE_PARTS_JSON_BYTES) break
                 budget -= (size - MAX_MESSAGE_PARTS_JSON_BYTES)

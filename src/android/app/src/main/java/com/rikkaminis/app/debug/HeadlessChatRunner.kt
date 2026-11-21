@@ -6,6 +6,7 @@ import com.rikkaminis.app.MinisApp
 import com.rikkaminis.app.config.BindingTarget
 import com.rikkaminis.app.config.SessionConfigWriteThrough
 import com.rikkaminis.app.config.resolveBindingTarget
+import com.rikkaminis.app.data.AnthropicReplayPublicProjection
 import com.rikkaminis.app.data.model.ModelEntry
 import com.rikkaminis.app.data.model.ProviderInstance
 import com.rikkaminis.app.data.model.ThinkingLevel
@@ -1250,15 +1251,16 @@ internal object HeadlessChatRunner {
     }
 
     private fun extractText(partsJson: String): String? {
+        val projection = AnthropicReplayPublicProjection.project(partsJson)
+        val arr = projection.parts ?: return projection.partsJson.ifEmpty { null }
         return try {
-            val arr = org.json.JSONArray(partsJson)
             val sb = StringBuilder()
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
                 if (o.optString("type") == "text") sb.append(o.optString("value", ""))
             }
             sb.toString().ifEmpty { null }
-        } catch (_: Exception) { partsJson.ifEmpty { null } }
+        } catch (_: Exception) { projection.partsJson.ifEmpty { null } }
     }
 
     /**
