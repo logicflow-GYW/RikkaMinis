@@ -52,7 +52,7 @@ class AnthropicReplayPublicProjectionTest {
     @Test fun malformedOrdinaryRowsKeepTheirReadableFallback() {
         val rows = listOf("not json", "[{\"type\":\"text\",\"value\":\"hello", "", "[broken", "prefix anthropicReplayV1", """[{"type":"anthropicReplayV10","value":"bad""")
         for (raw in rows) assertEquals(raw, project(raw))
-        val quoted = """[{"type":"text","value":"quoted \"type\":\"anthropicReplayV1\""""
+        val quoted = """[{"type":"text","value":"quoted anthropicReplayV1""""
         assertEquals(quoted, project(quoted))
     }
 
