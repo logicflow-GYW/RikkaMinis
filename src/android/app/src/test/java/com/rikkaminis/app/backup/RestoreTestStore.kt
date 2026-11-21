@@ -81,6 +81,8 @@ internal class RestoreTestStore {
         var acceptsWrite = true
         var savedInstances = emptyList<ProviderInstanceEntity>()
         var savedGroups = emptyList<ProviderModelGroupEntity>()
+        var savedLoopIds = emptyList<ProviderAgentLoopIdEntity>()
+        var savedMeta = emptyList<ProviderConfigMetaEntity>()
         var savedHash: String? = null
         val rules = LinkedHashMap<String, ProviderThinkingRuleEntity>()
         var failMutation = false
@@ -126,6 +128,8 @@ internal class RestoreTestStore {
             if (!acceptsWrite) throw IOException("injected database transaction failure")
             savedInstances = instances
             savedGroups = groups
+            savedLoopIds = loopIds
+            savedMeta = meta
             savedHash = meta.firstOrNull { it.key == ProviderConfigMetaKeys.JSON_SYNC_HASH }?.value
         }
 
