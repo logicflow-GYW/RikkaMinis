@@ -3054,11 +3054,14 @@ object ConfigBackup {
         // ChatRepository.capPartsJsonForRow (500 KB, marker + original length)
         // is the import-side size authority — see sanitizeIncomingParts.
         if (partsJson.isNullOrBlank()) return null
-        val arr = try {
-            JSONArray(AnthropicReplayPublicProjection.partsJson(partsJson))
-        } catch (t: Throwable) {
-            return null
-        }
+        return sanitizeProjectedChatParts(AnthropicReplayPublicProjection.project(partsJson), slimText)
+    }
+
+    private fun sanitizeProjectedChatParts(
+        projection: AnthropicReplayPublicProjection.Projection,
+        slimText: Boolean,
+    ): String? {
+        val arr = projection.parts ?: return null
         val kept = JSONArray()
         for (i in 0 until arr.length()) {
             val el = arr.optJSONObject(i) ?: continue
@@ -3176,9 +3179,12 @@ object ConfigBackup {
      */
     internal fun sanitizeIncomingParts(raw: String): String {
         if (raw.isBlank()) return raw
-        val publicPartsJson = AnthropicReplayPublicProjection.partsJson(raw)
-        sanitizeChatParts(publicPartsJson, slimText = false)?.let { return it }
-        return if (runCatching { JSONArray(publicPartsJson) }.isSuccess) "" else publicPartsJson
+        val projection = AnthropicReplayPublicProjection.project(raw)
+        projection.parts?.let {
+            sanitizeProjectedChatParts(projection, slimText = false)?.let { cleaned -> return cleaned }
+            return ""
+        }
+        return projection.partsJson
     }
 
     /** [T-backup-chat-slim] Cuts model reasoning content to a sane size.

@@ -81,6 +81,38 @@ class AnthropicReplayPublicProjectionTest {
         assertEquals("[]", project("""[{"type":"anthropicReplayV1","value":{"data":"DATA_SYNTH_D05"},"pad":"${"y".repeat(1_000_001)}"}"""))
     }
 
+    @Test fun malformedNestedPrivateMarkerAndPlainBracketNotesRemainReadable() {
+        val nestedTool = "[{\"type\":\"toolUse\",\"value\":{\"toolUseId\":\"r\",\"name\":\"draw\",\"input\":{\"type\":\"anthropicReplayV1\",\"label\":\"PUBLIC_ARGUMENT\"}}}"
+        val notes = "Notes: " + "[".repeat(65) + " literal brackets"
+        assertEquals(nestedTool, project(nestedTool))
+        assertNull(AnthropicReplayPublicProjection.project(nestedTool).parts)
+        assertEquals(notes, project(notes))
+        assertNull(AnthropicReplayPublicProjection.project(notes).parts)
+    }
+
+    @Test fun confirmedPrivateCandidatesNeverTakeReadableRawFallback() {
+        assertEquals("[]", project("{\"type\":\"anthropicReplayV1\",\"value\":\"DATA_SYNTH_D05\"}"))
+        assertEquals("[]", project("[{\"type\":\"text\",\"value\":\"ok\"}] {\"type\":\"anthropicReplayV1\",\"data\":\"DATA_SYNTH_D05\"}"))
+        assertEquals("[]", project("[{\"type\":\"anthropicReplayV1\",\"value\":\"DATA_SYNTH_D05\"}"))
+    }
+
+    @Test fun lenientPublicSyntaxAndPreciseNumbersArePreserved() {
+        val androidLenient = listOf(
+            "[{kind/* note */:ordinary}]",
+            "[{kind:>ordinary}]",
+            "[{kind:'one\'s'}]",
+            "[{kind=>ordinary}]",
+            "[{kind # note\n:ordinary}]",
+            "[{kind: // note\nordinary}]",
+            "[{kind:'ordinary'}] extra",
+        )
+        for (raw in androidLenient) assertSame(raw, project(raw))
+        val precise = """[{"type":"futurePart","value":0.1234567890123456789},{"type":"anthropicReplayV1","value":null}]"""
+        val out = project(precise)
+        assertTrue(out.contains("0.1234567890123456789"))
+        assertFalse(out.contains("anthropicReplayV1"))
+    }
+
     @Test fun projectionHelperDescriptionDoesNotHoldInputs() {
         project("""[{"type":"anthropicReplayV1","value":{"data":"DATA_SYNTH_D05"}}]""")
         assertFalse(AnthropicReplayPublicProjection.toString().contains("DATA_SYNTH_D05"))

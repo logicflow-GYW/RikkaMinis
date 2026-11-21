@@ -262,9 +262,9 @@ object ChatExporter {
     }
 
     private fun extractPlainText(partsJson: String, role: String): String {
-        val publicPartsJson = AnthropicReplayPublicProjection.partsJson(partsJson)
+        val projection = AnthropicReplayPublicProjection.project(partsJson)
         return try {
-            val arr = JSONArray(publicPartsJson)
+            val arr = projection.parts ?: return projection.partsJson
             val sb = StringBuilder()
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
@@ -298,7 +298,7 @@ object ChatExporter {
             }
             sb.toString()
         } catch (_: Exception) {
-            publicPartsJson
+            projection.partsJson
         }
     }
 
@@ -309,7 +309,7 @@ object ChatExporter {
      * a plain JVM test can pin the classification.
      */
     private fun countAttachments(partsJson: String): Pair<Int, Int> = try {
-        countPartsAttachments(JSONArray(AnthropicReplayPublicProjection.partsJson(partsJson)))
+        AnthropicReplayPublicProjection.project(partsJson).parts?.let(::countPartsAttachments) ?: (0 to 0)
     } catch (_: Throwable) {
         0 to 0
     }

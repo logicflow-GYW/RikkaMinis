@@ -160,8 +160,8 @@ internal object ChatDebugMethods {
         }
         // Strip private replay BEFORE the nested RPC.parts view or raw fallback.
         // Ordinary unknown parts and legacy unstructured rows stay readable.
-        val publicPartsJson = AnthropicReplayPublicProjection.partsJson(m.partsJson)
-        val parts = try { org.json.JSONArray(publicPartsJson) } catch (_: Exception) { null }
+        val projection = AnthropicReplayPublicProjection.project(m.partsJson)
+        val parts = projection.parts
         if (parts != null) {
             obj.put("parts", parts)
             val sb = StringBuilder()
@@ -181,7 +181,7 @@ internal object ChatDebugMethods {
             if (attachments.length() > 0) obj.put("attachments", attachments)
         } else {
             // Legacy/unstructured payload — return raw.
-            obj.put("content", publicPartsJson)
+            obj.put("content", projection.partsJson)
         }
         m.tokenUsage?.let {
             obj.put("tokenUsage", try { JSONObject(it) } catch (_: Exception) { it })
