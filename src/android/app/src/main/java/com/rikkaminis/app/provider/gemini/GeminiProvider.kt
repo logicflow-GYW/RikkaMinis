@@ -18,6 +18,7 @@ import com.rikkaminis.app.data.model.LLMUsage
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.provider.ImageBudget
 import com.rikkaminis.app.provider.LLMProvider
+import com.rikkaminis.app.provider.executeOrCancel
 import com.rikkaminis.app.provider.extractHttpErrorMessage
 import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
@@ -122,7 +123,7 @@ class GeminiProvider(
             .build()
 
         // [fix/audit-s4m1] response closed via .use{} on all paths.
-        client.newCall(request).execute().use { response ->
+        client.newCall(request).executeOrCancel { response ->
             val responseBody = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {

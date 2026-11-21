@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -71,6 +72,9 @@ class ModelExecutionService : Service() {
         const val STREAM_FILE = "stream.jsonl"
         /** Cancellation signal file: when created, a running stream aborts. */
         const val CANCEL_FILE = "cancel"
+        /** Main process explicitly abandoned this non-streaming result. */
+        const val ABANDON_FILE = "abandon.request"
+        const val ABANDON_ACK_FILE = "abandon.ack"
 
         /**
          * [fix/zero-chunk-cancel] How often the in-stream cancel watcher polls
@@ -411,49 +415,55 @@ class ModelExecutionService : Service() {
                 // read re-throws into the catch → model_use_failed below.
                 val requestBody = CapturedRequestBody.capture { requestFile.readText() }
                 val wantsQueueFrames = requestBody.streamingFlagOrFalse()
-                if (wantsQueueFrames) {
-                    var lastPublished = -1
-                    while (!executionSlots.tryAcquire(QUEUE_FRAME_POLL_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                        val waitingNow = synchronized(lifecycleLock) { queuedRequests.get() }
-                        if (waitingNow != lastPublished) {
-                            lastPublished = waitingNow
-                            runCatching {
-                                java.io.FileWriter(File(dir, STREAM_FILE), true).use { w ->
-                                    w.append(ChatStreamJsonl.encode(LLMStreamChunk.QueueStatus(waitingNow))).append('\n')
+                val isStreaming = requestBody.streamingFlagOrFalse()
+                val cancelFile = File(dir, CANCEL_FILE)
+                var lastPublished = -1
+                try {
+                    runWithModelExecutionSlot(
+                        slots = executionSlots,
+                        cancelRequested = { cancelFile.isFile },
+                        pollMs = QUEUE_FRAME_POLL_MS,
+                        onQueuePoll = {
+                            if (wantsQueueFrames) {
+                                val waitingNow = synchronized(lifecycleLock) { queuedRequests.get() }
+                                if (waitingNow != lastPublished) {
+                                    lastPublished = waitingNow
+                                    runCatching {
+                                        java.io.FileWriter(File(dir, STREAM_FILE), true).use { w ->
+                                            w.append(ChatStreamJsonl.encode(LLMStreamChunk.QueueStatus(waitingNow))).append('\n')
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    }
-                } else {
-                    executionSlots.acquire()
-                }
-                try {
-                    synchronized(lifecycleLock) { queuedRequests.decrementAndGet() }
-                    try {
-                        val req = requestBody.jsonOrThrow()
-                        val isStreaming = req.optBoolean("streaming", false)
-                        if (isStreaming) {
-                            // TF-I: streaming exec writes the result and closes
-                            // the stream INSIDE the lock (serialized provider
-                            // network), but does NOT wait for the client ack —
-                            // that barrier runs outside below.
-                            executeStreamingRun(req, dir, carriedApiKey)
-                        } else {
-                            // TF-J2: non-streaming worker beats liveness too.
-                            // start() is idempotent; the beat is stopped in the
-                            // OUTER finally (after finishRequestLocked writes the
-                            // terminal marker), so the main process — which cannot
-                            // read our /proc on a hidepid=invisible device — can
-                            // both see we are alive AND know we finished writing
-                            // only once the beat goes silent after terminal.
-                            heartbeat.start()
-                            ModelExecutionRunDir.writeReady(dir)
-                            val result = executeRun(req, dir, carriedApiKey)
-                            writeResultAtomically(dir, result)
-                            Log.i(TAG, "result written ($result.length bytes), pid=${android.os.Process.myPid()}")
-                        }
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "execution failed: ${t.message}", t)
+                        },
+                        onQueueSettled = {
+                            synchronized(lifecycleLock) { queuedRequests.decrementAndGet() }
+                        },
+                        onCancelled = { throw ModelExecutionStopException() },
+                        sender = {
+                            if (cancelFile.isFile) throw ModelExecutionStopException()
+                            val req = requestBody.jsonOrThrow()
+                            if (req.optBoolean("streaming", false)) {
+                                // TF-I: streaming exec writes the result and closes
+                                // the stream INSIDE the lock, but does NOT wait for
+                                // the client ack — that barrier runs outside below.
+                                executeStreamingRun(req, dir, carriedApiKey)
+                            } else {
+                                heartbeat.start()
+                                ModelExecutionRunDir.writeReady(dir)
+                                // The non-streaming execution wrapper owns its
+                                // run-scoped watcher and awaits provider transport.
+                                executeRun(req, dir, carriedApiKey)
+                                Log.i(TAG, "result written, pid=${android.os.Process.myPid()}")
+                            }
+                        },
+                    )
+                } catch (t: Throwable) {
+                    val cancelled = t is ModelExecutionStopException
+                    Log.w(TAG, "execution failed: ${t.message}", t)
+                    if (cancelled) {
+                        writeCancelledRun(dir, isStreaming)
+                    } else {
                         try {
                             writeResultAtomically(dir, JSONObject().apply {
                                 put("error", "model_use_failed")
@@ -462,10 +472,7 @@ class ModelExecutionService : Service() {
                             }.toString())
                         } catch (_: Throwable) {}
                     }
-                } finally {
-                    executionSlots.release()
                 }
-
 
                 // ── TF-I: the ACK barrier + finalize run OUTSIDE the mutex ──
                 // The client must have consumed the result/stream before we
@@ -479,7 +486,6 @@ class ModelExecutionService : Service() {
                 // call, never to a sleeping ack-wait. finalize must run after
                 // the barrier so its quiescence check sees the released (or
                 // held-on-timeout) ACK token.
-                val isStreaming = requestBody.streamingFlagOrFalse()
                 try {
                     if (isStreaming) {
                         awaitStreamAckBarrier(dir)
@@ -680,6 +686,10 @@ class ModelExecutionService : Service() {
         val ack = File(dir, ModelExecutionMailbox.FILE_CLIENT_ACK)
         while (System.currentTimeMillis() < deadline) {
             if (ack.exists()) return
+            if (File(dir, ABANDON_FILE).isFile) {
+                runCatching { File(dir, ABANDON_ACK_FILE).createNewFile() }
+                return
+            }
             try { Thread.sleep(ACK_POLL_MS) } catch (_: InterruptedException) { return }
         }
         Log.w(TAG, "client ack timeout (${timeoutMs}ms) on run ${dir.name} — proceeding anyway")
@@ -702,6 +712,32 @@ class ModelExecutionService : Service() {
             // defensive: copy + delete instead of leaving a broken result.
             tmp.copyTo(target, overwrite = true)
             tmp.delete()
+        }
+    }
+
+    /**
+     * Publish one worker-owned cancellation result for queued or non-streaming
+     * requests. The cancel ACK is only a signal that the worker observed the
+     * request; directory reclamation still waits for result/terminal and worker
+     * exit in the existing client protocol.
+     */
+    private fun writeCancelledRun(dir: File, streaming: Boolean) {
+        if (streaming) {
+            runCatching {
+                java.io.FileWriter(File(dir, STREAM_FILE), true).use { writer ->
+                    writer.append(ChatStreamJsonl.errorLine("cancelled", ChatStreamErrorPolicyKind.KIND_TRANSIENT))
+                        .append('\n')
+                }
+            }
+        }
+        runCatching { ModelExecutionMailbox.writeCancelAck(dir) }
+        runCatching {
+            writeResultAtomically(dir, JSONObject().apply {
+                put("cancelled", true)
+                put("error", "model_use_cancelled")
+                put("message", "The offload request was cancelled.")
+                put("exit_code", 1)
+            }.toString())
         }
     }
 
@@ -827,7 +863,21 @@ class ModelExecutionService : Service() {
         }
     }
 
+    // Non-suspend entrypoint kept for the frozen shape gates, and the body stays
+    // lexically inside it (modeluse_proto_single_source_check requires
+    // `provider.sendMessage(` here). The child runBlocking owns the run-scoped
+    // cancel watcher; `publish` is the single result-CAS winner.
     private fun executeRun(req: JSONObject, dir: File, carriedApiKey: String = ""): String {
+        val cancelFile = File(dir, CANCEL_FILE)
+        val cancelRace = ModelExecutionCancellationRace()
+        return try {
+            kotlinx.coroutines.runBlocking {
+                withModelExecutionCancellation(
+                    cancelFile = cancelFile,
+                    pollMs = CANCEL_POLL_MS,
+                    cancellation = { ModelExecutionStopException() },
+                    race = cancelRace,
+                    block = { ensureBeforeDispatch ->
         // [ISSUE-12a] `req` is pre-parsed by the caller (CapturedRequestBody) —
         // the duplicate parse of the multi-MB body is gone.
         // Decode once for this request, never publish into the process-wide UI cache.
@@ -967,7 +1017,7 @@ class ModelExecutionService : Service() {
             // poisoned process alive past the retry budget) shows the user why
             // instead of a bare `stale_key_cache`. exit_code stays the default
             // 1 (runtime failure) — 2 means "invalid args" in this CLI family.
-            return JSONObject().apply {
+            return@withModelExecutionCancellation JSONObject().apply {
                 put("error", WorkerKeyFreshness.STALE_KEY_CACHE)
                 put(
                     "message",
@@ -978,12 +1028,12 @@ class ModelExecutionService : Service() {
         }
         val apiKey = WorkerKeyHandoff.pickKey(carriedApiKey) {
             try {
-                com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
+                com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this@ModelExecutionService, "provider_secrets")
                     .getString("apikey_${instance.id}", null)
             } catch (_: Exception) { null }
         }
         if (apiKey.isEmpty()) {
-            return JSONObject().apply {
+            return@withModelExecutionCancellation JSONObject().apply {
                 put("error", "missing_api_key")
                 put("message", "No API key configured for ${instance.label}.")
                 put("exit_code", 2)
@@ -991,8 +1041,9 @@ class ModelExecutionService : Service() {
         }
 
         // ── Build provider ──
+        ensureBeforeDispatch()
         val provider = com.rikkaminis.app.provider.ProviderFactory.create(
-            instance = instance, apiKey = apiKey, model = model, context = this,
+            instance = instance, apiKey = apiKey, model = model, context = this@ModelExecutionService,
             requestThinkingRules = requestThinkingRules,
         )
         // [FIX-1 / F-191] Same cross-process stamp as the streaming path above.
@@ -1010,6 +1061,9 @@ class ModelExecutionService : Service() {
                 ?.fastModeOverride = req.optBoolean("fast_mode")
         }
 
+        // A stop may arrive while ProviderFactory performs synchronous setup.
+        // Recheck before preparing payloads or entering any transport.
+        ensureBeforeDispatch()
         // ── Passthrough extras ──
         val inputJson = req.optString("input_json", "")
         val callWarnings = mutableListOf<String>()
@@ -1050,11 +1104,11 @@ class ModelExecutionService : Service() {
         val passthroughReq = req.optJSONObject("passthrough_request")
         if (passthroughReq != null) {
             if (openAI == null) {
-                return JSONObject().put("error", "passthrough_unsupported")
+                return@withModelExecutionCancellation JSONObject().put("error", "passthrough_unsupported")
                     .put("message", "passthrough mode requires an OpenAI-compatible provider instance")
                     .toString()
             }
-            return try {
+            return@withModelExecutionCancellation try {
                 val ptBody = passthroughReq.opt("body")?.takeIf { it != JSONObject.NULL } as? JSONObject
                 val ptHeaders = LinkedHashMap<String, String>()
                 passthroughReq.optJSONObject("headers")?.let { h ->
@@ -1063,14 +1117,13 @@ class ModelExecutionService : Service() {
                         if (v is String) ptHeaders[k] = v
                     }
                 }
-                val ptResult = runBlocking {
-                    openAI.rawPassthroughRequest(
-                        endpoint = passthroughReq.optString("endpoint", "").ifEmpty { null },
-                        method = passthroughReq.optString("method", "POST"),
-                        headers = ptHeaders,
-                        bodyObject = ptBody,
-                    )
-                }
+                ensureBeforeDispatch()
+                val ptResult = openAI.rawPassthroughRequest(
+                    endpoint = passthroughReq.optString("endpoint", "").ifEmpty { null },
+                    method = passthroughReq.optString("method", "POST"),
+                    headers = ptHeaders,
+                    bodyObject = ptBody,
+                )
                 JSONObject()
                     .put("passthrough", true)
                     .put("http_status", ptResult.status)
@@ -1080,6 +1133,7 @@ class ModelExecutionService : Service() {
                     .put("body_b64", Base64.encodeToString(ptResult.data, Base64.NO_WRAP))
                     .toString()
             } catch (t: Throwable) {
+                if (isExplicitWorkerCancellation(cancelRace)) throw t
                 JSONObject().put("error", "passthrough_failed")
                     .put("message", t.message ?: "passthrough request failed")
                     .toString()
@@ -1107,7 +1161,7 @@ class ModelExecutionService : Service() {
             endpointOverride = imageConfig.endpointOverride,
         )
         if (imageRoute is ModelUseProtocol.ImageRoute.Reject) {
-            return JSONObject().apply {
+            return@withModelExecutionCancellation JSONObject().apply {
                 put("error", imageRoute.error)
                 put("message", imageRoute.message)
                 put("exit_code", 2)
@@ -1125,13 +1179,12 @@ class ModelExecutionService : Service() {
                 // auto → a route-missing 4xx is a cacheable "no Images API".
                 val forced = imageRoute.mode == com.rikkaminis.app.data.model.ImageEndpointMode.imagesGenerations
                 try {
-                    val imgResult = runBlocking {
-                        openAI.generateImage(prompt, imageConfig.n, imageConfig.size, imageConfig.quality)
-                    }
+                    ensureBeforeDispatch()
+                    val imgResult = openAI.generateImage(prompt, imageConfig.n, imageConfig.size, imageConfig.quality)
                     if (!forced) {
                         imageEndpointCache = com.rikkaminis.app.data.model.ImageEndpointMode.imagesGenerations
                     }
-                    return JSONObject().apply {
+                    return@withModelExecutionCancellation JSONObject().apply {
                         put("model", model.id)
                         put("text", imgResult.text)
                         imgResult.usage?.let { u ->
@@ -1155,6 +1208,7 @@ class ModelExecutionService : Service() {
                         put("exit_code", 0)
                     }.toString()
                 } catch (t: Throwable) {
+                    if (isExplicitWorkerCancellation(cancelRace)) throw t
                     val routeMissing = !forced &&
                         (t is com.rikkaminis.app.data.model.LLMError.ProviderError ||
                             t is com.rikkaminis.app.data.model.LLMError.InvalidApiKey) &&
@@ -1174,7 +1228,7 @@ class ModelExecutionService : Service() {
                             outputModalities = model.outputModalities.orEmpty(),
                         )
                         val base = t.message ?: "image_generation_failed"
-                        return JSONObject().apply {
+                        return@withModelExecutionCancellation JSONObject().apply {
                             put("error", "image_generation_failed")
                             put("message", if (hint.isEmpty()) base else "$base\n\n$hint")
                             put("exit_code", 1)
@@ -1193,8 +1247,8 @@ class ModelExecutionService : Service() {
         // model ran with reasoning explicitly disabled.
         val thinkingLevel = thinkingLevelFromWire(req.optString("thinking_level", ""))
         val response = try {
-            runBlocking {
-                provider.sendMessage(
+            ensureBeforeDispatch()
+            provider.sendMessage(
                     messages = messages,
                     systemPrompt = systemPrompt,
                     maxTokens = maxTokens,
@@ -1208,18 +1262,12 @@ class ModelExecutionService : Service() {
                     tools = parseToolsJson(req.optJSONArray("tools")),
                     thinkingLevel = thinkingLevel,
                 )
-            }
         } catch (e: Throwable) {
             Log.w(TAG, "sendMessage failed: ${e.message}", e)
-            return JSONObject().apply {
-                put("error", "model_use_failed")
-                put("message", e.message ?: "unknown")
-                imageEndpointCache?.let { put("image_endpoint_resolved", it.name) }
-                put("exit_code", 1)
-            }.toString()
+            return@withModelExecutionCancellation nonStreamingFailureResult(e, cancelRace, imageEndpointCache?.name)
         }
 
-        return JSONObject().apply {
+        return@withModelExecutionCancellation JSONObject().apply {
             put("model", model.id)
             put("text", response.text)
             response.stopReason?.let { put("stop_reason", it) }
@@ -1245,6 +1293,15 @@ class ModelExecutionService : Service() {
             imageEndpointCache?.let { put("image_endpoint_resolved", it.name) }
             put("exit_code", 0)
         }.toString()
+
+                    },
+                    publish = { completed -> writeResultAtomically(dir, completed) },
+                )
+            }
+        } catch (t: Throwable) {
+            if (isExplicitWorkerCancellation(cancelRace)) throw ModelExecutionStopException()
+            throw t
+        }
     }
 
     /**
