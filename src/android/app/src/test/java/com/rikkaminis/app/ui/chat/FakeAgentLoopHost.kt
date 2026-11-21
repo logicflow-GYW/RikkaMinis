@@ -3,6 +3,7 @@ package com.rikkaminis.app.ui.chat
 import com.rikkaminis.app.agent.ToolLoopDetector
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
+import com.rikkaminis.app.data.model.AnthropicReplay
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.LLMStreamChunk
@@ -85,6 +86,8 @@ internal class FakeAgentLoopHost(
     val persistedTurns = mutableListOf<PersistedTurn>()
     val persistedToolResults = mutableListOf<List<String>>()
     val updatedPersistedTurns = mutableListOf<Pair<String, Int>>() // dbId to part count
+    val persistedReplays = mutableListOf<Pair<String, AnthropicReplay?>>()
+    val updatedReplays = mutableListOf<Pair<String, AnthropicReplay?>>()
     val toolExecutions = mutableListOf<ToolExecution>()
     val buildTurnPartsCalls = mutableListOf<Pair<Int, Int>>() // turnStartBlockIndex to allToolBlocks.size
     val inlineErrors = mutableListOf<String>()
@@ -238,6 +241,7 @@ internal class FakeAgentLoopHost(
         modelId: String?,
         entryId: String?,
         stableId: String?,
+        anthropicReplay: AnthropicReplay?,
     ): String? {
         // Production contract (InterruptedTailDetector.kt:30, TurnAnswerPick.kt:10):
         // persistAssistantTurn drops an assistant row that has no parts. Model it,
@@ -248,6 +252,7 @@ internal class FakeAgentLoopHost(
         }
         val dbId = "db-${++dbCounter}"
         persistedTurns.add(PersistedTurn(dbId, parts.map { it.kindLabel() }, usage, reasoningContent, modelId, entryId))
+        persistedReplays.add(dbId to anthropicReplay)
         record("persistAssistantTurn#$dbId")
         return dbId
     }
@@ -255,8 +260,10 @@ internal class FakeAgentLoopHost(
         dbId: String,
         parts: List<AgentContentPart>,
         toolBlockMeta: Map<String, AssistantBlock>,
+        anthropicReplay: AnthropicReplay?,
     ) {
         updatedPersistedTurns.add(dbId to parts.size)
+        updatedReplays.add(dbId to anthropicReplay)
         record("updatePersistedAssistantTurn($dbId)")
     }
     override suspend fun persistToolResultMessage(
