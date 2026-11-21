@@ -942,45 +942,7 @@ class ModelExecutionService : Service() {
         )
 
         // ── Reconstruct messages ──
-        val messages = jsonObjList(req.optJSONArray("messages")).map { obj ->
-            com.rikkaminis.app.data.model.LLMMessage(
-                role = try {
-                    com.rikkaminis.app.data.model.LLMMessage.Role.valueOf(
-                        obj.getString("role").uppercase()
-                    )
-                } catch (_: Exception) {
-                    com.rikkaminis.app.data.model.LLMMessage.Role.USER
-                },
-                content = obj.optString("content", ""),
-                // [T-worker-reasoning-content-roundtrip] Read back the
-                // reasoning_content serialized by ModelExecutionDispatcher —
-                // WITHOUT this, every offloaded request (chat streaming /
-                // titles / compaction / QuickTest) loses the assistant turns'
-                // captured reasoning, and DeepSeek V4 (thinking on +
-                // tool_calls in history) 400s with "The 'reasoning_content'
-                // in the thinking mode must be passed back to the API".
-                // Empty string is meaningful (field-presence signal) — only
-                // a MISSING key maps to null.
-                reasoningContent = obj.optString("reasoning_content", "").let {
-                    if (it.isEmpty() && !obj.has("reasoning_content")) null else it
-                },
-                // [fix/audit-s3m1] Non-streaming executeRun now parses
-                // contentParts exactly like the streaming path (:870) — the
-                // dispatcher serializes contentParts (buildRequestJson :95),
-                // and previously tool results / images carried as parts were
-                // silently dropped here, so non-streaming turns (title
-                // generation / compaction / QuickTest) saw text only.
-                contentParts = parseContentParts(obj),
-                audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
-                    val b64 = a.optString("data", "")
-                    if (b64.isEmpty()) null
-                    else com.rikkaminis.app.data.model.LLMMessage.AudioPart(
-                        format = a.optString("format", "wav"),
-                        base64Data = b64,
-                    )
-                },
-            )
-        }
+        val messages = readNonStreamingMessages(req.optJSONArray("messages"))
         val systemPrompt = req.optString("system_prompt", "").ifEmpty { null }
         val maxTokens = req.optInt("max_tokens", 4096)
         val temperature = if (req.has("temperature")) {
@@ -1267,32 +1229,9 @@ class ModelExecutionService : Service() {
             return@withModelExecutionCancellation nonStreamingFailureResult(e, cancelRace, imageEndpointCache?.name)
         }
 
-        return@withModelExecutionCancellation JSONObject().apply {
-            put("model", model.id)
-            put("text", response.text)
-            response.stopReason?.let { put("stop_reason", it) }
-            response.usage?.let { u ->
-                put("usage", JSONObject().apply {
-                    put("input_tokens", u.inputTokens)
-                    put("output_tokens", u.outputTokens)
-                })
-            }
-            put("media_files", JSONArray().apply {
-                response.mediaAttachments.forEach { m ->
-                    put(JSONObject().apply {
-                        put("type", m.type.value)
-                        put("mime_type", m.mimeType)
-                        put("data", android.util.Base64.encodeToString(m.data, android.util.Base64.NO_WRAP))
-                    })
-                }
-            })
-            if (appliedExtras.length() > 0) put("applied_extras", appliedExtras)
-            if (callWarnings.isNotEmpty()) put("warnings", JSONArray(callWarnings))
-            // [fix/audit3-1015 F-10] The auto probe's answer rides home with the
-            // chat result; :app persists it (this process must not touch prefs).
-            imageEndpointCache?.let { put("image_endpoint_resolved", it.name) }
-            put("exit_code", 0)
-        }.toString()
+        return@withModelExecutionCancellation buildNonStreamingResult(
+            model.id, response, appliedExtras, callWarnings, imageEndpointCache,
+        )
 
                     },
                     publish = { completed -> writeResultAtomically(dir, completed) },
@@ -1400,33 +1339,7 @@ class ModelExecutionService : Service() {
             )
 
             // ── Reconstruct messages ──
-            val messages = jsonObjList(req.optJSONArray("messages")).map { obj ->
-                com.rikkaminis.app.data.model.LLMMessage(
-                    role = try {
-                        com.rikkaminis.app.data.model.LLMMessage.Role.valueOf(
-                            obj.getString("role").uppercase()
-                        )
-                    } catch (_: Exception) {
-                        com.rikkaminis.app.data.model.LLMMessage.Role.USER
-                    },
-                    content = obj.optString("content", ""),
-                    // [T-worker-reasoning-content-roundtrip] Same read-back as
-                    // executeRun: missing key → null, present (even "") → keep.
-                    // See the full rationale at the executeRun reconstruction.
-                    reasoningContent = obj.optString("reasoning_content", "").let {
-                        if (it.isEmpty() && !obj.has("reasoning_content")) null else it
-                    },
-                    contentParts = parseContentParts(obj),
-                    audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
-                        val b64 = a.optString("data", "")
-                        if (b64.isEmpty()) null
-                        else com.rikkaminis.app.data.model.LLMMessage.AudioPart(
-                            format = a.optString("format", "wav"),
-                            base64Data = b64,
-                        )
-                    },
-                )
-            }
+            val messages = readStreamingMessages(req.optJSONArray("messages"))
             val systemPrompt = req.optString("system_prompt", "").ifEmpty { null }
             val maxTokens = req.optInt("max_tokens", 4096)
             val temperature = if (req.has("temperature")) {
@@ -1894,6 +1807,111 @@ class ModelExecutionService : Service() {
      */
     private class ModelExecutionCancelledException : kotlinx.coroutines.CancellationException("cancelled")
 
+    internal fun readNonStreamingMessages(wireMessages: JSONArray?): List<com.rikkaminis.app.data.model.LLMMessage> =
+        jsonObjList(wireMessages).mapIndexed { index, obj ->
+            com.rikkaminis.app.data.model.LLMMessage(
+                role = try {
+                    com.rikkaminis.app.data.model.LLMMessage.Role.valueOf(
+                        obj.getString("role").uppercase()
+                    )
+                } catch (_: Exception) {
+                    com.rikkaminis.app.data.model.LLMMessage.Role.USER
+                },
+                content = obj.optString("content", ""),
+                // [T-worker-reasoning-content-roundtrip] Read back the
+                // reasoning_content serialized by ModelExecutionDispatcher —
+                // WITHOUT this, every offloaded request (chat streaming /
+                // titles / compaction / QuickTest) loses the assistant turns'
+                // captured reasoning, and DeepSeek V4 (thinking on +
+                // tool_calls in history) 400s with "The 'reasoning_content'
+                // in the thinking mode must be passed back to the API".
+                // Empty string is meaningful (field-presence signal) — only
+                // a MISSING key maps to null.
+                reasoningContent = obj.optString("reasoning_content", "").let {
+                    if (it.isEmpty() && !obj.has("reasoning_content")) null else it
+                },
+                // [fix/audit-s3m1] Non-streaming executeRun now parses
+                // contentParts exactly like the streaming path (:870) — the
+                // dispatcher serializes contentParts (buildRequestJson :95),
+                // and previously tool results / images carried as parts were
+                // silently dropped here, so non-streaming turns (title
+                // generation / compaction / QuickTest) saw text only.
+                contentParts = parseContentParts(obj),
+                anthropicReplay = AnthropicReplayIpc.messageReplay(wireMessages, index),
+                audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
+                    val b64 = a.optString("data", "")
+                    if (b64.isEmpty()) null
+                    else com.rikkaminis.app.data.model.LLMMessage.AudioPart(
+                        format = a.optString("format", "wav"),
+                        base64Data = b64,
+                    )
+                },
+            )
+        }
+
+    internal fun readStreamingMessages(wireMessages: JSONArray?): List<com.rikkaminis.app.data.model.LLMMessage> =
+        jsonObjList(wireMessages).mapIndexed { index, obj ->
+            com.rikkaminis.app.data.model.LLMMessage(
+                role = try {
+                    com.rikkaminis.app.data.model.LLMMessage.Role.valueOf(
+                        obj.getString("role").uppercase()
+                    )
+                } catch (_: Exception) {
+                    com.rikkaminis.app.data.model.LLMMessage.Role.USER
+                },
+                content = obj.optString("content", ""),
+                // [T-worker-reasoning-content-roundtrip] Same read-back as
+                // executeRun: missing key → null, present (even "") → keep.
+                // See the full rationale at the executeRun reconstruction.
+                reasoningContent = obj.optString("reasoning_content", "").let {
+                    if (it.isEmpty() && !obj.has("reasoning_content")) null else it
+                },
+                contentParts = parseContentParts(obj),
+                anthropicReplay = AnthropicReplayIpc.messageReplay(wireMessages, index),
+                audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
+                    val b64 = a.optString("data", "")
+                    if (b64.isEmpty()) null
+                    else com.rikkaminis.app.data.model.LLMMessage.AudioPart(
+                        format = a.optString("format", "wav"),
+                        base64Data = b64,
+                    )
+                },
+            )
+        }
+
+    internal fun buildNonStreamingResult(
+        modelId: String,
+        response: com.rikkaminis.app.data.model.LLMResponse,
+        appliedExtras: JSONObject,
+        callWarnings: List<String>,
+        imageEndpointCache: com.rikkaminis.app.data.model.ImageEndpointMode?,
+    ): String = AnthropicReplayIpc.encodeResult(JSONObject().apply {
+        put("model", modelId)
+        put("text", response.text)
+        response.stopReason?.let { put("stop_reason", it) }
+        response.usage?.let { u ->
+            put("usage", JSONObject().apply {
+                put("input_tokens", u.inputTokens)
+                put("output_tokens", u.outputTokens)
+            })
+        }
+        put("media_files", JSONArray().apply {
+            response.mediaAttachments.forEach { m ->
+                put(JSONObject().apply {
+                    put("type", m.type.value)
+                    put("mime_type", m.mimeType)
+                    put("data", java.util.Base64.getEncoder().encodeToString(m.data))
+                })
+            }
+        })
+        if (appliedExtras.length() > 0) put("applied_extras", appliedExtras)
+        if (callWarnings.isNotEmpty()) put("warnings", JSONArray(callWarnings))
+        // [fix/audit3-1015 F-10] The auto probe's answer rides home with the
+        // chat result; :app persists it (this process must not touch prefs).
+        imageEndpointCache?.let { put("image_endpoint_resolved", it.name) }
+        put("exit_code", 0)
+    }, response.anthropicReplay)
+
     private fun parseContentParts(o: JSONObject): List<com.rikkaminis.app.data.model.AgentContentPart> {
         val parts = mutableListOf<com.rikkaminis.app.data.model.AgentContentPart>()
         o.optJSONArray("contentParts")?.let { arr ->
@@ -2151,7 +2169,7 @@ private class LivenessHeartbeat(
  */
 
 /**
- * [ISSUE-12a] One run's request body, read from disk and parsed exactly once.
+ * [ISSUE-12a] One run's request body, read once and captured before either executor.
  *
  * The old flow read `request.json` three times (queue-frame decision, formal
  * read, ack-barrier decision) and parsed it at each site — 2 redundant reads
@@ -2187,8 +2205,8 @@ internal class CapturedRequestBody private constructor(
     fun jsonOrThrow(): JSONObject = json.getOrThrow()
 
     companion object {
-        /** Reads via [read] exactly once and parses exactly once. */
+        /** Reads via [read] exactly once; optional replay is decoded at this raw boundary. */
         fun capture(read: () -> String): CapturedRequestBody =
-            CapturedRequestBody(runCatching { JSONObject(read()) })
+            CapturedRequestBody(runCatching { AnthropicReplayIpc.parseRequest(read()) })
     }
 }
