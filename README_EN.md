@@ -65,9 +65,10 @@ Verify a download with `python3 scripts/apk_cert_sha256.py <apk>`.
 ## What this fork changes
 
 This started as a build-only fork and now maintains Android features and
-reliability. The [Nov 18–19, 2026 stability review](docs/stability/2026-11-19-review.md)
+reliability. The [Nov 20–22, 2026 protocol pass](docs/stability/2026-11-22-surgery-final.md)
 (in Chinese) records what changed, what was verified, and what still needs
-on-device confirmation.
+on-device confirmation; the entry, bypass symptom and guarding test for each
+cross-boundary rule are in [protocol invariants](docs/stability/protocol-invariants.md).
 
 ### App changes
 
@@ -354,7 +355,7 @@ Tokens are only used for authenticating those explicit requests.
 
 **→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System overview and complexity boundaries (what is inherited and what this fork owns).
 
-**→ [Stability review](docs/stability/2026-11-19-review.md)** — Recent hardening, release status, and verification boundaries.
+**→ [Stability review](docs/stability/2026-11-22-surgery-final.md)** — Latest cross-cutting pass, release status, and verification boundaries; read [protocol invariants](docs/stability/protocol-invariants.md) before touching the boundaries.
 
 **→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — ready-made
 skills. Skills built for Claude, Codex, OpenClaw or Hermes Agent generally run

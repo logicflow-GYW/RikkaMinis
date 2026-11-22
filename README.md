@@ -55,8 +55,10 @@ SHA-256  AD:DF:D7:C6:56:06:EB:E7:05:07:5B:2E:B1:9C:A7:B8
 ## 这个 fork 改了什么
 
 起初这是一个纯构建 fork，现在也维护 Android 端的功能和可靠性。
-[2026-11-18～19 稳定性复盘](docs/stability/2026-11-19-review.md)记录了最近一轮
-修了什么、哪些验证已经完成、哪些场景仍待真机确认。
+[2026-11-20～22 协议整理](docs/stability/2026-11-22-surgery-final.md)记录了最近一轮
+跨域改动：回合提交、取消、恢复、调度与 Provider 终态各自变成了显式协议，
+每条的入口、绕过症状和守卫测试见[跨边界协议不变量](docs/stability/protocol-invariants.md)。
+[2026-11-18～19 稳定性复盘](docs/stability/2026-11-19-review.md)是上一轮。
 
 ### 应用改动
 
@@ -276,7 +278,7 @@ token 只用于这些显式请求的鉴权。
 
 **→ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — 系统全貌与复杂度边界（哪些是继承的、哪些是本 fork 自写的）。
 
-**→ [稳定性复盘](docs/stability/2026-11-19-review.md)** — 最近一轮稳定化、发布状态与验证边界。
+**→ [稳定性复盘](docs/stability/2026-11-22-surgery-final.md)** — 最近一轮跨域改动、发布状态与验证边界；改代码前先看[跨边界协议不变量](docs/stability/protocol-invariants.md)。
 
 **→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — 现成技能。
 为 Claude、Codex、OpenClaw 或 Hermes Agent 构建的技能通常可以直接在 Minis 中运行。
