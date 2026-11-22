@@ -190,9 +190,23 @@ def row_identity(code, pos, kind):
 
 
 def commit_settles(code, pos, hi, identity):
-    """Is there a feasible commit after `pos` that settles exactly `identity`?"""
+    """Is there a feasible commit after `pos` that settles exactly `identity`?
+
+    [fix/protocol-gate-teeth-1122 F2, second pass] Matching the identity alone is
+    still not the invariant when two sites bind the SAME name. Measured on the
+    real tree: the stream-interrupted site (L3295) and the content-filtered site
+    (L3409) both bind `carriedRowId`, so deleting L3295's commit left L3409's
+    sibling commit satisfying the identity match and the gate stayed at rc=0.
+    A row is settled by a commit that belongs to ITS OWN site, so the search
+    window ends at the next write site: a commit after that belongs to the
+    neighbour, not to this row.
+    """
+    window_hi = hi
+    for wpos, _wkind in write_sites(code):
+        if pos < wpos < window_hi:
+            window_hi = wpos
     for cpos in call_positions(code, "commitTranscriptRow"):
-        if not (pos < cpos < hi):
+        if not (pos < cpos < window_hi):
             continue
         if not path_feasible(code, cpos, {}):
             continue
