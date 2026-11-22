@@ -159,7 +159,6 @@
     <string name="token_usage_context_window_group_limit">（グループ上限 %1$s）</string>
     <string name="token_usage_context_window_group_limit_applied">（グループ上限に基づく %1$s）</string>
     <string name="token_usage_context_window_heuristic_warning">モデルが実際のコンテキストウィンドウを報告していません。これは推測値です。モデル詳細画面で修正してください。</string>
-    <string name="token_usage_context_window_group_unlimited">（無制限）</string>
     <string name="token_usage_max_output">最大出力</string>
     <string name="context_full_dialog_title">コンテキスト上限</string>
     <string name="context_full_dialog_body">会話コンテキストが上限に達しました。続けるには新しいチャットを開始するか、チャットをクリアしてください。下書きは保存されています — キャンセルで復元します。</string>
@@ -1391,10 +1390,9 @@
     <string name="model_group_detail_thinking_ultra">ウルトラ</string>
     <string name="model_group_detail_limit_context_window">コンテキストウィンドウを制限</string>
     <string name="model_group_detail_max_context">最大コンテキスト</string>
-    <string name="model_group_detail_unlimited">無制限</string>
     <string name="model_group_detail_custom_context">カスタム…</string>
     <string name="model_group_detail_custom_context_title">カスタムコンテキスト上限</string>
-    <string name="model_group_detail_custom_context_input">コンテキスト上限（トークン）</string>
+    <string name="model_group_detail_custom_context_input">コンテキスト上限（K トークン）</string>
     <string name="model_group_detail_custom_context_range">最低 64,000 トークン</string>
     <string name="add_provider_subtitle_openai">OpenAI と、DeepSeek、Moonshot、Groq などの互換サービスに対応</string>
     <string name="add_provider_subtitle_anthropic">ClaudeおよびAnthropicプロトコル互換サービスで動作します</string>

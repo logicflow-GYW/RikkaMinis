@@ -54,12 +54,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
@@ -616,11 +614,15 @@ fun ModelGroupDetailScreen(
                             }
                         }
                     }
-                    val contextEnabled = contextLimitTokens != null
+                    // Legacy Int.MAX_VALUE was the retired "Unlimited" stop.
+                    // Treat it as the switch being off (no group override)
+                    // without rewriting the persisted config.
+                    val contextEnabled = contextLimitTokens != null &&
+                        !ContextLimitLadder.isLegacyUnlimited(contextLimitTokens)
                     // T-android-ctx-slider-cap (port iOS fa77f493): the slider
-                    // is a fixed five-stop ladder plus custom/unlimited,
-                    // decoupled from member-model metadata. We no longer derive
-                    // an `unlimitedTokens` cap from `max(member.contextWindow)`,
+                    // is a fixed five-stop ladder plus custom, decoupled from
+                    // member-model metadata. We no longer derive an
+                    // `unlimitedTokens` cap from `max(member.contextWindow)`,
                     // because that field is unreliable (image-output / router
                     // models report no window, falling through to the 128K
                     // heuristic default) and silently shrunk the picker.
@@ -644,6 +646,9 @@ fun ModelGroupDetailScreen(
                                 // overwritten by the stale restore — the 1027-E
                                 // family ("stale snapshot write覆盖外部写入").
                                 val restored = currentGroup().lastContextLimitTokens
+                                    ?.takeIf {
+                                        it > 0 && !ContextLimitLadder.isLegacyUnlimited(it)
+                                    }
                                     ?: DEFAULT_GROUP_CONTEXT_LIMIT_TOKENS
                                 contextLimitTokens = restored
                                 providerRepository.updateGroup(
@@ -678,7 +683,6 @@ fun ModelGroupDetailScreen(
                     if (contextEnabled) {
                         ContextLimitSlider(
                             value = contextLimitTokens,
-                            unlimitedLabel = stringResource(R.string.model_group_detail_unlimited),
                             customLabel = stringResource(R.string.model_group_detail_custom_context),
                             customDialogTitle = stringResource(R.string.model_group_detail_custom_context_title),
                             customInputLabel = stringResource(R.string.model_group_detail_custom_context_input),
@@ -792,8 +796,8 @@ fun ModelGroupDetailScreen(
 }
 
 /**
- * Discrete max-context slider. Fixed stops:
- * 64K / 128K / 256K / 512K / 1M / Custom… / Unlimited.
+ * Discrete max-context slider. Stops:
+ * 64K / 128K / 256K / 512K / 1M / Custom…
  *
  * The ladder is always shown verbatim regardless of which models (if any) are
  * in the group. Model metadata is unreliable (e.g. image-output / router models
@@ -804,18 +808,11 @@ fun ModelGroupDetailScreen(
  * the entire family of bugs where adding/removing a model silently changed the
  * picker.
  *
- * Every stop carries its own label so the ladder is readable at a glance;
- * the selected stop is emphasized. The custom stop always reads "Custom…" to
- * identify the level, while the header shows the selected exact count
- * ("800,000") — a user-entered token count is never rewritten as a K/M
- * approximation. Selecting custom does not write anything until the dialog is
- * confirmed, and cancelling restores the slider to the persisted value.
- *
- * The "Unlimited" stop maps to `Int.MAX_VALUE` in the binding; the runtime
- * consumer treats anything `>= Int.MAX_VALUE` as "no override, use the
- * model's native window".
+ * The trailing custom stop is the only non-fixed value. Selecting it opens the
+ * K-unit dialog without writing anything; confirmation stores the token count
+ * and cancelling restores the persisted value. Turning the whole group limit
+ * off is the only "no override" path — there is no Unlimited stop.
  */
-private const val CONTEXT_LIMIT_UNLIMITED_SENTINEL: Int = Int.MAX_VALUE
 private const val CONTEXT_LIMIT_CUSTOM_STEP_TOKEN: Int = -1
 
 private data class ContextLimitStep(
@@ -826,7 +823,6 @@ private data class ContextLimitStep(
 @Composable
 private fun ContextLimitSlider(
     value: Int?,
-    unlimitedLabel: String,
     customLabel: String,
     customDialogTitle: String,
     customInputLabel: String,
@@ -835,15 +831,14 @@ private fun ContextLimitSlider(
     onValueChange: (Int) -> Unit,
 ) {
     val customValue = value?.takeIf { ContextLimitLadder.isCustomValue(it) }
-    val steps = remember(unlimitedLabel, customLabel) {
+    val steps = remember(customLabel) {
         ContextLimitLadder.presets.map { ContextLimitStep(ContextLimitLadder.label(it), it) } +
-            ContextLimitStep(customLabel, CONTEXT_LIMIT_CUSTOM_STEP_TOKEN) +
-            ContextLimitStep(unlimitedLabel, CONTEXT_LIMIT_UNLIMITED_SENTINEL)
+            ContextLimitStep(customLabel, CONTEXT_LIMIT_CUSTOM_STEP_TOKEN)
     }
-    val customIndex = steps.size - 2
+    val customIndex = steps.lastIndex
 
     fun indexFor(v: Int?): Int =
-        ContextLimitLadder.stepIndexFor(v, customIndex, steps.lastIndex)
+        ContextLimitLadder.stepIndexFor(v, customIndex)
 
     // The selected stop is tracked locally so the custom stop can be previewed
     // (and cancelled) without writing a value. Any external value change
@@ -852,7 +847,7 @@ private fun ContextLimitSlider(
     var showCustomDialog by remember { mutableStateOf(false) }
     var customDraft by remember { mutableStateOf("") }
     val currentLabel: String = when {
-        value == null || value >= CONTEXT_LIMIT_UNLIMITED_SENTINEL -> unlimitedLabel
+        value == null || ContextLimitLadder.isLegacyUnlimited(value) -> customLabel
         ContextLimitLadder.isCustomValue(value) -> ContextLimitLadder.customLabel(value)
         else -> ContextLimitLadder.label(value)
     }
@@ -881,7 +876,9 @@ private fun ContextLimitSlider(
                 // while the thumb crosses the ladder makes "cancel custom"
                 // unable to restore the previous value.
                 if (selectedIndex == customIndex) {
-                    customDraft = customValue?.toString().orEmpty()
+                    customDraft = customValue
+                        ?.let(ContextLimitLadder::customInputValue)
+                        .orEmpty()
                     showCustomDialog = true
                 } else {
                     val tokens = steps[selectedIndex].tokens
@@ -892,11 +889,23 @@ private fun ContextLimitSlider(
             steps = (steps.size - 2).coerceAtLeast(0),
             modifier = Modifier.fillMaxWidth(),
         )
-        ContextLimitStopLabels(steps = steps, selectedIndex = selectedIndex)
+        Row {
+            Text(
+                steps.first().label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                customLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 
     if (showCustomDialog) {
-        val parsed = ContextLimitLadder.parseCustom(customDraft)
+        val parsed = ContextLimitLadder.parseCustomK(customDraft)
         fun dismissCustom() {
             showCustomDialog = false
             selectedIndex = indexFor(value)
@@ -909,14 +918,14 @@ private fun ContextLimitSlider(
                     OutlinedTextField(
                         value = customDraft,
                         onValueChange = { input ->
-                            customDraft = input.filter(Char::isDigit).take(10)
+                            customDraft = ContextLimitLadder.sanitizeCustomKInput(input)
                         },
                         label = { Text(customInputLabel) },
                         supportingText = { Text(customRangeLabel) },
                         singleLine = true,
                         isError = customDraft.isNotEmpty() && parsed == null,
                         keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Number,
+                            keyboardType = KeyboardType.Decimal,
                             imeAction = ImeAction.Done,
                         ),
                         keyboardActions = KeyboardActions(
@@ -950,56 +959,6 @@ private fun ContextLimitSlider(
                 }
             },
         )
-    }
-}
-
-/**
- * One label per discrete stop, placed at the stop's actual fraction of the
- * track instead of relying on equal-weight cells (which drift away from the
- * first/last ticks). Edge labels are clamped inside the row so "64K" and
- * "Unlimited" never clip on narrow screens. The selected stop is emphasized,
- * making the ladder's distinct levels visible rather than showing only the two
- * endpoints.
- */
-@Composable
-private fun ContextLimitStopLabels(
-    steps: List<ContextLimitStep>,
-    selectedIndex: Int,
-) {
-    Layout(
-        content = {
-            steps.forEachIndexed { index, step ->
-                val selected = index == selectedIndex
-                Text(
-                    text = step.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                )
-            }
-        },
-        modifier = Modifier.fillMaxWidth(),
-    ) { measurables, constraints ->
-        val placeables = measurables.map { it.measure(Constraints()) }
-        val width = constraints.maxWidth
-        val height = placeables.maxOfOrNull { it.height } ?: 0
-        layout(width, height) {
-            val lastIndex = placeables.lastIndex
-            placeables.forEachIndexed { index, placeable ->
-                val center = if (lastIndex <= 0) {
-                    width / 2
-                } else {
-                    (width.toLong() * index / lastIndex).toInt()
-                }
-                val x = (center - placeable.width / 2)
-                    .coerceIn(0, (width - placeable.width).coerceAtLeast(0))
-                placeable.placeRelative(x, 0)
-            }
-        }
     }
 }
 

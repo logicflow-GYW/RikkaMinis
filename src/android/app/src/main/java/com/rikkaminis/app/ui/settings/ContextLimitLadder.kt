@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
 import java.util.Locale
+import kotlin.math.roundToLong
 
 /**
  * Shared ladder logic for the group context-limit picker.
@@ -13,9 +14,12 @@ import java.util.Locale
  * stay reachable through the single custom stop instead of making the ladder a
  * catalogue of vendor marketing numbers.
  *
- * Values saved by older builds outside the preset list remain valid: the UI
- * maps them onto the custom stop and shows their real number. Only *new* custom
- * input is validated against [customMinTokens]..[customMaxTokens].
+ * There is no "unlimited" stop. Turning the group limit off is the only
+ * "no group override" path. Values saved by older builds as the old unlimited
+ * sentinel are treated as off at the UI boundary without rewriting config.
+ *
+ * Custom input is expressed in K: entering 800 stores 800,000 tokens and the
+ * value is displayed as "800K".
  */
 object ContextLimitLadder {
     const val customMinTokens: Int = 64_000
@@ -36,6 +40,10 @@ object ContextLimitLadder {
             tokens < Int.MAX_VALUE &&
             tokens !in presets
 
+    /** The retired "Unlimited" slider value. Legacy configs keep their bytes. */
+    fun isLegacyUnlimited(tokens: Int?): Boolean =
+        tokens != null && tokens >= Int.MAX_VALUE
+
     /** Compact label for a fixed stop: 64K, 128K, 256K, 512K, 1M. */
     fun label(tokens: Int): String {
         val (divisor, suffix) = if (tokens >= 1_000_000) {
@@ -49,29 +57,53 @@ object ContextLimitLadder {
         return "$amount$suffix"
     }
 
+    /** Custom values always use K, including values above one million. */
+    fun customLabel(tokens: Int): String = "${formatK(tokens)}K"
+
+    /** Pre-fills the K-unit dialog without its suffix. */
+    fun customInputValue(tokens: Int): String = formatK(tokens)
+
+    /** Allows digits and a single decimal point; grouping commas are dropped. */
+    fun sanitizeCustomKInput(raw: String): String {
+        val out = StringBuilder()
+        var hasDecimalPoint = false
+        for (ch in raw) {
+            when {
+                ch.isDigit() -> out.append(ch)
+                ch == '.' && !hasDecimalPoint -> {
+                    out.append('.')
+                    hasDecimalPoint = true
+                }
+            }
+        }
+        return out.toString().take(12)
+    }
+
     /**
-     * Custom values are shown as the exact token count. A user-entered value
-     * is not a K/M approximation: "200500" must not read as "200.5K" while the
-     * input field asks for tokens. Fixed stops keep their compact labels.
+     * Parses the K-unit dialog into tokens. A fractional K is valid
+     * (200.5 → 200,500 tokens), but the result must still fit the same
+     * 64K..Int.MAX_VALUE-1 range as storage.
      */
-    fun customLabel(tokens: Int): String =
-        String.format(Locale.US, "%,d", tokens)
+    fun parseCustomK(raw: String): Int? {
+        val k = raw.trim().toDoubleOrNull() ?: return null
+        if (!k.isFinite() || k < customMinTokens / 1000.0) return null
+        val tokens = (k * 1000.0).roundToLong()
+        if (tokens < customMinTokens || tokens > customMaxTokens) return null
+        return tokens.toInt()
+    }
 
     /**
      * Slider stop for a persisted value. Legacy values outside [presets]
      * (including 32K / 200K / 400K / 2M) land on [customIndex] without being
-     * rewritten; null and the unlimited sentinel map to [unlimitedIndex].
+     * rewritten.
      */
-    fun stepIndexFor(tokens: Int?, customIndex: Int, unlimitedIndex: Int): Int = when {
-        tokens == null || tokens >= Int.MAX_VALUE -> unlimitedIndex
-        tokens in presets -> presets.indexOf(tokens)
+    fun stepIndexFor(tokens: Int?, customIndex: Int): Int = when {
+        tokens != null && tokens in presets -> presets.indexOf(tokens)
         else -> customIndex
     }
 
-    /** Parses new custom input. Out-of-range or non-numeric text returns null. */
-    fun parseCustom(raw: String): Int? {
-        val value = raw.trim().toLongOrNull() ?: return null
-        if (value < customMinTokens || value > customMaxTokens) return null
-        return value.toInt()
-    }
+    private fun formatK(tokens: Int): String =
+        String.format(Locale.US, "%.3f", tokens / 1000.0)
+            .trimEnd('0')
+            .trimEnd('.')
 }

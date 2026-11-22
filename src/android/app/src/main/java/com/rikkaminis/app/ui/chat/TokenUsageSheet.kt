@@ -116,17 +116,13 @@ fun TokenUsageSheet(
                     //    called out.
                     val isHeuristic = contextWindowSource == LLMModel.ContextWindowSource.HEURISTIC
                     // [audit-0917] Snapshot the delegated property into a local
-                    // val: Kotlin cannot smart-cast a `by remember` property, so
-                    // `groupLimit != null && ... groupLimit.unlimited` no longer
-                    // compiles once the declaration became a var.
+                    // val: Kotlin cannot smart-cast a `by remember` property.
                     val limit = groupLimit
                     val annotation = when {
-                        isHeuristic && limit != null && !limit.unlimited ->
+                        isHeuristic && limit != null ->
                             // Model window guessed + group limit set → group limit
                             // is the authoritative budget we're running on.
                             stringResource(R.string.token_usage_context_window_group_limit_applied, formatTokens(w))
-                        limit?.unlimited == true ->
-                            stringResource(R.string.token_usage_context_window_group_unlimited)
                         limit != null && w < limit.tokens ->
                             stringResource(
                                 R.string.token_usage_context_window_group_limit,

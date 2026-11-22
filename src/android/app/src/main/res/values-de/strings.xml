@@ -159,7 +159,6 @@
     <string name="token_usage_context_window_group_limit"> (Gruppenlimit %1$s)</string>
     <string name="token_usage_context_window_group_limit_applied"> (per Gruppenlimit %1$s)</string>
     <string name="token_usage_context_window_heuristic_warning">Das Modell meldet sein echtes Kontextfenster nicht — dies ist ein Schätzwert. Korrigieren Sie ihn in den Modelldetails.</string>
-    <string name="token_usage_context_window_group_unlimited"> (unbegrenzt)</string>
     <string name="token_usage_max_output">Max. Ausgabe</string>
     <string name="context_full_dialog_title">Kontext voll</string>
     <string name="context_full_dialog_body">Der Gesprächskontext hat sein Limit erreicht. Starte einen neuen Chat oder leere den Chat, um fortzufahren. Ihr Entwurf ist gespeichert — Abbrechen stellt ihn wieder her.</string>
@@ -1384,10 +1383,9 @@
     <string name="model_group_detail_thinking_ultra">Ultra</string>
     <string name="model_group_detail_limit_context_window">Kontextfenster begrenzen</string>
     <string name="model_group_detail_max_context">Max. Kontext</string>
-    <string name="model_group_detail_unlimited">Unbegrenzt</string>
     <string name="model_group_detail_custom_context">Benutzerdefiniert…</string>
     <string name="model_group_detail_custom_context_title">Benutzerdefiniertes Kontextlimit</string>
-    <string name="model_group_detail_custom_context_input">Kontextlimit (Tokens)</string>
+    <string name="model_group_detail_custom_context_input">Kontextlimit (K-Tokens)</string>
     <string name="model_group_detail_custom_context_range">Mindestens 64,000 Tokens</string>
     <string name="add_provider_subtitle_openai">OpenAI und kompatible Dienste wie DeepSeek, Moonshot und Groq</string>
     <string name="add_provider_subtitle_anthropic">Funktioniert mit Claude und Diensten, die das Anthropic-Protokoll unterstützen</string>

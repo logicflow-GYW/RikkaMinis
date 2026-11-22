@@ -197,7 +197,6 @@
     <string name="token_usage_context_window_group_limit"> (лимит группы %1$s)</string>
     <string name="token_usage_context_window_group_limit_applied"> (по лимиту группы %1$s)</string>
     <string name="token_usage_context_window_heuristic_warning">Модель не сообщает реальное контекстное окно — это оценка. Исправьте ее в деталях модели.</string>
-    <string name="token_usage_context_window_group_unlimited"> (без ограничений)</string>
     <string name="token_usage_max_output">Макс. вывод</string>
     <string name="context_full_dialog_title">Контекст заполнен</string>
     <string name="context_full_dialog_body">Контекст разговора достиг предела. Чтобы продолжить, начните новый чат или очистите чат. Ваш черновик сохранен — Отмена восстановит его.</string>
@@ -774,10 +773,9 @@
     <string name="model_group_detail_thinking_auto">Авто</string>
     <string name="model_group_detail_limit_context_window">Ограничить контекстное окно</string>
     <string name="model_group_detail_max_context">Макс. контекст</string>
-    <string name="model_group_detail_unlimited">Без ограничений</string>
     <string name="model_group_detail_custom_context">Другой…</string>
     <string name="model_group_detail_custom_context_title">Свой лимит контекста</string>
-    <string name="model_group_detail_custom_context_input">Лимит контекста (токены)</string>
+    <string name="model_group_detail_custom_context_input">Лимит контекста (K токенов)</string>
     <string name="model_group_detail_custom_context_range">Минимум 64,000 токенов</string>
     <string name="model_groups_model_groups">Группы моделей</string>
     <string name="model_groups_new_group">Новая группа</string>
