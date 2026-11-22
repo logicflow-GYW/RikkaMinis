@@ -201,6 +201,92 @@ class ComposerClearResiduePolicyTest {
         )
     }
 
+    // ── [fix/composer-short-body-replay-1122] bodies below the fragment floor ──
+    //
+    // The reported device symptom, verbatim from `minis-2026-11-22.log`:
+    //
+    //   [ComposerResidue] allowed a short fragment of the cleared body
+    //   (len=1 of 1, composition=false, dt=1ms)
+    //
+    // The user sent "做" (one character). The message went out; one millisecond
+    // after the clear the IME replayed that same character, and the guard SAW it
+    // and let it through — `longEnough` was `len >= 4`, which a one-character
+    // body can never satisfy. Every body shorter than the floor leaked the same
+    // way. A whole-body match is the strongest signal available, so it lifts the
+    // floor and leaves the decision to the rate test.
+
+    /** The exact logged case: 1 of 1 characters, 1 ms after the clear. */
+    @Test
+    fun `a one character body replayed whole is dropped`() {
+        assertEquals(
+            ComposerResidueVerdict.DROP,
+            verdict(incoming = "做", clearedText = "做", msSinceClear = 1L),
+        )
+    }
+
+    /** Two and three character bodies were equally unreachable before. */
+    @Test
+    fun `a two and three character body replayed whole are dropped`() {
+        assertEquals(
+            ComposerResidueVerdict.DROP,
+            verdict(incoming = "好的", clearedText = "好的", msSinceClear = 30L),
+        )
+        assertEquals(
+            ComposerResidueVerdict.DROP,
+            verdict(incoming = "ok!", clearedText = "ok!", msSinceClear = 12L),
+        )
+    }
+
+    /**
+     * Lifting the floor is not "drop anything short": a body the user genuinely
+     * retypes needs human time, and the rate test is what stands down then. One
+     * character still needs ~90 ms at the 12 chars/s ceiling, so 900 ms is far
+     * past it.
+     */
+    @Test
+    fun `a one character body retyped at a human pace is kept`() {
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = "做", clearedText = "做", msSinceClear = 900L),
+        )
+    }
+
+    /**
+     * The floor is lifted for EQUALITY only. A short PREFIX of a longer body is
+     * still the user's own first keystroke — that is the arm A trade the
+     * W1118-COMPOSER A1 work settled, and it must not regress.
+     */
+    @Test
+    fun `a one character prefix of a longer body is still kept`() {
+        assertEquals(
+            ComposerResidueVerdict.NONE,
+            verdict(incoming = "做", clearedText = "做完了再说", msSinceClear = 1L),
+        )
+    }
+
+    /**
+     * With a stale ViewModel copy still holding the body, the verdict escalates
+     * to a wipe — that copy is what the mirror and the persisted draft slot read,
+     * so dropping the edit alone would refill the box one frame later.
+     */
+    @Test
+    fun `a whole one character body against a stale view model copy is wiped`() {
+        assertEquals(
+            ComposerResidueVerdict.DROP_AND_CLEAR,
+            verdict(incoming = "做", clearedText = "做", vmText = "做", msSinceClear = 1L),
+        )
+    }
+
+    /** Trailing IME noise must not defeat the equality test. */
+    @Test
+    fun `the whole body test ignores IME trailing noise`() {
+        assertTrue(isWholeClearedBody("做。", "做"))
+        assertTrue(isWholeClearedBody("ok ", "ok"))
+        assertFalse(isWholeClearedBody("做", "做完了"))
+        assertFalse(isWholeClearedBody("", "做"))
+        assertFalse(isWholeClearedBody("做", ""))
+    }
+
     /**
      * [W1118-COMPOSER C-A F-01] Coverage on the boundary: exactly half the body
      * counts, one character less does not. The denominator ignores the IME's own
