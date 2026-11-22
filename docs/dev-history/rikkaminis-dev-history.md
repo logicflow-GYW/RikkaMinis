@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-19）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-22）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-11-19，共 107 天
-- 条目总数：2801（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：4515163 / 总行数：53004
+- 合并范围：2026-08-03 ～ 2026-11-22，共 110 天
+- 条目总数：2902（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：4618231 / 总行数：53878
 
 ---
 
@@ -52997,6 +52997,880 @@ scan-gate `115 passed, 0 failed` + `scripts/scan/** untouched … skipping the f
 6. **lint 红先查是否编译前的依赖解析**：`generateDebugAndroidTestLintModel` 失败（hamcrest/javawriter 404）与代码无关。判据三条：失败点在编译前 + jar URL 实测 200 + 同形态代码此前 lint 绿 + 未触碰构建文件 ⇒ 重跑即可（#3342/#3343 红，#3345 绿）。
 
 **残留登记**：`MCPOAuthController.kt:123` 仍打 `state?.take(8)`（同族，文件不在本支范围）。
+
+<!-- 2026-11-19 16:34:07 -->
+## 14 支全量合并 + 真机验证（2026-11-19 下午）
+
+
+**合并**：main `ecb03d92` → **`8771018e`**（`--no-ff` 合 `integration/1119`，parents 2 ✓，树逐字节一致 `a22b4c1f`）。14 支 / 63 条发现（3D-1119 18 + R1 23 + R2 6 + R3 18）。
+**并集 CI** #3346 五 job 绿；**本地门** 115/115。
+**main CI** #3347：lint 首轮被 Maven Central **HTTP 429** 打死（hamcrest-integration/library 1.3、javawriter 2.1.1），实测三 jar 复取 206 ⇒ 判定环境红，`POST /rerun-failed-jobs` 重跑 → **全绿**，publish 真执行（tag 移动 + release `v1.0.0+3347`，APK 14,921,474 B）。
+**清理**：远端 15 分支 DELETE 204 ×15、worktree `remove --force` ×15、本地 `-D` ×15；远端与本地只剩 `main`。
+**踩坑**：worktree 里 `.git` 是**文件**不是目录，判据写 `-d "$d/.git"` 会静默跳过全部 worktree（第一次清理一条都没删）。应用 `-e`。
+
+## 真机验证（装机 `1.0.0+3346` = 并集构建）
+
+**先踩一次**：首轮探针「放行」不是修复失效 —— 用户当时把**受保护区删除保护开关关着**，开关打开后全部按预期拒绝。**测守卫类修复前必须先确认开关状态**，否则结论完全反过来。
+
+| 项 | 结果 |
+|---|---|
+| `rm -rf $(echo /tmp/x) <zone>/__probe>` | **拒绝** ✅（P0 绕过已堵） |
+| `rm -rf $((1+2)) <zone>/__probe>` | **拒绝** ✅ |
+| `(rm -rf <zone>/__probe) && echo 'unclosed` | **拒绝** ✅ |
+| `rm -rf /tmp/var && echo 'unclosed` | **放行** ✅（误拒已修） |
+| `mv -S <zone> a b` | **不拒** ✅（`-S` 值不再当源） |
+| `rm -rf /var/minis` 文案 | 含「confirm which files」✅ |
+| 深层目录删除（阴性对照） | 放行 ✅ |
+| `file_read(direction=tail)` 不给 lines | 返回 **101-200** ✅ |
+| `test_scan.py --single=X` / 孤立 `--single` / 裸测试名 | 只跑一个 / fail-closed / fail-closed ✅ |
+| Shizuku 大输出（2.5 MB） | 截到 256000 + stderr 明示上限与旋钮 ✅ |
+| `minis-fastio tar` 中/日文长名往返 | 4 个名字与内容全对 ✅ |
+| 崩溃标记（ForegroundServiceStartNotAllowed / BadTokenException / CME / OOM / FATAL） | 全 0 ✅ |
+
+**教训**：守卫类修复的验证必须同时给「拒绝侧」和「放行侧」，且先确认开关；否则一次开关状态就能把「全绿」读成「全红」。
+
+<!-- 2026-11-19 17:52:33 -->
+## FIX-R2D-backup-1119 完成，停在分支
+
+- worktree `/var/minis/shared/work/r2rest/backup`，基线 `8771018e`，支 `fix/r2-backup-1119`；代码绿 SHA `c29158929f56b91898f3a6a77f13cca3c26440b8`，报告 tip `6f598ec866bc96f069e668b888063e6823724c7b`。未合 main；报告 push 后未再 dispatch；非报告差异 0，远端 tip 一致。
+- F-22 前缀信任域名成立：严格四段 ASCII IPv4 0..255，再判 RFC1918/127；保留 localhost/*.localhost/::1/[::1]。纯字面量+抛错 DNS 桩，无公网请求。
+- F-20 fatal 返回仍成功成立：restoreNotifyOutcome 同时控制已有 restoredOk/restoredMsg，fatal 非 null（含空消息）失败，复用本地化回滚说明+原因；成功方向保留。
+- F-21 技能 enable 单向棘轮成立：skillEnableWriteTarget 比较 imported.isEnabled 与备份值，差异时写 desired；双向与相同状态均测。
+- 基线行为回放 3 例；当前定向 JVM 15 例全绿（入库 12+真实调用块回放3）；14/14 变异 RED-PRECISE，finally 按快照恢复+sha256。装置在 `r2rest/backup-jvm/`，报告 `fix-reports/FIX-R2-1119-D-backup.md` 八节。
+- CI #3348 / `44496104753` @ 代码 SHA，最终五 job success；unit-tests 10209 PASSED/0 真 FAILED，新12例逐条 PASSED；scan-gate 115 passed（夹具按机制跳过）。lint 首轮 Maven 三 jar 找不到，独立请求均206，只 rerun-failed-jobs 后绿；publish两发布步骤 skipped。
+- 本地未跑全量，限定7个代码/测试文件；真机通知/真实磁盘半写未测。装置曾把决策拼写存在当抽取正确条件，遮蔽M05；移除该语义前置后完整14臂重跑成功，提取器只验边界，行为由JUnit判。
+
+<!-- 2026-11-19 18:17:29 -->
+## R2-C WebApp / 模型进程收口
+
+`fix/r2-webapp-1119` 基线 `8771018e`，代码 `11404bab04b492cdacda095eee9b9b77a234260d`，分支 CI `44501326521` 成功；八节报告 `fix-reports/FIX-R2-1119-C-webapp.md` 提交 `3fb4ad8d` 已推，非报告 diff=0，未合 main，报告后未再 dispatch。本地 16 定向测试 + 10/10 负控变红。跨进程接线验证应同时查 Manifest 绑定、跑真实启动分支配注入桩，再把注册故意移到主进程验证测试能抓错；只测回调动作不能证明注册的进程。设备端测试仅编译，未实跑。
+
+<!-- 2026-11-19 18:46:39 -->
+## R2B sandbox 七条完成（fix/r2-sandbox-1119，未合 main）
+
+基线 8771018e，worktree shared/work/r2rest/sandbox。顺序 F14/F03/F07/F08/F15/F16/F13 各独立实现提交；另 3 个分项 CI 兼容提交。代码绿 e34e10078f24804d8dddd6048aefeb83d6cd2f1f；报告 tip 1115a7d74d8bf8b1171dc279c138e69dc82e2b78，非报告 diff=0，推送已核远端一致。CI #3351 / 44506021754 五 job success，unit 10225 PASSED/0 真 FAILED，新增 28/28；scan 115/115，fixture 未跑（scripts/scan 未动）；publish tag/release 两步 skipped。报告后未再 dispatch，不合 main。
+F14 截图会话私有 attachments+guest 路径，cache-only 明示 --inline；启动清旧外部截图+原 TTL。F03 先造合法 plain ustar 声明6GiB、占16KiB稀疏包，基线验证接受，从未提取；复用 PayloadSizePolicy.MAX_FILE_BYTES=64MiB，含 skip/metadata/hardlink materialization。F07 祖先拒绝，任务书深层阴性矛盾：locked mount 子项仍拒绝，阴性用可写兄弟。F08 common Mutex+Locked 实现+read/skip ensureActive。F15 五处同步 snapshot。F16 两处显式 WorkerKeyHandoff。F13 no-follow+复用entry/depth边界+partial观测。
+本地78定向+22兼容+4额外并发/压力通过；16/16变异RED。首轮#3350真红：旧5条形状断言，SysInfo门只派生非private方法，Locked 实现改internal（仅本文件调用）兼容，禁区全未改。装置 sandbox-jvm，报告 fix-reports/FIX-R2-1119-B-sandbox.md。Android端到端截图/真实reset/真实换key未跑，报告如实分层。
+
+<!-- 2026-11-19 19:01:05 -->
+## FULLSCAN-1119 R2-A provider 收口（未合 main）
+
+`fix/r2-provider-1119` 自 `8771018e`：F-09/F-18 代码 `388011497ef334179176f69661ff39bc5cdab240`，CI `44506343030` 五 job success；报告 `bd49a76a` 已推，非报告 diff=0，未再 dispatch。定向 JVM 74 例；已修项 8 个精确变异，另 F-19 诊断负控 1 臂。F-19 成立但未改：显式写 `fast_mode` 不能替代 `ModelExecutionService.executeRun/executeStreamingRun` 两个禁改消费点的装配，已在报告/台账登记。
+可复用：签名下载不能只给 catch 的 URL 套名单式 redactor——`X-Amz-Signature` 不在既有名单，二跳共用的网络 trace 及错误体也是出口。此支仅改变二跳日志，保留原连接池/超时。路径级静态豁免的夹具必须用生产相对路径；本门独立自测 31 臂绿，公共 `test_scan.py` 未注册，rc=2 不计为通过。
+
+<!-- 2026-11-19 19:36:26 -->
+## R2 剩余 16 条收口 + F-19 单独一支（2026-11-19 夜）
+
+
+**4 支合并**：main `8771018e` → **`900a7b92`**（`--no-ff` 合 `integration/r2rest`，parents = `8771018e 06103864`，父数 2 ✓，树一致 `1b4680fb`）。
+- provider #3352（F-09 签名 URL 进日志 + F-18 Responses EOF itemId）/ sandbox #3351（F-03 tar 炸弹上限、F-07 只读挂载祖先、F-08 rootfs 互斥、F-13 dirSize、F-14 a11y 截图私有化、F-15 PersistentShell 快照、F-16 WorkerKeyHandoff）/ webapp #3349（F-02 降级态崩溃、F-12 onNewIntent、F-17 modelservice NetworkCallback）/ backup #3348（F-20 半写误报、F-21 技能开关双向、F-22 内网判定严格 IPv4）。
+- 并集 #3353 五 job 绿（unit 10249 PASSED / 0 真 FAILED；scan-gate 115 + ALL 387 CASES PASS）；本地门 115/115。
+- main CI #3354 五 job 绿，publish 真执行 → release **v1.0.0+3354**，APK 14,923,626 B。
+- 清理：远端 DELETE 204 ×5、worktree ×5、本地 -D ×5；远端只剩 main。
+
+**F-19 仍未修，单独一支 `fix/r2-fastmode-1119`（会话 `a7ced940`，基线 `900a7b92`）**：上一支只被允许改写端 `ModelExecutionDispatcher`，读端在 `sandbox/offload/ModelExecutionService` 两个构造点（流式 `:1447` / 非流式 `:1000`）+ `OpenAIProvider:3329`；只改一端静默失效。**支会话明确登记「继续开着」而不是假装修好 —— 这是正确处置**。新任务书要求 fast_mode 三态（写端无条件写显式 true/false，读端缺字段才回落缓存）+ 四条用例（true 覆盖缓存 false、false 覆盖缓存 true、缺字段回落两条、断线负控）。
+
+**可复用**：跨进程配置透传的判据是「写端 + 全部读端 + 缺字段语义」三件事；少任一端都不是「修了」，而是「产生了一个看起来绿、实际不生效的补丁」。`enhanced_cache` 是 present-only（缺字段=false），fast_mode 必须三态（缺字段=回落缓存），照抄形状可以，照抄语义不行。
+
+<!-- 2026-11-19 19:54:20 -->
+## FIX-R2-1119-E fastmode（F-19 唯一遗留）完成 — 分支 CI 绿，未合 main
+
+
+支 `fix/r2-fastmode-1119`（worktree `shared/work/r2rest/fastmode`，基线 `900a7b92`）。代码 `93c70bea`，报告 tip `033f02f6`，非报告 diff=0，远端 tip 一致。CI **#3355 / 44517081092** 五 job success @ `93c70bea`，unit **10259 PASSED / 0 真 FAILED**，新增 10 例逐条 PASSED；scan 115 passed（fixture 未跑，scripts/scan 未动）；publish 两步 skipped。报告后未再 dispatch，不合 main。
+
+**三端同改**（缺一静默）：写端 `put("fast_mode", FastModePrefs.isEnabled())` 无条件写（显式 true/false）；`ModelExecutionService` 两个装配点各 `if (req.has("fast_mode")) provider.fastModeOverride = req.optBoolean(...)`；`OpenAIProvider` 新增 `internal var fastModeOverride: Boolean? = null`，唯一读点改 `fastModeOverride ?: cache`。
+
+**证据**：本地切片装置 `fastmode-jvm/`（真实生产切片 + 9 例）；修复前 BaselineTest 复现双路径都发 `priority`，修复后同一探针翻红。变异 **5/5 RED-PRECISE**（删写端 5、删非流式 2、删流式 2、去掉 has 门 2、忽略 override 4）。
+
+**可复用两条**：
+1. **present-only 透传只能表达「开」**：任何「关也必须生效」的跨进程开关必须写显式三态，读端用 `has()` 判存在——`optBoolean(..., false)` 会把「旧客户端缺字段」读成显式关闭（M4 实测，第一次预期写成 4 实为 2，按实测语义修预期而非凑绿）。
+2. **两个装配点必须各挂一条独立断言**：写端 + 读端只改一端的「半修」在 CI 全绿下与修好不可区分；变异逐端删除才能证明两端都接线。
+
+<!-- 2026-11-19 20:11:54 -->
+## F-19 合并 = 三轮审计全闭环（2026-11-19 夜）
+
+
+**F-19 支**（`fix/r2-fastmode-1119`，会话 `a7ced940`）：代码 `93c70bea`，分支 CI **#3355** 五 job 全 success（unit-tests **10259 PASSED / 0 真 FAILED**，新类 `FastModeRequestPropagationTest` 6/6、`FastModeWirePayloadTest` 4/4；scan-gate 115 passed + 夹具按机制跳过）。**5/5 变异 RED-PRECISE**（M1 删写端→5 红、M2 删非流式读端→2 红、M3 删流式读端→2 红、M4 `has()` 改恒真→2 红、M5 provider 忽略 override→4 红）。四条必测全覆盖（true 覆盖缓存 false、false 覆盖缓存 true、缺字段回落两条、断线负控）。
+
+**合并**：main `900a7b92` → **`f75cceaa`**（`--no-ff`，parents = `900a7b92 033f02f6`，父数 2 ✓，树一致 `0feba5c6`）。
+**main CI #3356** 五 job 全 success，publish 真执行 → release **`v1.0.0+3356`**，APK 14,923,938 B。
+**清理**：远端 DELETE 204、worktree remove、本地 -D；远端与本地只剩 `main`，无悬空工作树。
+
+**全账**：3D-1119 18/25 修（5 登记 2 证伪）+ R1 23/23 + R2 22/22 + R3 18/18 = **81 条已修 / 3 批报告 63 条 + R2 补齐 22 条全部闭环**（R2 计入 22，三轮 63 里与 R2 不重叠部分已单列）。
+
+**可复用（F-19 报告给的）**：present-only 透传只能表达「开」；任何「关也要生效」的跨进程开关必须写成**显式三态**，且读端判据用 `has()`——用 `optBoolean(..., false)` 会把「旧客户端缺字段」误读成显式关闭（M4 实测抓到）。跨进程配置的完整判据 = 写端 + **全部**读端 + 缺字段语义，缺任一端都只是「看起来绿的补丁」。
+
+<!-- 2026-11-19 20:30:33 -->
+## 第二轮真机验证（装机 1.0.0+3356，2026-11-19 夜）
+
+
+**版本确认**：`versionName=1.0.0+3356`，`lastUpdateTime=20:25:10`（= main `f75cceaa` 的构建）。
+
+| 项 | 结果 |
+|---|---|
+| 崩溃标记（FGS/`BadToken`/CME/OOM/`FATAL`） | 全 0（对照 `ChatVMStream` 23460） |
+| **F-14 a11y 截图落点** | `path=/var/minis/attachments/a11y_screenshots/...`，返回 `"storage":"app_private"`；旧共享目录 `/storage/emulated/0/Android/data/.../a11y_screenshots/` **已不存在** ✅ |
+| **F-03 tar 字节预算** | 手写 ustar 头声明 8 GiB、实际 1 KB 的 `.tar.gz` → **校验阶段拒绝**：`archive payload exceeded the byte budget: used=0 next=8589934592 max=67108864`，零落盘 ✅ |
+| **F-13 dirSize 有界** | `android-device storage` 0.81 s 返回，新增 `app_data_visited=104060` / `app_data_partial=true` / `app_data_errors=[AccessDeniedException...]` —— 新实现会跳过并上报而不是静默递归 ✅（链接环无法在真机造：`/data/data/.../files` 连 Shizuku 也 Permission denied） |
+| 阴性对照：正常归档（含中文名） | 2 文件 1 目录，内容与文件名正确 ✅（预算没有误伤正常使用） |
+| 日志脱敏 / `service_tier` | 命中均为假阳性（命中的是我自己任务书文本回显 + `compl…` 词内），无真实泄漏证据 |
+
+**造炸弹的两个坑**（复用价值）：
+1. 手写 ustar 头时 checksum 必须 = **含 8 个空格占位**的整块字节和；减去空格会被解析器判 `header checksum mismatch`（我第一版就是这么错的，门拦下的理由不是预算而是校验和）。
+2. `minis-fastio tar` 的预算上限是 **64 MiB**（`max=67108864`），且在校验阶段就拒，不会先写一半。
+
+**不可在本机验的**：F-02 安全模式、F-07 只读挂载祖先（需先锁一个挂载）、F-12 双 WebApp 快捷方式、F-15/16 竞态与换 Key、F-17 切网、F-19 Fast Mode 跨进程、F-20/21/22 备份与 WebDAV —— 都需要构造特定状态或 UI 操作，已由各支的 JVM 装置与变异臂覆盖。
+
+<!-- 2026-11-19 21:11:50 -->
+## 11-18～11-19 两日复盘：仓库规模与成果口径
+
+本轮用两日日报（30+41条）交叉核主克隆主干 `ac8620c1..f75cceaa`：194 个提交（含 merge/报告）、9 个主干合并节点；233 文件，+33,807/−918。分层：生产侧93文件 +7,719/−746；测试97 +16,922/−94；扫描5 +1,114/−28；报告34 +6,257/0；文档4 +1,795/−50。约69%新增行是测试与修复报告，不能把194提交说成194功能。CI记录用例9584→10259（+675）。后半程累计复审18+全仓三轮23/22/18=81项报告级修复，不是两天去重Bug总数。开发档案更新到107天/2801条（提交0f5a5685）。当前GLOBAL实测12519 B，仍比12288 B预算多231 B。
+复盘判断：这两天主要是稳定化/安全边界/代理行为与验证流程加固，非新增使用场景；多轮里同时有旧隐患、补丁回归和装置自身缺陷，不能混作一类计数。四个核心大文件拆分仅做工程量/收益评估，未实施。最终装机/发布3356与重点真机探针有记录，但不能扩大为全功能端到端验证。
+
+## 2026-11-20
+
+<!-- 2026-11-20 01:20:35 -->
+## RikkaMinis 文案审校与合并（2026-11-19）
+
+用户指出“管理提供商 / API key 与 OAuth 登录”已过时，并明确允许纯文案修改后直接合并。基于 `f75cceaa` 新分支完成 29 个资源文案键的七语言同步（en/zh/zh-TW/de/ja/ko/ru），并修正 `ChatPromptAndTools.kt` 中内置 minis-config 操作说明的错误历史/撤销承诺。涵盖：移除提供商 OAuth 登录与 Kimi 账号登录文案（MCP OAuth 保留）；修正 provider API 密钥会发送到配置端点、Anthropic `/v1/messages` 与 `/v1` 路径说明；模型组实际回退条件；备份密钥/其他机密的明文警告、自动备份不含聊天和凭据；rootfs 重置保留 rootfs 外数据；只读挂载写入保护边界；动态图片预算提示；毛玻璃设置位置；计划任务前台执行时机；免确认权限范围；全局记忆由用户拥有、修改须批准。
+验证：7 个 strings.xml 均解析成功；28 个改动资源键完整出现在全部 7 语言；格式化占位符逐语言一致；`scripts/scan/i18n_check.py` ALL CLEAN。分支 `fix/android-copy-audit-1119` 代码提交 `d1f2fdde8acac0ca449b31fe5360e25792d8978f`；首轮 CI #3357 的 unit/scan/build 绿，lint 因 Maven Central 的 3 个 jar 下载失败；重跑仅失败 lint 后全绿。按用户许可 `--no-ff` 合并，main merge commit `2d9189f8ef19660e6018c353543f897aa6cb1695`（parents 为 f75cceaa 和 d1f2fdde，树与分支一致）；推送后核对远端 main 同 SHA。main CI #3358 / run `44573411952` 五 job 全成功，Publish to Releases 成功，滚动 APK `android-latest` 更新。
+
+<!-- 2026-11-20 05:08:22 -->
+## RikkaMinis 纯文档合并（PR #15）
+
+用户要求“提交推送合并”。7 个 Markdown 文件（双语 README、构建/架构/开发流程、开发档案入口、11-18～19 稳定性复盘）在最新主线 `2d9189f8` 上提交 `6646908a`，经 PR #15 合入 `95d4c6ea`。已核远端 main、合并双亲和树一致；24 个新增本地链接/锚点及构建示例通过检查。未改应用代码、工作流或开发档案三件套；未触发新 APK 构建，发布仍为 `1.0.0+3358`。
+
+<!-- 2026-11-20 08:44:56 -->
+## RikkaMinis 2026-11-20 历史修改模式复扫
+
+对当前生产树 `6646908a` 相对三轮已修复基线做七域会话子代理只读复扫，核对/排除前轮63条原项；7份报告共提39条候选（各域自报），覆盖约七个互斥代码域，未改应用仓库、未跑Gradle/全量扫描。主会话抽检确认 ProviderConfigDao 分块 NOT IN 删除、MemoryRollup 重复追加竞态、FileBrowser symlink 删除守卫参数错配/异步旧结果覆盖，以及MiniMax请求量纲与响应解析的代码机制。完整汇总 `/var/minis/shared/work/fullscan-rescan-1120/FINAL-RESCAN.md`，分域报告位于同目录 `reports/`；39条尚待主会话逐条二次核实，不能直接视作修复工单。
+
+<!-- 2026-11-20 10:24:21 -->
+## V4 复核报告完成（2026-11-20）
+
+按 `/var/minis/shared/work/fullscan-rescan-1120/triage-1120/V4-task.md` 对 origin/main `95d4c6ea` 只读复核 R4-BM-01..02 与 R5 F-01..F-07，共 9 条：修 7 条（Browser 下载 URL 日志、MiniMax TTS 两条、模型列表 body-read 取消桥、分享恢复/账本/阻塞读三条），登记 2 条（MCP OAuth 无界响应体、2xx JSON 错误被 ASR raw-text 回退）。报告已写 `/var/minis/shared/work/fullscan-rescan-1120/triage-1120/V4.md`，首行 `STATUS: DONE`；未改仓库、backlog、门或分支，未跑 Gradle/全量门。建议 4 个互斥施工支：Browser、MiniMax、Models cancel、Share staging。动态证据来自 R5 真实生产切片/本地 MockServer/真实清理函数，未做真机重建、恶意 ContentProvider 或真实凭据验证。
+
+<!-- 2026-11-20 12:11:02 -->
+## MiniMax TTS 修复完成（2026-11-20）
+
+分支 `fix/minimax-tts-contract-1120` @ `e060a91d` 完成 R5-F-01/F-02：MiniMax speed 使用 0.5–2.0 倍率并对越界 fail-closed，vol=1.0，请求显式 output_format=hex；成功解析 data.audio 严格偶数合法 hex，base_resp 非零/缺失状态/非法包均 Parse。L1 6/6、L2 4/4 变异红、L3 wiring exit=0，相关门 10/10，CI #3362 五 job success；未合 main，报告 `/var/minis/shared/work/fullscan-rescan-1120/reports/FIX-minimax.md`。
+
+<!-- 2026-11-20 12:13:46 -->
+## FIX-RESCAN-1120 ModelsCancel：分支 CI 绿，未合 main
+
+按 TASK-cancel.md 仅改共享 CallCancellation + 四个 ModelsApi + 两个测试。分支 fix/models-body-cancel-1120 最终 27ce3f820b6bb87a55fdcb43f2144723e3a86c6d；CI #3361 / 44670633215 五 job success，10270 PASSED、0 真 FAILED，115 门通过；扫描夹具按机制 skipped。新增 owning executeOrCancel(consume) 复用 watcher 包住 Response.use+body/parse；旧 headers-only API 不扩面。本地13/13；七变异均 RED-PRECISE（headers退休1、逐四端断线各1、吞CE1、成功cancel3），五生产文件 SHA256+blob恢复、最终工作树干净。外部报告 shared/work/fullscan-rescan-1120/reports/FIX-cancel.md；装置 models-cancel-probe/。未合main、未清支、未改backlog、未跑本机全量/Gradle。
+可复用：CI java -ea 会启用 coroutines debug stack recovery，跨 coroutineScope 异常可复制，assertSame(exception) 会假失败。此次首轮CI两条在本地coroutines1.9+java-ea精确复现，改类型+固定语义消息断言，不关闭debug；修后全部变异重跑仍精确红。对照最后一次编译产物前须重编译干净源码，变异最后一个jar可残留坏实现。
+统计：本地main=f75cceaa过期，字面main...HEAD混入已有文案/文档变更22文件；正确任务基线origin/main=95d4c6ea，实际只7文件 +531/-292。
+
+<!-- 2026-11-20 12:39:33 -->
+## FIX-RESCAN-1120 mirror per-category intent（分支停止）
+
+基线95d4c6ea，分支fix/mirror-per-category-intent-1120提交4fcb6abdd2ccbfc1fa871e4e3983dd2e4fe743c0，已推，未合main。MirrorSettingsScreen +14/-3：selectMirror/setUseCustom同步记每类别用户意图，detector Main结算合并prior+当前ids+intent，保留测速中手选与无id OFF，不全局取消其它类别。新增7例真实detector latch+OkHttp interceptor测试，临时prefs/rootfs校验；本地33/33，旧基线4红，三变异精确4/2/3红，wiring PASS，相关门11/11。CI #3363 /44673998441五job success，同SHA；10266 PASSED/0真FAILED，新7逐条PASSED，scan115/115，夹具按机制跳过；发布两步skipped。报告shared/work/fullscan-rescan-1120/reports/FIX-mirror.md，装置mirror-probe/。本地main ref过期f75cceaa，准确diff需origin/main/固定基线（2文件+265/-3）；未动共享main ref、分支清理或并集。
+
+<!-- 2026-11-20 12:43:59 -->
+## Worker 槽位调优（2026-11-20）
+
+用户要求把 Runtime Limits 的 Worker 槽位默认值从 2 调到 6，最大值从 4 放宽到 12。分支 `fix/worker-slots-6-12-1120`，提交 `259066a3e1d6ea880f2e6204e54ef5ff3076018f`；同步了 AgentRuntimeLimitsPrefs、ProviderExecSlotPolicy/ModelExecutionService 注释、ConfigBuiltins 描述、七语言文案和相关测试。用户自定义已保存值仍按新范围读取/夹紧；队列准入上限保持 12、默认 6。独立 JVM：真实偏好源码探针 `REAL_PREFS_DEFAULT=6 MAX=12 SAVE12=12 CLAMP13=12 CLAMP0=1 SAVE6=6 PASS`；策略测试 5/5、偏好测试 6/6、i18n ALL CLEAN；分支 CI #3364 五 job 全 success。未合并 main。
+
+<!-- 2026-11-20 12:58:45 -->
+## FIX-RESCAN-1120 BackupOwner 分支完成（未合 main）
+
+按 TASK-backup + 追加门迁移授权，只改 BackupSettingsScreen.kt、4 个对应测试和 backup_streaming_export_check.py。分支 fix/backup-task-ownership-1120 @ 06e499fa657e7861bf3f06eb76fd90330dfa1e4e；CI #3367 /44676394987 五 job success，同 SHA，10273 PASSED/0真FAILED；新增 owner14+旧相关21逐条 PASSED，115门+ALL387 CASES PASS，发布两步 skipped。原文件内 BackupTaskOwner.application + synchronized claim/token release + transfer 无空窗 + Job completion 清理（含未入体取消），页面观察 StateFlow；13站点传token/6 applicationScope保留离页运行，SAF请求及secret选择由owner保存。L1真实owner切片35/35，L3 wiring18/18，四变异精确2/7/2红及arm6单红，最终字节+blob还原，工作树干净。首轮CI claim_release_guard发现pendingExport消费无显式token比较，增加takeExport身份检查后绿，没改守卫豁免。报告 shared/work/fullscan-rescan-1120/reports/FIX-backup.md，装置 probe/backup-owner。未真机Compose/恢复/WebDAV；未合并/清支/并集。本地main仍f75cceaa过期：main...HEAD21文件，实际origin/main=95d4c6ea基线6文件+451/-202。
+
+<!-- 2026-11-20 12:59:44 -->
+## FIX-RESCAN-1120 ShareLifecycle：分支CI绿，未合main
+
+任务TASK-share.md限定四个share生产文件+测试，分支fix/share-staging-lifecycle-1120 @ f0eab6e8124147db850f95365acbb56944572e74，基线95d4c6ea。R5-F04按原始输入身份/逐槽完成状态保存恢复，保存冻结旧producer，成功item+credit同锁；F05注册表区分partial/committed，清理按pending∪committed-inflight绝对对账，handoff同锁；F06受控FutureTask+descriptor/stream close+CancellationSignal，最多2工作线程，保留同步结果/成功credit。L1 74/74含22新例，真实SharedShareStore原方法另4段80+30>100/交接/释放回放；7/7逐目标变异RED_PRECISE，4源码SHA256还原后74全绿，L3 10/10，相关门11/11。CI #3366 /44676330607五job success同SHA，10281 PASSED/0真FAILED，新22逐条PASSED，115门通过，夹具按机制skipped，publish两发布步骤skipped。6文件+689/-123；共享本地main=f75cceaa过期，字面main...HEAD混入旧文案文档21文件，未改main ref。外部报告shared/work/fullscan-rescan-1120/reports/FIX-share.md；装置probe/share/。未合主线、未并集/清支、未做真机旋转或真实ContentProvider。边界：完全忽略平台cancel/close/interrupt的恶意实现无法安全强杀，以2worker硬上限fail-closed，不声称任意close绝对可终止。
+
+<!-- 2026-11-20 13:20:04 -->
+## FIX-RESCAN-1120 FileBrowser 异步加载归属完成
+
+任务 TASK-filebrowser.md 已执行：分支 `fix/filebrowser-load-ownership-1120`，代码提交 `beaa040e859898dae159cbba27532d70f1c615e6`，相对 `origin/main=95d4c6ea` 修改 FileBrowserViewModel + 新 ownership 测试 2 文件，+376/-42。loadItems 在 Main 分配单调 generation，快照逻辑路径/宿主路径/showHidden，IO 后成功失败统一校验归属再提交；取消不替代归属检查。L1 真实源码 JVM 14/14；M1-M6 六臂精确变红；L3 wiring exit=0；gate_run 9/9。分支 CI #3368 / 44678129559 五 job success，同 SHA；scan-gate 115/115，夹具因 scripts/scan 未改按机制跳过。报告 `/var/minis/shared/work/fullscan-rescan-1120/reports/FIX-filebrowser.md`。未合 main、未并集、未清理分支、未真机 UI/PRoot 交错。
+
+<!-- 2026-11-20 13:44:06 -->
+## FIX-RESCAN-1120 MCP 配置事务支完成（未合 main）
+
+按 TASK-mcp-tx 仅 config.py、MCPRepository.kt、ServersJsonIo.kt + MCPConfigTransactionTest。基线95d4c6ea，分支fix/mcp-config-transaction-1120 @4457b16b552c9779a3fa73a3176aadaea83ca41a，CI #3370 /44681370969五job success同SHA。17/17真实生产完整Kotlin+真实Python；4变异精确红3/2/3/3例，三文件SHA256+HEAD blob恢复后重编17绿；L3 18/18，相关门12/12。CI10276 PASSED/0真FAILED，新17逐条PASSED，115门，夹具按机制skipped；发布两步骤skipped。共同稳定servers.json.lock用Java FileChannel.lock+Python lockf（flock为另一命名空间，负控坐实）；各操作锁内重读按名称delta，提交后内存，保留未知根/entry字段与unique temp/atomic replace。内部File构造支持真仓库JVM，无假Context；移除rename失败直接覆盖正式文件降级。报告shared/work/fullscan-rescan-1120/reports/FIX-mcp-tx.md，装置probe/mcp-tx/及mcp-tx_wiring.py。未真机UI/PRoot并发、未合并/并集/清支。任务真实4文件+545/-133；本地main=f75cceaa过期，字面main...HEAD19文件+1025/-580，未修改main ref。
+
+<!-- 2026-11-20 13:44:53 -->
+## FIX-RESCAN-1120 DAO 完成，停在分支 CI 绿
+
+`fix/provider-delete-set-1120` @ `cfae5fe726870e94dd1badf1389f92c4b2bb5c2a`，任务基线95d4c6ea；仅ProviderConfigDao+三测试，4文件+493/-261。四表仅投影主键，完整keep hash set差集后按900正向IN删除；parent Upsert/级联、隔离preserve、空名单/loop快路保留。真实DAO+映射/模型+Python SQLite(限999,FK ON) L1 27/27，含0/900/901/1200最终行集、两隔离行/旧1200删除、第二chunk和晚meta异常回滚、真hash/mapping闭库重开1200；宿主事务/schema适配，不声称Android Room实跑。L2三变异RED_PRECISE：逐块NOT IN仅901/1200红；去preserve仅两隔离红；不分块仅1200旧行bind红。SHA256+blob恢复后重编27绿。L3 21/21，相关门8/8。CI#3369/44681268396同SHA五job success，10270PASSED/0真FAILED，新SQLite11逐条PASS，115门绿，夹具按机制skipped，发布两步skipped。报告shared/work/fullscan-rescan-1120/reports/FIX-dao.md，装置probe/dao。未合main/清支/并集/动backlog。共享本地main=f75cceaa过期，字面main...HEAD19文件+973/-708；实际固定基线只有4文件。任务书B为别支不处理。
+
+<!-- 2026-11-20 14:12:26 -->
+## FIX-RESCAN-1120 Memspike 预览脱敏（分支停止，未合 main）
+
+按 TASK-memspike 仅改 MemorySpikeRecorder.kt + 现有测试；分支 fix/memspike-preview-1120 @ 4e372b2ed8367edccb2b29c84915c95c65738e83，基线 origin/main=95d4c6ea。previewOf 增精确敏感 long-option 值规则（短值/等号/单双引号/拼接/转义/换行），保留长 token；先脱敏再截断；password-file/api-key-file 等路径类不遮。真实整文件+装运测试 43/43（新16）；副本三变异 15/3/1 红精确，生产测试 SHA256 2/2 未变；L3 wiring 11/11，含 context start/sample/end 与 ExecutionCoordinator 三 direct preview event。默认旧 main 基线 gate_run 7/7；精确 origin/main 自动命中0，报告不冒称7门全直接覆盖。CI #3375 /44684322297 五job success，同SHA，10275 PASSED/0真FAILED，新16逐条PASSED；115门通过，夹具 scripts/scan 未改按机制 skipped，发布两步 skipped。实际2文件+186/-5；字面 main...HEAD 因本地main=f75cceaa过期为17文件+666/-452，未改共享main。报告 shared/work/fullscan-rescan-1120/reports/FIX-memspike.md；装置 probe/memspike/。未合main/并集/清支/改backlog，未真机或使用真实凭据。
+边界：非完整shell evaluator，不声称动态构造/编码参数名或未知flag覆盖；不清历史日志，不改聊天持久化/AppLogger。
+
+<!-- 2026-11-20 14:16:32 -->
+## FIX-RESCAN-1120 R7-F01：STDIO MCP 握手失败回收
+
+`fix/mcp-stdio-cleanup-1120 @ abecfbcd58799cd8b76740fd86f56e4a3989bc48` 仅在 `MCPServerProcess.start()` 握手失败时复用 `stop()` 并重抛原异常；成功入池、`call_with_retry()` 不变。真实合成子进程 3/3 绿，去回收变异 1 红，AST 接线 exit=0；`gate_run --base origin/main` 仅筛 Kotlin，纯 Python 本支 0 门。CI `44683641339` 五 job 绿、同 SHA，115 门通过，扫描夹具按机制跳过。任务基线 `95d4c6ea` 两文件 +152/-1，本地旧 main 会混入旧差异；未合并/清支。报告 `shared/work/fullscan-rescan-1120/reports/FIX-mcp-stdio.md`。
+
+<!-- 2026-11-20 14:23:18 -->
+## FIX-RESCAN-1120 BackupIntegrity：分支完成，未合 main
+
+任务 TASK-backup-integrity.md；基线95d4c6ea，支 fix/backup-restore-integrity-1120 @20fac284b80de742f87c5d9b76ac0c646014bd4e，远端一致/树净。仅7生产+5测试：DATA05 archiveComplete从converter贯穿Stage5/Skill prune；16无密钥MCP选择+读取双软链墙；07组显式NULL闭环；10复用DAO计数+有界tail单独报200条遗漏；02 WebDAV/Provider/MCP跨服务无密钥保留完整旧连接；03 JSON附件首遍实际展开4MiB/24MiB预算+全暂存后单文件同卷原子替换。L1 157/157+Android NULL边界注入1/1；L2 15/15 RED-PRECISE，7文件SHA恢复；L3 14/14。gate_run命中28，27运行0失败，backup_remap真树另跑绿（selftest固定跳）。CI #3374 /44684205527五job success同SHA，10288 PASSED/0真FAILED，新29逐条PASSED，115门通过，夹具按机制skipped，发布两步skipped。报告shared/work/fullscan-rescan-1120/reports/FIX-backup-integrity.md；装置probe/backup-integrity。未真机SAF/Room/真实凭据，无多文件事务保证；未改禁区/Gradle/全量门/并集/清支。实际12文件+626/-74；本地共享main=f75cceaa过期导致字面main...HEAD27文件+1106/-521，未动main ref。
+可复用：门function_text将参数默认{}误认函数体，改可空回调默认null保语义无需豁免；Maven org.json NULL optString回fallback，移除Android null guard在本地等价，须明确注入Android边界差异才能精确单红，不能把等价臂算负控通过。M06工具超时残留一处临时变异，先diff确认再精确恢复，后单臂跑完，未盲reset。
+
+<!-- 2026-11-20 14:29:54 -->
+## FIX-RESCAN-1120 Mirror（DATA-12 / DATA-14）分支 CI 绿，未合 main
+
+分支 `fix/mirror-integrity-1120` @ `7f5d3b7ee4c25ef536088e937eb04d68a4ee034d`，基线 `origin/main=95d4c6ea`；DATA-14 manifest 入口拒绝相对越界/绝对/异常分隔符及非白名单源和恶意 previous point，FileTarget 六个 I/O 入口用 canonical mirror/auto 子树边界，边界根不再解析其自身 symlink。DATA-12 让 pendingCount/runLocked 共用物理缺失集合，缺失或类型错误进 changed/toWrite；force 仍只跳 60 秒节流。真实 MirrorStore + 临时 Context 桩 + 真文件系统验证 99/99 本地 JUnit、27/27 同步断言，普通/force 均补写且 read-back。6/6 精确变异 RED-PRECISE，每臂 sha256 + git blob 还原，干净态最后复跑绿；L3 wiring 14 项 exit=0，相关门 7/7 绿。DATA-13 P2 已带触发条件追加 shared/backlog.md，未修递归类型转换。CI run `44685228428` / #3377 最终 success；首轮 lint 仅三个既有 Maven JAR 解析失败（独立请求均 206），只 rerun-failed-jobs；最终 10265 PASSED/0 真 FAILED，新 6 例逐条 PASSED，扫描 115/115，fixture 未跑（未改 scripts/scan），publish 两发布步骤 skipped。报告 `/var/minis/shared/work/fullscan-rescan-1120/reports/FIX-mirror-integrity.md`；装置 `probe/mirror-integrity/`。7 个授权文件 +306/-39；共享本地 main=f75cceaa 陈旧，统计按 origin/main。未合 main、未清支、未真机验证。
+
+<!-- 2026-11-20 14:39:20 -->
+## Responses API 断流恢复修复（2026-11-20，分支 CI 绿，未合 main）
+
+用户报今日中转站断流后需手动重启，并明确授权补缺口。独立 clone shared/work/responses-recovery-1120/repo，基线95d4c6ea，分支fix/responses-stream-recovery-1120，最终d53a0ae8966cbed8d28aa1a53c2ca9e87c28ca62；远端一致、树干净。根因：upstream_stream_read_error/upstream_error/bps_stream_error及unknown+特定传输消息被openAiStreamErrorStatus映射0→ProviderError→worker kind=provider→跳过同端点瞬时重试，耗尽fallback后停。四生产文件：共享mapper精确allowlist、已知4xx/认证/限流优先，三SSE入口均传message；typed transient/network+正文无工具活动接既有EOF预算续写，保留历史/接缝去重；工具bearing失败沿用回滚重试不执行半截/未调度调用；ensureActive防停止后复活；异常段记ServerError；续写后永久失败/空重试耗尽先flush已保留正文再抛原错。9文件+403/-9，生产+103/-7，不换API/不加依赖设置/不改代理和fallback顺序。
+证据：旧真实主线同错误码expected502 actual0 RED→修后GREEN；本地31/31；5变异精确2/2/1/1/1红，字节还原再31绿；13相关门绿，原截断gate26臂自测；CI #3378 /44687299208 五job success同SHA，10279 PASSED/0真FAILED，新增20例(7真Provider+MockServer+JSONL/13真engine+FakeHost)逐条PASSED，115门+ALL387 CASES PASS，publish release skipped。首轮#3373只旧blockedEmptyReply负控因if改else-if锚点不命中红，恢复原外层if（不放宽测试）后7旧例本地绿；随后补续写最终失败正文保留两例绿。报告shared/work/responses-recovery-1120/REPORT.md；probe/ci保存日志。未合/未发布装机/未真网人为消耗额度或故障注入；不能承诺所有中转站恢复、零重复计费或语义绝不复述。CI只读探针urllib受代理SSLEOF，已改curl --noproxy双跳，token不进argv/日志、不转发对象存储。
+
+<!-- 2026-11-20 15:53:21 -->
+## FIX-RESCAN-1120 ProviderKey 快照保存完成（分支CI绿，未合main）
+
+R6 F-04：Save 点击同步捕获 `val keyToSave=editKeyValue`，新 internal ProviderKeySaver 以 MutableStateFlow 单飞门拒 IO 期间 Cancel/输入/重复 Save，成功回填只用快照，失败先释放门再通用 Toast（日志无密钥），凭据 state 补 instanceId 键。分支 fix/provider-key-save-snapshot-1120 代码 `03513e8b`+形状修复 `b6d5d380`，基线 95d4c6ea，2文件+321/-38。L1 5/5 真实 saver 切片，3/3 变异 RED-PRECISE 各翻自己断言，L3 wiring exit=0，gate_run 命中11全绿。CI #3381 scan-gate 红：ProviderKeySaver ioDispatcher 参数跳转运行时等价但 readonly_mount_write_guard 文本形状判据看不见——教训=把平台守卫锚点搬进抽象层=摘守卫的牙，搬前先跑那道门；修法恢复调用点字面 `withContext(Dispatchers.IO){}` 并由接线测试补钉形状。CI #3383 /44696692510 五job success同SHA，新5逐条PASSED，115/0 failed，夹具按机制skipped，发布两步skipped。未真机Compose、未合并清支。报告 shared/work/fullscan-rescan-1120/reports/FIX-key.md，装置 probe/key-save-jvm/ + key-save_wiring.py。另：gh_ci_wait 长轮询两次被中断，健康路径=短 sleep(60)×N 分片 python 轮询并逐条核 head_sha。
+
+<!-- 2026-11-20 16:11:10 -->
+## FIX-RESCAN-1120 WebDAV 分支完成（未合 main）
+
+分支 `fix/webdav-resource-identity-1120` @ `4d7c4b96c145c61cc45dcbd26957f1bc902be1a5`，基线 `95d4c6ea`。只改 WebDavClient/WebDavSync 与两个 WebDAV 测试。restore/restoreAuto/delete/rotation 使用经过同源、预期 collection、危险分段/嵌套编码校验的 href，displayName 仅展示/过滤；resourceName 为轮转身份。GET 64 MiB 上限：Content-Length 早拒 + 实际流读取限额，超限响应关闭；提供无副作用 isSupportedBackupPayload 供后波 Screen 发布门。L1 81/81，L3 wiring 8 项，相关门8/8；隔离变异 displayName-path 5 红、unbounded-body 3 红，未触碰工作树。CI #3380 / run 44695004174 attempt3 五 job success，head_sha 一致；新测试逐条 PASSED，115 门绿，夹具按机制 skipped。前两次 lint 为 Maven Central 429，第三次仅重跑失败作业转绿。报告 shared/work/fullscan-rescan-1120/reports/FIX-webdav.md；装置 probe/webdav-resource-identity-1120。未合 main、未并集/清支、未真机/真实 WebDAV，Screen 发布门留待后波。
+
+<!-- 2026-11-20 16:15:14 -->
+## FIX-RESCAN-1120 ChatClaim：分支CI绿，未合main
+
+R1-CHAT-01按TASK-chat只改ChatViewModel/ChatQueueInterruption及queue claim测试，最终fix/chat-send-claim-1120 @ 7936dec2a059bc0455e46089cef2567350f9bc6c，基线95d4c6ea。send/drain共享claim；send失败恢复草稿不动赢家/附件，同文件retry/rerun/resume共claim，drain最终Main认领；active+streaming+token/epoch贯穿guard/lazy句柄发布/终止，旧finally不清新owner。L1 44/44；7组变异RED_PRECISE并SHA256恢复，L3 24/24，本地相关门11/11。CI run44698830573（#3384）五job success、同SHA；日志10268 PASSED/0真FAILED，新9例+旧6例逐条PASSED；scan115/115，夹具按机制未跑；publish两发布步skipped。首轮#3382仅SessionActivityStreamErrorTest形状锚因lazy缩进失配，恢复resume流内原缩进后#3384通过。报告shared/work/fullscan-rescan-1120/reports/FIX-chat.md，装置chat-claim-probe。未合main/未并集/未清支，未真机并发；本地main过期故diff须origin/main。
+
+<!-- 2026-11-20 18:20:20 -->
+## FIX-RESCAN-1120 全批合并 + 设备验证收口（2026-11-20 晚）
+
+主线 `95d4c6ea` → 并集 `f9fde744f`（20 支零冲突；本地 115 门绿；CI #3385 五 job 绿、`ALL 387 CASES PASS`、unit 10471 PASSED/0 真 FAILED；文件集两两零交集）→ main `31815b0e4`。
+设备验证（1.0.0+3385 = 主线构建）发现 R4-BM-01 同族漏网：`BrowserUseManager.onReceivedHttpError` 仍打印带签名 query 的原始 URL（实测 `main-frame HTTP 404 ...?X-Amz-Signature=...`，URL 进 logcat→filesDir/logs 可分享）。修支 `fix/browser-url-log-siblings-1120` @ `77372f502`：抽 `originOnlyForLog()` 供下载监听与主框架错误两条日志共用，补 2 单测；CI #3387 绿。
+再次合并 main `31815b0e4` → `fd20621b1`（parents=2，树=分支树 `455a2228` 逐字节一致）。main CI #3388 lint 两次撞 Maven Central **429**（hamcrest-integration 1.3 / hamcrest-library 1.3 / javawriter 2.1.1；独立请求均 200 = 环境红）→ `rerun-failed-jobs` attempt 3 success，publish 成功（APK 14,961,578 B）。教训：run 仍在跑时 rerun 返回 403 "workflow is already running"；429 需冷却后再重跑，通常第三轮过。
+设备复测（1.0.0+3387，与合并树源码等价）：404 日志变为 `https://example.com/`（无 query/path/userinfo，新 pid 19690 两条均如此）；memspike 敏感参数=`***`、非敏感对照保留；MCP 无效 add 保留 OAuth、并发 add 两支均存活、原 termux-dock 完整；崩溃/ANR/OOM/FGS 0；槽位默认 6/范围 1–12 生效（用户值 12）。断流恢复仍无真实样本，不宣称验证。
+清理：远端 22 分支 DELETE 全成功（21 fix + integration｜compare ahead_by==0 判据），本地同名 -D；24 个工作树移除；保留 `fix/ci-job-granularity-1120`（在飞）与 worker-slots/docs-refresh 用户会话工作树。P2 登记 backlog §1120-C（12 条，scan_debt OK）。
+
+<!-- 2026-11-20 18:27:00 -->
+## FIX-CI-1120 CI 判读细化到 job 级（分支绿，未合 main）
+
+
+用户原话：查 CI 颗粒度太粗，只判「CI 有没有过」，但已是 4 模块并行，扫描红了其它还在跑，宏观仍显示在跑。
+
+**分支** `fix/ci-job-granularity-1120` @ `a75ba6d3c22d59e208af30aea62c234f8865b935`（`origin/main` 重放后），3 提交：
+`379623632` 分项改造 → `f2bcbac46` 并行判读权威化（GET 不落空体、cancelled 计入硬失败）→ `a75ba6d3c` 等待模式强制 `--workflow`。
+
+**实现**（`assets/skills/github-ops/`）：
+- 新增 `scripts/gh_ci.py`：一次读 run + **当前 attempt 全部 job**（`/runs/<id>/attempts/<n>/jobs` 钉死 attempt，局部重跑不会混入旧红 job），每 job 给 conclusion + 失败步骤 + 运行中步骤；分页按 total_count 收全；job 明细缺失 → UNKNOWN(3)，不判绿。
+- `gh_sync.sh gh-actions-runs` 默认走分项；`--summary` 才回退粗列表；`--run-id` 直读单 run；无 `--workflow` 时不过滤 workflow（与旧行为一致）。
+- `gh_ci_wait.sh` 变薄包装；每 poll 打全量 job 快照；`--fail-fast` 首个硬失败即返回（默认仍等 workflow 终态，避免误读「绿」）；`--job-detail` 保留兼容。
+- 传输改 curl（沙箱 urllib 对 api.github.com 间歇 TLS EOF）；token 走 `--config -` stdin，**不进 argv**；GET 不建临时体，POST 体走独立临时文件。
+- `SKILL.md` 1.0.2 → 1.0.4；`test_gh_ci.py` 从 `assets/**/scripts/` 移到仓库 `tests/ci-granularity/`（不进 APK 资产）。
+
+**证据**：本地 14/14 unittest（离线 mock，覆盖并行红/分项分页/attempt 钉死/幂等 dispatch/超时/快照缺明细/GET 无体/token 脱敏）；ruff F,E9 过；`sh -n` 双侧过。真实运行抽查：`#3381` 能直接指出 `scan-gate: failure；失败步骤：Run pre-build scan gate`，而 `build-apk/unit-tests/lint` 仍 success。
+
+**CI**：`#3389` / run `44716367496`。attempt 1 的 `lint` 因 **Maven Central 429**（hamcrest-integration/library、javawriter 下载被限流）红，其它三 job 仍 in_progress——正是本改造要暴露的形态；run 结束后 `rerun-failed-jobs`（HTTP 201）→ attempt 2 五 job 全 success，`head_sha` 与分支 tip 逐字符一致，publish 两发布步骤 skipped（main 门控）。
+
+**未做**：未合 main、未清分支、未并集；CI 不跑 `tests/ci-granularity/`，Python 测试证据仅本地。
+
+<!-- 2026-11-20 19:01:51 -->
+## CI-JOB-GRANULARITY-1120 审查 + 合并 main（2026-11-20 晚）
+
+
+用户「检查云端剩下的那个分支，没问题就合并」。分支 `fix/ci-job-granularity-1120` @ `a75ba6d3c`（基线 `fd20621b1`）→ main 合并提交 `fe72bb9cd`（`--no-ff`，parents=`fd20621b1 a75ba6d3c` 父数 2；树与分支 tip 逐字节一致；5 文件 +612/−214）。
+
+改动：`assets/skills/github-ops` 新增 `scripts/gh_ci.py`（job 明细按 `/runs/<id>/attempts/<n>/jobs` 钉死 attempt、按 total_count 分页、明细缺失→UNKNOWN exit 3、cancelled 计硬失败、curl `--config -` 使 token 不进 argv）；`gh_ci_wait.sh` 退化为 exec 包装；`gh_sync.sh gh-actions-runs` 默认分项输出并可在非 git 目录用 `--repo`；`tests/ci-granularity/test_gh_ci.py` 新增（CI 不跑，仅本地）。
+
+审查证据：14/14 本地 unittest + ruff F,E9 + 双侧 `sh -n`；实网回放 #3389 得 5 job 逐项 success rc0、#3381 精确指出 `scan-gate: failure；失败步骤：Run pre-build scan gate` rc1；`/tmp` 下非仓库目录 `--repo` 读通、`--no-dispatch` 等待模式 rc0；设备侧 `/var/minis/skills/github-ops` 四文件与分支 sha256 逐个相同。本地 `scan.sh` 按机制拒绝全量（exit 3）→ 115 门证据取 CI：`Summary: 115 passed, 0 failed`、`✅ All four layers consistent`、夹具因 `scripts/scan/** untouched` 按机制 skipped。
+
+CI：#3389 五 job success 同 SHA（attempt1 lint 撞 Maven Central 429，`rerun-failed-jobs` attempt2 全绿）；main #3390 五 job success、publish 真执行 → `android-latest` 14,963,469 B @10:59Z。
+
+清理：远端分支 DELETE 204、本地 `-D`；工作副本 `shared/work/merge-ci-job-granularity-1120`（67 MB）与日志 `shared/work/ci-job-granularity-evidence/ci-3389-jobs/` 保留。**遗留未删**：远端 `docs/refresh-stability-1119`（6646908a）、`fix/android-copy-audit-1119`（d1f2fdde）均已并入（compare ahead_by=0 / behind 54、56）但一直没删，未擅自动。
+
+可复用：审查这类 CI 工具改动，「拿历史同 SHA 的红 run 实网回放」是最省的行为证据——新旧脚本对 #3381 的输出形态差异一眼可见（逐 job+失败步骤 vs 一行 run 状态）。
+
+<!-- 2026-11-20 19:47:00 -->
+## SURGERY-AUDIT-1120 C-security 只读审计完成
+
+基线 merge-ci-job-granularity-1120 @fe72bb9cdad4a66b0d40e0dff8844202d7cf4fe8，起止工作树干净、3切片来源hash未变。报告 shared/work/surgery-audit-1120/reports/C-security.md，STATUS DONE。4候选：C01 NativeOffload原始argv在handler权限前进logcat→开启日志时持久→分享（非MemorySpike旧项）；C02 blobDownloadError无token→失败面板/原生info消息，源码切片3次→3条+4096字符原样，非DB/模型system注入；C03默认OkHttp跨来源保留api-key/x-api-key，307/308保留POST，真实4.12.0 MockWebServer四臂通过，但可信生产端点重定向攻击可达未证，建议P2条件；C04顶层文档信任覆盖外部iframe/about:blank/popup仅策略切片成立，WebView递送/SOP/外传未证，不能计已证泄漏。allowFileAccess逐宿主核查：浏览器/WebApp四项false，静态预览/print JS false，KaTeX固定asset JS+file true且模板trust:true，未证任意执行。cleartext/userCA系backlog§39 P3明确设计，WebDAV另有严格门。Debug RPC认证/DEBUG/CORS及既有MCP/WebDAV/share修复排重。用户补充附件 /var/minis/attachments/uploads/Rikkaminis______________.md 在本会话uploads为空，已报告未读，不假称全文核对。无真实凭据/设备DB/业务日志访问，无真机攻击/改代码/CI。证据目录同任务 evidence/C-security。
+
+<!-- 2026-11-20 20:36:19 -->
+## 手术前全域审计：材料纠偏 + 19候选 + 工程波次（2026-11-20）
+
+
+用户要求以三份重构材料为参考，调查此前因成本/风险未动的疑难杂症。实际基线 `fe72bb9cdad4a66b0d40e0dff8844202d7cf4fe8`（origin/main，干净）。四会话只读审运行时/持久化/安全/Provider；主会话核读三份材料、抽查关键路径并汇总到 `/var/minis/shared/work/surgery-audit-1120/FINAL-EVALUATION.md`。未改仓库/未开支/未合 main/未跑 Gradle/CI；报告 A-D 与可回放证据位于该目录 reports/evidence。
+
+候选共19：A01 正常 worker DONE 后主进程 transcript 未提交，ACK删run-dir且terminal恢复跳过；A02 NativeOffload无取消传播；A03计划任务旧run迟到结算写同ID新任务。B01稀疏thinkingRules错绑同type+label provider；B02规则UUID通过REPLACE跨owner搬移；B03“回滚”仍merge不还原集合；B04规则RMW丢更新；B05 import成功无Provider持久化完成屏障。C01 raw argv在业务校验前入日志；C02未认证blobDownloadError造面板/聊天提示；C03跨源重定向非Bearer key+POST仍保留（仅依赖实测，生产端点可达未证）；C04 minis iframe来源边界需真WebView验。D01 worker将per-request规则写进共享cache串请求；D02 Gemini function-call明确失败正常收尾；D03 Anthropic context window截断可让prefix工具参数repair执行；D04 Claude prefill能力矩阵；D05官方thinking/signature/redacted未收/回放；D06压缩只认length而漏max_tokens。
+
+纠偏：ProviderDatabase无destructive fallback（仅注释）；2个MODE_MULTI_PROCESS均为注释；ConfigBuiltins主线程直走所以“必死锁”不成立；checkReleaseBuilds=false但CI有lintDebug；4处allowFileAccess分宿主不是任意网页漏洞；333个源码读取测试不能全当伪单测；先删90门/引入Koin/多模块/Detekt并不解决核心协议问题；反向Migration不会随旧APK降级，注释的Room注册限制与该版本官方源码不一致，属于说明/测试债。
+
+路线：W0真实回放/反事实+门等效判据；W1 turn commit；W2取消/argv/reset；W3请求级快照；W4恢复身份/RMW/完成屏障；W5回滚语义；W6终态与工具安全；W7 Anthropic合同；W8迟到结算。不要先大刀删门/拆模块后补状态机。
+
+<!-- 2026-11-20 22:07:21 -->
+## SURGERY-C02 下载失败桥鉴权完成（分支 CI 绿，未合 main）
+
+
+分支 `fix/download-bridge-auth-1120` @ `726a4ae679bf66afc5aaf0ba6f2e98e63faf99d4`（基线 `fe72bb9cd`），CI #3392 / run `44747579493` success，head_sha 一致。报告 `/var/minis/shared/work/surgery-impl-1120/reports/DOWNLOAD-AUTH.md`，装置 `shared/work/surgery-impl-1120/probe/download-auth/`（不入库）。
+
+**缺陷闭合**：`blobDownloadError(error)` 原本零凭证 ⇒ 任意页面/iframe 可写下载面板 FAILED 行 + 原生聊天提示（reason 无长度/次数上限）；成功桥的「错误 token 分支」同族（无凭证即可上报）。
+
+**改法**：新增顶层 `BlobDownloadTokenSlot.kt`（arm / claim 同锁内比较+消费 / 过期窗口 120s；`boundedBlobFailureReason` 240 字上限 + 控制字符折叠；`blobDownloadFetchScript` 顶层生成器）。两个桥成员共用一个槽；**被拒绝的调用一律不写业务状态**，只留有界结构化诊断（成员名 + 判定 + reasonLen + ≤64 字摘录）；成功桥的「被替换」分支也降为诊断；注入脚本两处错误回调带 token；destroy 解除 arm。保留 `blobDownloadActiveToken` 门面属性——`browser_destroy_wakeup_check.py` 的 ARM_RE 锚在 arm 字面量上，搬进 slot 文件会摘门牙。
+
+**证据**：修前基线反例（从 `git show HEAD:` 抽原字面成员编译实跑）= 无凭证 3 次调用 → 3 条面板行 + 4096 字 reason；修后 = 0 条 + 240 字。L1 17/17（槽状态机含 8 线程并发只 1 胜出）+ 真实桥成员切片 13/13 + node 实跑生成脚本 5/5；既有 `BrowserTeardownAndFailureSignalTest` 9/9。L2 变异 9 臂全精确红（m1 保持 arity 改语义，因为删参数只编译红=非行为证据），还原后 sha256 对拍。L3 wiring 探针修后 14 criteria 绿、修前树 13/14 红。gate_run 命中 2 道（browser_destroy_wakeup / claim_release）全绿。CI：10490 PASSED / 0 真 FAILED，新类 17 条逐条 PASSED，scan-gate `Summary: 115 passed, 0 failed`，`scripts/scan/** untouched` ⇒ **349 夹具本轮未跑**（机制如此）。
+
+**可复用**：①「漏斗调用 ≥N 次」判据是定时炸弹——新增上报点时仍绿，等于替下一个无凭证分支背书；改成**精确站点集合**后增删任一站点都红（本次已改 `BrowserTeardownAndFailureSignalTest`）。②把注入脚本提升到顶层纯函数 = 可执行证据（内联时「错误回调带没带 token」只能读源码）。③用 `git show HEAD:` 抽修前成员进同一装置做前后观测值对照，比 diff 转述硬。④上限与认证不可互换：有界只是不让已认证敌意页面把可见失败变无界，认证才是断点。
+
+**待收口**：本次未动 `scripts/scan/**`（任务书冻结），所以无注册门；收口建议把 probe 的 wiring_check.py 落成 `scripts/scan/blob_download_bridge_auth_check.py`（带 --selftest）并追加为 scan_blocks 第 116 块（scan_parallel.py 校验块号连续+分母）。真机 WebView 端到端未验。成功桥「被替换 token」从「上报失败」改为「仅诊断」是语义取舍——待主会话拍板（若要求可见，需每请求各自 token 而非回到无凭证上报）。
+
+<!-- 2026-11-20 22:09:22 -->
+## SURGERY-W3 请求局部思考规则快照（2026-11-20）
+
+
+分支 `fix/request-rules-1120` @ `12799a7c17f9842c32c2cc86f01eb4896aa3fc93`（基线 fe72bb9cd），CI #3393 / 44748094116 success（head_sha 逐字符一致）。未合 main、未清支。
+
+**根因（D01）**：`:modelservice` worker 把请求的 `thinking_rules` **发布进进程级 `ThinkingRuleResolver.customRulesCache`**；同 worker 上第二个请求会在第一个建 wire body 前覆盖它，且 wire（`apply`）与 echo（`echoPolicyFor`）各读一次 cache → 同一次请求可能拿到两份不同代际的规则。
+
+**修法**：`RequestThinkingRules`（私有集合持有，`fromJson` 解码、`capture` 深拷贝 CustomPath tier map）→ worker `decodeThinkingRules(req)` 每请求解一次 → 既有 `ProviderFactory.create(..., requestThinkingRules=)` → `OpenAIProvider` 构造注入，wire/echo 共用同一次捕获。缺字段 = **显式空快照**（不继承前一请求）。worker 不再写 cache；UI 侧 cache 语义（`customRulesRevision`、`restoreCustomRulesFromJson`、编辑器预览只读路径）完全未动。
+
+**改动阶梯**：停第 2 级（复用既有 `applyDraftRules` + `decodeRuleJson`），唯一新类型是快照容器。6 文件 +390/−83。
+
+**验证**：L1 真实 resolver/快照 8/8 绿（kotlinc 切片，`ThinkingLevel` 与 Room 实体机械切片）；L2 变异 4 臂全 PRECISE（M1 worker 重发布 cache / M2 echo 回退 cache / M3 缺字段继承 / M4 工厂丢快照），字节基线还原不用 `git checkout --`；L3 接线探针 20/20 exit=0（`probe/request_rules_wiring.py`，模板感知剥注释）；gate_run 16 道相关门全绿（未跑全量 115 门/349 夹具，按任务书硬约束）；CI unit 10480 PASSED 行、0 真 FAILED、12 条新用例逐条 PASSED，scan-gate `Summary: 115 passed, 0 failed`（`scripts/scan/** untouched` ⇒ 夹具按机制未跑）。
+
+**踩坑**：`OpenAIProvider` 离线**编译不了**（触 Android ConnectivityManager / PRoot LocalSocket，有界闭包编译到 130+ 错误后停）⇒ L1 只能覆盖 resolver/快照层，Provider 层靠 CI 真 Android 编译 + `RequestThinkingRulesProviderTest` 承担。`gate_run --run` 常被别人会话持锁（`@@LOCK@@` 不排队），等窗口重试即可。变异臂若用 `git status` 判脏会挡住本支自己的未提交改动 ⇒ 改按**文件字节基线**守护还原。
+
+**未验证**：未实跑真实 `:modelservice`、未打真实上游、未真机；Provider 持有快照这一步只有源码级证据。
+
+<!-- 2026-11-20 22:17:55 -->
+## SURGERY-W8 A03 迟到结算归属修复（2026-11-20，施工支已交）
+
+
+分支 `fix/scheduled-settle-1120` @ `cf07ce7c44e219dfc29d192b15ccfc35a3516181`（实现 `b0a05b335` + 跨包 import 修复 `cf07ce7c4`），基线 `origin/main=fe72bb9cd`。CI run `44748380279`（#3394）attempt 2 五 job 全 success、head_sha 与 tip 逐字符一致；unit-tests `10490 PASSED / 0 FAILED`（新测试类 17 条逐条 PASSED），scan-gate `Summary: 115 passed, 0 failed`（夹具因 `scripts/scan/** untouched` 按机制 skipped）。**未合 main / 未清支 / 未并集**。报告：`/var/minis/shared/work/surgery-impl-1120/reports/SCHEDULED-SETTLE.md`，装置 `probe/scheduled-settle/`（run.sh / mutate.py / late_settlement_wiring.py / xpkg 形状探针）。
+
+**根因与修法**：结算只按 taskId 认领运行，而 taskId 可被删除/恢复重建/同 id 重建 ⇒ 旧 run 的迟到结算把 lastRunDate/lastResult/failStreak 写到新任务上。身份改用 `(taskId, sessionId)`——计划任务每次派发由 `HeadlessChatRunner.ensureSession` 新建 UUID 行，会话 id 从不复用。新增 `ScheduledRunRef`（ScheduledTask.kt）+ `ScheduledTaskRunOwnership`（Policy 层 ownsMarker / ownsActiveRun）；`completeRun` / `clearRunningMarker` 先问身份再写；runner 的 `runningTaskId` 换成携带身份的 `activeRun` 且只有 `releaseActiveRun` 一个释放点；崩溃恢复用同一套归属判据；未起跑（无 session）走 `completeUnstartedRun`，只在文档无 marker 时才允许记账。
+
+**可复用两条**：
+1. **冻结的门会钉住调用点的参数表**——`scripts/scan/schedule_date_source_check.py` 要求 `ScheduledTasksStore.completeRun(` 恰好 4 参且是唯一结算漏斗，加一个 `sessionId` 位置参数直接让门红。解法不是改门（施工期冻结），而是把新增信息**收成一个值对象参数**（`ScheduledRunRef`），参数表不变、还顺手消掉"两个相邻位置参数写反"的新缺陷面。**签名扩参前先 grep 门脚本里的参数表判据。**
+2. **跨包新增符号 = 必补 import，且 CI 才拦得住**——`…app.service` 包的测试用了 `…app.scheduled` 包的新 data class，CI `compileReleaseUnitTestKotlin` 报 `Unresolved reference`（attempt 1 真红，16 分钟一轮）。沙箱 kotlinc 编不了那个文件 ⇒ 用**形状编译探针**复刻同形（有 import 通过 / 无 import 报逐字相同错误）当先证。**跨包新增符号的 import 必须与用法同一次 edit 落地**（kotlin-compile-gotchas §8 同族）。
+
+**门与环境噪声**：`schedule_date_source_check.py` / `scheduled_store_release_guard.py` 是计划任务域的相关门（gate_run 按改动文件集命中 4 道）；attempt 1 的 `lint` 红是 **Maven Central 429**（hamcrest-integration/library 1.3 + javawriter 2.1.1），与改动无关，`rerun-failed-jobs` 后 attempt 2 全绿——与 11-19、11-20 其它批次同一形态。
+
+**未验证**：真机上「删除后在飞 run 与同 id 重建交错」「备份恢复与在飞任务交错」未复现（需构造特定 UI 状态）；未跑本机全量门与 349 夹具。
+
+<!-- 2026-11-20 22:40:03 -->
+## SURGERY-W4 restore-identity 支完成（分支 CI 绿，未合 main）
+
+分支 fix/restore-identity-1120 @ fa7a8b626e3a370319a9edb449f67f1574441c36（基线 fe72bb9cd），远端 ls-remote 一致；CI run 44753483361 success，head_sha 逐字符一致，scan-gate 115/0、unit 0 真 FAILED、新增 16 例逐条 PASSED。修 B01/B02/B04/B05：导出与规则分组带 _sourceInstanceId（Provider 条目也必须带，否则 Stage1 映射恒空）；配对决策抽成纯函数 ConfigBackup.ThinkingRuleGroupPairing，旧包在“同键多 Provider 且分组数<Provider 数”时拒绝并提示，组数相等仍按序；规则 id 由 DAO 在覆盖整表的事务里解析，跨 owner 冲突重新分配、同 owner 保留、同批重复也重新分配；规则读改写改为 ThinkingRuleMutation 数据 + DAO 单事务（synchronized 内挂起调用编译不过，仓库层锁不可行）；恢复在 import 返回前 await 持久化屏障并把失败写入 skipped。首轮 CI 44752068668 红于 'public' function exposes its 'internal' parameter type 'ThinkingRuleMutation'（提交 7dcefa4f6），改 public 后重推绿。证据 probe/restore-identity（主探针 25 断言、b04 差分、5 变异臂全红、wiring 14/14、pre 基线同集红 10 项），报告 shared/work/surgery-impl-1120/reports/RESTORE-IDENTITY.md。未改 BackupSettingsScreen（屏障放 import 内）、未改 Entity（不升库版本）、未碰禁区文件，未合并/未清支/未做并集。
+
+<!-- 2026-11-20 23:04:58 -->
+## SURGERY-W2 NativeOffload 取消/脱敏/boot-reset 串行化（2026-11-20）
+
+
+分支 `fix/offload-cancel-1120`（worktree `/var/minis/shared/work/surgery-impl-1120/offload-cancel`），基线 `fe72bb9cd`，三提交到 `5def49bc1d3407c5728b2e10ebf47de3be207590`，分支 CI run **#3400 success**（head_sha 逐字符一致）。未合 main。
+
+**做了什么**：
+- A02 取消上下文：`OffloadCallContext`（requestId/owner/取消标志+幂等监听器）+ 每代服务器**一条** daemon 线程的 `OffloadSocketMonitor`（`poll(POLLHUP|POLLERR)` 不消费帧字节）；accept 先挂监视再入队；队列有界；排队期已取消的请求不解帧不执行；取消后的 response tmpfile 立刻回收；帧读有 10s 超时；`stop()` 停监视器并 drain 队列。model-use 内层 dispatch 经 `dispatchCancellable { … }`（**lambda 包装**，调用点字面形状不变）共享同一取消源，取消会真正跑 `dispatchOnce` 的 finally（写 cancel 给 :modelservice + 有界 settle）。
+- C-01 argv：`recv` 日志不再插值 `$argv`/`$cwd`，只留 handler 名/argc/envc/argvChars/cwdChars。
+- A04：`BootTransaction`（独立 Mutex + ThreadLocal owner，可重入，**刻意不是 lifecycleMutex**，否则 install 自锁），`installIfNeeded/autoRepair/restoreCriticalFromAssets/reset` 全部「boot 事务(外) → lifecycleMutex(内)」；boot/reset 互斥、boot 体内的 Stage-3 reset 不自锁；beforeRootfsWiped 停消费者与 bootGate 重臂保留。
+
+**验证**：L1 真实生产切片 JVM：`NativeOffloadCancelTest` 16/16、`BootTransactionTest` 8/8；另有 model-use 取消形状独立探针 3 臂。L2 变异负控 **8 臂全红**（M1 argv 日志 / M2 监视器不取消 / M3 队列守卫 `if(false)` / M4 裸 dispatch / M5 boot 门直通 / M6 reset 绕事务 / M7 包装不读 context / M8 调用点丢密钥），每次从字节快照还原且 sha256 对拍。L3 静态接线探针 29 条全过（自检两次：监视器不取消→红 W3a；`handlers.keySet()`→红 W5c）。L4 CI #3400：10497 PASSED / 0 真 FAILED，scan-gate `Summary: 115 passed, 0 failed`，夹具按机制 skipped（未改 scripts/scan）。本地 gate_run 命中 11 道全绿。
+
+**CI 两次红（真实生产错误，都已修）**：①`handlers.keySet()` 无参调用编译错（ConcurrentHashMap.keySet() 需谓词参数）——本地切片装置编的是抽取类不是整个 server object，没看见；②既有 `ModelUseKeyHandoffWiringTest`（2 例）+ `ModelUsePassthroughTest` 钉住 dispatch 调用点**字面形状**，我第一版改了参数名/接收者 ⇒ 改成 lambda 包装保留调用点原样，**不放宽既有测试**。
+
+**可复用教训**：
+1. **既有测试钉字面形状时，不要改形状也不要把测试放宽**——把新能力做成参数（lambda），让调用点原地不动。
+2. **切片装置编的是抽取出来的类，不是整个 object**：object 里的日志行、字段访问可能编译不过而装置看不见。CI 第一次红就在这种行上。⇒ 形状探针要额外钉住「可调用写法」（本轮 W5c）。
+3. **变异驱动要先验锚点命中**：锚点失配时驱动"报错并还原"= 没跑，必须把「锚点缺失」当红而不是当通过。
+4. 装置读源码断言时，驱动必须同步**全部**被读文件到探针树（M6 首跑绿就是因为只同步了两个文件）。
+
+## 2026-11-21
+
+<!-- 2026-11-21 01:26:14 -->
+## NIGHT-PROTOCOL W6 防御性协议兼容交付（2026-11-21，CI_PENDING）
+
+分支 `fix/protocol-terminal-1120` @ `472eccfeb543eb9122bef927370497e17b23cd80`，基线 `fe72bb9cd`，7文件 +342/-20，已push且ls-remote一致，工作树干净。D02 Gemini两官方工具失败在共享parser抛既有ProviderError，JSONL kind=provider→既有fallback；channel.close(error)保留排队文本（cancel会丢，M5实证）。D03独立context截断predicate接既有工具准入，绝不混入output length wall；Anthropic usage-only delta不覆盖已声明reason、未闭合tool标truncated。D06摘要采用复用已知截断谓词，第一候选截断→下一完整、全败throw，错误文案实际reason。禁区Engine/State/FakeHost/OpenAI/Factory/ModelService与基线字节不变；无利用验证/真工具/模型设置修改/合main/清支。
+本地共享锁：真实整份Provider+JSONL+Engine拒绝逐字切片+真实compact候选循环，47/47绿；同夹具基线44项11失败（新API3项未纳入baseline，未用编译红冒充行为红）；6隔离变异全行为红，源码sha256未变；接线23/23；相关门10/10，未本地全量/Gradle。新增14个入库回归，其中4个完整Engine+FakeHost测试待CI，不能声称本地全Engine跑过。
+CI只dispatch一次：#3408 / run `44782368104` / attempt1 @完整代码SHA，最后读取scan-gate success、build-apk/lint/unit-tests仍in_progress，父会话可15分钟读同run，不重dispatch。报告 `/var/minis/shared/work/surgery-impl-1120/reports/PROTOCOL-TERMINAL.md`（STATUS: CI_PENDING）。
+D04未修生产：官方4.6+无论thinking禁prefill、旧代thinking开启禁；真实builder矩阵已取证。HIGH在legacy maxTokens512实际无thinking、AUTO老/新不同，requested档位不能代替有效wire状态；worker实例缓存也不能回答主进程capability。最小接线/fixture布局在 `probe/protocol-terminal/D04-HANDOFF.md`，待W1父会话串接。
+
+<!-- 2026-11-21 02:14:37 -->
+## SURGERY-W1 复核修订：回合提交的崩溃与活性边界（2026-11-21 凌晨）
+
+
+分支 `fix/turn-commit-1120` @ `3241641016970c65d0d5b1c5c4a57ea55d3d4eaa`（起点 `da56fa53a`），CI **#3409 / 44788417563 success**，head_sha 逐字符一致；unit **10516 PASSED / 0 FAILED**（新增 29 例逐条 PASSED：StreamRecoveryOwnershipTest 24 / TranscriptCommitHandleDurabilityTest 3 / AgentLoopTranscriptPlanTest 2），scan-gate `115 passed, 0 failed`（`scripts/scan/** untouched` ⇒ 349 夹具按机制未跑），publish 两步 main 门控 skipped。**未合 main / 未清支**。报告 `shared/work/surgery-impl-1120/reports/REVIEW-FIX-TURN.md`，装置 `probe/turn-commit-v2/`（不入库）。
+
+**三处缺陷（真代码证实）**
+1. 恢复每目录 `readLines()` **两次**（一次探 DONE、一次拼正文），且在任何门槛之前 ⇒ **无 `stream.jsonl` 的目录直接抛 FileNotFoundException，被吞成 skipped 后永久留存**；所有目录正文同时驻留。改为 `StreamScan` 单遍有界（同协议行上限、8 MiB/目录、超限帧计数跳过），`readDone` 改成**惰性 supplier**，已提交/取消/活跃目录一个字节都不读。
+2. 延迟第二轮在同进程活跃期扫描，而 worker 往目录**内部** append 不刷新目录 mtime ⇒ 健康运行被当孤儿、DONE 前缀被插成成品行。三层所有权：`StreamOwnership`（本进程 live 注册表 + `MinisApp` 启动基线名快照）、`workerMayWrite`（心跳新鲜 **或** 本地可见 pid 匹配；刻意不把 hidepid 下的 DEAD 当授权）、`deleteIfUnowned` 单一删除入口（canonical 前缀守卫 + 删除前活性复检）。
+3. 行身份/计划诚实：`meta.json` 加 `row_index`（流开始前写入），恢复按 (泡,行) 分组（旧目录保 attempt 序一泡一行）；`plan()` 写成功后才记；**计划不可持久且 spool 仍在 ⇒ 引擎拒绝插行**；`discard()` marker 写失败降级到 `recovered.json`；**cancel 出口 NonCancellable 结算为 discard**（旧 stop 合同不动，只是不再给下次冷启动留可复活 spool）。
+
+**核实后不动**：worker 的 `client.ack` 本来就只释放 token/进程、从不删 run dir ⇒ ACK→marker→delete 顺序已正确，无需分离改造。
+
+**可复用三条**
+1. **「留给恢复」与「恢复会跳过」必须成对**：回收器把 `terminal + 未提交` 一律留给恢复，而恢复对错误终态 `SKIP_TERMINAL` ⇒ 两边互推、目录永久留存。修法是让「留给恢复」也要求干净 DONE（有界单遍探）。
+2. **mtime 不是活性**：worker 在目录内 append 不刷新目录 mtime，任何按目录 mtime 判「没人动」的清理都会误判长回答为孤儿。活性只能用 owner 注册表 / 心跳 / pid，且 hidepid 下 DEAD 不可用作删除授权。
+3. **变异臂 BLIND 有两种，别混**：一种是「还有第二道守卫兜住」（端到端看不见 → 补纯判据表臂，如 `decide(ownerLive=true)==SKIP_OWNED`）；一种是「这个改动本来就不可观测」（如 handle 里先记内存后写盘 → 换靶到真正承重的一半：`writePlan` 撒谎会让「无计划不插行」永远不触发）。两者都要在报告里如实写，不许凑绿。
+
+<!-- 2026-11-21 02:38:36 -->
+## Offload W2 复核发现（2026-11-21）
+
+复核 `fix/offload-cancel-1120` 时发现：线程局部事务所有权不能表达 suspend 协程归属，首个 manager reset 也可能在可空 gate 安装前绕过；修复方向是 manager 生命周期内的 coroutine Mutex + job-bound/范围失效 lease，boot 内专用 locked 路径，外部 install/repair/asset-restore/reset 固定 gate→lifecycleMutex 锁序。NativeOffload 需以公开 Android `LocalSocket.fileDescriptor` + `Os.poll(StructPollfd[],0)` 检测断连；Android 官方 API 文档确认 Os.poll 与 StructPollfd 字段从 API 21 可用，LocalSocket.fileDescriptor 公开 API 1 可用，满足 minSdk 26。检查 PRoot 固定子模块的 SOCK_STREAM 合同：正常读写有 POLLIN，native 客户端收完整响应后 close；请求完成标记必须在响应写前，避免传输完成中的断连继续触发昂贵请求取消。后续还需验证 stop 对所有 active request cancellation、generation 隔离、retry 前二次 dispatch 的取消检查，以及 stage-3 resetLocked 不重取非重入外锁。
+
+<!-- 2026-11-21 07:14:05 -->
+## REVIEW-FIX-OFFLOAD W2 返工交付 CI_PENDING（2026-11-21）
+
+分支 fix/offload-cancel-1120，基线5def49bc1。生产提交7d50cf9617bff8587eed941c04c78a83114a51dc + 仅既有测试适配0f366f225763342d0427226d13c9feae58db0244（最终远端HEAD一致、工作树干净）。RootfsManager永久持BootTransaction(lifecycleMutex)，opaque private HeldPermit + mutex.withLock(owner)/holdsLock(owner)，不用thread/job/threadlocal所有权；boot全程同一lifecycle mutex，public四入口同锁，Stage3保持locked图、invalidate不重入。NativeOffload public FileDescriptor/Os.poll；context原子accepted→running→handler_done→responding→completed，beginWork claim、beginResponse与cancel竞争；listener通知race修、stop关闭accepted socket/关闭pool迟到submit、generation目录捕获；ModelUse lazy child先挂取消再start，修SupervisorJob合并顺序，取消抛CE；Dispatcher捕获context再suspend、retry前ensureActive+context check。
+最终L1 93/93（完整BootTransaction11+BootGate7+NativeCancel21+Ownership11+WorkerCap7+TmpLedger17+Retry9+Manager生产wrapper回放3+ModelUse生产wrapper回放4+既有RootfsLifecycleSerial3）；真实完整NativeOffload.kt编译，Android边界桩；9臂变异均行为红、hash恢复相同，旧支同线程ThreadLocal反例1/1真红；14相关门全绿，不跑本地Gradle/全量。首CI#3412/44833007193仅RootfsLifecycleSerial旧形状断言失败（10519 total/1failed/1skipped），已仅测试提交适配；最终CI#3413/44834228009@0f366f225在跑，scan success、unit/lint/build in_progress。STATUS CI_PENDING。报告shared/work/surgery-impl-1120/reports/REVIEW-FIX-OFFLOAD.md；最终证据probe/offload-cancel/review-w2/。未合main/清支/真机/真实HTTP/攻击/利用/模型切换。主动取消仅ModelUse；ModelExecutionService内executionSlots队列/非流式取消未改（他支禁区），不可声称远端付费停止。
+
+<!-- 2026-11-21 08:23:31 -->
+## SURGERY-1121 首批复核返工与八支并集验收（2026-11-21早）
+
+用户夜间交托持续推进、自动选模型/兜底不改、进度轮询15分钟。基线fe72bb9cd；父会话没直接信原六支绿，抓W1 active spool/plan失败、W2 ThreadLocal重入/错误FD反射、W4双写吞失败/缓存倒序/旧包槽、W8 prepare恢复同ID/unstarted/false写回后虚拟结算，分别返工；W6本轮才实际写完，下载桥由父补FileReader onloadend→onload及close/日志，七语言快照提示merge而非精确rollback。
+最终8支头：W1 324164101、W2 0f366f225、W4 9eba41e03、规则12799a7c1、W6 472eccfeb、下载b1b42eaf9、计划ad6f1f755、文案ba031e1f8。完整分支链零冲突进入 integration/surgery-reviewed-1121 @2890514ba7fddd539b4357711f1fc579e30a2f5a（86文件+7918/-1173）。#3415/44840439196 attempt1五job success；父会话下载全部job日志核115门/10641 PASSED行/0真失败，fixture untouched按机制未跑，release/tag步骤skipped。计划#3414/44837235767 attempt2成功（lint Maven依赖环境红，三JAR独立200→仅rerun-failed）；W2#3413/44834228009 success。主线远端/本地fe72bb9cd不动，未合/装机/发布/删支。
+正式验收 shared/work/surgery-impl-1120/reports/FINAL-REVIEW.md；原始证据logs/final-ci/summary.json及三run日志、核验脚本。尚未完成D04 prefill/D05 opaque blocks、精确rollback（只文案纠偏）、worker内层HTTP/slots取消与其他handler、C03/C04、真机。均追加backlog §SURGERY-1121-REMAINING，不能称整场手术已完。任务管理补充send在活动会话常回send_dropped_before_stream但有时已入队，须读messages验证，勿盲重复派发；某调度fixture把restore.await放resumePrepare前与checkMutex成真死锁，父指出后修屏障，才得旧红新绿。
+
+<!-- 2026-11-21 10:07:17 -->
+## SURGERY-1121 用户改为先并集验收、禁止此时进主干
+
+用户明确：这次大手术改动大，后台已有其他人在下载，不希望影响他们；先以并集形式完成，严格检查测试后再进main。覆盖此前「检查没问题直接合」授权。本会话未合/未发布，远端main仍fe72bb9cd、integration/surgery-reviewed-1121仍2890514ba（当场ls-remote核实）。两份只读审查已出reports/MERGE-AUDIT-{LIFECYCLE,RESTORE}.md；报告断言仅线索。生命周期F01「早行更新混入第二次stream」被主回查控制流证伪（earlyAssistantDbId每model turn局部重新声明，更新在下一stream之前）；未提交的误补丁/误测试已逐项撤回。加固分支fix/surgery-review-hardening-1121自2890514ba：reaper扫描预算+不拼正文/预算外保留、cancel discard fsync移IO、统一staging常量、恢复内部后续BOTH全量快照确认后不再fatal、新增仓库代际纯谓词单测。尚在验证，不能报最终已修。
+
+<!-- 2026-11-21 10:28:22 -->
+## HARDENING-RESTORE-TEST 验真（2026-11-21，只读仓库）
+
+
+`review-hardening` 树（基线 2890514ba，我离场时施工方已提交 `414f3b37e`）新增的 `lastFullyConfirmed / unresolvedWrites` 汇总语义：**判定成立**。FIFO 全量快照下后一条 BOTH 覆盖较早同批 NEITHER；后继失败/单副本/无关 stage fatal 仍可见；未宣称跨存储原子。报告 `reports/HARDENING-RESTORE-TEST.md`，装置 `probe/hardening-restore/{verify_summary.py,verify_fifo.py}`（全部 verbatim 抽取 barrier/submit 区/classify/汇总，只替身两个存储适配器 + android.util.Log）。
+
+**三条边界（写进报告，别再过度宣称）**：① 批内 NEITHER + 批外 UI BOTH + 批内 NEITHER 仍报 fatal = **保守多报**（不会漏报）；② BOTH 只等于两副本各自确认，"hash 修复失败"不打进分类 ⇒ 不代表冷启动降级判定正确；③ NEITHER 是分类不是回滚（commit()==false 时内存值可能已变）。
+
+**四条不变式（可沉成纯函数单测）**：heal 静默 / 后继 NEITHER 仍 fatal / 单副本仍 warning / 无关 stage fatal 不被抹掉 / 批外写不进回执。
+
+**未完成**：真实 `RestorePersistenceTest`（6 例）未编译执行——整份 `ConfigBackup.import` 闭包需 Android SDK/Room/序列化全族，仓库无 JVM 源集，超 10 分钟盲搭预算；"测试文件本身编译并全绿"只能由 CI 给。
+
+**装置可复用教训**：① 沙箱 kotlinc 包装**不支持 `-include-runtime`**（报 `Couldn't find kotlin-stdlib at <no_path>`）→ 用 `-d <dir>` + 显式 `kotlin-stdlib-2.1.0.jar` + 全限定主类名 `probe.XxxKt` 运行；② `android.util.Log` 替身必须**单独文件 `package android.util`**（Kotlin 一文件一 package，生产里写全限定名时无法在同文件顶层替身）；③ 建 FIFO 队列替身时，**存储结果必须随提交捕获**（共享字段会让队列执行时读到最后一次的值 → `receipts=[NEITHER, NEITHER]` 假红/假绿，我第一次就踩了）。
+
+<!-- 2026-11-21 10:33:41 -->
+## SURGERY-1121 并集加固首轮已绿，公开主线保持不动
+
+本轮代码414f3b37e4c42e8aaa0df045268f78fab1f5e68f（8文件+169/-12）已推fix/surgery-review-hardening-1121；CI #3416/run44854628701 attempt1五job success，下载全部原始日志核10649 PASSED行/0真失败、115门/四层一致；fixture未跑，publish标签/release两步skipped。新增8例逐条PASSED（恢复2/reaper3/代际3）。本地恢复89/89、调度142/142、store+AtomicFile6/6，两个reaper独立影子负控精确红；真实Engine cancel方法旧同线程红/新IO绿。恢复barrier+FIFO+summary生产切片旧红新绿，完整RestorePersistenceTest6条靠本次CI（本地旧76例装置未找到）。并集integration/surgery-reviewed-1121仅ff到相同414f3b37e，树a3ce1d701，不再dispatch同代码；远端main和android-latest最终ls-remote仍fe72bb9cd，未合/发/装/删。HANDOFF/FINAL-REVIEW首部已覆盖最新授权，工作板VALIDATION-PLAN.md，正式reports/INTEGRATION-HARDENING-REVIEW.md；待从414f3b37e继续D04，再D05等。backlog新增REVIEW-RESIDUAL段带触发条件，本段OK；全账notes仍10段历史no-trigger，不能报全绿。
+
+<!-- 2026-11-21 10:50:50 -->
+## SURGERY WAVE2 五会话派发（2026-11-21）
+
+用户问剩余工程量大则直接子代理加速，已实际派5会话并回读确认送达，公共基线414f3b37e，main/android-latest仍fe72bb9cd禁止推进。任务书+COMMON+冲突矩阵在shared/work/surgery-impl-1120/wave2/；BOARD.md与sessions.json由回执自动带出。D04施工***UUID***（独立clone wave2-prefill，branch fix/claude-prefill-1121）；A02 worker取消施工***UUID***（独立clone wave2-worker-cancel，fix/worker-inner-cancel-1121）；D05方案原型只读***UUID***；B03精确恢复方案原型只读***UUID***；C03/C04边界只读取证***UUID***。D05碰D04/Service同文件，本波只做源图与原型，前置绿后再施工；无嵌套派发、重活全局锁、禁本地全量/Gradle、不能代父合并/发布/删支，最后必须报告STATUS。父原空worktree claude-prefill干净，已交施工独占clone不再写。
+
+<!-- 2026-11-21 10:57:23 -->
+## WAVE2 子会话轮询频率纠正
+
+用户明确本批任务「15分钟轮询一次，设的太短不合适」。父会话每15分钟（shell_execute.delay=900）统一查五会话进度，不再2–5分钟频繁查；主动报已完成/显式阻塞可即时收取。写入wave2/BOARD.md，不改应用全局设置。
+
+<!-- 2026-11-21 11:48:32 -->
+## 用户澄清多代理资源约束
+
+用户明确：子代理的大模型额度与App侧调度已经处理好，当前不需要为调用成本或代理数量节省，开更多代理没有关系；唯一需要约束的是多个代理同时操作沙箱造成的CPU/内存/I/O与共享状态影响。派发按任务独立性充分并行，重活继续全局锁串行、文件/接口依赖串行；代码最小化不等于少用模型。当前wave2/COMMON.md已补口径，轮询仍15分钟。
+
+<!-- 2026-11-21 11:58:22 -->
+## W2E C03/C04 来源边界取证完成
+
+只读集成树 `414f3b37e4c42e8aaa0df045268f78fab1f5e68f`；产物 `wave2/reports/C03-C04-BOUNDARY.md` 与 `wave2/origin-evidence/`。OkHttp 4.12 MockWebServer矩阵13/13：跨来源非-Authorization头保留；307/308会转发正文；Authorization含Basic也会移除；host/port分轴、HTTP↔HTTPS、同源阴性对照均跑。C03覆盖 Provider、WebDAV secret backup PUT、MCP OAuth token exchange；可信服务攻击者可控redirect未证，P2条件不修。影子network-interceptor guard 5臂通过，bypass mutation准确目标已收请求，但未连生产client。C04只证策略对所有child frame统一信任 + Android官方bridge all-frame合同；实际WebView hook递送/SOP可读/about:blank popup未测，保留待instrumentation工单。已生成三origin fixture HTML+mock routes；未运行设备。最终HEAD/770源码hash不变、worktree clean。
+
+<!-- 2026-11-21 12:18:17 -->
+## WAVE2 D04 独立只读审查（固定对象，非最终树放行）
+
+按任务书读 wave2-prefill：首次干净 HEAD ce8e62e48d8dea38a992200c2e166250a6efcea1（base414f3b37e），完整567行diff；03:55:59Z第二次同HEAD但Engine/新测试dirty，working diff sha256 8fdc07872b7d45bef279941dccc972cb0098c8593a7bb182eac3b6da1185b1c2。22/22起始源码与不可变提交相同；之后只用冻结副本不追最终树。
+报告 wave2/reports/D04-INDEPENDENT-REVIEW.md STATUS DONE，建议不直接集成所审对象。F01/P1两对象：pendingLengthWallTail收集结束便清，空max_tokens/空错误/空refusal恢复下一turn绕过request能力，尾assistant；空end_turn因reminder不在history而EmptyTurnRecovery GiveUp，原一次恢复断线。F02/P1仅dirty施工未完成项：删identity剥离后preflightMessages既当base又当projection，同turn retry提醒1→2→3、new→legacy OFF fallback去不掉提醒。F03/P2 ce8假想提醒提前占预算（dirty正在修）；F04/P2 dirty提醒后NEEDS_COMPACTION只读floor继续发，本地margin不变量超89但未证HTTP400；C01 alias/date safe-deny只观察。
+本轮仅源码+官方快照原文+独立Python状态/算术推演；未跑Kotlin/真实Engine/worker/HTTP/CI、未复用施工probe、未改repo/.git/联系施工方。不能把报告当后来最终HEAD已审。Provider共源emitter对照旧参数段逐字一致，新增2 Provider+9 Engine测试确实真builder/Engine但缺空终态、same-provider retry、NEEDS_COMPACTION交叉。
+
+<!-- 2026-11-21 12:28:10 -->
+## WAVE2 独立审查有实际收益与返工（2026-11-21 12:27）
+
+用户明确不需省代理/额度，沙箱争用才限。已增D04独立审查***UUID***与A02独立审查***UUID***，读中途树不抢写。D04报告ce8/快照pending过早清/base-projection混，当前1190已修两项但withReminder NEEDS_COMPACTION忽略仍真；同会话REWORK-D04补空max/EOF/同provider retry及三态预算。A02报告真切片复现无cancel的provider CE被model_use_cancelled，父当前核Service仍t is CE；删owner.cancel原5单测仍绿，真HTTP裸/headers-only桥不盖慢body。REWORK-A02许可OpenAI/Gemini/必要Dispatcher取消finally小域接consume桥，Anthropic仍D04独占，父后串接。两续派send_dropped_before_stream但search确认12:27指令已入队，勿重派。D05必要性复核有官方parsedJSON反证，撤原raw字节serializer/AEAD/账户层/新终帧/prefix journal，仅一个codec+字段/块序及20真边；B03只方案原型，Undo/Replace产品语义未拍板不擅自实施。C03/C04取证已交仍缺可信端点/真实WebView读canary，不盲修。父轮询严格15min；未main/release/装机。
+
+<!-- 2026-11-21 14:22:20 -->
+## WAVE2 资源轮换与D05可并行切片（2026-11-21 14:21）
+
+父持续15min轮询。D04返工在补空恢复/真实NEEDS_COMPACTION与same-provider retry，13臂多次重编占锁让carrier饥饿，父RESOURCE-FAIRNESS.md要求每次锁最多单compile/变异臂、证据source hash相同不无理由整套重跑；send_dropped但回读入队。新增D05载体施工***UUID***，独立clone wave2-replay-carrier，branch fix/anthropic-replay-carrier-1121，base414；独占AnthropicReplay新codec、LLMMessage/Response、Finished可选字段、ChatStreamJsonl，不激活。冻结API wave2/REPLAY-API.md，128KiB/immutable/standard JSON保值序，非raw字节/AEAD框架。新增D05出口隐私先行施工***UUID***，clone wave2-replay-projection，branch fix/anthropic-replay-projection-1121，独占ConfigBackup sanitize/ChatDebugMethods/ChatExporter/SessionForkManager+纯projection helper，按固定type anthropicReplayV1剥整part，禁碰Repository/Engine/Provider/Service/codec；能并行先封出口，不称全隐私或D05完成。BOARD/sessions真实回执共9任务（4施工，其它调查/审查已完）；main/release仍冻结。
+
+<!-- 2026-11-21 14:44:26 -->
+## D04 最终固定 943241 窄续审：仅 N01/P1 阻断
+
+用户要求固定943241、不追施工树、不跑重装置。只git show9432417526866d3970dffd40d5bd0067e25ad9bf及base414固定diff；519行生产diff与父冻结字节相同，Engine hash b9b1e655…，新测试433行/24方法全读。原F02 base/projection分离、recover后retry新base、400同步base已接；F04 reminder NEEDS_COMPACTION原管线+actual仍超拒发已接；F01 raw-empty/只思考/EOF/ordinary empty/blocked fallback主路径修好。
+唯一新阻断N01/P1：Engine2952按raw turnTextSb.isNotBlank先clear pending，3045/3049 seam可把完整重复续写裁成空；3486按裁后空走empty wall，3601删自己shell并continue但3701非空rearm没走。head/max_tokens→head/max_tokens→下一请求assistant-final（新4.6无论thinking禁，旧HIGH亦禁）。现有空测试用raw空/ThinkingDelta，非空都是+tail，不覆盖raw非空但seam裁空。建议把消费点放seam后按真正新正文/工具判断，并在已有真实Engine fixture补这一条。不改结构/不重开P2alias。
+报告wave2/reports/D04-FINAL-REVIEW.md首行STATUS BLOCKED N01/P1；旧审报告hash核未变。证据固定源码+合同+轻量symbolic trace（prefill-final-review/N01-source-trace.json），未跑编译/变异/真实Engine/HTTP/worker/CI，不能把任务书已有44例/13臂当本轮实测。不追后续SHA。
+
+<!-- 2026-11-21 14:48:16 -->
+## WAVE2 D05 基础载体交付（未激活）
+
+`fix/anthropic-replay-carrier-1121` @ `7a1bd543faa6c858cb7241d572a1c7f8dbc50a89`，CI run 44876105067 精确 SHA 五 job 成功，9 个新测试逐条 PASSED，115 门绿，扫描器夹具及标签/发布两步跳过；本地正向 17、基线 10、影子负控 4 臂行为红。报告和冻结接口在 `shared/work/surgery-impl-1120/wave2/{reports/D05-CARRIER.md,REPLAY-API.md}`。只交不可变 carrier 与旧 Finished 的双向 JSONL 桥；不代表 Provider/Worker/Engine/Room/出站接通，未合 main。
+可复用：Android `org.json` 小数、指数和超 Long 数字可能降成 Double；精确保真的路径从原始 JSON 用现有 kotlinx JSON 树，不可先过 `JSONObject`。共享重活争用按本波 `RESOURCE-FAIRNESS.md` 一次锁一套编译或一臂，归还窗口，不并发 JVM、不反复装已有依赖。
+
+<!-- 2026-11-21 14:52:57 -->
+## 用户纠正子代理上下文污染
+
+用户要求子代理尽量用新的对话框，不在旧会话追加新任务，避免上下文污染。今后新任务/下一轮返工/独立复审默认新会话，最小自含任务包只带精确SHA、输入路径、必要证据与约束，不灌旧对话或旧裁决诱导。正在施工同一工作树不盲开第二写入者；先确认原写入者停止/提交与树状态，再由新会话接手。当前D04固定943241最终复审改为全新会话；wave2/COMMON.md已补。
+
+<!-- 2026-11-21 14:56:49 -->
+## WAVE2 转为全新子会话（14:53–14:55）
+
+用户要求子代理尽量全新对话防污染。已新开D04固定943241复审***UUID***（不先读旧审查）；旧窄审D04-FINAL-REVIEW已完成指出seam把raw非空续写全裁空后pending过早消费N01（仅源码推演）。已用全新施工***UUID***，独立clone wave2-prefill-seam，branch fix/claude-prefill-seam-1121自9432417526866d3970dffd40d5bd0067e25ad9bf，先真实Engine旧红新绿、只改Engine+对应测试、单消费点1–2负控不重跑13臂。原D04 writer不再追加。COMMON/BOARD/sessions/PARENT-NOTES已更新；main+android-latest最终核仍fe72bb9cd，并集仍414f3b37e。新会话不共写原树。
+
+<!-- 2026-11-21 15:08:02 -->
+## D04 固定 943241 全新上下文复审：BLOCKED N01/P1
+
+
+只审 `9432417526866d3970dffd40d5bd0067e25ad9bf`（父 `1190bfe`，基线 `414f3b37e`），`git show` 导出到树外 `wave2/prefill-fresh-review/`，未改 repo/.git，未跑编译/CI/真实 HTTP，未读旧 D04 报告。diff 5 文件 +433/−111 / 1131 物理行全读；生产三文件全文与 24 个新测试全读。
+
+**唯一阻断 N01**：`AgentLoopEngine.kt:2952` 清 `pendingLengthWallTail` 用的是原始缓冲 `turnTextSb`，而 seam 裁剪发生在 3041-3049 的 `turnText`。当续写整段重复被 `mergeLengthWallSeam` 裁空（`trimmedSeamChars == turnTextRaw.length`），raw 非空 ⇒ intent 被清 null；3440 空 assistant 壳、3601 丢壳后 `continue`，3701 的 non-empty 分支不再 re-arm。下一请求 1782 直接以 `preflightBaseMessages` 的 assistant 结尾出站，跳过 1729 的 `supportsPrefillForRequest` 分支；对 Claude 4.6+ 官方明确 400（prompting/thinking-overview 快照原文）。基线旧逻辑在 wall 处即时决定，不存在这个跨 turn 窗口；24 个测试全用不同文本或空文本，未覆盖 raw 非空 + seam 裁空。
+
+**最小修法**：把清点移到 3075 之后，用 `turnText.isNotBlank()` 判断；补一条 `"head"→"head"→"+tail"` 的 Engine 用例断言第三 body `lastRole=="user"`。次生 S01-S04 均 P2 登记不阻断（空壳双清理路径、宽松 relay 标签 safe-deny、query 温度参数非同源、测试投影自造）。
+
+报告 `wave2/reports/D04-FRESH-REVIEW.md` STATUS BLOCKED N01/P1；不支持该精确对象进非公开并集。未跑真实 Engine/HTTP/worker/CI，N01 为源码控制流推演。
+
+<!-- 2026-11-21 15:47:16 -->
+## D05-P 公开投影出口剥离完成（分支绿，未合 main）
+
+
+分支 `fix/anthropic-replay-projection-1121` @ `9ae16a104b04263d0d7d8f86e9ec30920793e20c`（base `414f3b37e`），独立 clone `wave2-replay-projection`，工作树干净、远端 SHA 一致。**未合 main/并集/发布/装机/删支**；远端 main 与 android-latest 仍 `fe72bb9cd`。
+
+**新增唯一纯 helper** `data/AnthropicReplayPublicProjection.kt`：保留 part 名 `type:"anthropicReplayV1"`，整只剥离（不清空 signature 后回放）；无私有时**逐字节返回原串**；畸形行用有界词法结构预检（转义键、单引号/裸 token/`=>`/注释）决定能否保留可读回退，确认私有 ⇒ `[]`；>1,000,000 字符或深度>64 不解析，只跑一次有界扫描（确认私有/预算耗尽 ⇒ `[]`，超大但干净 ⇒ 保留原串）。
+
+**七个真实调用点**：Debug `messageToJson`（parts/flat content/畸形 fallback）、ZIP JSON `content`（嵌套 parts_json 字符串）、文本导出及 catch、`countAttachments`、`ConfigBackup.sanitizeChatParts` 与 `sanitizeIncomingParts`、`remapForkedPartsJson`（在既有 sid replace 之前）。
+
+**证据**：旧 `414` 树同一合成 sentinel 在 4 个真实出口全回显（Debug/BackupExport/BackupImport/Fork）且 49 例中 10 红；补丁后 49/49 绿。8 个影子变异臂编译成功后精确红：helper 8、oversize 1、debug 2、backup 1、share 2、text 1、fork 2。相关门 9 GREEN/1 沙箱 SKIP/3 glob 交 CI。CI `#3424/44880733247` @ 精确 SHA 五 job success，unit 10666 PASSED/0 FAILED（新类 7/3/17/13/9 逐条 PASSED），scan-gate 115/0，夹具因 `scripts/scan` 未动按机制跳过，publish 两步 skipped。
+
+**可复用**：① 导出 JSON 把 parts_json 当**字符串**塞进 `content`，只改数组解析看不见——嵌套 raw 载体是漏点；② `catch { return raw }` 是平行第二出口，负控必须打 fallback；③ 有界预检要区分「未命中」与「预算耗尽」：深度超限 fail-closed，超大但干净必须保留可读回退，一刀切 `[]` 会吞用户正文。禁区内 `ChatRepository` 500KB funnel、worker rawJson、Provider raw SSE 仍未接，不能称全隐私闭环。
+
+<!-- 2026-11-21 15:48:10 -->
+## WAVE2 D04-SEAM 窄修完成（2026-11-21 15:45，分支 CI 绿，未合 main）
+
+
+专属 clone `surgery-impl-1120/wave2-prefill-seam`，branch `fix/claude-prefill-seam-1121`，起点 `9432417`，代码提交 `e6639e5d293273c1c3809a17e79d90660dd2b8b9`（远端一致，工作树干净）。只改 `AgentLoopEngine.kt`（+7/−3）+ `AgentLoopPrefillRequestTest.kt`（4 例）。
+
+**根因（真源码）**：`pendingLengthWallTail` 在 943 里按**原始缓冲** `turnTextSb.isNotBlank()` 清除（旧 :2953），而 seam 去重在同回合尾部（:3045）把整段重复续写裁成空 ⇒ 同一回合已「无新正文」但意图已丢：下一次重试/one-shot 请求在 :1429 跳过 `supportsPrefillForRequest` 适配（4.6 任意档、旧 4.5 开 thinking 时 assistant-final 非法），:3903 的空回合一次性恢复也被跳过、落到通用 GiveUp。**修法**：唯一消费点移到 seam 之后，判据 `turnText.isNotBlank() || toolCalls.isNotEmpty()`；不关 seam、不新增状态、不写 history/DB。
+
+**证据（真实整份 Engine + 真实 Provider builder + 未改 FakeHost，装置 `wave2/probe-prefill-seam`，每臂一次全源 kotlinc 编译）**：old943（`git show 9432417:` 引擎 + 新测试）COMPILE_OK → 2 failures（`expected:<user> but was:<assistant>`）；current 48/48 OK（含既有 44 例正控）；mut1（判据换回 `turnTextRaw`）2 failures；mut2（删 `toolCalls` 判据）1 failure（tool 用例）。哈希：仓库引擎 `0816bd63…` == current 臂编译副本；old943 臂 `b9b1e655…` == HEAD 版。
+
+**CI**：#3423 / 44880412215 attempt1 success @ head 逐字符一致；scan-gate `Summary: 115 passed, 0 failed`（`scripts/scan/** untouched` ⇒ 349 夹具未跑）；unit 10679 PASSED / 0 真失败（6 条含 FAILED 的行全是用例名），4 个新例逐条 PASSED；publish 5s、发布步骤 skipped、`android-latest` 资产未变；远端 main 仍 `fe72bb9cd`。
+
+**两条可复用**：① 消费意图标记必须读**加工后**的值（seam 之后），判据与加工点的相对顺序就是缺陷面；② 对照测试只断言「提醒文本在不在」时，在 prefill 合法的模型上两种状态都恒 0 → 负控变瞎（mut2 首跑假绿），必须换成能区分两种状态的观测面（禁 prefill 形态：保留=1 / 消费=0）。
+
+报告 `wave2/reports/D04-SEAM-STATE.md`（STATUS: DONE）；日志 `wave2/probe-prefill-seam/logs/run-44880412215/`；抓日志脚本 `fetch_logs.sh`（token 只走 stdin）。未跑真机/真实上游 HTTP；未合 main、未并集、未发布、未删支。
+
+<!-- 2026-11-21 15:56:15 -->
+## D05 载体固定提交独立复核（2026-11-21，仅第一部分，新上下文）
+
+
+只审 `7a1bd543faa6c858cb7241d572a1c7f8dbc50a89`（父 414f3b37e，只读 detached 树 wave2-carrier-audit），未跑 CI/未改仓库/未做第二部分。方法：5 文件全文 + 556 行 diff 全读；树外 JVM 装置 `wave2/carrier-review/jvm/`（固定提交 7 个生产文件 + 自带测试 + 自写 16 臂，kotlinx-serialization-json 1.7.3 与仓库同版本，Maven org.json 替 Android）。
+
+**结果：无 P0/P1。** 自带 9/9 OK；16 独立反例臂全绿；6 臂变异负控全行为红（自带套件有牙，M1 NaN / M6 absent 严格性是我臂没覆盖的独有牙）；旧/新 81 行差分 IDENTICAL；旧读取端读新帧正常；最坏合法行 131143 B < 收集器 699052 / 恢复扫描 700 KiB。
+
+**发现**：N01 P2 `AnthropicReplay` 无 equals/hashCode → identity 相等漏进 `LLMStreamChunk.Finished`/`LLMMessage`/`LLMResponse`（A16 实测两份相同载体不相等），激活前需定；N02 P2 块白名单窄于官方 assistant 块全集（`server_tool_use` 等 → 整组 UNAVAILABLE，现 latent）；N03 P3 无账户绑定、instanceId 可空（需接线层准入）；N04 P3 含 `\u`/载体字段的行双解析；N05 P3 载体帧 stop/truncated 不做旧式类型强制；N06 P3 重复键行解析器差分（无载体→null 丢弃，有载体→Finished 后值，属畸形输入，仅本 codec 为生产者）。
+**假警报（已推翻）**：曾疑 `uri.host==null`（registry authority）触发 NPE——Kotlin 解析到 `String?.equals(ignoreCase)` 扩展，对 null 安全，实测不抛。
+施工方字节哈希与我抽出的逐条相同（13c224b6/77d9133a/488b7fca），REPLAY-API.md 无一条被证伪。报告 `wave2/reports/D05-CARRIER-INDEPENDENT-REVIEW.md` STATUS: DONE。
+
+<!-- 2026-11-21 16:03:14 -->
+## D05 接线只读方案（2026-11-21，会话 bc621857）
+
+
+只执行任务文件第二部分，产出 `wave2/reports/D05-LIFECYCLE-PLAN.md` + `wave2/lifecycle-plan/{EDGE-INVENTORY,ELIGIBILITY,BRANCH-SPLIT}.md`。基线 `integration-reviewed@414f3b37e` 干净，载体 `7a1bd54`、投影支 `9ae16a1` 均用 git show 读；未编译/未跑单测/未跑 CI/未改仓库。唯一门执行：在 `wave2-replay-projection` 树上跑 `parts_json_funnel_check.py` = PASS（证明投影支不破漏斗门）。
+
+**关键结论**：①17 条实际边，必须改 11 条，明确不改 8 面（Room schema/ContentPart.kt/OpenAI·Gemini/ProviderFactory·KeyRoulette/LLMProvider 基类/新 chunk 类型/ChatDao/AgentContentPart）；②载体只落了 3 个可选字段+codec，**Provider 侧不产块**（AnthropicProvider 无 `signature_delta`/`redacted_thinking` 分支）⇒ 回放内容源头就不存在；③出口已封 5 个（投影支），**漏 3 个整行回显**（ChatRepository.extractTextPreview :910-912、extractTextForOffload :1358-1360、HeadlessChatRunner.extractText :1261）+ 2 个日志（AnthropicProvider :296-330 请求体、:397 RAW SSE）；④**今天就成立的泄漏**：`AnthropicProvider.kt:397` 无条件打印整条 SSE 行 ⇒ 官方端点的 thinking 签名今天就在进 logcat；⑤`xproc_boundary_check.py:107-119` 的 BOUNDARY_MODELS 只有 LLMModel/ProviderInstance ⇒ **LLMMessage 不在跨进程门覆盖内**，Dispatcher/Service 漏一边 CI 全绿（加字段缺同步层同族第 7 次形态）；⑥native 块必须绕开 `mergeConsecutiveSameRole`（:1202 会重排 assistant 块，改序=官方 400）；⑦`capPartsJsonForRow`（:1494）超 500KB 把整行换成单个 text part ⇒ 私有 part 会被静默吃掉，解法=生产者侧控预算、**不动 cap 函数**（R5/R6 判据不受影响）；⑧`loop_persist_slice_check.py:660-668` 逐字钉住 UPDATE 分支实参 ⇒ carrier 只能走「末尾带默认值的新参数」通道（AgentLoopState → persistAssistantTurn(...,replay=)/updatePersistedAssistantTurn(...,replay=) → buildAssistantPartsJson(parts,meta,replay=)，`buildTurnParts` 三实参不可动）。
+
+**资格矩阵 18 格**：只有 Q1 正常完成/Q11 工具回合落盘/Q12 同回合第二次请求（+Q16 冷重载条件）有资格；EOF 截断、工具块未闭合、取消、空回合、length-wall 续写、compact 前后、重试/回退、编辑/导入/分叉、无工具普通回答一律无资格。判定必须在 provider 层（`sawClearFinish`+`toolBlock.isOpen`）；三态 null/COMPLETE/UNAVAILABLE，Engine 必须把 UNAVAILABLE 当无资格。
+
+**preserved-thinking 前缀缺口 = 需用户拍板**：P1（旧签名型首发，零新状态，本方案按此施工）/ P2（同回合 live 回传）/ P3（前缀快照，与 D05-MINIMUM-REVIEW 减法冲突，不做）。
+
+**切分 4 支**：S1 出口封堵(S) → S2 Provider 捕获+出站(L) → S3 落盘/重载(M) → S4 跨进程(S)；合计 L；S1 可并行但建议把 :397 并入 S2 避免同文件并行写。
+
+**可复用**：①worker IPC 是「加字段」族的结构盲区，凡给 LLMMessage/LLMResponse 加字段必须自带双读端断言；②`parts_json_funnel_check.py:608` 从 ContentPart.kt 推导 part 名 ⇒ 进该文件 = 被门强制要求进 RPC 出口，私有数据要进 parts_json 就不能进 ContentPart.kt；③落盘层的截断 fun 会让新数据静默消失，要在生产者侧控预算；④原始 SSE 日志是协议级泄漏面（服务端签名/密文进 logcat）。
+
+<!-- 2026-11-21 16:24:57 -->
+## WAVE2 续跑16:24：三绿支父验真，投影P1返工，非公开foundation候选
+
+父独立API+5job原日志验三绿：seam e6639e5/#3423 run44880412215 unit10679/0，carrier7a1bd54/#3420 run44876105067 10658/0，projection9ae16a1/#3424 run44880733247 10666/0；都115门/fixture跳过/release skipped，证据wave2/parent-ci。全新投影复审***UUID***实证P1-PROJ-01：公开嵌套tool输入type+缺]、普通Notes+65字面[被吞正文，AOSP15与Maven真实Debug/ZIP旧新对照；9ae不集成。已全新返工***UUID***，独立clone wave2-projection-rework@9ae，branch fix/anthropic-replay-projection-boundary-1121。carrier全新复审d852无P0/P1，9+16例/6变异/81行旧新相同；相等语义N01和server tools边界激活前处理。A02@927e23c首CI#3425/44882139809真编译红this=CoroutineScope传Context(1031/1046)，原施工者正本轮修复未另开写者。新Anthropic非流Call消费取消尾边***UUID***，独立树wave2-anthropic-cancel自e663，只改该Provider.send非流桥+专属测试。
+父先仅合e663+7a1bd54（零文件交集）到独立worktree wave2-foundation，branch integration/surgery-wave2-foundation-1121@1f00cd73a4b6a562dfb14252e1ad035d28126b7f，两merge父数均2，10文件+1298/-132，无冲突；已push+单次dispatch(16:24)，等完整并集CI。原integration/surgery-reviewed仍414f3b37e，main/android-latest仍fe72bb9cd，未main/发布/装机/删支。报告wave2/reports/WAVE2-FOUNDATION-PRECHECK.md；以后任务全新会话、15分钟轮询、重活单臂轮换。
+
+<!-- 2026-11-21 16:45:36 -->
+## A02-A Anthropic 非流式取消消费桥完成（分支绿，未合 main）
+
+专属 clone `surgery-impl-1120/wave2-anthropic-cancel`，branch `fix/anthropic-nonstream-cancel-1121`，base `e6639e5d293273c1c3809a17e79d90660dd2b8b9` → `c4ce580a09026466185237de2b60f32a28183234`；只 AnthropicProvider 非流式裸 execute/use 换既有 `executeOrCancel(consume)`+import/注释（+4/-5）和专属 7 例。builder/stream/parse 后缀逐字节不变（915e706f…）；不接另一 A02 worker 支、不改 CallCancellation。
+真实完整 Provider+LLMProvider+CallCancellation/localhost MockWebServer 同集36例：old e663 编译成功2精确AssertionError（headers/body 1506/1532ms仍Call=false/events0）；new36/36（headers18ms/body71ms，Call=true/events1/CE，不发布，body close1，真实在飞兄弟正常）；单行影子回裸execute同2行为红，其余34绿，三臂测试hash一致。本地6相关门全绿（base e663）。
+单次CI #3427/run44884587611 attempt1@精确c4ce五job success；原日志10686 PASSED/0真FAILED，新7/7逐条PASSED，115/0门；fixture scripts/scan未动按机制未跑，发布两步skipped。最终08:44Z远端branch=本地、树干净；main+android-latest仍fe72bb9cd。报告 `wave2/reports/A02-ANTHROPIC-CANCEL.md` STATUS DONE，装置与原CI日志 `wave2/probe-anthropic-cancel/`。
+复用教训：同步execute返回headers后退出Dispatcher.runningSyncCalls，body仍可能阻塞，`dispatcher.cancelAll()`不能清理这类慢body；反例须持真实Call，在快照/判决后显式Call.cancel。健康兄弟先完成再断言旧红，避免finally取消兄弟的IOException覆盖目标AssertionError。首装置源清单过边界/清理stall已记录，最终三臂重跑才计证据。未真机/真实worker/真实上游，不承诺停止计费。
+
+<!-- 2026-11-21 18:40:37 -->
+## A02 固定最终复审结论（653365f，2026-11-21）
+
+独立审查 `653365f685c6a791f6a03763d04d2b5d5478ad0e`（base `414f3b37e`）产出 `shared/work/surgery-impl-1120/wave2/reports/A02-FINAL-FRESH-REVIEW.md`，STATUS:BLOCKED。P1：OpenAI `generateImage` 在首个 400 `response_format/b64_json` 响应体消费后直接 retry；cancel marker 可先落盘、但250ms watcher未运行时第二个 POST 仍发出。生产取消策略+真实 loopback POST 探针按生产poll间隔5/5重现。Transport cancel 真 socket close、并发兄弟隔离、取消策略8/8通过。另有条件性P2：Semaphore timed acquire 被线程 interrupt 会映射成 stop，但当前未发现该请求线程生产中断源。固定提交不支持进非公开并集，需先修 retry 前同步检查并补生产路径回归。
+
+<!-- 2026-11-21 19:07:50 -->
+## WAVE2 19:05 收交付并继续四线施工
+
+用户说已完成后即时收报告：A02最终固定审查6204已DONE但BLOCKED P1 marker先落盘、OpenAI images400仍retry(nextCall在250ms watcher前发)，父源码回核成立，旧653绿不集成。全新***UUID***在独立clone wave2-worker-retry@653(branch fix/worker-retry-cancel-1121)窄修run-local predispatch+真实完整Provider旧红新绿，不缩poll/全局ThreadLocal。投影最终12feff2c6e74ca2b1238b41f6bc67adcdcb2eb45 #3432/44894545304五job绿，父独立原日志10669/0/115+最终源hash对拍+AOSP/Maven真实出口各35/35；原9ae仍不可孤立纳。父runtime候选cfab4771737d219197181eab605ea57241b11610=已验1f+c4非流取消+12fe投影，两merge父数2/无冲突，推integration/surgery-wave2-runtime-1121，CI#3433/44896516103在跑；lint三旧JAR缺失（非代码诊断），独立HTTP全200，等run终态仅rerun-failed。
+新全新并行D05 Provider***UUID***独占Anthropic+helper/tests、history***UUID***独占Engine/Host/VM/parts/parser/tests、publicfallback ***UUID***独占ChatRepository preview/offload/500KB截断安全源+Headless/tests，三独立clone自cfab。连同retry共4施工零文件交集，重活单臂锁公平，15min查。IPC等retry固定，整体replay尚未通/不激活；不造新chunk/AEAD/账户矩阵/Room列。COMMON/BOARD/sessions/VALIDATION/PARENT-NOTES已更新。main/android-latest仍fe72，验收并集仍1f，未main/发布/装机/删支。
+
+<!-- 2026-11-21 19:30:11 -->
+## A02 marker-before-retry 窄修完成（分支绿，未合 main，2026-11-21）
+
+
+分支 `fix/worker-retry-cancel-1121` @ `863740908eb24967868b6ece40dbe9544e828262`（父 = 固定起点 `653365f`），CI #3434/run44897447665 attempt1 五 job success、head_sha 逐字符一致、unit 10673 PASSED/0 真 FAILED、新 `WorkerPredispatchCancellationTest` 10/10 逐条 PASSED、scan-gate 115/0（`scripts/scan/** untouched` ⇒ 349 夹具未跑）、publish 两步 skipped。未合 main/并集/release/装机/删支；远端 main+android-latest 仍 `fe72bb9cd`。
+
+**修法**：生产只改 2 文件 +20/−2 —— `provider/CallCancellation.kt` 新增 `CallDispatchGuard`（CoroutineContext 元素，只持有既有 `ensureBeforeDispatch` 回调），并在**同一个**私有桥 `withCallCancellation` 里 `execute()` 之前同步读它；`ModelExecutionCancelPolicy.kt` 只用标准 `withContext(CallDispatchGuard(::ensureBeforeDispatch))` 把同 race 同回调装进本 run 作用域。无 ThreadLocal/全局 callback/Provider 字段缓存，Provider 不碰 File/Service，无 guard 时旧语义完全不变。
+
+**旧版真实反例（先证再改）**：固定旧 653 整份 `OpenAIProvider` + 真实 CallCancellation/ModelExecutionCancelPolicy + MockWebServer，watcher 轮询拉到 60s（生产 250ms）后仍观测到：400 body 耗尽→marker 落盘→**第 2 个 POST 仍发出**（2 vs 1）；返回 URL→**下载 server 仍被访问**（1 vs 0）。旧 653 同集 37 例 7 红；新版 37/37 绿（retry requests=1、next-hop generation=1/download=0）。取消断言要求专用 `ModelExecutionStopException`，超时判 FAIL。
+
+**影子负控 3 臂**（全编译成功、精确行为红）：去安装 7 红 / 禁执行 check 7 红 / 仅下载改回裸 execute 1 红（只红下一跳那条）。装置 `wave2/probe-worker-retry/`，五臂 source+test sha256 落 `verification.json`，CI 原日志核验 `verify_ci.py`+`ci/44897447665/verified.json`，边清单 `EDGES.md`。
+
+**未验证边界**：真实 `:modelservice` worker 进程、真实 Dispatcher/ACK 交错、真实上游计费、真机；新 guard 只保护已接 `executeOrCancel` 的出站边（OpenAI image/retry/download/raw、Gemini 非流、headers-only 桥），OpenAI 普通 send 仍 stream-backed 裸 execute、Gemini/Anthropic 流式裸 execute、Anthropic 非流裸 execute（独立支）**不在本轮保护范围**；四家 models fetch 与 Voice 仅源码枚举，未端到端实测。同步检查不是 marker 与网络的原子事务，检查后才落盘的 marker 仍由原 watcher + Call hook 处理 ⇒ 不宣称取消零费用。
+
+**可复用**：①取消的最后一道出站决定点必须在**同一 run 内同步判据**——marker 落盘后、watcher 轮询前那段窗口只能靠决定点同步读 marker 关闭，缩短轮询周期只是缩小窗口；②run-local 归属用 CoroutineContext 元素承载最省（随作用域退出自动消失、天然不串并发兄弟），ThreadLocal/Provider 字段缓存都会串请求；③真实 Provider 反例必须先成立再改（server 计数才是证据，源码控制流只是"可能"）；④下一跳要单独负控（只把下载改回裸 execute，精确只红下一跳那条）；⑤取消断言必须要求专用 stop 异常，超时判 FAIL，否则装置把"卡死"读成"取消成功"。
+
+**台账**：条件性 P2（执行槽等待线程 interrupt 被映射成 stop，无生产 interrupt 源）登记 `shared/backlog.md` §1121-A02-RETRY（带触发条件+触发后方案，scan_debt OK）。报告 `wave2/reports/A02-RETRY-CANCEL.md` STATUS:DONE。
+
+<!-- 2026-11-21 20:33:48 -->
+## WAVE2 20:30 继续：runtime并集已验收cfab，修复父复制gitdir事故
+
+#3433/run44896516103 attempt2精确cfab4771737d219197181eab605ea57241b11610五job绿；父原日志10715 PASSED/0真失败/115门，fixture未跑+release skipped，验收integration-reviewed已FF同SHA（tree0f805c3b），main/android-latest仍fe72，未main/发布/装机/删支。A02后继8637409/#3434绿父已读两生产diff+271行10新例，run-local CoroutineContext guard最小，已全新固定窄复核***UUID***待收；旧653不孤立纳。
+父此前fastio复制runtime worktree导致.git指针共HEAD/index（不是独立clone），fallback writer先发现引用落错history并迁唯一worktree wave2-public-fallback-wt；Provider自己变独立.git。父证实history仍共享后同任务安全暂停ACK，在原路径仅换入git clone --no-checkout独立.git，9源码sha前后全等、HEADcfab/branch正确，未checkout/reset源码，证据wave2/git-isolation-recovery/history-repair.json，writer确认恢复任务。父runtime也切回自己分支，干净。COMMON固化任何复制前查.git文件类型+逐写者核唯一absolute-git-dir；rules_index查无命中属知识缺口。公开fallback首CI#3435真红只新preview期望写次数2而实际1，正确安全行为，writer test-only56eeaac10待新CI；不盲rerun代码红。Provider/history仍施工；新审查全新会话、15min轮询、重活单臂锁。
+
+<!-- 2026-11-21 20:56:40 -->
+## D05 公开回退窄支验收（仅分支）
+
+`fix/replay-public-fallback-1121` @ `56eeaac10d7cade577c31ca25d9dca5bb93f3c0f`（base `cfab477`），唯一 gitdir 工作树 `wave2-public-fallback-wt`。CI #3436 / run 44904418152 attempt 1 精确 SHA 五 job success；10726 PASSED / 0 FAILED / 1 用例 SKIPPED，新增 11/11、既有 PartsJsonFunnelTest 8/8、115 门全过，扫描夹具及滚动标签/发布步骤 skipped。AOSP/Maven 各 24 条合成对照，预览/Offload/Headless/超限截断标记命中 5/4/4/3→全 0，定向门 7/7。报告 `shared/work/surgery-impl-1120/wave2/reports/D05-PUBLIC-FALLBACK.md` 首行 STATUS: DONE。未并集/合 main/发布/装机；只验三公开读面与截断漏斗，worker rawJson、Provider 日志、D05 端到端仍不在本支验收范围。
+
+<!-- 2026-11-21 21:02:51 -->
+## WAVE2 21:00 取消最后独审通过，新候选09cb与IPC开始
+
+父即时收全新ce7f2d9c最后窄复核DONE无P0/P1：固定8637409、604行差异/9桥调用，独立真实37/37新vs旧653有7行为红；retry请求2→1、URL下一跳1→0、3精准负控。publicfallback最终56eeaac10d7cade577c31ca25d9dca5bb93f3c0f #3436/run44904418152五job绿，父独立全日志10726/0/115、11新例逐条过；首CI错计数纯test-only后继修。
+父新唯一worktree wave2-cancel-public，branch integration/surgery-wave2-cancel-public-1121，自已验cfab --no-ff合863完整worker链+56ee，候选09cb33f959b92d33f3877b833cb88cec22c40b87/tree74d5134d，两merge均2父/零冲突，12文件+1664/-106，推+单次CI20:54等终态。验收integration-reviewed仍cfab、公开main/android-latest仍fe72，未main/发布/装机/删支。
+取消前置固定后新真正独立HTTPS clone wave2-replay-ipc@09cb(branch feat/anthropic-replay-ipc-1121)，新会话***UUID***，TASK-D05-IPC-VERTICAL.md；独占Dispatcher写、Service原raw一次捕获/两个消息读端+非流写、Gateway原raw精确回读/public rawJson投影+最多1glue/test。必须kotlinx exact树，不从JSONObject.toString救数值；不碰取消/slots/ACK/CallCancellation/Provider/Engine/载体，ModelUse天然public投影不无证重写。Provider880/history335继续各自独占接线，与IPC零文件交集，重活单编译/负控臂公平锁。COMMON/BOARD/sessions/VALIDATION/PARENT-NOTES已更新+新IPC送达回读。15min查进度，完整D05尚未跨边验收。
+
+<!-- 2026-11-21 21:26:26 -->
+## WAVE2 21:25 验收并集09cb，Provider固定新审
+
+09cb33f959b92d33f3877b833cb88cec22c40b87自己的#3437/run44906205602 attempt1五job绿，父全5job原日志10750 PASSED/0真失败/115门，fixture未跑/发布两步skipped。验收integration-reviewed从cfab只FF同SHA（tree74d5134d），无新merge不重复CI；main/android-latest仍fe72，未main/发布/装机/删支。正式wave2/reports/WAVE2-CANCEL-PUBLIC-ACCEPTANCE.md，VALIDATION/BOARD更新，包含完整worker863后继+publicfallback56ee。
+D05 Provider固定代码38c6faf122ea0a01a3918e21a85d055519852fff（3文件+960/-62，自cfab），#3438/run44908119285在跑scan已绿；父读602行Provider diff+311行NativeBlocks，已全新固定审查***UUID***，任务TASK-D05-PROVIDER-FRESH-REVIEW.md/报告D05-PROVIDER-FRESH-REVIEW.md，先不读旧裁决，重点完整message_stop/资格/实际source/工具匹配/日志/error/exact数值。history335与IPC697继续原独占施工，unique.git确认，三支未跨链组验D05未完成。15min统一轮询，重活单臂公平。
+
+<!-- 2026-11-21 21:44:34 -->
+## D05 Provider 纵向交付（2026-11-21，停功能分支）
+
+`feat/anthropic-replay-provider-1121` 最终 `38c6faf122ea0a01a3918e21a85d055519852fff`（base cfab4771，生产38ee73f5+仅测试修正），本地/远端一致、干净；限定3文件+892/-81：AnthropicProvider、同包AnthropicNativeBlocks、新14例测试。Provider原SSE/nonstream→既有carrier→真实next-request精确树回放，message_stop+正常body结束资格、来源/工具配对准入、私有日志/错误净化；未接Engine/IPC/Room。
+最终本地完整Provider/LLMProvider/CallCancellation55/55、日志哨兵0；旧cfab同集53例8行为红+5日志泄漏，16格无metadata请求旧新字节一致。4影子负控（签名/块序/message_stop/source）均编译成功各1目标行为红；这4臂在最终门形状调整/图片保守拒绝前跑，未冒充最终hash。最终源码新55例另验。最终CI#3439/run44908119285 attempt1精确SHA五job success；原始日志10729 PASSED/0真FAILED、新14/14、115门；fixture按机制skip、tag/release两步skip。首#3438唯一图片AQID断言红因Android return-default Base64桩，生产未变；真实vision字节55绿冻结out/new-vision-55，入库改测真实text-only占位后最终55绿。
+复用：①Json.encodeToString(JsonObject.serializer(),tree)会将高精literal经Double，JsonObject原生toString保真；必须测实际wire。②sanitizeToolPairing可复制未改列表，identity判断会误拒，比较实质结构。③safe新异常保留原JSONException类型但不保raw正文/cause。
+报告`shared/work/surgery-impl-1120/wave2/reports/D05-PROVIDER-VERTICAL.md` STATUS DONE，已全文回读；证据probe-replay-provider/final-evidence.json可机械复核。未真实Anthropic/设备/modelservice/Room/冷重载、未合并/发布/装机/删支；最后ls-remote main+android-latest仍fe72bb9cd。
+
+<!-- 2026-11-21 21:50:11 -->
+## D05 History 纵向接线分支完成（2026-11-21，未合 main）
+
+独立树 `shared/work/surgery-impl-1120/wave2-replay-history`，支 `feat/anthropic-replay-history-1121`，base `cfab4771737d219197181eab605ea57241b11610`→唯一代码 `87eed8c334203832ca5ae8c76a1cb99320446403`（10文件+640/-27）。先因父误复制worktree .git指针暂停全部Git写，父原子替换为独立.git后自行复核恢复，未自行reset/checkout。
+真实collect每attempt资格→干净完整tool_use+真实结果→同earlyId末态UPDATE→私有anthropicReplayV1精确part→实际parseRows/buildSingle/buildBatch回填；超500KB UTF8仅丢metadata，公开构造体与cfab逐字相同；上下文改写/continuation/局部重建守界。新16 Engine+8 Storage；本地真实完整Engine+serializer/mapper最终58/58 Maven与AOSP15；同57例检查点旧整Engine cfab编译成功5红；capture5/persist5/read4/budget1四编译成功行为负控，17相关门+parts漏斗绿。
+唯一CI #3440/run44908906962 attempt1精确SHA五job成功，原日志10739 PASSED/0真FAILED，新24逐条PASSED，scan115/0、fixture未跑、公开tag/Release步骤skipped。最终远端main/android-latest仍fe72bb9cd，树干净；未合并/并集/发布/装机/删支。报告 `wave2/reports/D05-HISTORY-VERTICAL.md` STATUS DONE，证据 `wave2/probe-replay-history/`。父须固定87eed8c独立复审，再组合Provider+IPC全链；未真机Room/worker/真实上游，不称服务器接受。
+Android数值边界：org.json对tool input 1e400构造即拒绝；private kotlinx token可保留但公开执行projection不一致须失格，不伪称执行输入保真。原生text citations中1e400回读精确保真；大整数/高精小数工具输入private亦保留，旧JSONObject投影只比较从不回写opaque。
+
+<!-- 2026-11-21 22:06:37 -->
+## D05 history 固定对象全新复审 BLOCKED（2026-11-21）
+
+只读审87eed8c334203832ca5ae8c76a1cb99320446403/base cfab477，1023行diff/10文件+640/-27。报告 shared/work/surgery-impl-1120/wave2/reports/D05-HISTORY-FRESH-REVIEW.md。独立真实完整Engine+逐字VM effectiveHistory/persistence+serializer/parser/mapper（Room内存leaf）编译成功，AOSP 28例26过2行为红，Maven27过1红；原24新测试均过。P1 F-H01 native高精0.12345678901234567890123456789→Android执行0.12345678901234568，publicInputEquals把expected也舍入导致hot/cold均仍资格1；P1 F-H02已有v2 marker时unrelated summary copy触发全局identity guard，压缩后新工具组source=1/request2=0，无marker=1/1，两解析器同红。P2 [}由旧null变新empty，普通畸形行合同退化。真实持久化更新/结果写失败样本无误资格；单臂删冷读成功编译后a冷资格1→0目标红，d邻正控过。证据 wave2/history-fresh-review/verification.json，115生产全文hash逐字匹配。未改repo/.git/CI/main/并集/真机/上游，不支持此固定对象进非公开组合候选。
+
+<!-- 2026-11-21 22:16:46 -->
+## D05 IPC 纵向接线完成（仅分支，2026-11-21）
+
+`feat/anthropic-replay-ipc-1121` @ `89f74959ea7ac7e8a998fce806c52263d9999450`（独立.git clone `wave2-replay-ipc`，base09cb33f）。6授权文件+608/-100；Dispatcher结构写、Capture raw一次读+每run消息数组私有不可变sidecar、Service两个真实消息构造/非流结果写、Gateway exact回读+公开raw剥整field；model-use仅普通结果先剥再org.json。既有取消/slots/ACK/原子发布/JSONL/carrier/Provider/history全未动。
+CI #3441/run44911160810 attempt1精确SHA五job绿，10762 PASSED/0真FAILED/1既有用例SKIPPED，新12/12，115门/349夹具跳过/发布两步skipped；main+android-latest仍fe72。AOSP54/54、Maven56/56；old09cb同测试编译成功AOSP9例8行为红/Maven9例5红；4独立边负控两解析器各2例精确1红；无载体请求各661B旧新字节相同。报告`shared/work/surgery-impl-1120/wave2/reports/D05-IPC-VERTICAL.md` STATUS DONE，证据`wave2/probe-replay-ipc/`。未实跑Android进程/真实上游/Provider-history组合，停支未并集/发布/装机/删支。
+可复用：AOSP org.json遇private工具参数1e400会在解析期拒绝整对象（不只是Double舍入），须先用kotlinx raw树剥私有再legacy parse；Maven会吞掉这差异。直接传req给入口专属纯构造helper会触xproc对称恢复门，传语义最窄的原消息JSONArray并按同index携载体可保持原入口合同，不能让两入口假调用对方或放宽门。
+
+<!-- 2026-11-21 22:23:03 -->
+## WAVE2 22:22 当前仅两项活跃，IPC完成件已验
+
+用户提示“只剩两个子代理在跑”，父即时收IPC完成件：89f74959ea7ac7e8a998fce806c52263d9999450 #3441/run44911160810 attempt1五job绿，父独立全日志10762 PASSED/0真失败/115门、12新例逐条过/fixture未跑/发布跳过，writer697 DONE。已验并集仍09cb、公开main/android-latest仍fe72，未纳D05。
+Provider38c6faf #3439父核10729/0，a1独审DONE但AOSP数字投影碰撞需history兜；history87#3440父核10739/0，74独审BLOCKED F-H01/F-H02两P1（真实native数值≠Android实际执行仍hot/cold合格；旧compact marker持续清之后新组）。父核源码后已新真正独立clone wave2-history-qualification@87/branch fix/replay-history-qualification-1121，新***UUID***窄修，TASK-D05-HISTORY-QUALIFICATION。22:20其AOSP/Maven68例已跑，报告/CI未交，当前只helper+精确旧测试期望+新tests。
+另一在跑***UUID*** IPC89固定独审。当前仅这两活跃，progress.py可传sid过滤，后续每15min只查两项不读全已完。COMMON/BOARD/VALIDATION/D05-VERTICAL-CONTRACT/PARENT-NOTES同步。未主干/发布/装机/删支；完整D05组合端到端仍待两项交付，不用单支绿越过阻断。
+
+<!-- 2026-11-21 23:00:06 -->
+## D05 History 两资格阻断窄修完成（停分支，2026-11-21）
+
+独占真clone wave2-history-qualification，base87eed8c→唯一代码9dc03aad5d8d90233b1152d60be4606d745152b8，branch fix/replay-history-qualification-1121；4文件+270/-31。F-H01用exact native树vs实际JSONObject序列化树，拒舍入/数字编辑，不改执行和private；1.0→1保守拒。F-H02以唯一row身份/assistant公开结构/完整paired结果+即时前驱边按组失效，非unrelated copy全清；既有compact marker边界通过helper+VM唯一调用传入，旧区及坏锚点拒，新组可用，无新状态。
+复用独立原四方法逐字同hash；旧87 AOSP2行为红/Maven1红；最终115完整源+真实Engine/VM effective/persistence切片，AOSP/Maven各70/70（原24+新13+D04 28+独立4+真实VM边界1）。两成功编译影子仅改helper、测试hash同：回退lossy仅b数值红，回退global rewritten仅c marker红；数值hot/cold1/1→0/0，marker request2 0→1。13相关门绿；唯一CI#3442/run44915019680 attempt1精确SHA五job成功，原日志10752 PASSED/0真FAILED，新13/13+历史24/24+D04 28/28，115门；fixture未跑/发布两步skipped。最终树净远端一致、main/tag仍fe72。报告wave2/reports/D05-HISTORY-QUALIFICATION.md STATUS DONE，装置probe-history-qualification/verification.json。未main/并集/发布/装机/删支/真Room/worker/真实上游；N-H03仅报告登记。父需固定最终SHA窄复核并组合Provider+IPC，不能称D05全链已验。
+
+<!-- 2026-11-21 23:27:25 -->
+## SURGERY WAVE2最终非公开组合验收完成（23:27，未main/发/装/删）
+
+全部已派子会话交付；Provider38c6faf+history完整9dc03aad(含87前置双P1修)+IPC89f74959零冲突三次--no-ff进入**2396706cfdf98f75d024cf2a7635a8cc980966e5**，tree ebd38925a6d5b645ce915e584ad5c46a10113914，3merge父数2/20贡献文件与tips逐字相等，20文件+2379/-208。整场vs公开fe72共122文件+14261/-1667（含tests）。自己的**#3443/run44917057058 attempt1五job绿**，父独立全5job原日志10813 PASSED/0真失败/115门，新6类63例逐条过，fixture349未跑/发布两步skipped。验收integration/surgery-reviewed-1121仅FF同SHA2396706并push远端核一致；main/android-latest仍fe72bb9cd，未main/发布/装机/删支。
+父搭同SHA组合装置wave2/combined-replay：155单元/122唯一真实生产全文+逐字VM/IPC方法（production清单123条含一重复），实际完整Provider→JSONL文件/BoundedLineReader→Engine→工具执行→原id UPDATE→真实serializer/parser/mapper冷重载→Dispatcher/Service两reader→下一实际请求，**AOSP8/8/Maven8/8同jar**；正常0.125热冷1/1、Android高精舍入热冷0/0无private、Maven执行精确保1/1；旧v2marker新组仍1；非流Provider→result writer→Gateway精确且public rawJson无signature→下一request，错instance降级。原独立四方法逐字不改通过，父重放旧87同4方法恰2行为红。平台transport/Room为明示叶子，非真Android进程/SQLite磁盘/真实上游/停止计费。首轮树外夹具期望错已留log未改生产。
+正式wave2/reports/WAVE2-REPLAY-FINAL-ACCEPTANCE.md；原CI parent-ci/44917057058/{verified,acceptance-check}.json与5log，跨边combined-replay/{manifest,verified}.json可重验。条件P2(双文档raw旁路/JSONArray sidecar/parse前资源/[}合同/旧1e400/Provider独立投影碰撞)三件套登记backlog§1121-W2-REPLAY-RESIDUAL；B03产品Undo/Replace、C03/C04来源取证和真机窗口仍未决。HANDOFF/FINAL-REVIEW头部/VALIDATION/BOARD/COMMON/D05合同均更新。当前无子任务在跑，停止空轮询/不新开全库扫描；下一步用户验收或明确授权真机/主干，不自动公开动作。
+
+<!-- 2026-11-21 23:34:49 -->
+## 大手术交接准备完成（2026-11-21 23:33）
+
+用户因长对话要求交接，已创建自含当前入口 `/var/minis/shared/work/surgery-impl-1120/HANDOFF-CURRENT.md`，旧HANDOFF首部加指路。新会话仅先读当前交接＋`wave2/reports/WAVE2-REPLAY-FINAL-ACCEPTANCE.md`，不灌历史PARENT-NOTES/旧全部报告。23:33实核远端main/android-latest=fe72bb9cd，验收integration-reviewed与replay候选=2396706cf，tree ebd38925，本地干净；关键CI与组合证据存在。全部派发完成/无轮询/无新施工，main/发布/装机/删支未授权。
+交接带当前成果(69生产文件+6119/-1510、53测试+8142/-157，约57%新增是测试)、已验10813/0/115与跨层AOSP/Maven8/8、真实平台/上游未验及B03/C03C04产品/取证边界、条件P2三件套、复制.git指针事故禁复发。用户最新在评估“不为未来留隐患”的价值；结论是明确提交/归属/恢复/协议不变量+回归证据，不是零隐患；下一阶段应用户选代表性真机窗口，不自动无期限扫描或合主干。
+
+<!-- 2026-11-21 23:54:45 -->
+## 大手术第一批非破坏真机验证（2026-11-21 23:35–23:52）
+
+用户已自行装包含全部修改应用并授权测试；实核com.rikkaminis.app 1.0.0+3443/code220003443/update23:35:22、base.apk15042525B与CI3443大小同，未APK hash。远端main/android-latest仍fe72，reviewed2396706cf，源码干净；不派代理/全审/CI/主干/发布/安装/删支/配置写。
+真实model-use短回复2次成功；自建合法abstract socket请求进入:modelservice@13178/run e71c646a后仅关测试client，49 EOF→worker stop→同run settled=true reclaimed=true，约385.9ms，无成功文件，后续星驰请求正常。真实Room前5行两读ID/role/text一致，越界空页total真实；真WebView4伪token调用可达→NO_TOKEN_ARMED拒绝，正常blob24B逐字落盘；参数canary在recv原始日志0命中只形状元数据；主PID5920连续，crash retained本包0/system no ANR since boot。限定记录断言22/22，不称整手术真机验收。
+两异常：聚合网关deepseek两次Stream error，原始SSE HTTP200明确code4008 QUOTA额度超；不是凭外层错判应用回归。agentrouter GPT模型条目期间消失：起12模型/短请求成功→后11/model_not_found，provider仍存在enabled但models匹配0；本会话未改配置，原因未知（不得写provider删除/取消导致）。
+证据/报告shared/work/surgery-device-1121/{DEVICE-BATCH1-REPORT.md,VERIFIED.json,verify_evidence.py,evidence/}。全部测试client已结束。未覆盖进程死亡恢复/ACK竞争/满载、rootfs/恢复/调度、官方Anthropic与费用、C03/C04；未直接下载面板无FAILED行，不拿聊天搜索污染作证。下一步先确认模型消失是否用户预期，再另选隔离进程恢复窗口，不强杀自测中的app。
+
+<!-- 2026-11-21 23:58:36 -->
+## 首批真机两项外部因素已由用户澄清
+
+用户直接确认「那个模型是我手动移除的」「而有一些模型确实是额度耗尽了」。故agentrouter-1下gpt-6.1-sol消失归用户手动移除，不是取消链/持久化缺陷，不恢复配置；已测网关deepseek原始SSE code4008 QUOTA与用户说明一致，其他未取证错误仍不能泛归额度。已同步surgery-device-1121的DEVICE-BATCH1-REPORT.md、verify_evidence.py、VERIFIED.json，并保存evidence/user-confirmations.json；只重核已存证据22/22，没有再次模型调用/配置修改。首批未证实新的应用回归，但原未覆盖的进程死亡恢复等边界不变。
+
+## 2026-11-22
+
+<!-- 2026-11-22 00:28:37 -->
+## 大手术合并前终审启动（2026-11-22 00:00–00:27）
+
+用户要求答规模/工时后完整复查，允许代理加速，无问题就合main；追加明确「检查出了问题就直接处理」。已回规模122文件+14261/-1667，生产69+6119/-1510、测试53+8142/-157；完整diff20094行，64提交47非merge。预计45–90min审+15–30CI，若真问题停修。授权替代旧handoff不合/不派限制，未授权装机/强杀app/删支。
+共享项目shared/work/surgery-final-review-1122，AUTHORIZATION/BOARD/sessions/tasks/manifests/diffs/reports。固定审查base fe72bb9cd→2396706cf，同treeebd38925。六真正独立HTTPS clone只读：A463b569e(运行时)、Bf672af35(提交Engine)、Ccda9f022(回放IPC)、D050e92c7(Provider)、Eaa6a13fa(恢复调度)、Ffb9572b3(公开浏览器)，都已送达回读。完整本域diff+source+caller+coverage/symbols，CPU全局gate锁串行。
+父原API#3443@239五jobsuccess/release skipped、旧组合verify和63新case/10813/115原日志验真。本轮机械bundle450.3s rc0（verify_branch树外仅显式--allow-local --jobs1），115门全绿/i18n7语言/debt/four-way4结论，原脚本四层摘要旧20分母漏显示已人工取原行。父本轮原source-bound组合jar AOSP8/8+Maven8/8真实重放，新log在evidence/parent-replay-*，未改原证据。
+已父核2阻断直接派窄修（各独立clone/分支）：F-E01 Stage3 field.write漏persistence.capture，defaults六字段saveConfig回执不等/漏失败，P1BZ修者***UUID***，fix-restore-fields/branch fix/surgery-restore-fields-1122，仅ConfigBackup+≤3tests。A-RT01并发逆序最后gen1在gen2先完后被stale veto不selfReap，P1BZ存量不是本手术回归，真实verbatim两方法probe24checks有观察反例；修者***UUID***，fix-worker-reap/branch fix/surgery-worker-reap-1122，仅Service决定点+≤2tests，禁粗删controlled-drain代际保护。两新修者已回读送达，base239、工作树零交集，要求旧红新绿+精准负控+同SHA五jobCI/报告，父最后累积窗口审含原+补丁后组合。main仍fe72，未合/发/装/删。
+
+<!-- 2026-11-22 00:47:01 -->
+## 轮询间隔用户明确（终审1122）
+
+用户明确：纯审查10分钟轮询足够；涉及修改、跑CI则15分钟更合适。当前大手术终审两修复支并行，父统一按15分钟查进度/CI，间隔内处理已交证据，不5分钟频刷。此偏好应复用于后续派发。
+
+<!-- 2026-11-22 01:07:10 -->
+## FIX-E01 默认字段恢复回执窄修（2026-11-22，停分支）
+
+用户授权读TASK-FIX-E01直接修、不派代理。独立真clone surgery-final-review-1122/fix-restore-fields，base2396706cf→唯一提交d12a7f8124daf73eeb543c38e0d3d09b782ccf1d，branch fix/surgery-restore-fields-1122，远端一致/干净。生产仅ConfigBackup Stage3 field.write包既有persistence.capture（+3/-1含2注释）；专属测试269行+RestoreTestStore记录meta/loopIds4行，共3文件+276/-1；旧RestorePersistence六例逐字未改。CI唯一#3444/run44926159011 attempt1同SHA五job绿，原日志10824 PASSED/0真FAILED，新完整import+真实Registry/ClosureField/六Builtin writer/repo/Store测试11/11（48字段矩阵+5边界），旧六例6/6；115门，349夹具按机制未跑，两发布步骤skipped。本地无健康full-import装置，明确真实逐字Stage3/repo切片+真实Registry/ClosureField整文件：旧11例10行为红/新11绿/树外只删capture同10精准红，同测试hash；非完整旧import，不扩大结论。wiring14/14，相关8门7跑0失败1已知skip。报告shared/work/surgery-final-review-1122/reports/FIX-E01-RESTORE-FIELDS.md；证据probes/FIX-E01。未main/并集/清理/装机/真实配置写，main/android-latest仍fe72。验收器首次按'tag'子串误中Stage release asset，改精确两实际发布步骤后原日志重核通过，不动生产或CI。
+
+<!-- 2026-11-22 01:07:15 -->
+## FIX-A01 worker逆序finisher回收窄修（2026-11-22，停分支）
+
+独立clone surgery-final-review-1122/fix-worker-reap，branch fix/surgery-worker-reap-1122，自2396706cf→唯一57833ed8ff96527406a7404ab0925e22e5679f9e，2文件+106/-10（生产Service+13/-10含注释；新决定点源guard93行）。同lifecycleLock采一次当前reapGeneration供正常/dirMissing两条回收调用；maybeSelfReap执行体、controlled drain全方法、外围admission/ACK/poison原文不动。公开fe72与239三个相关方法逐字同，存量可达P1非本手术回归。
+真实逐字finish/reap/drain+真实Lifecycle/Mailbox/RunDir/StreamException，明示receiver/log/pid/selfReap计数leaf；old239编译成功18中仅reverse行为红kills0，新18/18+入库5/5，单表达式回旧采样同一18例精确同1红；三臂测试同hash、controlled drain同hash、仓库全程未被影子改。入库同jar读old/mutant源各仅采样1红，新5绿。local验真20/20、wiring17/17；gate_run固定base239相关5/5。
+唯一dispatch CI#3445/run44926678352 attempt1精确57833ed五job成功，五份原日志10818 PASSED/0真FAILED、新5逐条过、115门；fixture未跑、tag/release两步skipped。本地clean/远端同SHA，main/android-latest仍fe72。报告reports/FIX-A01-WORKER-REAP.md STATUS DONE，装置probe-fix-worker-reap/{verified-local,wiring-result,final-verification}.json及ci/。未派代理/主干/并集/发/装/强杀/配置/删支/报告提交。未验真实Android进程退出/内存MB/上游计费；drain行为只在树外receiver grace=0，保实际线程锁控制流。
+
+<!-- 2026-11-22 01:12:27 -->
+## 终审01:04：五域已交，第三窄修开始
+
+按用户新轮询纯审10min/改或CI15min执行，00:57一批查（上一约00:41）；两原窄修CI在跑：restore d12a7f8124daf73eeb543c38e0d3d09b782ccf1d #3444/run44926159011；reap57833ed8ff96527406a7404ab0925e22e5679f9e #3445/run44926678352。父已逐字读生产diff：capture{field.write}；finish锁内采当前generation传两出口，未删delayed drain guard。
+A/C/D/E/F完整报告已交父全文读，B还差报告（coverage/symbols已落）。A唯一逆序回收P1（旧A02报告已有，补真实行为，不计新bug）；E唯一六defaults漏receipt（7反例+7单点对照/5真Store）；C无P0/P1（独立AOSP47/48单红DONE+1e400合成fixture，Maven48/48，不能全绿；深包装64预算P2）；F无P0/P1（AOSP18/Maven18+Node4，裸near-name/非规范坏行P2与单槽可见性P3）。C/F残余三件套已追加backlog§1122-FINAL-C-REPLAY/§1122-FINAL-F-PUBLIC。
+新D01 P1CZ静态链父核：Anthropic context_window reason被保declared/truncated=false正确，但无工具Engine partial/empty跳过error且clean normal；工具拒绝已正确不动。新独立clone fix-context-terminal/branch fix/surgery-context-terminal-1122@239，writer***UUID***已回读送达，先全真Engine旧红再修Engine窄终态+1key七语言+test，复用pendingInlineError/terminalErrorSurfaced/单持久化，不走EOF/length重试，禁覆盖前成功row。三修支零文件交集/重活全局串行。BOARD已同步，main仍fe72未合/发/装/删。准备父安全verify_run.py（三源同SHA+current attempt jobs+原日志新case）及文档先行目录；全量门仅先前一次115过，不重复全跑。
+
+<!-- 2026-11-22 01:32:38 -->
+## 终审01:32 两窄修父验绿、第三context已固定待CI/独审
+
+六域全部完成，父全文读6份+coverage-sourcehash122/122、338符号匹配（evidence/coverage-verified.json）；B无P0P1，>8MiBterminal DONE在预算后reaper保留/recovery永久skip P2DZ已登记backlog§1122-FINAL-B-RECOVERY。C/F条件P2均三件套登记，不扩施工。
+E01d12a7f8 #3444/44926159011，父verify_run.py独立取全5job原日志10824PASSED/0，new11+old6，115/fixture未跑/release skip；A01 57833ed #3445/44926678352父同样10818/0、新5、115/fixture未跑/release skip。父重核旧新负控及wiring（E14/A17），真源码无额外改。新POST-AE独审sid01a437f8-bab5-436c-9068-f1a877a1931f已送达，任务只读固定两支原上下文+补丁，尚未交。
+D01 writer55已code5e54c7151120d6bc24e9a6ebaefce8c013899796，#3446/44929331113@01:29仍跑；仅Engine no-tool入口+8行pendingInlineError/terminalErrorSurfaced，1key七语言+178行ContextWindowTerminalTest，共9file+193。父已读补丁和全部tests/原continue gates，wiring22/22实核，full Engine old-final和删block mutant同目标三条红/新green、不改FakeHost；最终报告未交。新POST-D01固定独审***UUID***已派，TASK-POST-D01.md，待回读送达。
+最终独立clone final-integration/branch integration/surgery-final-reviewed-1122仍239（尚未merge），已fetch公开mainfe72和两绿支sha，base ancestor真，等待三支独审+绿后再并集。docs/FINAL-REVIEW-DRAFT.md已树外起草未声称合并；开发档案三件套仍待最终状态后一次重建/脱敏/与挂载对拍再纯docs先行（meta-audit§3.2b）。轮询用户要求改/CI15min（最新01:29），纯审10min；interval内父处理证据不频刷。main仍fe72未合/发/装/删。
+
+<!-- 2026-11-22 01:39:25 -->
+## D01 CI真红后单测试窄扩与send假失败（01:38）
+
+用户转D01授权申请；父核#3446@5e54终态failure唯一SessionActivityStreamErrorTest删除engine deferred site负控失牙（旧>=6遇新增第7站），ContextWindow6/6/scan115/build/lint皆过。已批只额外改该test file，全部旧@Test保留，改direct/deferred逐站精确集合+每站负控/重复补偿拒绝，禁6→7floor/改生产避字面/盲rerun3446。生产/七语言/ContextWindow6/原全Engine三臂45hash冻结5e54；后继test-only新SHA一次CI，父核生产等价。授权tasks/D01-TEST-SCOPE-EXTENSION.md。
+原writer55与POST-D01 345分别追加--session发送，工具均SEND_FAILED/send_dropped_before_stream，但回读最后消息证实两条已入库且各assistant读任务/继续；未重发/未新第二写者。当前CLI实际只list/search/messages/send，无status/retry（help已验），不能信旧工具提示有status。BOARD已记，父继续按15minCI轮询，mainfe72尚未合。
+
+<!-- 2026-11-22 01:54:36 -->
+## POST-AE 修后独审（2026-11-22，只读，STATUS BLOCKED）
+
+
+固定对象 E01 `d12a7f8124daf73eeb543c38e0d3d09b782ccf1d`、A01 `57833ed8ff96527406a7404ab0925e22e5679f9e`，均自 2396706cf，两树 clean 未动。报告 `reports/POST-AE-FIXED-REVIEW.md` + `.json`；短报 `POST-AE-BLOCKER.md`；树外装置 `probes/POST-AE/`。
+
+**E01 闭合**：Stage3 唯一生产改动 `ConfigBackup.kt:1783 persistence.capture { field.write(value) }`，接进既有 `ConfigPersistenceBarrier`（ProviderRepository 280-308/833-856 与 239 逐字节同）；receipt 仅当 writer 同线程调 saveConfig 才生成 ⇒ 10 个非 repo 字段零回执零误等（满足「不承诺其它异步字段」）。old 11 例 10 红→new 11 绿→删 capture 同 10 红（同测试 hash 99212478）。CI #3444/44926159011 五 job 同 SHA、10824 PASSED、新 11、115 门、发布两步 skip。残余 P3：await 无超时（execute 只抛 REE/NPE，静态不可达）；测试反射换 ConfigRegistry.INSTANCE 全局单例。
+
+**A01 原阻断解除但新 P1**：锁内 `reapGeneration = requestGeneration.get()`（575）传两出口（594/619）；maybeSelfReap/drain/onStart 逐字未改（728417f8 / 2e30850b / 9e10a23d 与 239 同）；new 18/18、单表达式回退精确 1 红；CI #3445/44926678352 同 SHA。**新 P1（C/Z）**：这些字段全是 Service 实例字段，`selfReap()` 杀整个 `:modelservice` 进程；队列触顶 281-307 的 `stopSelf` 不停进程，旧实例非 daemon 请求线程继续；同 PID 新实例可接纳 F；旧实例最后 ACK 后锁内采旧实例 gen4、计数 0/0/0、A 有 terminal ⇒ 杀全进程切掉 F。239 同交错因 A 准入 gen1≠4 被 stale veto（实测 kills=0），补丁换当前 gen 后变 kills=1 —— 是修后新增出口。六臂：old239/reverse 0、fixed/reverse 1、same-instance 双臂不杀、old239/replacement 0、fixed/replacement 1（新实例 sender 已进 provider 且无 terminal）。
+
+可复用：①`stopSelf` ≠ 进程死亡，凡「实例字段 + killProcess(myPid)」的回收判据必须带实例身份，否则跨实例把新准入请求当空闲；单实例逆序用例（含 sibling/queued/ack）测不出这条。②树外装置要真切片就整方法逐字 + 唯一替身是 kill/Service 叶子，编译失败日志也要留（本轮首编译 1，修 harness 后 0）。③回执类修复先问「receipt 由谁在哪个线程生成」，否则会误等或漏等。
+
+<!-- 2026-11-22 02:08:14 -->
+## D01 context-window 终态修复与单测试窄扩（分支绿，2026-11-22）
+
+独立clone surgery-final-review-1122/fix-context-terminal，branch fix/surgery-context-terminal-1122。起239→生产5e54c7151120d6bc24e9a6ebaefce8c013899796：Engine无工具入口+8行用既有context谓词/pendingInlineError/terminalErrorSurfaced，原single persist+empty row filler后本行banner；一key七语言。实际Anthropic loopback SSE→JSONL→完整Engine+原FakeHost：154单元/122生产全文；old-final45例恰3目标行为红、新45/45、树外删8行mutant恰同3红/42旁控绿，5测试hash同；同jar AOSP45/45。四相关门4/4、wiring22/22、i18n1687键七语言一致。
+首CI#3446/44929331113@5e54新6例均过，唯一真红既有SessionActivityStreamErrorTest的deferred>=6负控：新增第7站删旧站仍达floor。获用户D01-TEST-SCOPE-EXTENSION明确只扩该测试，原18@test全留（另17旧本体字节不变），精确11站call+owner共用清单、60逐站删除/重复/补偿/伪装负控；本地旧18恰1红→新21/21。test-only后继feef2a99f4da3ae368305980a079446d47c89e9b；生产subtree与5e54同b0879652。新单次CI#3447/44932144060 attempt1精确feef五job成功，原日志10822 PASSED/0真FAILED，context6/funnel21/protocol4/provider7/prefill28全逐条过，115门；349夹具未跑，两发布步skipped。未rerun3446/主干/并集/发布/装机/删支/派代理。报告 reports/FIX-D01-CONTEXT-TERMINAL.md STATUS DONE，证据probe-fix-context-terminal。最后远端main/tag仍fe72，tip本远同且clean。
+经验：新增漏斗站触发旧floor负控失牙时，不改生产字面绕门、不将6改7；按真实call+所属控制流逐站精确集合并逐站删除/重复，原测试仍完整保留。真实Room/worker/UI/上游计费未验。
+
+<!-- 2026-11-22 02:09:26 -->
+## 修后再阻断01:52→02:08：A跨实例误杀、D冷读漏提示，直接后继中
+
+最新十五分钟轮询01:52交两POST BLOCKED：POST-AE E01已闭合，A01 578仅实例锁/计数而selfReap杀整个PID，旧Service队列拒绝stopSelf后同PID新实例F已准入，旧A最后finish误杀F。独立真实service切片6臂（old239 reverse红/fixed replacement红其余绿）非Android实测。父回源核、交原writer f2f续修A01-PROCESS-OWNERSHIP-FOLLOWUP.md，已回读送达（01:54），要求process-scope归属/所有3kill与stopSelf路径、两receiver真实行为入库+精准负控/新CI，不粗删guard、不另写者。
+POST-D01 原5e54热态正确但error_info成功落DB的空assistant被ChatTranscriptRebuild:244先empty过滤，冷加载提示消失；独立原Engine jar+真实parser/serializer/rebuild五测恰2红（empty及tool后empty），其它partial/seam/null/throw绿。父直接开独立clone fix-context-cold/branch fix/surgery-context-cold-1122（基feef2a99），生产只ChatTranscriptRebuild一判据附errorInfo.isNullOrBlank()，新增ChatTranscriptErrorRecoveryTest8例。run_cold_probe.py原独立PostD01Probe未改+真实reader/model+既有tests共65：old-final AOSP/Maven恰5行为红、new65/65各绿、回退唯一判据mutant恰同5红，tests/hash相同，verify_cold.py实核；初old test枚举误COMPLETED编译红只更正SUCCESS后old-final再跑，不计行为。新提交a6e1f5bc46c48b5f2f1f06ec1413c1500f41ed22=2files+87/-2，定向1门绿，安全push/dispatch一次#3448/run44933127803@02:08仍跑。
+D原writer单test后继feef2a99 #3447/44932144060终success，父全5job原日志10822/0、Context6/6+SessionActivity21/21（60负控）、115/fixture未跑/release skipped；生产main subtree与5e54逐字相同。FIX-D01最终报告已父读但不能据它越过冷读BLOCKED。POST两完整报告已父读，条件残余不扩全库。
+main/android-latest仍fe72，final-integration仍239未merge/dispatch。下一先收A后继+冷CI父验→冷固定窄复审（复用POST-D reviewer可）和A最终后审→最小最终组合（context贡献用a6e包含feef，不重复原branch）+更新verify_union TIPS与full final source重放+自身CI→文档三件套脱敏先行→--no-ff main用户已授权。仍不自动装机/强杀app/删支。轮询15min最新02:08，间隔只父证据工作。
+
+<!-- 2026-11-22 02:46:02 -->
+## FIX-A01后继：跨Service实例回收归属（2026-11-22，停分支）
+
+原独立clone/分支续修：57833ed（旧绿保留但被证伪，不得孤立纳入）→ 最终 d49ecb9c22941681071c142c2e5b879677b09f6b，branch fix/surgery-worker-reap-1122，独立增量2文件+264/-34（Service +54/-44，新 WorkerProcessOwnershipTest 223行；578 的 WorkerFinalizerReapDecisionTest 未放宽）。
+缺陷：selfReap杀整PID，而 active/queue/ACK/generation/lifecycleState/lifecycleLock 原为 Service 实例字段；队列满 stopSelf 后进程存活、新 receiver 接纳 F，旧实例最后收尾可切断新请求。旧239因 stale veto 不杀=驻留；578 修通同实例逆序后首次允许该旧线程杀进程。
+修法停第2级：复用既有 companion（executionSlots 本已进程级），六个既有真值原样迁入 + keyCachePoisoned 对齐进程缓存实际作用域；不新增 helper/registry/watchdog/timer/type/config。poison 延迟 watchdog 改为同 lifecycleLock 内复核 active+queue+ACK 后杀，决定到 kill 不释放锁；selfReap 加 check(Thread.holdsLock(lifecycleLock)) 不变量；controlled-drain 全方法逐字不动、scheduled generation veto 保留；所有 stopSelf 路径原文不动。
+证据（树外 process-followup，复制父只读装置，未改父探针）：12真实service方法+真实Lifecycle/Mailbox/RunDir/etc，平台leaf仅Service/Intent/Process/Log/prefs/provider latch。old578 行为10红+全admission 4红；new 14/14+4/4绿；mutant-local-owner 9红+4红；mutant-poison-ack 恰1红(ACK poison)。覆盖两实例共享池/同PID换receiver/active|queue|ACK阻断/旧finisher写自己terminal/F最后恰一次kill/单实例顺逆/dirMissing/缺terminal/未flush/旧drain veto/poison 新receiver+queue+ACK+锁等待/三条stopSelf(null-intent,missing-extra,missing-request)重建/队列满真实两槽cap2。
+L3 进程归属源码守卫26项 exit0。gate_run 固定base57833ed 相关5门全绿(20261121T181848Z)。
+CI #3449/run44934803700 attempt2（attempt1 lint 因 Maven Central 缺 hamcrest-integration/library 1.3+javawriter 2.1.1 环境红，同秒直连均200；本会话未rerun，attempt2由外部发起）五job成功、head精确d49ecb9、10832 PASSED/0真FAILED、新19例逐条PASSED、115门、fixture未跑、发布两步skipped。ci/lint-attempt1.log 与 ci/verified.json 留证。
+本地clean、远端同SHA，main/android-latest仍fe72。报告 reports/FIX-A01-WORKER-REAP.md STATUS DONE（首段明确578被证伪诚实记录）。未派代理/合主干/并集/发/装/强杀/改配置/删支。未验真Android Service重建与内存MB；start-only未onStart窗口未扩大。
+
+<!-- 2026-11-22 02:50:47 -->
+## 02:50 终审三支状态：E01/D01冷读已闭合，A01后继待原发现者复核
+
+D01冷读：父直接窄修a6e1f5bc（ChatTranscriptRebuild唯一skip判据加errorInfo.isNullOrBlank，+3/-2；新ChatTranscriptErrorRecoveryTest8例）。父run_cold_probe原独立PostD01Probe逐字+真reader/model+既有52tests共65：old-final与mutant(仅回退3行)AOSP/Maven各恰5行为红，new各65/65绿，同test hash；verify_cold.py实核。原POST-D01审者已交POST-D01-COLD-FINAL.md STATUS DONE：原两行为红翻绿、普通空行/空白error仍不可见、工具成功行error仍null、折叠规则未变；残余P3（新测试两assertNull对fixture无判别力、ChatSessionLifecycle两处旧注释漂移）。父独立取#3448/44933127803@a6e1f5bc原日志：10830 PASSED/0、ChatTranscriptErrorRecoveryTest8/8+ChatTurnPartsJson28+Parser24逐条PASSED、115门、发布skipped；verify_run.py曾因未出现的ChatTranscriptRebuildTest断言失败，已改为只断explicit expected。
+A01：原writer交d49ecb9c（578后继），把6个生命周期真值+keyCachePoisoned迁companion与executionSlots/killProcess同scope，poison watchdog同锁复核全部计数，selfReap加holdsLock check，controlledDrain逐字未改，4个stopSelf原文不动；新WorkerProcessOwnershipTest14例。旧578入库10红+admission4红、新14/14+4/4、两变异9红/恰1红、5门绿。CI#3449/44934803700 attempt1 lint红于Maven Central三jar（父独立curl三URL均200→环境红），rerun-failed后attempt2五job success；父verify_run原日志10832/0、WorkerProcessOwnership14/14+WorkerFinalizer5/5+ProviderExecConcurrency5/5、115门、发布skip。已请原发现者01a437f8做POST-A01-PROCESS-FINAL固定复核（重点实例副本残留/锁不变量/原反例/controlledDrain/新挂死），已送达。
+E01 d12a7f8已闭合（父+POST-AE双确认）。main/android-latest仍fe72；final-integration仍239未merge。下一步：等POST-A01结论→若DONE则三支齐绿→verify_union.py更新TIPS(restore d12a7f8/worker d49ecb9/context a6e1f5bc含feef)→最终并集三方sha/树等价→final源码53例AOSP/Maven重放→并集自身CI→文档三件套脱敏先行→--no-ff合main。轮询按15min（改/CI），纯审10min。
+
+<!-- 2026-11-22 03:29:06 -->
+## POST-A01-PROCESS 后继复核（2026-11-22，只读，STATUS DONE）
+
+
+固定对象 `d49ecb9c22941681071c142c2e5b879677b09f6b`（parent 57833ed，2 文件 +264/−34），树 clean 未动。报告 `reports/POST-A01-PROCESS-FINAL.md` + `.json`，装置 `probes/POST-A01-PROCESS/`（一次离线编译、19 臂）。
+
+**结论：我原报的跨实例 P1 闭合，本对象未证实新 P0/P1。**
+
+- **真值唯一**：七个生命周期值 + `executionSlots` 全在 companion(166-211)；类体扫 7 个名字零命中，无实例副本/遮蔽；读写点 284/318-324/434/446/507/565/581/592/607/622/827/852/869-874/1660 全指进程真值。树外 `shared-truth`：d49 六字段 static+sameObject，578 全 false（探针有区分力）。
+- **锁不变量**：`selfReap():754` 首行 `check(Thread.holdsLock(lifecycleLock))`；三调用点 675/854/1771 全在 `synchronized` 内；锁外调用抛异常且不杀（实测）。poison watchdog `851-857` 锁内复核 active/queued/acks 才 kill；变异回退单条即被 queued 骗过（有牙）。无嵌套锁（RunDir/Mailbox/RunLog 零 synchronized），槽位 tryAcquire 在锁外。
+- **原反例翻绿**：`replacement-active` d49 kills=0 / 578 kills=1；queued、ack、drain、poison-遇新实例、两条 stopSelf 后换 receiver 全部不杀，F 完成后恰一次。
+- **未改**：`onStartCommand` 578 与 d49 逐字节同（4890f1a7，四处停止分支原文）；`scheduleControlledDrain` 239/578/d49 三者同 sha（2e30850b）。
+- **四类 P3 全存量**：①DEAD 棘轮（run_dir_missing 后 transition→DEAD 不回收，下一次准入 321 置 ACTIVE 自愈；578 完全同形）；②准入上限比较在锁外（onStartCommand 逐字节同）；③终态锁内做文件 IO（239 同）；④毒化写锁外。
+- **CI**：api-run/api-jobs 五 job 均 d49 attempt2 success、publish 两发布步 skipped；unit 10832 PASSED、` FAILED$` 零行、新 14+5 逐条过；115 门、夹具按机制 skip。attempt1 原件本地不存在，未独立复核。
+
+可复用：①「实例字段 + killProcess(myPid)」类回收判据的完备性检查必须问「谁持有该真值、生命周期比 Service 长吗」，companion 迁移后用「类体扫同名字段 + 两实例 sameObject」两条机械判据证明，比读 diff 硬。②叶子 kill 不结束 JVM 会让 watchdog 与 finalizer 各记一次，断言要写 ≥1 而不是 ==1（真机首个 kill 即终止）。③`lifecycleState` 从实例变进程后，`transition` 的 DEAD 吸收态会跨 receiver 残留——但准入处无条件置 ACTIVE 是天然自愈点，判 P3 不阻断。
+
+<!-- 2026-11-22 09:13:37 -->
+## 2026-11-22 08:56–09:12 大手术最终合并完成
+
+用户问“怎么突然停了”；不是CI或验证失败，是助理在长时间等待后未正确续上收口，且误输出了无关内容。随后继续已授权收口。最终并集65e35135（代码303ac2d2+文档提交）与main fe72合并：merge commit 3383e0e0bb892f68a782c66a93cd3162520a5a02，父=fe72+65e35135，tree aeb3c7a3与候选逐字一致；远端main已推送并核同SHA。main CI #3453/run44969067495五job success：unit 10860 PASSED/0、scan 115、lint/build成功、publish发布步骤success；android-latest已强制移动到3383e0e，Release日志显示删除旧asset并上传RikkaMinis-arm64-v8a.apk。最终累计129文件+15454/-1756（含文档），三处阻断已修复并独立复核；未验证边界仍保留（真实进程死亡/Room ACK、rootfs reset、官方Anthropic签名/停止计费、B03/C03/C04及条件P2）。未删分支/工作树、未自动装机。用户此前偏好：审查10min/改动CI15min轮询；本次被用户中止等待后改为短轮询完成。
+
+<!-- 2026-11-22 09:24:35 -->
+## 2026-11-22 09:15–09:25 1.0.0+3453 真机复测
+
+用户更新到1.0.0+3453后复测。安装身份：versionCode 220003453、update 09:15:55、base.apk 15045057B、SHA-256 5a6f408d…aec7；从Release下载APK同大小同hash，确认装的是发布产物。main 3383e0e、android-latest同SHA、Release名v1.0.0+3453且资产15045057B。
+真机通过：trae-cn/glm-5.3-flash真实worker短回复逐字OK；09:20:49 socket EOF->request31 cancelled，09:20:50 explicit cancel handshake settled=true reclaimed=true run d60c…，取消后请求成功，并发两请求均成功；Room同会话两次前5行ID/role/text一致total664；WebView无token 3调均NO_TOKEN_ARMED拒绝且无非法文件，正常blob落盘内容SURGERY_VALID_3453\n（19B；测试页expectedBytes=24是显示值错误）；主进程16494、boot以来无ANR、crash app 0。
+未做：context window耗尽行为（需官方Anthropic真实样本）、跨Service重建/队列满交错、默认字段真实恢复导入、进程死亡Room/ACK、rootfs reset、停止计费。外部：gpt-6.1-sol两次503、hy4free model not found，换glm成功，不归应用回归；取消测试脚本因全量日志轮询超时，但原生日志证据有效，未冒充脚本rc=0。报告shared/work/surgery-final-review-1122/DEVICE-BATCH2-REPORT.md；未删分支/工作树。
+
+<!-- 2026-11-22 09:52:40 -->
+## 2026-11-22 09:45–10:00 用户数据空间清理（shared/work 4.9G→1.0G）
+
+
+用户「本地应用的用户数据这一块的空间又涨上去了」。实测：app 8.4GB，`shared/work` 表观 10.4GB/实际 4.9GB；`/var/minis/mounts` 733MB 是用户挂载（笔记 403M、背景包 315M），未动。
+
+做法（全部可重建/无损）：
+1. `surgery-impl-1120` 30 worktree + 14 独立 clone：先 fetch 每个 HEAD/分支进宿主仓库 `work/merge-ci-job-granularity-1120` 的 `refs/archive/<name>/*`（61 refs，fsck 干净），再 worktree remove/删除。未提交改动导出 `shared/archive/work-refs-1122/uncommitted/`（public-fallback.patch + ReplayPublicFallbackTest.kt）与 `worker-final-fresh-review/`；HEAD 清单 `worktree-heads.txt`。
+2. 其余 RikkaMinis 克隆（incr1117/repo、responses-recovery-1120/repo、worker-slots-1120/repo、ci-granularity-1120、docs-refresh-1119）同样归档 refs 后删。
+3. extrepos-1118 的 mika-src(189M)/cindy-src(652M) 外部仓库 clone 删除（远端可重建），抽取文档保留。
+4. fullscan-1119/out（ecb03d92 源码快照 55MB）删，README 存 archive/fullscan-1119-note/。
+5. r2rest 稀疏探针删（表观 6.4GB/实际 10MB，复制时会膨胀）。
+6. /var/minis/logs 11-16～11-21 gzip（178→53MB，zgrep 可查）。
+
+结果：shared 4.9G→1.06G；/var/minis 4.9G→1.9G；host 空闲 35.1G→43.0G。README 已加「〇-3 清理实录」（含恢复命令：git -C merge-ci-job... worktree add ../x refs/archive/<name>/<branch>）。
+
+保留：surgery-final-review-1122（活跃）、surgery-impl-1120 的 reports/tasks/probe/wave2、归档宿主仓库 174M、jvm-libs/kotlin-home。
+
+教训复用：1) 「clone 目录多」应先问共享 .git 宿主在哪（`cat .git`），worktree 可 remove，独立 clone 要 fetch refs 归档；2) `minis-fastio du` 报 apparent bytes，稀疏文件（r2rest）会误导 6GB；判实际占用用 `du -s`；3) cleanup-work.sh 会把活跃项目 surgery-final-review-1122 的 probe jar 列进 ARTIFACT，直接 --yes 会删活证据。
+
+<!-- 2026-11-22 10:13:02 -->
+## 2026-11-22 协议不变量文档入库（main a8f83d30b）
+
+
+用户要求把大手术留下的判据与六域地图落成仓库文档，并"顺便更新文档"。纯 docs 改动，未 dispatch CI（build-apk paths 只含 src/android、src/shared、deps、workflow 自身 → docs 不触发；推送后最新 run 仍 3383 已验证）。
+
+新增 `docs/stability/protocol-invariants.md`（108 行）：五条取证判据（累积窗口/唯一决定点/失败侧先红/精准负控/明示叶子）+ 13 条不变量表（入口/绕过症状/守卫测试）+ 六域地图 + 维护纪律（折旧条件）+ 已知缺口（0 新门、8MiB spool、真机不可重跑、B03/C03/C04、四类 P3）。
+
+更新 5 处：`2026-11-22-surgery-final.md`（STATUS 改 MERGED_TO_MAIN，新增"留下的判据与入口"节，替换"发布边界"为实际合并/发布结果 #3453、android-latest 15,045,057B、真机复测摘要）、`ARCHITECTURE.md`（§10 加跨边界协议条目 + §11 演进表加"协议期 11/20–22" + "最近一轮"指向）、`DEVELOPMENT_LIFECYCLE.md`（审计与验收补 2 条：唯一决定点、修复前先红）、`README.md`/`README_EN.md`（最近一轮与索引指向新文档）。
+
+分支 `docs/protocol-invariants-1122` @ b294e2466 → `--no-ff` 合并 a8f83d30b（父数 2），已推 main 并核远端 SHA 一致。分支未删（纯文档，ahead=0，可随时删）。
+
+机械校验：文档引用的 36 个测试类全部存在于仓库；13 个生产符号存在；7 张表列数一致；相对链接有效。修正过一处类名错误：ModelExecutionCancelPolicy → ModelExecutionCancelPolicy.kt 里的实际类 `ModelExecutionCancellationRace` / `ModelExecutionSlotLease`。
+
+可复用：写"地图类"文档必须先机械核对所有类名/文件名存在，否则半年后按文档找不到东西；表格列数用脚本验；docs-only 提交前确认 workflow paths 不含 docs，避免误触发发包。
 
 ---
 
