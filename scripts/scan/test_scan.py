@@ -3803,6 +3803,7 @@ SURGERY_1122_GATES = [
     ("transcript_commit_order_check", "TRANSCRIPT_COMMIT_ORDER_SELFTEST=PASS"),
     ("provider_dispatch_cancel_check", "PROVIDER_DISPATCH_CANCEL_SELFTEST=PASS"),
     ("worker_process_scope_check", "WORKER_PROCESS_SCOPE_SELFTEST=PASS"),
+    ("fixture_anchor_check", "FIXTURE_ANCHOR_SELFTEST=PASS"),
 ]
 
 def test_surgery_1122_gates():
