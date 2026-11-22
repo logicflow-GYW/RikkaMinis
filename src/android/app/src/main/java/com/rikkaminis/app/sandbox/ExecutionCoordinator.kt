@@ -88,10 +88,6 @@ object ExecutionCoordinator {
 
     private const val TAG = "ExecutionCoordinator"
 
-    // [fix/heavy-gate-scope] Slice size for the interruptible heavy-permit wait:
-    // small enough that a cancel lands promptly, large enough not to spin.
-    private const val HEAVY_GATE_POLL_MS = 250L
-
     // [P2-proot-native-leak]
     // High-water mark (MB) for PRoot *child process* RSS. Normal operation is
     // ~35-55MB. A long-lived PRoot tracer leaks native memory monotonically
@@ -487,8 +483,17 @@ object ExecutionCoordinator {
                 "[$sessionId] heavy gate: class=$gateClass memAvail=${memAvailableMB}MB timeout=${heavyGateTimeoutMs}ms",
             )
         }
+        // [fix/heavy-gate-scope] Observe the wait from OUTSIDE the wrapper:
+        // exec_gate_release_check pins the wrapper body (exactly one acquire in a
+        // direct `runInterruptible` block), so the progress report lives here.
+        val gateWaitStartMs = System.currentTimeMillis()
         val heavyGateAcquired = gateRequired &&
-            awaitHeavyGatePermitInterruptibly(heavyGate, heavyGateTimeoutMs, gateClass.name)
+            awaitHeavyGatePermitInterruptibly(heavyGate, heavyGateTimeoutMs)
+        val gateWaitMs = System.currentTimeMillis() - gateWaitStartMs
+        if (gateRequired && gateWaitMs >= 1_000L) {
+            Log.w(TAG, "[$sessionId] heavy gate waited ${gateWaitMs}ms (class=$gateClass) before acquiring")
+            MemorySpikeRecorder.onEvent("gate-wait", "session=$sessionId class=$gateClass waitedMs=$gateWaitMs")
+        }
         if (gateRequired && !heavyGateAcquired) {
             Log.w(TAG, "[$sessionId] Heavy gate timeout after ${heavyGateTimeoutMs}ms — another heavy command still running")
             postRecycleMemoryRecovery()
@@ -2189,37 +2194,8 @@ internal fun recycleDispatchMode(isOnMainThread: Boolean): RecycleDispatch =
 internal suspend fun awaitHeavyGatePermitInterruptibly(
     heavyGate: Semaphore,
     timeoutMs: Long,
-    label: String = "heavy",
 ): Boolean = runInterruptible(Dispatchers.IO) {
-    // [fix/heavy-gate-scope] Wait in slices so a long queue is VISIBLE.
-    // Before this, a blocked command produced no line at all — the agent and the
-    // user saw a silent stall and had no way to tell "runs slow" from "queued
-    // behind another session". One `tryAcquire(` call site is kept on purpose:
-    // exec_gate_release_check pins its occurrence count at 2 (this one + the
-    // global-slot one), which is what keeps a raw blocking acquire from coming
-    // back.
-    val deadline = System.currentTimeMillis() + timeoutMs
-    var granted = false
-    var waitedMs = 0L
-    var nextReportMs = 1_000L
-    while (!granted) {
-        val remainMs = deadline - System.currentTimeMillis()
-        if (remainMs <= 0L) break
-        granted = heavyGate.tryAcquire(minOf(remainMs, HEAVY_GATE_POLL_MS), TimeUnit.MILLISECONDS)
-        if (!granted) {
-            waitedMs += HEAVY_GATE_POLL_MS
-            if (waitedMs >= nextReportMs) {
-                Log.w(TAG, "[gate] waiting for the $label permit: ${waitedMs}ms of ${timeoutMs}ms")
-                MemorySpikeRecorder.onEvent("gate-wait", "label=$label waitedMs=$waitedMs timeoutMs=$timeoutMs")
-                nextReportMs = when {
-                    waitedMs < 10_000L -> 10_000L
-                    waitedMs < 60_000L -> 30_000L
-                    else -> 60_000L
-                }
-            }
-        }
-    }
-    granted
+    heavyGate.tryAcquire(timeoutMs, TimeUnit.MILLISECONDS)
 }
 
 /**
