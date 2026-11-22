@@ -5,7 +5,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 内存尖峰记录器（纯诊断，零介入执行路径）。
@@ -117,7 +117,12 @@ object MemorySpikeRecorder {
     @Volatile
     var enabled: Boolean = true
 
-    private val currentCmd = AtomicReference<CmdContext?>(null)
+    // [fix/heavy-gate-scope] Per-session, not a single slot: with several
+    // sessions running commands at once the single slot let one session's
+    // cmd-end consume another's context (observed 2026-11-22: dur and
+    // session fields swapped between concurrent commands). Diagnostics must
+    // not silently lie about which command ate what.
+    private val currentCmds = ConcurrentHashMap<String, CmdContext>()
     private var started = false
     private var sampleIndex = 0L
     // [fix/r4-s F-04] SimpleDateFormat is NOT thread-safe, and this single
@@ -324,14 +329,14 @@ object MemorySpikeRecorder {
     fun onCommandStart(sessionId: String, cmdClass: String, command: String) {
         if (!enabled) return
         val ctx = CmdContext(sessionId, cmdClass, previewOf(command))
-        currentCmd.set(ctx)
+        currentCmds[sessionId] = ctx
         write(formatEvent(clock(), "cmd-start", "rss=${safeSnapshot().rssMb}MB ${ctx.cmdClass} session=$sessionId :: ${ctx.preview}"))
     }
 
     /** 命令结束：记录 ΔRSS（本类最有价值的一行——直接回答「哪条命令吃掉多少」）。 */
-    fun onCommandEnd(durationMs: Long, rssBeforeKb: Long? = null) {
+    fun onCommandEnd(sessionId: String, durationMs: Long, rssBeforeKb: Long? = null) {
         if (!enabled) return
-        val ctx = currentCmd.getAndSet(null)
+        val ctx = currentCmds.remove(sessionId)
         val now = safeSnapshot()
         val before = rssBeforeKb ?: 0L
         val delta = if (before > 0) (now.rssKb - before) / 1024L else 0L
@@ -366,14 +371,14 @@ object MemorySpikeRecorder {
     }
 
     /** 当前命令上下文（供调用方判断是否需要配对 end）。 */
-    fun currentCommand(): CmdContext? = currentCmd.get()
+    fun currentCommand(sessionId: String): CmdContext? = currentCmds[sessionId]
 
     /**
      * 兜底配对：仍有未收尾的命令上下文时才记录（异常 / 早退路径）。
      * 幂等——记录后上下文被清空。
      */
-    fun onCommandEndIfPending(durationMs: Long = -1L, rssBeforeKb: Long? = null) {
-        if (currentCmd.get() != null) onCommandEnd(durationMs, rssBeforeKb)
+    fun onCommandEndIfPending(sessionId: String, durationMs: Long = -1L, rssBeforeKb: Long? = null) {
+        if (currentCmds.containsKey(sessionId)) onCommandEnd(sessionId, durationMs, rssBeforeKb)
     }
 
     // ---------- 采样循环（由 MinisApp 的 applicationScope 驱动） ----------
@@ -401,7 +406,7 @@ object MemorySpikeRecorder {
             sampleIndex++
             val kids = if (sampleIndex % CHILD_REFRESH_EVERY == 1L || burst) safeChildren() else state.lastChildren
             state.lastChildren = kids
-            val line = formatSample(clock(), snap, state.lastEmittedRssKb, kids, currentCmd.get())
+            val line = formatSample(clock(), snap, state.lastEmittedRssKb, kids, currentCmds.values.firstOrNull())
             state.lastEmittedRssKb = snap.rssKb
             write(line)
             wrote = true
@@ -612,7 +617,7 @@ object MemorySpikeRecorder {
 
     /** 测试用：重置内部状态。生产不调用。 */
     fun resetForTest() {
-        currentCmd.set(null)
+        currentCmds.clear()
         started = false
         sampleIndex = 0L
     }

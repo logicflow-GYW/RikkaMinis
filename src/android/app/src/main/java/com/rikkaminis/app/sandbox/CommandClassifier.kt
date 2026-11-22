@@ -71,9 +71,22 @@ private val LEADING_ASSIGNMENT = Regex("""^[A-Za-z_][A-Za-z0-9_]*=\S*\s+""")
  * Verbs whose whole subtree is heavy. Matched against the basename of the verb
  * so `/usr/bin/python3` and `./python3` both count.
  */
-private val HEAVY_VERBS = setOf(
-    // Interpreters / runtimes
+/**
+ * [fix/heavy-gate-scope] Interpreters: the footprint depends on the SCRIPT, not
+ * on the verb. They stay in [HEAVY_VERBS] so memory discipline (recycle tiers,
+ * pre-exec rejection) is byte-for-byte unchanged; the second axis
+ * ([classifyHeavyGate]) is what decides whether they serialize globally.
+ */
+private val INTERPRETER_VERBS = setOf(
     "python", "python3", "python3.11", "python3.12", "node", "nodejs", "deno", "bun",
+)
+
+/**
+ * [fix/heavy-gate-scope] Verbs whose global cost is deterministic — fixed
+ * buffers, fixed IO, a known build graph. These keep the process-wide permit
+ * and may run one at a time.
+ */
+private val DETERMINISTIC_HEAVY_VERBS = setOf(
     // Package managers
     "apk", "pip", "pip3", "npm", "npx", "yarn", "pnpm", "go", "cargo", "rustc",
     "gem", "composer", "mvn", "gradle", "gradlew",
@@ -82,9 +95,10 @@ private val HEAVY_VERBS = setOf(
     "make", "cmake", "ninja", "ld", "as",
     // Archivers / media (big buffers, real IO)
     "tar", "zip", "unzip", "7z", "xz", "gzip", "zstd", "ffmpeg", "ffprobe", "sox",
-    // Heavy host tools
-    "minis-model-use",
 )
+
+/** Union kept for [isHeavyVerb] — the FIRST axis is deliberately unchanged. */
+private val HEAVY_VERBS = INTERPRETER_VERBS + DETERMINISTIC_HEAVY_VERBS + "minis-model-use"
 
 /**
  * [fix/fold-paste-split-1114][F5] Versioned interpreter/runtime names:
@@ -114,14 +128,24 @@ private val VERSIONED_HEAVY_VERB = Regex(
  */
 private fun isHeavyVerb(verb: String): Boolean {
     if (verb in HEAVY_VERBS) return true
-    // Only pay for the regex when the verb looks like a runtime at all — a bare
-    // `ls`/`git` never reaches it.
-    return (verb.startsWith("python") || verb.startsWith("node") ||
+    return matchesVersionedRuntime(verb)
+}
+
+/**
+ * Versioned runtime names: `python3.13`, `ruby3.2`, `node20`.
+ * Only pay for the regex when the verb looks like a runtime at all — a bare
+ * `ls`/`git` never reaches it.
+ */
+private fun matchesVersionedRuntime(verb: String): Boolean =
+    (verb.startsWith("python") || verb.startsWith("node") ||
         verb.startsWith("ruby") || verb.startsWith("perl") || verb.startsWith("php") ||
         verb.startsWith("java") || verb.startsWith("kotlin") || verb.startsWith("dotnet") ||
         verb.startsWith("deno") || verb.startsWith("bun")) &&
         VERSIONED_HEAVY_VERB.matches(verb)
-}
+
+/** Interpreter (fixed set, or a versioned runtime name). */
+private fun isInterpreterVerb(verb: String): Boolean =
+    verb in INTERPRETER_VERBS || matchesVersionedRuntime(verb)
 
 /**
  * Leading shell keywords that wrap a real command without changing its cost:
@@ -264,6 +288,11 @@ internal fun shouldRecycleByClass(
  * `git --no-pager clone x` would read nothing).
  */
 private fun classifyGit(tail: String): CommandClass {
+    return if (gitSubcommand(tail) in HEAVY_GIT_SUBCOMMANDS) CommandClass.HEAVY else CommandClass.LIGHT
+}
+
+/** `git <global flags> <subcommand>` → the subcommand token. */
+private fun gitSubcommand(tail: String): String {
     var rest = tail
     var guard = 0
     while (rest.startsWith("-") && guard++ < 16) {
@@ -278,8 +307,85 @@ private fun classifyGit(tail: String): CommandClass {
             afterFlag
         }
     }
-    val sub = rest.substringBefore(' ')
-    return if (sub in HEAVY_GIT_SUBCOMMANDS) CommandClass.HEAVY else CommandClass.LIGHT
+    return rest.substringBefore(' ')
+}
+
+// ---------------------------------------------------------------------------
+// [fix/heavy-gate-scope] SECOND AXIS — who must take the process-wide permit
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a command must serialize behind the process-wide heavy permit.
+ *
+ * WHY a second axis instead of a new [CommandClass] value: the first axis is a
+ * MEMORY-DISCIPLINE signal (recycle tiers, pre-exec rejection, generation
+ * budget) and 233 tests plus the on-device log distribution are calibrated on
+ * it. Changing it would move recycle behaviour for every `python3` call, which
+ * is not what this fix is about. This axis answers one narrower question:
+ *
+ *   - [GLOBAL]  deterministic buffers — keep the permit, one at a time.
+ *   - [INTERPRETER] footprint depends on the script — run concurrently while
+ *     the system has headroom (the admission check lives in ExecutionCoordinator;
+ *     under pressure this falls back to [GLOBAL] behaviour).
+ *   - [LIGHT]   never touches the permit (unchanged).
+ */
+internal enum class HeavyGateClass { LIGHT, INTERPRETER, GLOBAL }
+
+/**
+ * Wait-only interpreter invocations stay on the light side of the gate.
+ *
+ * Evidence (2026-11-22, device log): two `python3 gh_ci.py wait …` runs held the
+ * ONE global permit for 687.7 s and 569.2 s while their PRoot child RSS stayed
+ * at 3 MB — pure socket polling. During the 687 s window another session's
+ * one-second command queued 151.2 s behind it.
+ *
+ * Kept deliberately narrow: only the shipping wait entry points match, so an
+ * arbitrary `python3 script.py` cannot claim the exemption.
+ */
+private val WAIT_ONLY_INTERPRETER = Regex(
+    """(?:^|[\s=|;&/])(?:gh_ci\.py\s+wait\b|gh_ci_wait\.[a-z]+\b|gh_ci_wait\b|gh_sync\.sh\s+wait\b)""",
+)
+
+/**
+ * Classify a whole command for the global gate. Never throws; unparseable
+ * input degrades to LIGHT, which is the pre-2026-11-22 behaviour for anything
+ * the classifier could not read.
+ */
+internal fun classifyHeavyGate(command: String): HeavyGateClass {
+    if (command.isBlank()) return HeavyGateClass.LIGHT
+    val normalized = command.replace('\t', ' ')
+    var best = HeavyGateClass.LIGHT
+    for (rawStatement in normalized.split(STATEMENT_SEPARATORS)) {
+        val c = gateClassOfStatement(rawStatement)
+        if (c.ordinal > best.ordinal) best = c
+    }
+    return best
+}
+
+private fun gateClassOfStatement(rawStatement: String): HeavyGateClass {
+    val s = stripLeadingNoise(rawStatement.trim())
+    if (s.isEmpty()) return HeavyGateClass.LIGHT
+    val verb = s.substringBefore(' ').substringAfterLast('/')
+    if (verb == "cd" || verb == "pushd" || verb == "popd") return HeavyGateClass.LIGHT
+    // minis-model-use runs in-process against :modelservice and never took this
+    // permit before the split — keep it that way.
+    if (verb == "minis-model-use") return HeavyGateClass.LIGHT
+    if (verb == "git") {
+        return if (gitSubcommand(s.substringAfter(' ', "").trimStart()) in HEAVY_GIT_SUBCOMMANDS) {
+            HeavyGateClass.GLOBAL
+        } else {
+            HeavyGateClass.LIGHT
+        }
+    }
+    if (verb in DETERMINISTIC_HEAVY_VERBS) return HeavyGateClass.GLOBAL
+    if (isInterpreterVerb(verb)) {
+        return if (WAIT_ONLY_INTERPRETER.containsMatchIn(s)) {
+            HeavyGateClass.LIGHT
+        } else {
+            HeavyGateClass.INTERPRETER
+        }
+    }
+    return HeavyGateClass.LIGHT
 }
 
 /**

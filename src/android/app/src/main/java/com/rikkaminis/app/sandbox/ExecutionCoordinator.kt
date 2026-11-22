@@ -88,6 +88,10 @@ object ExecutionCoordinator {
 
     private const val TAG = "ExecutionCoordinator"
 
+    // [fix/heavy-gate-scope] Slice size for the interruptible heavy-permit wait:
+    // small enough that a cancel lands promptly, large enough not to spin.
+    private const val HEAVY_GATE_POLL_MS = 250L
+
     // [P2-proot-native-leak]
     // High-water mark (MB) for PRoot *child process* RSS. Normal operation is
     // ~35-55MB. A long-lived PRoot tracer leaks native memory monotonically
@@ -466,9 +470,26 @@ object ExecutionCoordinator {
         // with no suspension point: the coroutine went Cancelling, the shell
         // stayed reserved, and the session's next command reported "System busy"
         // until the timeout expired.
-        val heavyGateAcquired = cmdClass == CommandClass.HEAVY &&
-            awaitHeavyGatePermitInterruptibly(heavyGate, heavyGateTimeoutMs)
-        if (cmdClass == CommandClass.HEAVY && !heavyGateAcquired) {
+        // [fix/heavy-gate-scope] SECOND AXIS — which commands must serialize.
+        // The ONE permit is now for deterministic-buffer work only. An
+        // interpreter call is admitted WITHOUT it while the system has headroom:
+        // its footprint is decided by the SCRIPT, the per-session mutex already
+        // serializes it inside its own session, and the child-RSS high-water
+        // mark + recycle path still bound it. Under pressure (memAvail below
+        // the ample threshold) it falls back to the serialized path, which is
+        // exactly the pre-split behaviour.
+        val gateClass = classifyHeavyGate(command)
+        val gateRequired = gateClass == HeavyGateClass.GLOBAL ||
+            (gateClass == HeavyGateClass.INTERPRETER && memAvailableMB < MEM_AVAIL_AMPLE_MB)
+        if (gateRequired) {
+            Log.i(
+                TAG,
+                "[$sessionId] heavy gate: class=$gateClass memAvail=${memAvailableMB}MB timeout=${heavyGateTimeoutMs}ms",
+            )
+        }
+        val heavyGateAcquired = gateRequired &&
+            awaitHeavyGatePermitInterruptibly(heavyGate, heavyGateTimeoutMs, gateClass.name)
+        if (gateRequired && !heavyGateAcquired) {
             Log.w(TAG, "[$sessionId] Heavy gate timeout after ${heavyGateTimeoutMs}ms — another heavy command still running")
             postRecycleMemoryRecovery()
             return CommandResult(
@@ -671,7 +692,7 @@ object ExecutionCoordinator {
 
             // [mem-spike-diag] 命令结束归因：ΔRSS + PRoot 子进程聚合，落盘
             // memspike-<date>.log。诊断旁路，不影响返回值。
-            MemorySpikeRecorder.onCommandEnd(durationMs, rssBeforeKb)
+            MemorySpikeRecorder.onCommandEnd(sessionId, durationMs, rssBeforeKb)
             // [deep-audit-1018 ISSUE-03] L1: carry the retry verdict's outcomeKnown
             // through the truncation re-wrap. Pre-fix this construction dropped it,
             // so the SAME command's two exits disagreed (executeWithShellRetry
@@ -687,7 +708,7 @@ object ExecutionCoordinator {
     } finally {
         // [mem-spike-diag] 兜底配对：异常 / 提前 return 的路径也把命令上下文收尾，
         // 避免 ΔRSS 归因丢行（幂等，成功路径已收尾时为 no-op）。
-        MemorySpikeRecorder.onCommandEndIfPending(rssBeforeKb = rssBeforeKb)
+        MemorySpikeRecorder.onCommandEndIfPending(sessionId, rssBeforeKb = rssBeforeKb)
         // [P2-global-concurrency] Release the global concurrency slot.
         // This runs after the per-session mutex is released (the mutex is
         // inside the try block), so the next session waiting on the
@@ -2168,8 +2189,37 @@ internal fun recycleDispatchMode(isOnMainThread: Boolean): RecycleDispatch =
 internal suspend fun awaitHeavyGatePermitInterruptibly(
     heavyGate: Semaphore,
     timeoutMs: Long,
+    label: String = "heavy",
 ): Boolean = runInterruptible(Dispatchers.IO) {
-    heavyGate.tryAcquire(timeoutMs, TimeUnit.MILLISECONDS)
+    // [fix/heavy-gate-scope] Wait in slices so a long queue is VISIBLE.
+    // Before this, a blocked command produced no line at all — the agent and the
+    // user saw a silent stall and had no way to tell "runs slow" from "queued
+    // behind another session". One `tryAcquire(` call site is kept on purpose:
+    // exec_gate_release_check pins its occurrence count at 2 (this one + the
+    // global-slot one), which is what keeps a raw blocking acquire from coming
+    // back.
+    val deadline = System.currentTimeMillis() + timeoutMs
+    var granted = false
+    var waitedMs = 0L
+    var nextReportMs = 1_000L
+    while (!granted) {
+        val remainMs = deadline - System.currentTimeMillis()
+        if (remainMs <= 0L) break
+        granted = heavyGate.tryAcquire(minOf(remainMs, HEAVY_GATE_POLL_MS), TimeUnit.MILLISECONDS)
+        if (!granted) {
+            waitedMs += HEAVY_GATE_POLL_MS
+            if (waitedMs >= nextReportMs) {
+                Log.w(TAG, "[gate] waiting for the $label permit: ${waitedMs}ms of ${timeoutMs}ms")
+                MemorySpikeRecorder.onEvent("gate-wait", "label=$label waitedMs=$waitedMs timeoutMs=$timeoutMs")
+                nextReportMs = when {
+                    waitedMs < 10_000L -> 10_000L
+                    waitedMs < 60_000L -> 30_000L
+                    else -> 60_000L
+                }
+            }
+        }
+    }
+    granted
 }
 
 /**
