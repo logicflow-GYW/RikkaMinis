@@ -110,23 +110,19 @@ object PRootKernel {
      * Initialize the PRoot environment: install rootfs and proot binary.
      */
     suspend fun boot(context: Context) {
-        if (isBooted) {
-            Log.d(TAG, "Already booted")
-            return
+        val manager = RootfsManager.getInstance(context)
+        var performed = false
+        manager.runBootTransaction { permit ->
+            performed = bootGate.run { bootCriticalSection(context, permit) }
         }
-        // [deep-audit-1016 FIX-C 3a] The fast path above stays lock-free; the
-        // gate re-checks under the lock and runs the body at most once. A loser
-        // waits here and then returns without touching the rootfs.
-        val performed = bootGate.run { bootCriticalSection(context) }
         if (!performed) Log.d(TAG, "Already booted (concurrent entrant)")
     }
 
     /**
      * [boot]'s one-shot body — rootfs install/repair, env, bind mounts, offload
-     * server. Split out so [boot] is only "fast path + gate"; never call this
-     * directly (it is the thing [bootGate] exists to serialize).
+     * server. Runs under the manager transaction; never call it directly.
      */
-    private suspend fun bootCriticalSection(context: Context) {
+    private suspend fun bootCriticalSection(context: Context, permit: BootTransaction.Permit) {
         bootContext = context.applicationContext
         rootfsManager = RootfsManager.getInstance(context)
         // [meta1028 D3-F02] Wire the rebuild notification FIRST: a
@@ -147,7 +143,7 @@ object PRootKernel {
         rootfsManager.afterRootfsReinstalled = {
             onRootfsReinstalled(context)
         }
-        rootfsManager.installIfNeeded()
+        rootfsManager.installIfNeededWithinBootTransaction(permit)
         rootfsManager.installProotIfNeeded()
 
         // [T-rootfs-integrity] Verify critical files survived extraction.
@@ -159,7 +155,7 @@ object PRootKernel {
         val health = rootfsManager.verifyIntegrity()
         if (!health.healthy) {
             Log.w(TAG, "Rootfs integrity check failed: missing=${health.missing}")
-            val repaired = rootfsManager.autoRepair()
+            val repaired = rootfsManager.autoRepairWithinBootTransaction(permit)
             if (repaired) {
                 Log.i(TAG, "Rootfs auto-repair succeeded")
             } else {
@@ -1642,6 +1638,35 @@ internal fun normalizeLinuxPath(path: String): String? {
  * [normalizeLinuxPath].
  */
 internal fun hasDotDotSegment(path: String): Boolean = path.split('/').any { it == ".." }
+
+/**
+ * Permanent rootfs lifecycle gate. Ownership is an opaque explicit reference,
+ * never a physical thread or inherited coroutine context. Mutex.holdsLock uses
+ * reference identity, so a foreign or expired permit cannot authorize entry.
+ */
+internal class BootTransaction(private val mutex: Mutex = Mutex()) {
+    internal sealed interface Permit
+    private class HeldPermit : Permit
+
+    suspend fun <T> runExclusive(block: suspend (Permit) -> T): T {
+        val permit = HeldPermit()
+        return mutex.withLock(permit) { block(permit) }
+    }
+
+    fun requirePermit(permit: Permit) {
+        check(permit is HeldPermit && mutex.holdsLock(permit)) {
+            "rootfs lifecycle permit is foreign or no longer held"
+        }
+    }
+
+    suspend fun runBoot(block: suspend (Permit) -> Unit): Boolean {
+        runExclusive(block)
+        return true
+    }
+
+    suspend fun runInstall(block: suspend (Permit) -> Unit) { runExclusive(block) }
+    suspend fun runReset(block: suspend (Permit) -> Unit) { runExclusive(block) }
+}
 
 /**
  * One-shot initialization gate ([deep-audit-1016 FIX-C 3a]).

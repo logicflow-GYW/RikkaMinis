@@ -2,6 +2,8 @@ package com.rikkaminis.app.sandbox.offload
 
 import android.content.Context
 import com.rikkaminis.app.data.model.AgentToolDefinition
+import com.rikkaminis.app.data.model.AnthropicReplayCodec
+import com.rikkaminis.app.data.model.AnthropicReplayCodec.FIELD
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.data.model.LLMResponse
@@ -169,7 +171,9 @@ object ProviderExecutionGateway {
      * without a Context / worker.
      */
     fun parseNonStreamingResult(raw: String): SendResult {
-        val obj = try { JSONObject(raw) } catch (_: Throwable) {
+        val exact = AnthropicReplayIpc.exactResultWithReplay(raw)
+        val publicJson = exact?.let { AnthropicReplayIpc.withoutReplay(it).toString() }
+        val obj = try { JSONObject(publicJson ?: raw) } catch (_: Throwable) {
             return SendResult.Unavailable("result JSON unparseable")
         }
         val errorCode = obj.optString("error", "")
@@ -207,14 +211,29 @@ object ProviderExecutionGateway {
                 outputTokens = u.optInt("output_tokens", 0),
             )
         }
+        val hasLegacyReplay = exact == null && obj.has(FIELD)
+        val replay = when {
+            exact != null -> AnthropicReplayCodec.decode(exact[FIELD])
+            hasLegacyReplay -> AnthropicReplayCodec.unavailable()
+            else -> null
+        }
+        // Never fall back to the raw string when the key was present, even
+        // if the legacy parser was the only one that accepted the envelope.
+        val projected = if (hasLegacyReplay) {
+            obj.remove(FIELD)
+            try { obj.toString(0) } catch (_: Throwable) {
+                return SendResult.Unavailable("result JSON unparseable")
+            }
+        } else publicJson ?: raw
         return SendResult.Success(
             response = LLMResponse(
                 text = obj.optString("text", ""),
                 stopReason = obj.optString("stop_reason", "").ifEmpty { null },
                 usage = usage,
                 mediaAttachments = media,
+                anthropicReplay = replay,
             ),
-            rawJson = raw,
+            rawJson = projected,
         )
     }
 
@@ -243,6 +262,9 @@ object ProviderExecutionGateway {
         // run dir for cold-start partial-stream recovery). Optional with a
         // default so the sub-agent call site is untouched.
         sessionId: String? = null,
+        // [surgery-1120 A-01] Stable attempt identity + commit rendezvous.
+        turnId: String? = null,
+        transcriptCommit: TranscriptCommitHandle? = null,
     ): Flow<LLMStreamChunk> {
         val requestJson = buildRequest(
             instance = instance,
@@ -262,6 +284,8 @@ object ProviderExecutionGateway {
         return ChatStreamOffloadHandler.stream(
             context, requestJson, thinkingLevel.isEnabled, sessionId,
             WorkerKeyHandoff.keyFor(context, instance.id),
+            turnId = turnId,
+            transcriptCommit = transcriptCommit,
         )
     }
 

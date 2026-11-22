@@ -3,6 +3,7 @@ package com.rikkaminis.app.share
 import android.content.Context
 import android.net.Uri
 import androidx.core.content.FileProvider
+import com.rikkaminis.app.data.AnthropicReplayPublicProjection
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.repository.ChatRepository
@@ -167,7 +168,8 @@ object ChatExporter {
                         val obj = JSONObject().apply {
                             put("id", msg.id)
                             put("role", msg.role)
-                            put("content", msg.partsJson)
+                            // content is a nested raw parts string, not public text.
+                            put("content", AnthropicReplayPublicProjection.partsJson(msg.partsJson))
                             put("created_at", msg.createdAt)
                         }
                         val rendered = obj.toString()
@@ -259,42 +261,45 @@ object ChatExporter {
         zos.closeEntry()
     }
 
-    private fun extractPlainText(partsJson: String, role: String): String = try {
-        val arr = JSONArray(partsJson)
-        val sb = StringBuilder()
-        for (i in 0 until arr.length()) {
-            val obj = arr.optJSONObject(i) ?: continue
-            if (obj.optString("type") == "text") {
-                // [T-android-retry-attachment-loss] Strip the persisted
-                // <user-attached-files> XML inventory from the human-readable
-                // text export — it's model-facing metadata, not chat content.
-                // (The JSON export above keeps full-fidelity parts_json.)
-                var value = obj.optString("value")
-                val start = value.indexOf("<user-attached-files>")
-                if (start >= 0) {
-                    val endTag = "</user-attached-files>"
-                    val end = value.indexOf(endTag, start)
-                    value = if (end >= 0) {
-                        value.substring(0, start) + value.substring(end + endTag.length)
-                    } else {
-                        value.substring(0, start)
-                    }.trim()
-                }
-                // [fix-think-closer-third-face] Same orphan-closer rule as the
-                // UI transcript / send history / drawer faces
-                // (stripOrphanThinkClosersForRole): assistant rows only — a
-                // user row carries tool output where a `</thinking>` inside
-                // command stdout is evidence, not an artifact.
-                if (role == "assistant") value = stripOrphanThinkClosers(value)
-                if (value.isNotEmpty()) {
-                    if (sb.isNotEmpty()) sb.append('\n')
-                    sb.append(value)
+    private fun extractPlainText(partsJson: String, role: String): String {
+        val projection = AnthropicReplayPublicProjection.project(partsJson)
+        return try {
+            val arr = projection.parts ?: return projection.partsJson
+            val sb = StringBuilder()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                if (obj.optString("type") == "text") {
+                    // [T-android-retry-attachment-loss] Strip the persisted
+                    // <user-attached-files> XML inventory from the human-readable
+                    // text export — it's model-facing metadata, not chat content.
+                    // (The JSON export above keeps the full public parts_json.)
+                    var value = obj.optString("value")
+                    val start = value.indexOf("<user-attached-files>")
+                    if (start >= 0) {
+                        val endTag = "</user-attached-files>"
+                        val end = value.indexOf(endTag, start)
+                        value = if (end >= 0) {
+                            value.substring(0, start) + value.substring(end + endTag.length)
+                        } else {
+                            value.substring(0, start)
+                        }.trim()
+                    }
+                    // [fix-think-closer-third-face] Same orphan-closer rule as the
+                    // UI transcript / send history / drawer faces
+                    // (stripOrphanThinkClosersForRole): assistant rows only — a
+                    // user row carries tool output where a `</thinking>` inside
+                    // command stdout is evidence, not an artifact.
+                    if (role == "assistant") value = stripOrphanThinkClosers(value)
+                    if (value.isNotEmpty()) {
+                        if (sb.isNotEmpty()) sb.append('\n')
+                        sb.append(value)
+                    }
                 }
             }
+            sb.toString()
+        } catch (_: Exception) {
+            projection.partsJson
         }
-        sb.toString()
-    } catch (_: Throwable) {
-        partsJson
     }
 
     /**
@@ -304,7 +309,7 @@ object ChatExporter {
      * a plain JVM test can pin the classification.
      */
     private fun countAttachments(partsJson: String): Pair<Int, Int> = try {
-        countPartsAttachments(JSONArray(partsJson))
+        AnthropicReplayPublicProjection.project(partsJson).parts?.let(::countPartsAttachments) ?: (0 to 0)
     } catch (_: Throwable) {
         0 to 0
     }

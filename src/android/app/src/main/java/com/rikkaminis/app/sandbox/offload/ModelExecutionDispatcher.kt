@@ -3,6 +3,7 @@ package com.rikkaminis.app.sandbox.offload
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.rikkaminis.app.sandbox.NativeOffloadServer
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
 import com.rikkaminis.app.data.model.LLMMessage
@@ -46,7 +47,7 @@ object ModelExecutionDispatcher {
     private const val REAP_POLL_MS = 50L
 
     /** Default base directory for request/result staging. */
-    private const val STAGING_ROOT = "model-exec"
+    private const val STAGING_ROOT = StreamOwnership.STAGING_ROOT
 
     /**
      * Build the serialized request JSON for a model run. Pure function —
@@ -78,7 +79,7 @@ object ModelExecutionDispatcher {
         // because ProviderBoundary forbids provider calls in the app process.
         passthroughRequest: JSONObject? = null,
     ): String {
-        return JSONObject().apply {
+        return AnthropicReplayIpc.encodeRequest(JSONObject().apply {
             put("instance_id", instance.id)
             put("instance_label", instance.label)
             put("provider_type", instance.providerType.name)
@@ -325,7 +326,7 @@ object ModelExecutionDispatcher {
                     customRules.forEach { put(ThinkingRuleCoding.encodeRuleJson(it)) }
                 })
             }
-        }.toString()
+        }, messages)
     }
 
     /**
@@ -335,6 +336,7 @@ object ModelExecutionDispatcher {
      * fall back to the in-process path.
      */
     suspend fun dispatch(context: Context, requestJson: String, apiKey: String = ""): String? {
+        val offloadContext = NativeOffloadServer.currentCallContext()
         // [fix/audit-s3l2] A TIMEOUT is never retried: dispatchOnce also returns
         // null on timeout — where the worker may STILL be executing the
         // provider call (slow image/long-text generation). Re-dispatching then
@@ -367,6 +369,7 @@ object ModelExecutionDispatcher {
                         "re-dispatching in ${delayMs}ms",
                 )
             },
+            shouldContinue = { offloadContext?.isCancelled != true },
         )
         return outcome.resultJson
     }
@@ -419,6 +422,7 @@ object ModelExecutionDispatcher {
         // so there is nothing left to wait for — and lets the outer dispatch()
         // re-dispatch promptly instead of burning TERMINAL/REAP waits.
         var workerDied = false
+        var abandonedWorker = false
         // [WAVE-1118 D3-F03] Set the moment the poll is over, before the
         // post-poll block decides anything. The poll below is a `delay`-driven
         // wait, so caller-side cancellation (user stop, session teardown, an
@@ -476,11 +480,13 @@ object ModelExecutionDispatcher {
                 // the outer dispatch() re-dispatch NOW.
                 Log.w(TAG, "run dir orphaned after confirmed worker death, dir=${dir.name}")
             } else {
-                Log.w(TAG, "timeout waiting for model-exec result — falling back in-process")
-                // Try to stop the worker (it may be mid-run); it self-reaps on cancel
-                // / shutdown. Then settle briefly before deleting the dir so we never
-                // delete under a worker still writing result.json.
-                try { ModelExecutionMailbox.writeCancel(dir) } catch (_: Exception) {}
+                Log.w(TAG, "timeout waiting for model-exec result — cancelling abandoned worker")
+                abandonedWorker = true
+            }
+
+            if (abandonedWorker) {
+                settleExplicitlyAbandonedRun(dir)
+                return DispatchOutcome(null, false)
             }
 
             // [TF-F P0-A] Delete the request dir ONLY after BOTH:
@@ -513,20 +519,46 @@ object ModelExecutionDispatcher {
             // `workerDied` ⇒ nobody is left to read the marker; leave the orphan
             // for the reaper exactly as the normal path does.
             if (internalShouldCancelAbandonedRun(pollFinished, workerDied)) {
-                val cleaned = internalRunCancelCleanup(
-                    writeCancel = { ModelExecutionMailbox.writeCancel(dir) },
-                    cleanup = {
-                        if (awaitTerminal(dir, TERMINAL_WAIT_MS) && waitForWorkerReap(dir, REAP_WAIT_MS)) {
-                            runCatching { dir.deleteRecursively() }
-                        }
-                    },
-                )
+                val cleaned = settleExplicitlyAbandonedRun(dir)
                 Log.w(
                     TAG,
                     "dispatch abandoned mid-poll — cancel sent, settle=${if (cleaned) "ran" else "failed"} dir=${dir.name}",
                 )
             }
         }
+    }
+
+    /**
+     * Explicit cancellation handshake: do not consume/reclaim on cancel.ack
+     * alone. Wait for the worker's cancel result too, write client.ack only
+     * after both are visible, then still require terminal + drained before delete.
+     */
+    private suspend fun settleExplicitlyAbandonedRun(dir: File): Boolean {
+        var reclaimed = false
+        val settled = internalRunCancelCleanup(
+            // Frozen shape (ModelExecutionAbandonedPollTest): the cancel is step one.
+            writeCancel = { ModelExecutionMailbox.writeCancel(dir) },
+            cleanup = {
+                // Step two, still under NonCancellable and before any wait: tell the
+                // worker this result was explicitly abandoned, so its ACK barrier can
+                // answer instead of burning the full 8s client-ack window.
+                runCatching { File(dir, ModelExecutionService.ABANDON_FILE).createNewFile() }
+                val handshake = awaitExplicitAbandonmentHandshake(
+                    abandonAckPresent = { File(dir, ModelExecutionService.ABANDON_ACK_FILE).isFile },
+                    resultPresent = { File(dir, ModelExecutionMailbox.FILE_RESULT).isFile },
+                    writeClientAck = { ModelExecutionMailbox.writeClientAck(dir) },
+                    timeoutMs = TERMINAL_WAIT_MS,
+                    pollMs = POLL_INTERVAL_MS,
+                )
+                if (handshake && awaitTerminal(dir, TERMINAL_WAIT_MS) &&
+                    waitForWorkerReap(dir, REAP_WAIT_MS)
+                ) {
+                    reclaimed = runCatching { dir.deleteRecursively() }.getOrDefault(false)
+                }
+            },
+        )
+        Log.w(TAG, "explicit cancel handshake settled=$settled reclaimed=$reclaimed dir=${dir.name}")
+        return settled && reclaimed
     }
 
     /** Outcome of a single [dispatchOnce] attempt. */

@@ -983,6 +983,7 @@
     <string name="error_output_truncated_repeated">モデルが出力長の上限に繰り返し達しました。モデル設定でコンテキスト制限を下げるか、質問をより小さな部分に分けてください。</string>
         <string name="error_content_filtered">モデルの安全フィルターによりこの応答がブロックされました。表現を変えるか、別のモデルに切り替えてください。</string>
         <string name="error_stream_interrupted">モデルとの接続が中断され、応答を完了できませんでした。もう一度お試しください。</string>
+    <string name="error_context_window_exceeded">コンテキストウィンドウの上限に達したため応答が中断され、内容が不完全な可能性があります。会話を圧縮するか、新しいセッションを開始してください。</string>
     <string name="error_empty_response_context_large">モデルが空の応答を返しました。会話のコンテキストが大きすぎる可能性があります — 圧縮するか、新しいセッションを開始してください。</string>
     <string name="error_empty_response_after_tool">ツールの結果の後、リマインダーを送っても、モデルは応答を返しませんでした。過負荷の可能性があります — もう一度試すか、モデルを切り替えてください。</string>
     <string name="thinking_truncated_hint">%2$dK 文字のうち末尾 %1$dK 文字を表示中</string>
@@ -1082,12 +1083,12 @@
     <string name="chat_menu_settings_always_last">Always last</string>
     <string name="back_to_exit_press_again">Press back again to exit</string>
     <string name="backup_snapshot_section_title">ローカルスナップショット</string>
-    <string name="backup_snapshot_section_footer">復元のたびに現在の設定のスナップショットが自動保存されます。タップで設定をロールバックします。</string>
+    <string name="backup_snapshot_section_footer">復元の前に毎回、ローカルにスナップショットを保存します。設定を戻すにはスナップショットをインポートしてください。後から追加した項目は残る場合があります。</string>
     <string name="backup_snapshot_empty">ローカルスナップショットはまだありません。</string>
-    <string name="backup_snapshot_restore_confirm_title">このスナップショットを復元しますか？</string>
-    <string name="backup_snapshot_restore_confirm_text">現在の設定は %1$s のスナップショットに置き換わります。現在の設定は先に新しいスナップショットとして保存されます。</string>
-    <string name="backup_snapshot_restore">復元</string>
-    <string name="backup_done_fatal">復元が途中で失敗しました — 設定は部分的に復元されています。スナップショットからロールバックしてください。</string>
+    <string name="backup_snapshot_restore_confirm_title">このスナップショットをインポートしますか？</string>
+    <string name="backup_snapshot_restore_confirm_text">スナップショット %1$s の設定を現在の設定に統合します。完全なロールバックではなく、後から追加した項目は残る場合があります。先に現在の設定を新しいスナップショットに保存します。</string>
+    <string name="backup_snapshot_restore">スナップショットをインポート</string>
+    <string name="backup_done_fatal">復元が完了しませんでした。一部の変更はすでに適用されている可能性があります。ローカルのスナップショットをインポートして設定を戻すことはできますが、すべての変更を元に戻すわけではありません。</string>
     <string name="backup_err_busy">バックアップまたは復元が進行中です。完了するまでお待ちください。</string>
     <!-- 英文兜底 (2026-08-08) -->
     <string name="model_group_name_saved">Name saved</string>

@@ -1310,6 +1310,7 @@
     <string name="error_output_truncated_repeated">模型多次达到输出长度上限被截断。请尝试在模型设置中调低上下文限制，或将问题拆分成更小的部分。</string>
         <string name="error_content_filtered">模型的安全过滤器拦截了这条回答。请尝试换个说法，或切换其他模型。</string>
         <string name="error_stream_interrupted">与模型的连接中断，回答未能完成——请重试。</string>
+    <string name="error_context_window_exceeded">响应因上下文窗口耗尽而中断，内容可能不完整。请压缩会话或开启新会话。</string>
     <string name="error_empty_response_context_large">模型返回了空响应。会话上下文可能过大 —— 请尝试压缩上下文或开启新会话。</string>
     <string name="error_empty_response_after_tool">在工具结果之后，即使经过提醒，模型仍未返回任何响应。它可能已过载 —— 请重试或切换模型。</string>
     <string name="thinking_truncated_hint">显示最后 %1$dK / 共 %2$dK 字符</string>
@@ -1345,12 +1346,12 @@
     <string name="chat_menu_settings_always_last">固定最右</string>
     <string name="back_to_exit_press_again">再按一次返回退出</string>
     <string name="backup_snapshot_section_title">本地快照</string>
-    <string name="backup_snapshot_section_footer">每次恢复前会自动保存当前配置快照。点按可回滚配置。</string>
+    <string name="backup_snapshot_section_footer">每次恢复前都会保存本地快照。可导入快照找回设置，之后新增的项目可能保留。</string>
     <string name="backup_snapshot_empty">暂无本地快照。</string>
-    <string name="backup_snapshot_restore_confirm_title">恢复此快照？</string>
-    <string name="backup_snapshot_restore_confirm_text">当前配置将被 %1$s 的快照替换。当前配置会先保存为新快照。</string>
-    <string name="backup_snapshot_restore">恢复</string>
-    <string name="backup_done_fatal">恢复中途失败——配置只恢复了一部分。可从快照回滚。</string>
+    <string name="backup_snapshot_restore_confirm_title">导入此快照？</string>
+    <string name="backup_snapshot_restore_confirm_text">将把 %1$s 快照中的设置合并到当前配置。此操作不是完整回滚，之后新增的项目可能保留。导入前会先为当前配置保存一份新快照。</string>
+    <string name="backup_snapshot_restore">导入快照</string>
+    <string name="backup_done_fatal">恢复未完成，部分更改可能已经应用。可导入本地快照找回设置，但这不会撤销所有更改。</string>
     <!-- 补全缺失翻译（2026-08-08） -->
     <string name="mcp_form_startup_timeout">启动超时（秒）</string>
     <string name="mcp_form_startup_timeout_placeholder">默认 60</string>

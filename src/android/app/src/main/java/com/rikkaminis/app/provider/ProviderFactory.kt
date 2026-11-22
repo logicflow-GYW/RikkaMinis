@@ -25,7 +25,13 @@ object ProviderFactory {
      * model-list fetch, voice and the debug probe each rotate at their own
      * choke point. See the rule documented on [com.rikkaminis.app.data.KeyRoulette].
      */
-    fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+    fun create(
+        instance: ProviderInstance,
+        apiKey: String,
+        model: LLMModel,
+        context: Context? = null,
+        requestThinkingRules: com.rikkaminis.app.provider.thinking.RequestThinkingRules? = null,
+    ): LLMProvider {
         // [T-provider-key-roulette] LRU rotation on the provider-instance id.
         val effectiveKey = com.rikkaminis.app.data.KeyRoulette.next(apiKey, instance.id)
         // T174: route through ProviderInstance.effectiveBaseURL instead of
@@ -90,6 +96,7 @@ object ProviderFactory {
                     // (deep-audit-1019 ISSUE-04: nothing pins it to relay
                     // instances — it is settable on any apiKey provider).
                     customUserAgent = instance.customUserAgent,
+                    requestThinkingRules = requestThinkingRules,
                     // [T-android-azure-openai] Azure auths with api-key +
                     // deployments-path URL. Pass the RAW customBaseURL (not
                     // the /v1-appended, query-stripped effectiveBaseURL) so
@@ -108,6 +115,7 @@ object ProviderFactory {
                     // below all dropped this; OpenRouter relays commonly key on
                     // UA, and the user set it on the instance.
                     customUserAgent = instance.customUserAgent,
+                    requestThinkingRules = requestThinkingRules,
                     extraHeaders = mapOf(
                         "HTTP-Referer" to "https://github.com/OpenMinis/OpenMinis",
                         "X-Title" to "Minis App",
@@ -125,6 +133,7 @@ object ProviderFactory {
                     // [deep-audit-1019 ISSUE-04] Same dropped override as the
                     // OpenRouter branch above.
                     customUserAgent = instance.customUserAgent,
+                    requestThinkingRules = requestThinkingRules,
                 )
             }
             ProviderType.kimiCode -> {
@@ -140,6 +149,7 @@ object ProviderFactory {
                     // [deep-audit-1019 ISSUE-04] Same dropped override as the
                     // xAI / OpenRouter branches above.
                     customUserAgent = instance.customUserAgent,
+                    requestThinkingRules = requestThinkingRules,
                 )
             }
         }).also { provider ->

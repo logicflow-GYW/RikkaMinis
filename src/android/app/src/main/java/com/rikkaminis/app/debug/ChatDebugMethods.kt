@@ -2,6 +2,7 @@ package com.rikkaminis.app.debug
 
 import android.content.Context
 import com.rikkaminis.app.MinisApp
+import com.rikkaminis.app.data.AnthropicReplayPublicProjection
 import com.rikkaminis.app.data.db.ChatSessionEntity
 import com.rikkaminis.app.data.db.MessageEntity
 import com.rikkaminis.app.data.repository.ChatRepository
@@ -157,10 +158,10 @@ internal object ChatDebugMethods {
             put("role", m.role)
             put("createdAt", m.createdAt)
         }
-        // partsJson is a JSON array of {type, value/...} blocks; surface it
-        // as-is so callers see what's stored. Pull a flat `content` view for
-        // text-only consumption.
-        val parts = try { org.json.JSONArray(m.partsJson) } catch (_: Exception) { null }
+        // Strip private replay BEFORE the nested RPC.parts view or raw fallback.
+        // Ordinary unknown parts and legacy unstructured rows stay readable.
+        val projection = AnthropicReplayPublicProjection.project(m.partsJson)
+        val parts = projection.parts
         if (parts != null) {
             obj.put("parts", parts)
             val sb = StringBuilder()
@@ -180,7 +181,7 @@ internal object ChatDebugMethods {
             if (attachments.length() > 0) obj.put("attachments", attachments)
         } else {
             // Legacy/unstructured payload — return raw.
-            obj.put("content", m.partsJson)
+            obj.put("content", projection.partsJson)
         }
         m.tokenUsage?.let {
             obj.put("tokenUsage", try { JSONObject(it) } catch (_: Exception) { it })

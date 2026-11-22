@@ -1113,6 +1113,7 @@
     <string name="error_output_truncated_repeated">Модель неоднократно достигала предела длины вывода. Попробуйте снизить лимит контекста в настройках модели или разбейте вопрос на более мелкие части.</string>
         <string name="error_content_filtered">Фильтр безопасности модели заблокировал этот ответ. Переформулируйте запрос или переключитесь на другую модель.</string>
         <string name="error_stream_interrupted">Соединение с моделью прервано, ответ не был завершён — попробуйте снова.</string>
+    <string name="error_context_window_exceeded">Ответ прерван из-за исчерпания окна контекста и может быть неполным. Сожмите беседу или начните новую сессию.</string>
     <string name="error_empty_response_context_large">Модель вернула пустой ответ. Контекст беседы может быть слишком большим — попробуйте сжать его или начать новую сессию.</string>
     <string name="error_empty_response_after_tool">Модель не вернула ответ после результата инструмента, даже после напоминания. Возможно, она перегружена — попробуйте ещё раз или смените модель.</string>
     <string name="thinking_truncated_hint">Показаны последние %1$dK из %2$dK символов</string>
@@ -1212,12 +1213,12 @@
     <string name="chat_menu_settings_always_last">Always last</string>
     <string name="back_to_exit_press_again">Press back again to exit</string>
     <string name="backup_snapshot_section_title">Локальные снимки</string>
-    <string name="backup_snapshot_section_footer">Снимок конфигурации сохраняется автоматически перед каждым восстановлением. Нажмите, чтобы откатить конфигурацию.</string>
+    <string name="backup_snapshot_section_footer">Перед каждым восстановлением сохраняется локальный снимок. Его можно импортировать, чтобы вернуть настройки; более поздние добавления могут сохраниться.</string>
     <string name="backup_snapshot_empty">Локальных снимков пока нет.</string>
-    <string name="backup_snapshot_restore_confirm_title">Восстановить этот снимок?</string>
-    <string name="backup_snapshot_restore_confirm_text">Текущая конфигурация будет заменена снимком от %1$s. Сначала будет сохранён новый снимок текущей конфигурации.</string>
-    <string name="backup_snapshot_restore">Восстановить</string>
-    <string name="backup_done_fatal">Восстановление прервано — конфигурация восстановлена частично. Откатитесь к снимку.</string>
+    <string name="backup_snapshot_restore_confirm_title">Импортировать этот снимок?</string>
+    <string name="backup_snapshot_restore_confirm_text">Настройки из снимка %1$s будут объединены с текущей конфигурацией. Это не полный откат: более поздние добавления могут сохраниться. Сначала будет сохранён новый снимок текущей конфигурации.</string>
+    <string name="backup_snapshot_restore">Импортировать снимок</string>
+    <string name="backup_done_fatal">Восстановление не завершено. Некоторые изменения уже могли быть применены. Импорт локального снимка поможет вернуть настройки, но не отменит все изменения.</string>
     <string name="backup_err_busy">Резервное копирование или восстановление уже выполняется — дождитесь завершения.</string>
     <!-- 英文兜底 (2026-08-08) -->
     <string name="model_group_name_saved">Name saved</string>

@@ -317,6 +317,20 @@ class MinisApp : Application(), ImageLoaderFactory {
         // never pass through a ViewModel.
         com.rikkaminis.app.data.FastModePrefs.prime(this)
 
+        // [surgery-1120 A-01 review] Cold-start recovery's frontier: the run
+        // dirs that exist NOW predate every stream this process can start.
+        // Recorded here (main process only — the :modelservice / :toolservice
+        // branches returned above) so the recovery scan, including its delayed
+        // second pass, can never see a dir created by a LATER turn: such a dir
+        // belongs to a run that is still unwinding, and a dir's mtime does not
+        // move when the worker appends into it. Cheap dir listing, no content
+        // read.
+        runCatching {
+            com.rikkaminis.app.sandbox.offload.StreamOwnership.recordBootBaseline(
+                java.io.File(cacheDir, com.rikkaminis.app.sandbox.offload.StreamOwnership.STAGING_ROOT),
+            )
+        }
+
         // [T-provider-key-roulette] Warm the LRU multi-key rotation state so
         // the first provider build of the process rotates against the
         // cold-start file hint instead of always picking key #1.

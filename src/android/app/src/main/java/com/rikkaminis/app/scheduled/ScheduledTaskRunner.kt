@@ -13,6 +13,7 @@ import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.service.SessionActivityTracker
 import com.rikkaminis.app.service.SessionConcurrencyManager
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -49,7 +50,8 @@ object ScheduledTaskRunner {
     private const val REAP_GRACE_MS = 180_000L
 
     private data class Dispatch(
-        val taskId: String,
+        /** The run's identity — the task it ran for and the session it ran in. */
+        val run: ScheduledRunRef,
         val deadlineSec: Int,
         val startedAtMs: Long,
         /**
@@ -62,20 +64,38 @@ object ScheduledTaskRunner {
         val scheduledDate: String,
     )
 
-    /** In-process single-flight gate (brief §5.2); mirrored by the persisted marker. */
+    /** The run this process has reserved the single-flight gate for. */
+    private data class ActiveRun(
+        val run: ScheduledRunRef,
+    )
+
+    /**
+     * In-process single-flight gate (brief §5.2); mirrored by the persisted
+     * marker. Task id AND session id live in ONE value: an old run's late
+     * finalize that only knew the task id used to clear the lock a NEWER run
+     * of the same task held, letting a second dispatch of that task start
+     * concurrently. [releaseActiveRun] is the only release point and compares
+     * both halves.
+     */
     @Volatile
-    private var runningTaskId: String? = null
+    private var activeRun: ActiveRun? = null
 
     /**
      * [B27] Serializes the whole read-evaluate-mark-running pass: two
      * foreground beats landing close together used to run [checkAndFireToday]
      * concurrently — both observed the same due task between the
-     * [runningTaskId] check and its placement, and the daily task fired
+     * [activeRun] check and its placement, and the daily task fired
      * twice (the crash-recovery branch double-counted the same way).
      */
     private val checkMutex = Mutex()
 
     /** sessionId -> dispatch record for runs this process started and awaits settling. */
+    private data class PendingSettlement(val run: ScheduledRunRef, val outcome: String, val scheduledDate: String)
+    private val pendingSettlements = ConcurrentHashMap<String, PendingSettlement>()
+    private val pendingMarkerClears = ConcurrentHashMap<String, ScheduledRunRef>()
+    private fun settlementKey(run: ScheduledRunRef): String =
+        run.sessionId ?: "unstarted:${run.taskId}:${run.taskGeneration}:${run.globalGeneration}:${run.documentGeneration}"
+
     private val dispatched = ConcurrentHashMap<String, Dispatch>()
 
     /** Misses are day-level facts; log each (task, day) once per process. */
@@ -110,11 +130,14 @@ object ScheduledTaskRunner {
         val app = context.applicationContext as? MinisApp ?: return
         val dispatch = dispatched.remove(sessionId) ?: return
         app.applicationScope.launch {
+            // [A03] The whole snapshot: the settle presents the run's own
+            // identity (dispatch.run) so the document can tell whether it
+            // still names THIS run. Deleted / restored / re-created task ids
+            // and a newer run of the same task are all refused by the store.
             finalizeRun(
                 app = app,
-                taskId = dispatch.taskId,
+                run = dispatch.run,
                 outcome = if (isError) ScheduledTask.RESULT_ERROR else ScheduledTask.RESULT_OK,
-                sessionId = sessionId,
                 scheduledDate = dispatch.scheduledDate,
             )
         }
@@ -128,7 +151,7 @@ object ScheduledTaskRunner {
      *
      * The store clears the persisted `running` marker for those runs
      * ([ScheduledTasksStore.deleteTask] / [ScheduledTasksStore.importDocument]),
-     * but the in-process bookkeeping ([runningTaskId] + [dispatched]) survived
+     * but the in-process bookkeeping ([activeRun] + [dispatched]) survived
      * the deletion: the deleted task kept the single-flight lock until
      * [reapAbandonedDispatch]'s deadline+grace (30 min for a default task) and
      * every other task degraded to `overlap`, while a backup restore left the
@@ -154,39 +177,30 @@ object ScheduledTaskRunner {
      * exactly that, and `scripts/scan/scheduled_store_release_guard.py` fails
      * if a call ever moves inside the store lock.
      */
-    suspend fun onTasksRemoved(removedTaskIds: Set<String>?) {
+    suspend fun onTasksRemoved(removedTaskIds: Set<String>?, removalWatermark: ScheduledTaskRemovalWatermark) {
         checkMutex.withLock {
             val snapshot = dispatched.toMap()
-            val plan = InMemoryRunBookkeeping.planRemoval(
-                InMemoryRunBookkeeping.State(
-                    runningTaskId = runningTaskId,
-                    dispatchedTaskIdBySession = snapshot.mapValues { it.value.taskId },
-                ),
-                removedTaskIds = removedTaskIds,
-            )
-            if (plan.isEmpty) return@withLock
-            AppLogger.info(
-                TAG,
-                "release removed=${removedTaskIds?.joinToString(",") ?: "all"} " +
-                    "sessions=${plan.dropSessions.size} lockReleased=${plan.clearRunningTaskId}",
-            )
-            for (sid in plan.dropSessions) {
-                // Compare-and-remove: only drop the exact dispatch we decided
-                // about. (Removal by key alone would be equivalent today — a
-                // scheduled run gets a freshly created session id and never
-                // reuses one — but the CAS keeps that independent of the
-                // session-creation path.)
-                val expected = snapshot[sid] ?: continue
-                if (dispatched.remove(sid, expected)) {
-                    // The abandoned run already snapshotted its budget at run
-                    // entry (AgentLoopEngine reads the ceiling once, at
-                    // runAgentLoop ENTER), so clearing now cannot loosen a live
-                    // run's caps — while leaving it would leak one entry per
-                    // released run for the life of the process.
-                    AgentRunBudgetCeilings.clear(sid)
-                }
+            val doomed = snapshot.filterValues { dispatch ->
+                (removedTaskIds == null || dispatch.run.taskId in removedTaskIds) &&
+                    ScheduledTaskGenerationPolicy.invalidated(dispatch.run, removedTaskIds, removalWatermark)
+            }.keys
+            val active = activeRun?.run
+            val clearActive = active != null && ScheduledTaskGenerationPolicy.invalidated(active, removedTaskIds, removalWatermark)
+            val staleSettlements = pendingSettlements.entries.filter { (_, pending) ->
+                (removedTaskIds == null || pending.run.taskId in removedTaskIds) &&
+                    ScheduledTaskGenerationPolicy.invalidated(pending.run, removedTaskIds, removalWatermark)
             }
-            if (plan.clearRunningTaskId) runningTaskId = null
+            val staleClears = pendingMarkerClears.entries.filter { (_, run) ->
+                (removedTaskIds == null || run.taskId in removedTaskIds) &&
+                    ScheduledTaskGenerationPolicy.invalidated(run, removedTaskIds, removalWatermark)
+            }
+            for (sid in doomed) {
+                val expected = snapshot[sid] ?: continue
+                if (dispatched.remove(sid, expected)) AgentRunBudgetCeilings.clear(sid)
+            }
+            if (clearActive) activeRun = null
+            staleSettlements.forEach { pendingSettlements.remove(it.key, it.value) }
+            staleClears.forEach { pendingMarkerClears.remove(it.key, it.value) }
         }
     }
 
@@ -198,53 +212,134 @@ object ScheduledTaskRunner {
     // is atomic under checkMutex, so two concurrent foreground beats cannot
     // both observe the same due task and fire it twice.
     // [FIX-R3-E F-04A] The lock now also excludes [finalizeRun]'s settlement:
-    // `load` snapshot → `evaluate` verdict and "persist the run + reset
-    // runningTaskId" can no longer interleave, which was how a daily task
+    // "persist the run + reset activeRun" can no longer interleave, which was how a daily task
     // could fire twice on the same day (evaluate pairing a stale task list —
-    // run not yet credited — with an already-nulled runningTaskId, defeating
+    // run not yet credited — with an already-nulled activeRun, defeating
     // ALREADY_RAN and OVERLAP at once). LOCK ORDER still holds: this path
     // takes checkMutex -> store lock (load/markRunning/completeRun), and the
     // store's call sites keep onTasksRemoved outside the store lock.
     internal suspend fun checkAndFireToday(app: MinisApp) = checkMutex.withLock {
-        val gate = ScheduledTasksStore.load(app)
-        if (!gate.globalEnabled) return
-
+        val hadPendingSettlement = pendingSettlements.isNotEmpty() || pendingMarkerClears.isNotEmpty()
+        if (!retryPendingMarkerClears(app)) return@withLock
+        if (!retryPendingSettlements(app)) return@withLock
+        // A retry consumes this foreground beat. Do not dispatch the same task
+        // again immediately after a successfully persisted failure recovery.
+        if (hadPendingSettlement) return@withLock
         reapAbandonedDispatch(app)
+        if (pendingSettlements.isNotEmpty() || pendingMarkerClears.isNotEmpty()) return@withLock
 
-        // Crash recovery: a persisted marker with no in-process run means the
-        // process died mid-run — count one failure and continue on the
-        // recovered state (brief §3).
-        val file = ScheduledTasksStore.load(app)
-        var current = file
-        val marker = file.running
-        if (marker != null && marker.taskId != runningTaskId) {
-            val res = ScheduledTasksStore.crashFailure(app, marker.taskId)
-            current = res.file
+        var admission = ScheduledTasksStore.admissionSnapshot(app)
+        if (!admission.file.globalEnabled) return@withLock
+        var current = admission.file
+        val marker = current.running
+        val active = activeRun
+        if (marker != null && !ScheduledTaskRunOwnership.ownsActiveRun(
+                active?.run?.taskId,
+                active?.run?.sessionId,
+                ScheduledRunRef(marker.taskId, marker.sessionId),
+            )
+        ) {
+            val crashRun = ScheduledRunRef(
+                marker.taskId,
+                marker.sessionId,
+                admission.generations[marker.taskId] ?: 0L,
+                admission.globalGeneration,
+                admission.documentGeneration,
+            )
+            val recovery = ScheduledTasksStore.crashFailure(app, crashRun)
+            if (recovery.disposition != ScheduledTaskWriteDisposition.PERSISTED) return@withLock
+            current = recovery.transition.file
             AppLogger.info(TAG, "abort task=${marker.taskId} reason=process-restart")
             MemorySpikeRecorder.onEvent(TAG, "abort task=${marker.taskId} reason=process-restart")
-            maybeNotifyFuse(app, res, marker.sessionId)
+            maybeNotifyFuse(app, recovery.transition, marker.sessionId)
         }
-
         val now = LocalDateTime.now()
         val today = now.toLocalDate().toString()
         val nowMinute = now.hour * 60 + now.minute
-        val verdicts = ScheduledTaskPolicy.evaluate(today, nowMinute, current.tasks, runningTaskId)
-        for (v in verdicts) logVerdict(v, today)
-        val fireId = verdicts.firstOrNull { it is ScheduledTaskPolicy.PassVerdict.Fire }?.taskId ?: return
-        val task = current.tasks.firstOrNull { it.id == fireId } ?: return
-        // [deep-audit-1016c ISSUE-09A] The scheduled day rides along the
-        // dispatch record: the settle path reads it back from [dispatched] and
-        // credits THIS day (the day the fire pass observed the task due), not
-        // the day the run happens to settle on (a 23:55 run settling at 00:06
-        // used to pin tomorrow's date and skip tomorrow's whole window).
-        fire(app, task, today)
+        val verdicts = ScheduledTaskPolicy.evaluate(today, nowMinute, current.tasks, activeRun?.run?.taskId)
+        verdicts.forEach { logVerdict(it, today) }
+        val taskId = verdicts.firstOrNull { it is ScheduledTaskPolicy.PassVerdict.Fire }?.taskId ?: return@withLock
+        val task = current.tasks.firstOrNull { it.id == taskId } ?: return@withLock
+        fire(app, task, today, admission)
     }
 
-    /**
-     * A dispatch whose message never turned into a stream (sendMessage dropped
-     * it) leaves nothing that will ever settle. Free the single-flight gate and
-     * count a failure so the task can retry on a later beat.
-     */
+    private suspend fun persistPendingSettlement(app: MinisApp, pending: PendingSettlement): ScheduledTaskStoreTransition {
+        val run = pending.run
+        return if (run.sessionId == null) {
+            val gateDate = ScheduledRunDating.gateDateOnSettle(
+                pending.scheduledDate,
+                LocalDate.now().toString(),
+                pending.outcome,
+            )
+            ScheduledTasksStore.completeUnstartedRun(
+                app, run.taskId, pending.outcome, gateDate,
+                run.taskGeneration, run.globalGeneration, run.documentGeneration,
+            )
+        } else {
+            ScheduledTasksStore.completeRun(
+                app,
+                run,
+                pending.outcome,
+                ScheduledRunDating.gateDateOnSettle(
+                    pending.scheduledDate,
+                    LocalDate.now().toString(),
+                    pending.outcome,
+                ),
+            )
+        }
+    }
+
+    private suspend fun retryPendingMarkerClears(app: MinisApp): Boolean {
+        for ((sessionId, run) in pendingMarkerClears.toMap()) {
+            val result = try { ScheduledTasksStore.clearRunningMarker(app, run) } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                AppLogger.warning(TAG, "marker cleanup retry failed task=${run.taskId}: ${t.javaClass.simpleName}")
+                return false
+            }
+            if (result == ScheduledTaskWriteDisposition.WRITE_FAILED) return false
+            pendingMarkerClears.remove(sessionId, run)
+            releaseActiveRun(run)
+            AgentRunBudgetCeilings.clear(sessionId)
+        }
+        return pendingMarkerClears.isEmpty()
+    }
+
+    private suspend fun retryPendingSettlements(app: MinisApp): Boolean {
+        for ((key, pending) in pendingSettlements.toMap()) {
+            val result = try { persistPendingSettlement(app, pending) } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                AppLogger.warning(TAG, "settlement retry failed task=${pending.run.taskId}: ${t.javaClass.simpleName}")
+                return false
+            }
+            when (result.disposition) {
+                ScheduledTaskWriteDisposition.WRITE_FAILED -> return false
+                ScheduledTaskWriteDisposition.NO_CHANGE -> {
+                    pendingSettlements.remove(key, pending)
+                    releaseActiveRun(pending.run)
+                    pending.run.sessionId?.let { AgentRunBudgetCeilings.clear(it) }
+                }
+                ScheduledTaskWriteDisposition.PERSISTED -> {
+                    pendingSettlements.remove(key, pending)
+                    publishPersistedSettlement(app, pending, result.transition)
+                }
+            }
+        }
+        return pendingSettlements.isEmpty()
+    }
+
+    private fun publishPersistedSettlement(app: MinisApp, pending: PendingSettlement, result: ScheduledTaskTransitions.Result) {
+        releaseActiveRun(pending.run)
+        pending.run.sessionId?.let { AgentRunBudgetCeilings.clear(it) }
+        if (pending.outcome == ScheduledTask.RESULT_OK) {
+            AppLogger.info(TAG, "done task=${pending.run.taskId} result=ok")
+            MemorySpikeRecorder.onEvent(TAG, "done task=${pending.run.taskId} result=ok")
+        } else {
+            AppLogger.info(TAG, "fail task=${pending.run.taskId} result=${pending.outcome} streak=${result.task?.failStreak ?: 0}")
+            MemorySpikeRecorder.onEvent(TAG, "fail task=${pending.run.taskId} result=${pending.outcome}")
+        }
+        maybeNotifyFuse(app, result, pending.run.sessionId)
+    }
+
     private suspend fun reapAbandonedDispatch(app: MinisApp) {
         if (dispatched.isEmpty()) return
         val nowMs = System.currentTimeMillis()
@@ -252,11 +347,11 @@ object ScheduledTaskRunner {
             if (nowMs - d.startedAtMs <= d.deadlineSec * 1000L + REAP_GRACE_MS) continue
             if (isRunAlive(sid)) continue
             if (!dispatched.remove(sid, d)) continue
-            AppLogger.info(TAG, "abort task=${d.taskId} reason=stale-dispatch")
-            MemorySpikeRecorder.onEvent(TAG, "abort task=${d.taskId} reason=stale-dispatch")
+            AppLogger.info(TAG, "abort task=${d.run.taskId} reason=stale-dispatch")
+            MemorySpikeRecorder.onEvent(TAG, "abort task=${d.run.taskId} reason=stale-dispatch")
             // Already under checkMutex (called from checkAndFireToday) — the
             // locked body, not the locking entry point ([FIX-R3-E F-04A]).
-            finalizeLocked(app, d.taskId, ScheduledTask.RESULT_ERROR, sid, d.scheduledDate)
+            finalizeLocked(app, d.run, ScheduledTask.RESULT_ERROR, d.scheduledDate)
         }
     }
 
@@ -270,68 +365,45 @@ object ScheduledTaskRunner {
     // Fire
     // ------------------------------------------------------------------
 
-    private suspend fun fire(app: MinisApp, task: ScheduledTask, scheduledDate: String) {
-        runningTaskId = task.id
+    private suspend fun fire(
+        app: MinisApp,
+        task: ScheduledTask,
+        scheduledDate: String,
+        admission: ScheduledTaskAdmissionSnapshot,
+    ) {
+        val selected = ScheduledRunRef(
+            task.id, null, admission.generations[task.id] ?: 0L,
+            admission.globalGeneration, admission.documentGeneration,
+        )
+        activeRun = ActiveRun(selected)
         var sessionId: String? = null
         try {
             val sid = prepareSession(app, task)
+            val run = selected.copy(sessionId = sid)
             sessionId = sid
+            activeRun = ActiveRun(run)
             AgentRunBudgetCeilings.register(
                 sid,
-                AgentRunBudgetCeilings.Ceiling(
-                    deadlineMs = task.deadlineSec * 1000L,
-                    maxTurns = task.maxTurns,
-                    maxEstimatedTokens = task.maxEstimatedTokens,
-                ),
+                AgentRunBudgetCeilings.Ceiling(task.deadlineSec * 1000L, task.maxTurns, task.maxEstimatedTokens),
             )
-            // [FIX-R3-E F-04B] Re-admission gate. `prepareSession` suspends
-            // WITHOUT the store lock; a delete/backup-restore that lands in
-            // that window removes the task (and clears any marker), then
-            // blocks on [checkMutex] in [onTasksRemoved] until this fire pass
-            // releases it. The old code wrote the marker back unconditionally
-            // here — resurrecting a `running` entry for a task that no longer
-            // exists — and dispatched the headless run anyway. markRunning now
-            // refuses to admit a task that is no longer in the document (see
-            // [ScheduledTaskStorePolicy.markRunningDecision]); when it
-            // refuses, drop everything this fire pass created: the budget
-            // ceiling, the in-process single-flight lock — no dispatch record,
-            // no prompt. The queued [onTasksRemoved] then finds nothing to
-            // release, and no orphan marker is left on disk (the store never
-            // wrote one; delete/restore already cleared it).
-            val marked = ScheduledTasksStore.markRunning(app, task.id, sid, System.currentTimeMillis())
-            if (!ScheduledTaskStorePolicy.markerLanded(marked, task.id)) {
-                AppLogger.info(TAG, "abandon task=${task.id} reason=removed-mid-fire")
-                MemorySpikeRecorder.onEvent(TAG, "abandon task=${task.id} reason=removed-mid-fire")
-                // [R5-B2 C-06①] `prepareSession` already INSERTED this session
-                // (source="scheduled", titled after the task) — it is the only
-                // thing this fire pass leaves behind on the early return, and
-                // it would sit in the user's session drawer forever as an empty
-                // "scheduled" chat. It has never carried a prompt (this branch
-                // returns before ChatMutationMethods.prompt), so nothing the
-                // user wrote or saw lives in it: delete the session this pass
-                // created, not "the session" — [sid] is a fresh id from
-                // [HeadlessChatRunner.ensureSession], never a reused one.
+            val marked = ScheduledTasksStore.markRunning(app, run, System.currentTimeMillis())
+            if (!ScheduledTaskStorePolicy.markerLanded(marked.file, task.id) ||
+                marked.disposition != ScheduledTaskWriteDisposition.PERSISTED ||
+                marked.file.running?.sessionId != sid
+            ) {
                 dropNewSession(app, sid)
-                if (runningTaskId == task.id) runningTaskId = null
+                releaseActiveRun(run)
                 AgentRunBudgetCeilings.clear(sid)
                 return
             }
             dispatched[sid] = Dispatch(
-                taskId = task.id,
+                run = run,
                 deadlineSec = task.deadlineSec,
                 startedAtMs = System.currentTimeMillis(),
                 scheduledDate = scheduledDate,
             )
             AppLogger.info(TAG, "fire task=${task.id} session=$sid")
             MemorySpikeRecorder.onEvent(TAG, "fire task=${task.id}")
-
-            // wait=false: returns "Running" once the message actually started a
-            // stream, or "Error" (+ a responseText reason) when the send path
-            // refused it — the headless runner reads `isStreaming` right after
-            // sendMessage (B-7b), so a dropped send no longer reports
-            // "Running" and no longer holds the single-flight lock until the
-            // reaper fires. Completion arrives via onSessionSettled(); a run
-            // that dies mid-flight is reaped on a later beat.
             val result = ChatMutationMethods.prompt(
                 app,
                 JSONObject().apply {
@@ -340,34 +412,34 @@ object ScheduledTaskRunner {
                     put("wait", false)
                 },
             )
-            val status = result.optString("status", "")
-            if (status != "Running") {
-                if (dispatched.remove(sid) != null) {
-                    AppLogger.warning(
-                        TAG,
-                        "dispatch produced no stream task=${task.id} status=$status " +
-                            "reason=${result.optString("responseText", "")}",
-                    )
-                    // Already under checkMutex via checkAndFireToday.
-                    finalizeLocked(app, task.id, ScheduledTask.RESULT_ERROR, sid, scheduledDate)
-                }
+            if (result.optString("status", "") != "Running" && dispatched.remove(sid) != null) {
+                finalizeLocked(app, run, ScheduledTask.RESULT_ERROR, scheduledDate)
             }
         } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) {
+                val run = selected.copy(sessionId = sessionId)
+                val wasDispatched = sessionId?.let { dispatched.remove(it) } != null
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    if (sessionId == null) {
+                        releaseActiveRun(run)
+                    } else {
+                        when (ScheduledTasksStore.clearRunningMarker(app, run)) {
+                            ScheduledTaskWriteDisposition.WRITE_FAILED -> pendingMarkerClears[sessionId] = run
+                            ScheduledTaskWriteDisposition.NO_CHANGE,
+                            ScheduledTaskWriteDisposition.PERSISTED -> {
+                                AgentRunBudgetCeilings.clear(sessionId)
+                                if (!wasDispatched) dropNewSession(app, sessionId)
+                                releaseActiveRun(run)
+                            }
+                        }
+                    }
+                }
+                throw t
+            }
             AppLogger.warning(TAG, "dispatch failed task=${task.id}: ${t.javaClass.simpleName}: ${t.message}")
-            val sid = sessionId
-            val pending = if (sid != null) dispatched.remove(sid) else null
-            if (sid == null || pending != null) {
-                // No dispatch record -> no settle can ever arrive; finalize now.
-                // [ISSUE-09A] The run never started: outcome is RESULT_ERROR so
-                // the gate never advances; the scheduled day still attributes
-                // the attempt to the day the fire pass observed it due (the
-                // fire-time `today` this function received — available even
-                // when prepareSession threw before a dispatch record existed).
-                // fire() is only ever called from checkAndFireToday, which
-                // holds checkMutex — so the locked body is the right call here
-                // too ([FIX-R3-E F-04A]: every settlement funnels through the
-                // same lock as the check pass).
-                finalizeLocked(app, task.id, ScheduledTask.RESULT_ERROR, sid, scheduledDate)
+            val record = sessionId?.let { dispatched.remove(it) }
+            if (sessionId == null || record != null) {
+                finalizeLocked(app, selected.copy(sessionId = sessionId), ScheduledTask.RESULT_ERROR, scheduledDate)
             }
         }
     }
@@ -424,13 +496,13 @@ object ScheduledTaskRunner {
     /**
      * Settle a run this process dispatched. [FIX-R3-E F-04A] Takes
      * [checkMutex]: the settlement (persisted `lastRunDate` + the
-     * [runningTaskId] reset) used to run OUTSIDE it, so a foreground
+     * [activeRun] reset) used to run OUTSIDE it, so a foreground
      * `checkAndFireToday` interleaving between its `load` snapshot and its
      * [ScheduledTaskPolicy.evaluate] call saw the STALE task list (the run not
-     * yet credited) together with the FRESH null [runningTaskId] — `ALREADY_RAN`
+     * yet credited) together with the FRESH null [activeRun] — `ALREADY_RAN`
      * and `OVERLAP` both failed and the daily task fired a second time the same
      * day. Under [checkMutex] the two sequences are both safe: check first →
-     * evaluate sees the still-set [runningTaskId] → OVERLAP; settle first →
+     * evaluate sees the still-set [activeRun] → OVERLAP; settle first →
      * evaluate's snapshot carries the credited `lastRunDate` → ALREADY_RAN.
      *
      * The callers that are ALREADY under [checkMutex] (the reaper and `fire`'s
@@ -439,81 +511,79 @@ object ScheduledTaskRunner {
      */
     private suspend fun finalizeRun(
         app: MinisApp,
-        taskId: String,
+        run: ScheduledRunRef,
         outcome: String,
-        sessionId: String?,
         scheduledDate: String,
     ) {
         checkMutex.withLock {
-            finalizeLocked(app, taskId, outcome, sessionId, scheduledDate)
+            finalizeLocked(app, run, outcome, scheduledDate)
         }
     }
 
-    /** The settlement body; caller MUST already hold [checkMutex]. */
+    /**
+     * The settlement body; caller MUST already hold [checkMutex].
+     *
+     * [A03 late settlement] [sessionId] is the settling run's identity. Two
+     * separate authorities are asked, and both must say yes before anything
+     * is recorded:
+     *
+     * - the DOCUMENT ([ScheduledTaskTransitions.completeRun]) credits the run
+     *   only if its `running` marker names this very session — so a delete, a
+     *   backup restore that re-created the same id, or a newer run of the same
+     *   task all end in "no write";
+     * - the RUNNER ([releaseActiveRun]) drops the single-flight gate only for
+     *   the run that holds it, so a late finalize cannot free a new run's lock.
+     *
+     * A refusal is logged as `settle ignored` and is otherwise inert: no
+     * `done`/`fail` verdict, no fuse notification, no cancellation of the run
+     * that actually holds the task (deleting a task deliberately leaves its
+     * run streaming to the end).
+     */
     private suspend fun finalizeLocked(
         app: MinisApp,
-        taskId: String,
+        run: ScheduledRunRef,
         outcome: String,
-        sessionId: String?,
         scheduledDate: String,
     ) {
-        sessionId?.let { AgentRunBudgetCeilings.clear(it) }
-        val res = try {
-            // [deep-audit-1016c ISSUE-09A] Credit the day the run was FIRED on
-            // (the same `today` the evaluate gate compared lastRunDate against,
-            // threaded through Dispatch.scheduledDate), never the settlement-day
-            // clock read. Settlement past local midnight used to pin tomorrow's
-            // date here, making the gate see the task as already-run for the
-            // whole of tomorrow.
-            ScheduledTasksStore.completeRun(
-                app,
-                taskId,
-                outcome,
-                ScheduledRunDating.gateDateOnSettle(scheduledDate, LocalDate.now().toString(), outcome),
-            )
+        val pending = PendingSettlement(run, outcome, scheduledDate)
+        val result = try {
+            persistPendingSettlement(app, pending)
         } catch (t: Throwable) {
-            AppLogger.warning(TAG, "finalize failed task=$taskId: ${t.javaClass.simpleName}")
-            // [WAVE-1118 D7 F-05] The settlement write did not land, so the
-            // persisted `running` marker is still on disk while the in-memory
-            // single-flight lock is about to be released. The next beat reads
-            // exactly that pair as "the process died mid-run" (crashFailure) and
-            // charges the task a failure it did not earn — `failStreak` climbs
-            // and the fuse can DISABLE a healthy task. Drop the marker we can no
-            // longer settle; the lost credit is recoverable (the task may retry
-            // inside its window), a phantom failure is not.
-            //
-            // LOCK ORDER: still `checkMutex` (held by the caller) -> store `lock`;
-            // `clearRunningMarker` takes the store mutex and nothing else, the
-            // same direction every other settlement path uses (see
-            // [ScheduledTasksStore.completeRun]) — no reverse nesting, so no
-            // deadlock with `onTasksRemoved`.
-            try {
-                ScheduledTasksStore.clearRunningMarker(app, taskId)
-            } catch (clearFailure: Throwable) {
-                // A cancelled settle is not a stuck marker: propagate instead of
-                // swallowing the cancellation (this compensation is the only
-                // suspension point added here, so it must not become one more
-                // place that eats CE).
-                if (clearFailure is kotlinx.coroutines.CancellationException) throw clearFailure
-                // Nothing left to try: the next beat will see the marker. Say so
-                // instead of pretending the settlement is clean.
-                AppLogger.warning(
-                    TAG,
-                    "finalize could not drop running marker task=$taskId: ${clearFailure.javaClass.simpleName}",
-                )
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            AppLogger.warning(TAG, "finalize failed task=${run.taskId}: ${t.javaClass.simpleName}")
+            ScheduledTaskStoreTransition(
+                ScheduledTaskTransitions.Result(ScheduledTasksFile(), null, false),
+                ScheduledTaskWriteDisposition.WRITE_FAILED,
+            )
+        }
+        when (result.disposition) {
+            ScheduledTaskWriteDisposition.WRITE_FAILED -> {
+                pendingSettlements[settlementKey(run)] = pending
+                AppLogger.warning(TAG, "settlement deferred task=${run.taskId} reason=write-failed")
             }
-            if (runningTaskId == taskId) runningTaskId = null
-            return
+            ScheduledTaskWriteDisposition.NO_CHANGE -> {
+                releaseActiveRun(run)
+                run.sessionId?.let { AgentRunBudgetCeilings.clear(it) }
+                AppLogger.info(TAG, "settle ignored task=${run.taskId} reason=ownership-changed")
+            }
+            ScheduledTaskWriteDisposition.PERSISTED -> publishPersistedSettlement(app, pending, result.transition)
         }
-        if (runningTaskId == taskId) runningTaskId = null
-        if (outcome == ScheduledTask.RESULT_OK) {
-            AppLogger.info(TAG, "done task=$taskId result=ok")
-            MemorySpikeRecorder.onEvent(TAG, "done task=$taskId result=ok")
-        } else {
-            AppLogger.info(TAG, "fail task=$taskId result=$outcome streak=${res.task?.failStreak ?: 0}")
-            MemorySpikeRecorder.onEvent(TAG, "fail task=$taskId result=$outcome")
-        }
-        maybeNotifyFuse(app, res, sessionId)
+    }
+
+    /**
+     * [A03] The ONE release point for the single-flight gate. Releases only the
+     * run it is told about ([ScheduledTaskRunOwnership.ownsActiveRun]): a stale
+     * finalize carrying an older session must not free a newer run's lock, and
+     * a run that never got a session (`null`) matches only the sessionless
+     * reservation its own fire pass placed.
+     *
+     * Document removals do NOT come through here — they are authoritative and
+     * clear the reservation directly in [onTasksRemoved].
+     */
+    private fun releaseActiveRun(run: ScheduledRunRef) {
+        val current = activeRun ?: return
+        if (!ScheduledTaskRunOwnership.ownsActiveRun(current.run.taskId, current.run.sessionId, run)) return
+        activeRun = null
     }
 
     private fun maybeNotifyFuse(app: MinisApp, res: ScheduledTaskTransitions.Result, sessionId: String?) {

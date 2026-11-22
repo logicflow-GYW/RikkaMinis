@@ -84,6 +84,13 @@ interface LLMProvider {
      */
     val supportsPrefill: Boolean get() = false
 
+    /** Request-aware capability; the default preserves non-Anthropic behaviour.
+     * [thinkingLevel] is the same captured effective input sent with this attempt,
+     * not a previous request's wire state. Implementations apply their own clamp.
+     */
+    fun supportsPrefillForRequest(maxTokens: Int, thinkingLevel: ThinkingLevel): Boolean =
+        supportsPrefill
+
     /**
      * [T-android-thinking-level-arch] PUBLIC entry — this is what every caller
      * (agent loop, fallback, quick test, model-use, …) invokes. It is NOT

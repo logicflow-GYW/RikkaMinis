@@ -8,12 +8,14 @@ import android.util.Log
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.provider.readProcessName
 import com.rikkaminis.app.provider.readProcCmdlineName
+import com.rikkaminis.app.provider.thinking.RequestThinkingRules
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -70,6 +72,9 @@ class ModelExecutionService : Service() {
         const val STREAM_FILE = "stream.jsonl"
         /** Cancellation signal file: when created, a running stream aborts. */
         const val CANCEL_FILE = "cancel"
+        /** Main process explicitly abandoned this non-streaming result. */
+        const val ABANDON_FILE = "abandon.request"
+        const val ABANDON_ACK_FILE = "abandon.ack"
 
         /**
          * [fix/zero-chunk-cancel] How often the in-stream cancel watcher polls
@@ -166,40 +171,46 @@ class ModelExecutionService : Service() {
             true, // fairness: FIFO waiters — queue position is honest
         )
 
+        // Process.killProcess and executionSlots span Service recreation. Keep
+        // admission, ACKs, counters and the reap decision under one process lock;
+        // stopSelf/onDestroy may replace the receiver while old run threads live.
+        /** Worker-side registry: number of requests currently being executed. */
+        private val activeRequests = AtomicInteger(0)
+
+        /** Worker-side lifecycle state (authoritative; main process only inspects state.json). */
+        @Volatile
+        private var lifecycleState = ModelExecutionWorkerState.ACTIVE
+
+        /**
+         * TF-H: lifecycle lock — guards the composite check of
+         * activeRequests / queuedRequests / pending ACKs / lifecycleState and the
+         * self-reap decision. The old code computed a quiescence snapshot outside
+         * the lock and then called killProcess() on it, so a NEW request that
+         * arrived between the snapshot and the kill could be killed by the old
+         * finishing thread. Everyone who mutates the counters or decides to die
+         * uses this lock.
+         */
+        private val lifecycleLock = Any()
+
+        /** TF-H: number of requests enqueued waiting on the execution mutex. */
+        private val queuedRequests = AtomicInteger(0)
+
+        /**
+         * TF-H: per-run ACK tokens, keyed by runId. A streaming worker registers
+         * one token when it commits its response and releases it exactly once when
+         * the client.ack for that run is observed (or on late ack / controlled
+         * drain). The lifecycle only self-reaps when every token is released.
+         */
+        private val pendingAckTokens = ConcurrentHashMap<String, AtomicBoolean>()
+
+        /** TF-H: request generation, incremented per run; used to invalidate
+         *  stale snapshot decisions. */
+        private val requestGeneration = AtomicLong(0L)
+
+        @Volatile
+        private var keyCachePoisoned = false
+
     }
-
-    /** Worker-side registry: number of requests currently being executed. */
-    private val activeRequests = AtomicInteger(0)
-
-    /** Worker-side lifecycle state (authoritative; main process only inspects state.json). */
-    @Volatile
-    private var lifecycleState = ModelExecutionWorkerState.ACTIVE
-
-    /**
-     * TF-H: lifecycle lock — guards the composite check of
-     * activeRequests / queuedRequests / pending ACKs / lifecycleState and the
-     * self-reap decision. The old code computed a quiescence snapshot outside
-     * the lock and then called killProcess() on it, so a NEW request that
-     * arrived between the snapshot and the kill could be killed by the old
-     * finishing thread. Everyone who mutates the counters or decides to die
-     * uses this lock.
-     */
-    private val lifecycleLock = Any()
-
-    /** TF-H: number of requests enqueued waiting on the execution mutex. */
-    private val queuedRequests = AtomicInteger(0)
-
-    /**
-     * TF-H: per-run ACK tokens, keyed by runId. A streaming worker registers
-     * one token when it commits its response and releases it exactly once when
-     * the client.ack for that run is observed (or on late ack / controlled
-     * drain). The lifecycle only self-reaps when every token is released.
-     */
-    private val pendingAckTokens = ConcurrentHashMap<String, AtomicBoolean>()
-
-    /** TF-H: request generation, incremented per run; used to invalidate
-     *  stale snapshot decisions. */
-    private val requestGeneration = AtomicLong(0L)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -410,49 +421,55 @@ class ModelExecutionService : Service() {
                 // read re-throws into the catch → model_use_failed below.
                 val requestBody = CapturedRequestBody.capture { requestFile.readText() }
                 val wantsQueueFrames = requestBody.streamingFlagOrFalse()
-                if (wantsQueueFrames) {
-                    var lastPublished = -1
-                    while (!executionSlots.tryAcquire(QUEUE_FRAME_POLL_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                        val waitingNow = synchronized(lifecycleLock) { queuedRequests.get() }
-                        if (waitingNow != lastPublished) {
-                            lastPublished = waitingNow
-                            runCatching {
-                                java.io.FileWriter(File(dir, STREAM_FILE), true).use { w ->
-                                    w.append(ChatStreamJsonl.encode(LLMStreamChunk.QueueStatus(waitingNow))).append('\n')
+                val isStreaming = requestBody.streamingFlagOrFalse()
+                val cancelFile = File(dir, CANCEL_FILE)
+                var lastPublished = -1
+                try {
+                    runWithModelExecutionSlot(
+                        slots = executionSlots,
+                        cancelRequested = { cancelFile.isFile },
+                        pollMs = QUEUE_FRAME_POLL_MS,
+                        onQueuePoll = {
+                            if (wantsQueueFrames) {
+                                val waitingNow = synchronized(lifecycleLock) { queuedRequests.get() }
+                                if (waitingNow != lastPublished) {
+                                    lastPublished = waitingNow
+                                    runCatching {
+                                        java.io.FileWriter(File(dir, STREAM_FILE), true).use { w ->
+                                            w.append(ChatStreamJsonl.encode(LLMStreamChunk.QueueStatus(waitingNow))).append('\n')
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    }
-                } else {
-                    executionSlots.acquire()
-                }
-                try {
-                    synchronized(lifecycleLock) { queuedRequests.decrementAndGet() }
-                    try {
-                        val req = requestBody.jsonOrThrow()
-                        val isStreaming = req.optBoolean("streaming", false)
-                        if (isStreaming) {
-                            // TF-I: streaming exec writes the result and closes
-                            // the stream INSIDE the lock (serialized provider
-                            // network), but does NOT wait for the client ack —
-                            // that barrier runs outside below.
-                            executeStreamingRun(req, dir, carriedApiKey)
-                        } else {
-                            // TF-J2: non-streaming worker beats liveness too.
-                            // start() is idempotent; the beat is stopped in the
-                            // OUTER finally (after finishRequestLocked writes the
-                            // terminal marker), so the main process — which cannot
-                            // read our /proc on a hidepid=invisible device — can
-                            // both see we are alive AND know we finished writing
-                            // only once the beat goes silent after terminal.
-                            heartbeat.start()
-                            ModelExecutionRunDir.writeReady(dir)
-                            val result = executeRun(req, dir, carriedApiKey)
-                            writeResultAtomically(dir, result)
-                            Log.i(TAG, "result written ($result.length bytes), pid=${android.os.Process.myPid()}")
-                        }
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "execution failed: ${t.message}", t)
+                        },
+                        onQueueSettled = {
+                            synchronized(lifecycleLock) { queuedRequests.decrementAndGet() }
+                        },
+                        onCancelled = { throw ModelExecutionStopException() },
+                        sender = {
+                            if (cancelFile.isFile) throw ModelExecutionStopException()
+                            val req = requestBody.jsonOrThrow()
+                            if (req.optBoolean("streaming", false)) {
+                                // TF-I: streaming exec writes the result and closes
+                                // the stream INSIDE the lock, but does NOT wait for
+                                // the client ack — that barrier runs outside below.
+                                executeStreamingRun(req, dir, carriedApiKey)
+                            } else {
+                                heartbeat.start()
+                                ModelExecutionRunDir.writeReady(dir)
+                                // The non-streaming execution wrapper owns its
+                                // run-scoped watcher and awaits provider transport.
+                                executeRun(req, dir, carriedApiKey)
+                                Log.i(TAG, "result written, pid=${android.os.Process.myPid()}")
+                            }
+                        },
+                    )
+                } catch (t: Throwable) {
+                    val cancelled = t is ModelExecutionStopException
+                    Log.w(TAG, "execution failed: ${t.message}", t)
+                    if (cancelled) {
+                        writeCancelledRun(dir, isStreaming)
+                    } else {
                         try {
                             writeResultAtomically(dir, JSONObject().apply {
                                 put("error", "model_use_failed")
@@ -461,10 +478,7 @@ class ModelExecutionService : Service() {
                             }.toString())
                         } catch (_: Throwable) {}
                     }
-                } finally {
-                    executionSlots.release()
                 }
-
 
                 // ── TF-I: the ACK barrier + finalize run OUTSIDE the mutex ──
                 // The client must have consumed the result/stream before we
@@ -478,7 +492,6 @@ class ModelExecutionService : Service() {
                 // call, never to a sleeping ack-wait. finalize must run after
                 // the barrier so its quiescence check sees the released (or
                 // held-on-timeout) ACK token.
-                val isStreaming = requestBody.streamingFlagOrFalse()
                 try {
                     if (isStreaming) {
                         awaitStreamAckBarrier(dir)
@@ -561,8 +574,11 @@ class ModelExecutionService : Service() {
         // finalizes its OWN run dir (state + terminal); the self-reap
         // decision is re-taken by every finisher against the CURRENT
         // counters, so the LAST one out correctly reaps a drained worker.
-        // The generation check survives ONLY inside maybeSelfReapLocked as a
-        // belt-and-suspenders re-verify before killProcess.
+        // The run's admission generation is not this completion snapshot's
+        // generation: concurrent runs may finish in reverse order. Sample the
+        // CURRENT generation under the same lifecycleLock as the counters and
+        // admission, retaining maybeSelfReapLocked's snapshot re-verification.
+        val reapGeneration = requestGeneration.get()
         val dirMissing = !dir.isDirectory
         if (dirMissing) {
             Log.w(
@@ -581,7 +597,7 @@ class ModelExecutionService : Service() {
                 quiescence = quiescence,
             )
             lifecycleState = next
-            maybeSelfReapLocked(dir, next, quiescence, runId, generation)
+            maybeSelfReapLocked(dir, next, quiescence, runId, reapGeneration)
             return next
         }
 
@@ -606,7 +622,7 @@ class ModelExecutionService : Service() {
         ModelExecutionMailbox.writeState(dir, next, activeRequests.get(), unacked = pendingAckTokens.size)
         ModelExecutionRunDir.writeTerminal(dir)
         if (ModelExecutionLifecycle.shouldKill(next, quiescence)) {
-            maybeSelfReapLocked(dir, next, quiescence, runId, generation)
+            maybeSelfReapLocked(dir, next, quiescence, runId, reapGeneration)
         } else {
             Log.i(
                 TAG,
@@ -624,12 +640,12 @@ class ModelExecutionService : Service() {
      * allowing self-reap. Without this, the lock-free old code killed a worker
      * right after a new request had revived it.
      *
-     * [feat/provider-exec-concurrency] The generation re-verify is now a
-     * belt-and-suspenders ONLY: the primary safety under concurrency is the
-     * counter re-check (active==0 && queued==0 && acks empty). Generation is
-     * still consulted — a request that arrived AFTER this finisher captured
-     * its snapshot must block the reap — but it no longer replaces the
-     * counter check (see finishRequestLocked KDoc for the leak it caused).
+     * [feat/provider-exec-concurrency] capturedGeneration belongs to the
+     * CURRENT locked completion snapshot, not the finishing run's admission.
+     * Re-verify it together with the counters (active==0 && queued==0 && acks
+     * empty). Admission uses the same lock, so an older run may safely reap
+     * when it is the last finisher. Delayed controlled-drain generations keep
+     * their separate stale-timer protection.
      */
     private fun maybeSelfReapLocked(
         dir: File,
@@ -679,6 +695,10 @@ class ModelExecutionService : Service() {
         val ack = File(dir, ModelExecutionMailbox.FILE_CLIENT_ACK)
         while (System.currentTimeMillis() < deadline) {
             if (ack.exists()) return
+            if (File(dir, ABANDON_FILE).isFile) {
+                runCatching { File(dir, ABANDON_ACK_FILE).createNewFile() }
+                return
+            }
             try { Thread.sleep(ACK_POLL_MS) } catch (_: InterruptedException) { return }
         }
         Log.w(TAG, "client ack timeout (${timeoutMs}ms) on run ${dir.name} — proceeding anyway")
@@ -704,8 +724,35 @@ class ModelExecutionService : Service() {
         }
     }
 
+    /**
+     * Publish one worker-owned cancellation result for queued or non-streaming
+     * requests. The cancel ACK is only a signal that the worker observed the
+     * request; directory reclamation still waits for result/terminal and worker
+     * exit in the existing client protocol.
+     */
+    private fun writeCancelledRun(dir: File, streaming: Boolean) {
+        if (streaming) {
+            runCatching {
+                java.io.FileWriter(File(dir, STREAM_FILE), true).use { writer ->
+                    writer.append(ChatStreamJsonl.errorLine("cancelled", ChatStreamErrorPolicyKind.KIND_TRANSIENT))
+                        .append('\n')
+                }
+            }
+        }
+        runCatching { ModelExecutionMailbox.writeCancelAck(dir) }
+        runCatching {
+            writeResultAtomically(dir, JSONObject().apply {
+                put("cancelled", true)
+                put("error", "model_use_cancelled")
+                put("message", "The offload request was cancelled.")
+                put("exit_code", 1)
+            }.toString())
+        }
+    }
+
     /** Kill our own process — only ever called after quiescence confirmation. */
     private fun selfReap() {
+        check(Thread.holdsLock(lifecycleLock)) { "process reap requires the lifecycle lock" }
         runCatching { android.os.Process.killProcess(android.os.Process.myPid()) }
     }
 
@@ -757,8 +804,6 @@ class ModelExecutionService : Service() {
      *     streams past POISON_REAP_WAIT_MS, the watchdog gives up and the
      *     normal finishRequest lifecycle owns the eventual death.
      */
-    @Volatile
-    private var keyCachePoisoned = false
 
     /**
      * [T-worker-key-intent-handoff] True when this request must fall back to the
@@ -803,10 +848,12 @@ class ModelExecutionService : Service() {
             var waitedMs = 0L
             while (waitedMs < POISON_REAP_WAIT_MS) {
                 try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
-                if (activeRequests.get() == 0) {
-                    Log.i(TAG, "poisoned worker self-reaping (drained), pid=$pid")
-                    selfReap()
-                    return@Thread
+                synchronized(lifecycleLock) {
+                    if (activeRequests.get() == 0 && queuedRequests.get() == 0 && pendingAckTokens.isEmpty()) {
+                        Log.i(TAG, "poisoned worker self-reaping (drained), pid=$pid")
+                        selfReap()
+                        return@Thread
+                    }
                 }
                 waitedMs += 500
             }
@@ -826,14 +873,25 @@ class ModelExecutionService : Service() {
         }
     }
 
+    // Non-suspend entrypoint kept for the frozen shape gates, and the body stays
+    // lexically inside it (modeluse_proto_single_source_check requires
+    // `provider.sendMessage(` here). The child runBlocking owns the run-scoped
+    // cancel watcher; `publish` is the single result-CAS winner.
     private fun executeRun(req: JSONObject, dir: File, carriedApiKey: String = ""): String {
+        val cancelFile = File(dir, CANCEL_FILE)
+        val cancelRace = ModelExecutionCancellationRace()
+        return try {
+            kotlinx.coroutines.runBlocking {
+                withModelExecutionCancellation(
+                    cancelFile = cancelFile,
+                    pollMs = CANCEL_POLL_MS,
+                    cancellation = { ModelExecutionStopException() },
+                    race = cancelRace,
+                    block = { ensureBeforeDispatch ->
         // [ISSUE-12a] `req` is pre-parsed by the caller (CapturedRequestBody) —
         // the duplicate parse of the multi-MB body is gone.
-        // [T-worker-thinking-rules-restore] Restore this instance's custom thinking
-        // rules from the request JSON BEFORE building the provider — the worker
-        // process never touches ProviderRepository, so the resolver cache is empty
-        // here otherwise. Mirrors the streaming path.
-        restoreThinkingRules(req)
+        // Decode once for this request, never publish into the process-wide UI cache.
+        val requestThinkingRules = decodeThinkingRules(req)
 
         // ── Reconstruct ProviderInstance ──
         val instance = com.rikkaminis.app.data.model.ProviderInstance(
@@ -894,45 +952,7 @@ class ModelExecutionService : Service() {
         )
 
         // ── Reconstruct messages ──
-        val messages = jsonObjList(req.optJSONArray("messages")).map { obj ->
-            com.rikkaminis.app.data.model.LLMMessage(
-                role = try {
-                    com.rikkaminis.app.data.model.LLMMessage.Role.valueOf(
-                        obj.getString("role").uppercase()
-                    )
-                } catch (_: Exception) {
-                    com.rikkaminis.app.data.model.LLMMessage.Role.USER
-                },
-                content = obj.optString("content", ""),
-                // [T-worker-reasoning-content-roundtrip] Read back the
-                // reasoning_content serialized by ModelExecutionDispatcher —
-                // WITHOUT this, every offloaded request (chat streaming /
-                // titles / compaction / QuickTest) loses the assistant turns'
-                // captured reasoning, and DeepSeek V4 (thinking on +
-                // tool_calls in history) 400s with "The 'reasoning_content'
-                // in the thinking mode must be passed back to the API".
-                // Empty string is meaningful (field-presence signal) — only
-                // a MISSING key maps to null.
-                reasoningContent = obj.optString("reasoning_content", "").let {
-                    if (it.isEmpty() && !obj.has("reasoning_content")) null else it
-                },
-                // [fix/audit-s3m1] Non-streaming executeRun now parses
-                // contentParts exactly like the streaming path (:870) — the
-                // dispatcher serializes contentParts (buildRequestJson :95),
-                // and previously tool results / images carried as parts were
-                // silently dropped here, so non-streaming turns (title
-                // generation / compaction / QuickTest) saw text only.
-                contentParts = parseContentParts(obj),
-                audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
-                    val b64 = a.optString("data", "")
-                    if (b64.isEmpty()) null
-                    else com.rikkaminis.app.data.model.LLMMessage.AudioPart(
-                        format = a.optString("format", "wav"),
-                        base64Data = b64,
-                    )
-                },
-            )
-        }
+        val messages = readNonStreamingMessages(req.optJSONArray("messages"))
         val systemPrompt = req.optString("system_prompt", "").ifEmpty { null }
         val maxTokens = req.optInt("max_tokens", 4096)
         val temperature = if (req.has("temperature")) {
@@ -969,7 +989,7 @@ class ModelExecutionService : Service() {
             // poisoned process alive past the retry budget) shows the user why
             // instead of a bare `stale_key_cache`. exit_code stays the default
             // 1 (runtime failure) — 2 means "invalid args" in this CLI family.
-            return JSONObject().apply {
+            return@withModelExecutionCancellation JSONObject().apply {
                 put("error", WorkerKeyFreshness.STALE_KEY_CACHE)
                 put(
                     "message",
@@ -980,12 +1000,12 @@ class ModelExecutionService : Service() {
         }
         val apiKey = WorkerKeyHandoff.pickKey(carriedApiKey) {
             try {
-                com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this, "provider_secrets")
+                com.rikkaminis.app.util.EncryptedPrefsFactory.safeCreate(this@ModelExecutionService, "provider_secrets")
                     .getString("apikey_${instance.id}", null)
             } catch (_: Exception) { null }
         }
         if (apiKey.isEmpty()) {
-            return JSONObject().apply {
+            return@withModelExecutionCancellation JSONObject().apply {
                 put("error", "missing_api_key")
                 put("message", "No API key configured for ${instance.label}.")
                 put("exit_code", 2)
@@ -993,8 +1013,10 @@ class ModelExecutionService : Service() {
         }
 
         // ── Build provider ──
+        ensureBeforeDispatch()
         val provider = com.rikkaminis.app.provider.ProviderFactory.create(
-            instance = instance, apiKey = apiKey, model = model, context = this,
+            instance = instance, apiKey = apiKey, model = model, context = this@ModelExecutionService,
+            requestThinkingRules = requestThinkingRules,
         )
         // [FIX-1 / F-191] Same cross-process stamp as the streaming path above.
         if (req.optBoolean("enhanced_cache", false)) {
@@ -1011,6 +1033,9 @@ class ModelExecutionService : Service() {
                 ?.fastModeOverride = req.optBoolean("fast_mode")
         }
 
+        // A stop may arrive while ProviderFactory performs synchronous setup.
+        // Recheck before preparing payloads or entering any transport.
+        ensureBeforeDispatch()
         // ── Passthrough extras ──
         val inputJson = req.optString("input_json", "")
         val callWarnings = mutableListOf<String>()
@@ -1051,11 +1076,11 @@ class ModelExecutionService : Service() {
         val passthroughReq = req.optJSONObject("passthrough_request")
         if (passthroughReq != null) {
             if (openAI == null) {
-                return JSONObject().put("error", "passthrough_unsupported")
+                return@withModelExecutionCancellation JSONObject().put("error", "passthrough_unsupported")
                     .put("message", "passthrough mode requires an OpenAI-compatible provider instance")
                     .toString()
             }
-            return try {
+            return@withModelExecutionCancellation try {
                 val ptBody = passthroughReq.opt("body")?.takeIf { it != JSONObject.NULL } as? JSONObject
                 val ptHeaders = LinkedHashMap<String, String>()
                 passthroughReq.optJSONObject("headers")?.let { h ->
@@ -1064,14 +1089,13 @@ class ModelExecutionService : Service() {
                         if (v is String) ptHeaders[k] = v
                     }
                 }
-                val ptResult = runBlocking {
-                    openAI.rawPassthroughRequest(
-                        endpoint = passthroughReq.optString("endpoint", "").ifEmpty { null },
-                        method = passthroughReq.optString("method", "POST"),
-                        headers = ptHeaders,
-                        bodyObject = ptBody,
-                    )
-                }
+                ensureBeforeDispatch()
+                val ptResult = openAI.rawPassthroughRequest(
+                    endpoint = passthroughReq.optString("endpoint", "").ifEmpty { null },
+                    method = passthroughReq.optString("method", "POST"),
+                    headers = ptHeaders,
+                    bodyObject = ptBody,
+                )
                 JSONObject()
                     .put("passthrough", true)
                     .put("http_status", ptResult.status)
@@ -1081,6 +1105,7 @@ class ModelExecutionService : Service() {
                     .put("body_b64", Base64.encodeToString(ptResult.data, Base64.NO_WRAP))
                     .toString()
             } catch (t: Throwable) {
+                if (isExplicitWorkerCancellation(cancelRace)) throw t
                 JSONObject().put("error", "passthrough_failed")
                     .put("message", t.message ?: "passthrough request failed")
                     .toString()
@@ -1108,7 +1133,7 @@ class ModelExecutionService : Service() {
             endpointOverride = imageConfig.endpointOverride,
         )
         if (imageRoute is ModelUseProtocol.ImageRoute.Reject) {
-            return JSONObject().apply {
+            return@withModelExecutionCancellation JSONObject().apply {
                 put("error", imageRoute.error)
                 put("message", imageRoute.message)
                 put("exit_code", 2)
@@ -1126,13 +1151,12 @@ class ModelExecutionService : Service() {
                 // auto → a route-missing 4xx is a cacheable "no Images API".
                 val forced = imageRoute.mode == com.rikkaminis.app.data.model.ImageEndpointMode.imagesGenerations
                 try {
-                    val imgResult = runBlocking {
-                        openAI.generateImage(prompt, imageConfig.n, imageConfig.size, imageConfig.quality)
-                    }
+                    ensureBeforeDispatch()
+                    val imgResult = openAI.generateImage(prompt, imageConfig.n, imageConfig.size, imageConfig.quality)
                     if (!forced) {
                         imageEndpointCache = com.rikkaminis.app.data.model.ImageEndpointMode.imagesGenerations
                     }
-                    return JSONObject().apply {
+                    return@withModelExecutionCancellation JSONObject().apply {
                         put("model", model.id)
                         put("text", imgResult.text)
                         imgResult.usage?.let { u ->
@@ -1156,6 +1180,7 @@ class ModelExecutionService : Service() {
                         put("exit_code", 0)
                     }.toString()
                 } catch (t: Throwable) {
+                    if (isExplicitWorkerCancellation(cancelRace)) throw t
                     val routeMissing = !forced &&
                         (t is com.rikkaminis.app.data.model.LLMError.ProviderError ||
                             t is com.rikkaminis.app.data.model.LLMError.InvalidApiKey) &&
@@ -1175,7 +1200,7 @@ class ModelExecutionService : Service() {
                             outputModalities = model.outputModalities.orEmpty(),
                         )
                         val base = t.message ?: "image_generation_failed"
-                        return JSONObject().apply {
+                        return@withModelExecutionCancellation JSONObject().apply {
                             put("error", "image_generation_failed")
                             put("message", if (hint.isEmpty()) base else "$base\n\n$hint")
                             put("exit_code", 1)
@@ -1194,8 +1219,8 @@ class ModelExecutionService : Service() {
         // model ran with reasoning explicitly disabled.
         val thinkingLevel = thinkingLevelFromWire(req.optString("thinking_level", ""))
         val response = try {
-            runBlocking {
-                provider.sendMessage(
+            ensureBeforeDispatch()
+            provider.sendMessage(
                     messages = messages,
                     systemPrompt = systemPrompt,
                     maxTokens = maxTokens,
@@ -1209,43 +1234,23 @@ class ModelExecutionService : Service() {
                     tools = parseToolsJson(req.optJSONArray("tools")),
                     thinkingLevel = thinkingLevel,
                 )
-            }
         } catch (e: Throwable) {
             Log.w(TAG, "sendMessage failed: ${e.message}", e)
-            return JSONObject().apply {
-                put("error", "model_use_failed")
-                put("message", e.message ?: "unknown")
-                imageEndpointCache?.let { put("image_endpoint_resolved", it.name) }
-                put("exit_code", 1)
-            }.toString()
+            return@withModelExecutionCancellation nonStreamingFailureResult(e, cancelRace, imageEndpointCache?.name)
         }
 
-        return JSONObject().apply {
-            put("model", model.id)
-            put("text", response.text)
-            response.stopReason?.let { put("stop_reason", it) }
-            response.usage?.let { u ->
-                put("usage", JSONObject().apply {
-                    put("input_tokens", u.inputTokens)
-                    put("output_tokens", u.outputTokens)
-                })
+        return@withModelExecutionCancellation buildNonStreamingResult(
+            model.id, response, appliedExtras, callWarnings, imageEndpointCache,
+        )
+
+                    },
+                    publish = { completed -> writeResultAtomically(dir, completed) },
+                )
             }
-            put("media_files", JSONArray().apply {
-                response.mediaAttachments.forEach { m ->
-                    put(JSONObject().apply {
-                        put("type", m.type.value)
-                        put("mime_type", m.mimeType)
-                        put("data", android.util.Base64.encodeToString(m.data, android.util.Base64.NO_WRAP))
-                    })
-                }
-            })
-            if (appliedExtras.length() > 0) put("applied_extras", appliedExtras)
-            if (callWarnings.isNotEmpty()) put("warnings", JSONArray(callWarnings))
-            // [fix/audit3-1015 F-10] The auto probe's answer rides home with the
-            // chat result; :app persists it (this process must not touch prefs).
-            imageEndpointCache?.let { put("image_endpoint_resolved", it.name) }
-            put("exit_code", 0)
-        }.toString()
+        } catch (t: Throwable) {
+            if (isExplicitWorkerCancellation(cancelRace)) throw ModelExecutionStopException()
+            throw t
+        }
     }
 
     /**
@@ -1280,10 +1285,10 @@ class ModelExecutionService : Service() {
             }
             // [ISSUE-12a] `req` arrives pre-parsed (CapturedRequestBody) — this
             // path used to re-parse the same multi-MB body a second time.
-            // [T-worker-thinking-rules-restore] Same restore as executeRun — the
-            // streaming path is the main chat path, where the sensenova clamp bug
+            // [T-worker-thinking-rules-restore] Same per-request snapshot as executeRun —
+            // the streaming path is the main chat path, where the sensenova clamp bug
             // was observed live.
-            restoreThinkingRules(req)
+            val requestThinkingRules = decodeThinkingRules(req)
 
             // ── Reconstruct ProviderInstance (mirrors executeRun) ──
             val instance = com.rikkaminis.app.data.model.ProviderInstance(
@@ -1344,33 +1349,7 @@ class ModelExecutionService : Service() {
             )
 
             // ── Reconstruct messages ──
-            val messages = jsonObjList(req.optJSONArray("messages")).map { obj ->
-                com.rikkaminis.app.data.model.LLMMessage(
-                    role = try {
-                        com.rikkaminis.app.data.model.LLMMessage.Role.valueOf(
-                            obj.getString("role").uppercase()
-                        )
-                    } catch (_: Exception) {
-                        com.rikkaminis.app.data.model.LLMMessage.Role.USER
-                    },
-                    content = obj.optString("content", ""),
-                    // [T-worker-reasoning-content-roundtrip] Same read-back as
-                    // executeRun: missing key → null, present (even "") → keep.
-                    // See the full rationale at the executeRun reconstruction.
-                    reasoningContent = obj.optString("reasoning_content", "").let {
-                        if (it.isEmpty() && !obj.has("reasoning_content")) null else it
-                    },
-                    contentParts = parseContentParts(obj),
-                    audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
-                        val b64 = a.optString("data", "")
-                        if (b64.isEmpty()) null
-                        else com.rikkaminis.app.data.model.LLMMessage.AudioPart(
-                            format = a.optString("format", "wav"),
-                            base64Data = b64,
-                        )
-                    },
-                )
-            }
+            val messages = readStreamingMessages(req.optJSONArray("messages"))
             val systemPrompt = req.optString("system_prompt", "").ifEmpty { null }
             val maxTokens = req.optInt("max_tokens", 4096)
             val temperature = if (req.has("temperature")) {
@@ -1443,7 +1422,9 @@ class ModelExecutionService : Service() {
 
             // ── Provider ──
             @Suppress("UNCHECKED_CAST")
-            val provider = com.rikkaminis.app.provider.ProviderFactory.create(instance, apiKey, model, this)
+            val provider = com.rikkaminis.app.provider.ProviderFactory.create(
+                instance, apiKey, model, this, requestThinkingRules,
+            )
             // [FIX-1 / F-191] Stamp the Enhanced Cache toggle onto the provider
             // that actually sends the request. Previously this stamp lived only
             // in AgentLoopEngine, on the MAIN-process provider object — which
@@ -1836,6 +1817,111 @@ class ModelExecutionService : Service() {
      */
     private class ModelExecutionCancelledException : kotlinx.coroutines.CancellationException("cancelled")
 
+    internal fun readNonStreamingMessages(wireMessages: JSONArray?): List<com.rikkaminis.app.data.model.LLMMessage> =
+        jsonObjList(wireMessages).mapIndexed { index, obj ->
+            com.rikkaminis.app.data.model.LLMMessage(
+                role = try {
+                    com.rikkaminis.app.data.model.LLMMessage.Role.valueOf(
+                        obj.getString("role").uppercase()
+                    )
+                } catch (_: Exception) {
+                    com.rikkaminis.app.data.model.LLMMessage.Role.USER
+                },
+                content = obj.optString("content", ""),
+                // [T-worker-reasoning-content-roundtrip] Read back the
+                // reasoning_content serialized by ModelExecutionDispatcher —
+                // WITHOUT this, every offloaded request (chat streaming /
+                // titles / compaction / QuickTest) loses the assistant turns'
+                // captured reasoning, and DeepSeek V4 (thinking on +
+                // tool_calls in history) 400s with "The 'reasoning_content'
+                // in the thinking mode must be passed back to the API".
+                // Empty string is meaningful (field-presence signal) — only
+                // a MISSING key maps to null.
+                reasoningContent = obj.optString("reasoning_content", "").let {
+                    if (it.isEmpty() && !obj.has("reasoning_content")) null else it
+                },
+                // [fix/audit-s3m1] Non-streaming executeRun now parses
+                // contentParts exactly like the streaming path (:870) — the
+                // dispatcher serializes contentParts (buildRequestJson :95),
+                // and previously tool results / images carried as parts were
+                // silently dropped here, so non-streaming turns (title
+                // generation / compaction / QuickTest) saw text only.
+                contentParts = parseContentParts(obj),
+                anthropicReplay = AnthropicReplayIpc.messageReplay(wireMessages, index),
+                audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
+                    val b64 = a.optString("data", "")
+                    if (b64.isEmpty()) null
+                    else com.rikkaminis.app.data.model.LLMMessage.AudioPart(
+                        format = a.optString("format", "wav"),
+                        base64Data = b64,
+                    )
+                },
+            )
+        }
+
+    internal fun readStreamingMessages(wireMessages: JSONArray?): List<com.rikkaminis.app.data.model.LLMMessage> =
+        jsonObjList(wireMessages).mapIndexed { index, obj ->
+            com.rikkaminis.app.data.model.LLMMessage(
+                role = try {
+                    com.rikkaminis.app.data.model.LLMMessage.Role.valueOf(
+                        obj.getString("role").uppercase()
+                    )
+                } catch (_: Exception) {
+                    com.rikkaminis.app.data.model.LLMMessage.Role.USER
+                },
+                content = obj.optString("content", ""),
+                // [T-worker-reasoning-content-roundtrip] Same read-back as
+                // executeRun: missing key → null, present (even "") → keep.
+                // See the full rationale at the executeRun reconstruction.
+                reasoningContent = obj.optString("reasoning_content", "").let {
+                    if (it.isEmpty() && !obj.has("reasoning_content")) null else it
+                },
+                contentParts = parseContentParts(obj),
+                anthropicReplay = AnthropicReplayIpc.messageReplay(wireMessages, index),
+                audioParts = jsonObjList(obj.optJSONArray("audio_parts")).mapNotNull { a ->
+                    val b64 = a.optString("data", "")
+                    if (b64.isEmpty()) null
+                    else com.rikkaminis.app.data.model.LLMMessage.AudioPart(
+                        format = a.optString("format", "wav"),
+                        base64Data = b64,
+                    )
+                },
+            )
+        }
+
+    internal fun buildNonStreamingResult(
+        modelId: String,
+        response: com.rikkaminis.app.data.model.LLMResponse,
+        appliedExtras: JSONObject,
+        callWarnings: List<String>,
+        imageEndpointCache: com.rikkaminis.app.data.model.ImageEndpointMode?,
+    ): String = AnthropicReplayIpc.encodeResult(JSONObject().apply {
+        put("model", modelId)
+        put("text", response.text)
+        response.stopReason?.let { put("stop_reason", it) }
+        response.usage?.let { u ->
+            put("usage", JSONObject().apply {
+                put("input_tokens", u.inputTokens)
+                put("output_tokens", u.outputTokens)
+            })
+        }
+        put("media_files", JSONArray().apply {
+            response.mediaAttachments.forEach { m ->
+                put(JSONObject().apply {
+                    put("type", m.type.value)
+                    put("mime_type", m.mimeType)
+                    put("data", java.util.Base64.getEncoder().encodeToString(m.data))
+                })
+            }
+        })
+        if (appliedExtras.length() > 0) put("applied_extras", appliedExtras)
+        if (callWarnings.isNotEmpty()) put("warnings", JSONArray(callWarnings))
+        // [fix/audit3-1015 F-10] The auto probe's answer rides home with the
+        // chat result; :app persists it (this process must not touch prefs).
+        imageEndpointCache?.let { put("image_endpoint_resolved", it.name) }
+        put("exit_code", 0)
+    }, response.anthropicReplay)
+
     private fun parseContentParts(o: JSONObject): List<com.rikkaminis.app.data.model.AgentContentPart> {
         val parts = mutableListOf<com.rikkaminis.app.data.model.AgentContentPart>()
         o.optJSONArray("contentParts")?.let { arr ->
@@ -1945,20 +2031,20 @@ class ModelExecutionService : Service() {
         if (arr == null) emptyList() else (0 until arr.length()).map { arr.getJSONObject(it) }
 
     /**
-     * [T-worker-thinking-rules-restore] Restore the request's per-instance custom
-     * thinking rules into [com.rikkaminis.app.provider.thinking.ThinkingRuleResolver]'s
-     * cache. No-op when the dispatcher omitted the field (no custom rules — the
-     * overwhelmingly common case, and byte-identical to the pre-fix behaviour).
+     * Decode this request's custom thinking rules into a request-local snapshot.
+     * Deliberately does NOT publish into [ThinkingRuleResolver]'s process-wide
+     * cache: a second request on the same worker would otherwise overwrite this
+     * one before its provider builds the wire body.
+     *
+     * An absent field is an explicit EMPTY snapshot (older callers, or no custom
+     * rules), so nothing from a previous request can survive into this one.
      */
-    private fun restoreThinkingRules(req: JSONObject) {
-        val count = com.rikkaminis.app.provider.thinking.ThinkingRuleResolver
-            .restoreCustomRulesFromJson(
-                instanceId = req.optString("instance_id", "remote"),
-                field = req.optJSONArray("thinking_rules"),
-            )
-        if (count > 0) {
-            Log.i(TAG, "thinking rules restored: instance=${req.optString("instance_id", "remote")} count=$count")
+    private fun decodeThinkingRules(req: JSONObject): RequestThinkingRules {
+        val rules = RequestThinkingRules.fromJson(req.optJSONArray("thinking_rules"))
+        if (rules.size > 0) {
+            Log.i(TAG, "thinking rules captured: instance=${req.optString("instance_id", "remote")} count=${rules.size}")
         }
+        return rules
     }
 
     // ── passthrough parsing (mirrors ModelUseOffloadHandler) ──
@@ -2093,7 +2179,7 @@ private class LivenessHeartbeat(
  */
 
 /**
- * [ISSUE-12a] One run's request body, read from disk and parsed exactly once.
+ * [ISSUE-12a] One run's request body, read once and captured before either executor.
  *
  * The old flow read `request.json` three times (queue-frame decision, formal
  * read, ack-barrier decision) and parsed it at each site — 2 redundant reads
@@ -2129,8 +2215,8 @@ internal class CapturedRequestBody private constructor(
     fun jsonOrThrow(): JSONObject = json.getOrThrow()
 
     companion object {
-        /** Reads via [read] exactly once and parses exactly once. */
+        /** Reads via [read] exactly once; optional replay is decoded at this raw boundary. */
         fun capture(read: () -> String): CapturedRequestBody =
-            CapturedRequestBody(runCatching { JSONObject(read()) })
+            CapturedRequestBody(runCatching { AnthropicReplayIpc.parseRequest(read()) })
     }
 }

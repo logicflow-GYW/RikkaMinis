@@ -750,6 +750,7 @@
     <string name="error_output_truncated_repeated">模型多次達到輸出長度上限而被截斷。請嘗試在模型設定中調低上下文限制，或將問題拆分為較小的部分。</string>
         <string name="error_content_filtered">模型的安全過濾器攔截了這條回答。請嘗試換個說法，或切換其他模型。</string>
         <string name="error_stream_interrupted">與模型的連線中斷，回答未能完成——請重試。</string>
+    <string name="error_context_window_exceeded">回應因上下文視窗耗盡而中斷，內容可能不完整。請壓縮對話或開啟新工作階段。</string>
     <string name="error_empty_response_context_large">模型回傳了空回應。對話上下文可能過大 —— 請嘗試壓縮上下文或開啟新工作階段。</string>
     <string name="error_empty_response_after_tool">在工具結果之後，即使經過提醒，模型仍未回傳任何回應。它可能已過載 —— 請重試或切換模型。</string>
     <string name="thinking_truncated_hint">顯示最後 %1$dK / 共 %2$dK 字元</string>
@@ -785,12 +786,12 @@
     <string name="chat_menu_settings_always_last">固定最右</string>
     <string name="back_to_exit_press_again">再按一次返回退出</string>
     <string name="backup_snapshot_section_title">本機快照</string>
-    <string name="backup_snapshot_section_footer">每次還原前會自動儲存目前設定快照。點按可回滾設定。</string>
+    <string name="backup_snapshot_section_footer">每次還原前都會儲存本機快照。可匯入快照取回設定，之後新增的項目可能保留。</string>
     <string name="backup_snapshot_empty">尚無本機快照。</string>
-    <string name="backup_snapshot_restore_confirm_title">還原此快照？</string>
-    <string name="backup_snapshot_restore_confirm_text">目前設定將被 %1$s 的快照取代。目前設定會先儲存為新快照。</string>
-    <string name="backup_snapshot_restore">還原</string>
-    <string name="backup_done_fatal">還原中途失敗——設定只還原了一部分。可從快照回滾。</string>
+    <string name="backup_snapshot_restore_confirm_title">匯入此快照？</string>
+    <string name="backup_snapshot_restore_confirm_text">會將 %1$s 快照中的設定合併到目前的設定。這不是完整回復，之後新增的項目可能保留。匯入前會先儲存目前設定的新快照。</string>
+    <string name="backup_snapshot_restore">匯入快照</string>
+    <string name="backup_done_fatal">還原未完成，部分變更可能已套用。可匯入本機快照取回設定，但這不會復原所有變更。</string>
     <!-- [P4-i18n] Mirrors values/values-zh strings; zh-rTW previously lacked
          this key so the Delete-confirm dialog in Memory settings fell back to
          English hardcoded text. -->

@@ -1,6 +1,7 @@
 package com.rikkaminis.app.scheduled
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -38,7 +39,7 @@ class ScheduledTaskCrashMarkerTest {
             tasks = listOf(task("t1", streak = 2)),
             running = ScheduledRunMarker(taskId = "t1", sessionId = "s1", startedAt = 1_000L),
         )
-        val cleared = ScheduledTaskTransitions.clearRunningMarker(doc, "t1")
+        val cleared = ScheduledTaskTransitions.clearRunningMarker(doc, ScheduledRunRef("t1", "s1"))
         assertEquals("the marker must be gone", null, cleared.running)
         assertEquals("run state must not be credited or bumped", 2, cleared.tasks.single().failStreak)
     }
@@ -52,14 +53,14 @@ class ScheduledTaskCrashMarkerTest {
         assertSame(
             "a foreign marker must come back as the same instance (nothing to write)",
             doc,
-            ScheduledTaskTransitions.clearRunningMarker(doc, "t1"),
+            ScheduledTaskTransitions.clearRunningMarker(doc, ScheduledRunRef("t1", "s1")),
         )
     }
 
     @Test
     fun `an absent marker is a no-op`() {
         val doc = ScheduledTasksFile(tasks = listOf(task("t1")))
-        assertSame(doc, ScheduledTaskTransitions.clearRunningMarker(doc, "t1"))
+        assertSame(doc, ScheduledTaskTransitions.clearRunningMarker(doc, ScheduledRunRef("t1", "s1")))
     }
 
     /**
@@ -80,51 +81,49 @@ class ScheduledTaskCrashMarkerTest {
             phantom.task?.failStreak,
         )
 
-        val compensated = ScheduledTaskTransitions.clearRunningMarker(doc, "t1")
+        val compensated = ScheduledTaskTransitions.clearRunningMarker(doc, ScheduledRunRef("t1", "s1"))
         val after = ScheduledTaskTransitions.crashFailure(compensated, "t1")
         assertEquals("with the marker cleared there is no crash to recover", null, after.task)
         assertEquals(0, compensated.tasks.single().failStreak)
     }
 
     @Test
-    fun `finalizeLocked drops the running marker when the settlement throws`() {
-        assertTrue(
-            "finalizeLocked's catch must clear the persisted marker",
-            clearsMarkerOnFailure(runnerSource()),
-        )
+    fun `finalizeLocked retains marker and owner after failed settlement write`() {
+        val body = bodyOf(runnerSource(), "private suspend fun finalizeLocked(")
+        val pending = body.indexOf("ScheduledTaskWriteDisposition.WRITE_FAILED ->")
+        val persist = body.indexOf("ScheduledTaskWriteDisposition.PERSISTED ->")
+        assertTrue("a false write must be retained for retry", pending >= 0 && persist > pending)
+        // There is no marker-delete compensation after write failure; keep the exact owner marker.
+        assertFalse("failure branch must not erase the persisted owner marker", body.substring(pending, persist).contains("ScheduledTasksStore.clearRunningMarker(app, run)"))
     }
 
     @Test
-    fun `negative control - dropping the compensation is caught`() {
+    fun `completeUnstartedRun carries the selected generation instead of default zero`() {
+        val body = storeSource().substringAfter("suspend fun completeUnstartedRun(")
+            .substringBefore("/**")
+        assertTrue("store method must accept the captured owner", body.contains("taskGeneration: Long"))
+        assertTrue(body.contains("globalGeneration: Long"))
+        assertTrue(body.contains("run = ScheduledRunRef(taskId, null, taskGeneration, globalGeneration"))
+        assertTrue(body.contains("!admissionMatchesLocked(run)"))
+    }
+
+    @Test
+    fun `fire captures selection before prepare and settles catch with selected owner`() {
         val source = runnerSource()
-        val mutated = source.replace(
-            "ScheduledTasksStore.clearRunningMarker(app, taskId)",
-            "Unit",
-        )
-        assertTrue("the negative control must actually mutate the source", mutated != source)
-        assertTrue(
-            "removing the compensation must be detected",
-            !clearsMarkerOnFailure(mutated),
-        )
+        val fire = bodyOf(source, "private suspend fun fire(")
+        val selected = fire.indexOf("val selected = ScheduledRunRef(")
+        val prepare = fire.indexOf("prepareSession(app, task)")
+        val mark = fire.indexOf("ScheduledTasksStore.markRunning(app, run,")
+        val catchAt = fire.indexOf("catch (t: Throwable)")
+        val noSessionSettle = fire.indexOf("finalizeLocked(app, selected.copy(sessionId = sessionId)")
+        assertTrue(selected >= 0 && prepare > selected && mark > prepare)
+        assertTrue("pre-session failure must preserve selected epochs", noSessionSettle > catchAt)
+        assertFalse("unstarted failure may not construct a generation-zero identity", fire.contains("ScheduledRunRef(task.id, sid)"))
     }
 
-    // ── the check as a function of the source text ───────────────────────────
+    private fun storeSource(): String = readRepoFile("src/android/app/src/main/java/com/rikkaminis/app/scheduled/ScheduledTasksStore.kt")
 
-    private fun clearsMarkerOnFailure(source: String): Boolean {
-        val body = bodyOf(source, "private suspend fun finalizeLocked(")
-        val catchAt = body.indexOf("catch (t: Throwable)")
-        if (catchAt < 0) return false
-        val tail = body.substring(catchAt)
-        val call = tail.indexOf("ScheduledTasksStore.clearRunningMarker(app, taskId)")
-        if (call < 0) return false
-        // The compensation must land BEFORE the in-memory lock is released, or
-        // the next beat can still observe "no run + marker" in its window.
-        val release = tail.indexOf("if (runningTaskId == taskId) runningTaskId = null")
-        return release < 0 || call < release
-    }
-
-    private fun runnerSource(): String =
-        readRepoFile("src/android/app/src/main/java/com/rikkaminis/app/scheduled/ScheduledTaskRunner.kt")
+    private fun runnerSource(): String = readRepoFile("src/android/app/src/main/java/com/rikkaminis/app/scheduled/ScheduledTaskRunner.kt")
 
     private fun readRepoFile(relative: String): String {
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: error("user.dir unset"))

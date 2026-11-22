@@ -1,8 +1,15 @@
 package com.rikkaminis.app.sandbox.offload
 
+import com.rikkaminis.app.data.model.AnthropicReplayCodec
 import com.rikkaminis.app.data.model.LLMMediaAttachment
 import com.rikkaminis.app.data.model.LLMStreamChunk
 import com.rikkaminis.app.data.model.LLMUsage
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.json.JSONObject
 
 /**
@@ -26,7 +33,7 @@ import org.json.JSONObject
  *     cache_creation / cache_read are OPTIONAL: the key is omitted when the
  *     provider did not report cache tokens (null) and present (even when 0)
  *     when caching is enabled. Presence is the discriminator — see F-05.
- *   {"t":"finished","stop":"stop_reason","truncated":false}
+ *   {"t":"finished","stop":"stop_reason","truncated":false}  optional `anthropic_replay` capsule
  *   {"t":"media","type":"image","mime":"image/png","b64":"..."}
  *   {"t":"error","m":"message"}
  *   {"t":"done"}                          sentinel: stream complete
@@ -71,8 +78,18 @@ object ChatStreamJsonl {
             chunk.usage.cacheReadInputTokens?.let { put("cache_read", it) }
             put("ctx", chunk.usage.latestContextTokens)
         }.toString()
-        is LLMStreamChunk.Finished -> JSONObject()
-            .put("t", "finished").put("stop", chunk.stopReason ?: "").put("truncated", chunk.truncated).toString()
+        is LLMStreamChunk.Finished -> {
+            val replay = chunk.anthropicReplay
+            // Keep the legacy frame byte-for-byte for all existing producers.
+            if (replay == null) JSONObject()
+                .put("t", "finished").put("stop", chunk.stopReason ?: "").put("truncated", chunk.truncated).toString()
+            else buildJsonObject {
+                put("t", "finished")
+                put("stop", chunk.stopReason.orEmpty())
+                put("truncated", chunk.truncated)
+                put(AnthropicReplayCodec.FIELD, AnthropicReplayCodec.encode(replay))
+            }.toString()
+        }
         is LLMStreamChunk.MediaAttachment -> JSONObject()
             .put("t", "media")
             .put("type", chunk.attachment.type.value)
@@ -109,6 +126,9 @@ object ChatStreamJsonl {
     fun decode(line: String): LLMStreamChunk? {
         val t = line.trim()
         if (t.isEmpty()) return null
+        // Read replay values from the original line: Android JSONObject rounds numbers
+        // outside its Long/Double representation even when the JSON itself is valid.
+        if (AnthropicReplayCodec.FIELD in t || "\\u" in t) decodeReplayFinished(t)?.let { return it }
         val obj = try { JSONObject(t) } catch (_: Exception) { return null }
         return when (obj.optString("t", "")) {
             "started" -> LLMStreamChunk.Started
@@ -141,6 +161,7 @@ object ChatStreamJsonl {
             "finished" -> LLMStreamChunk.Finished(
                 stopReason = obj.optString("stop", "").ifEmpty { null },
                 truncated = obj.optBoolean("truncated", false),
+                anthropicReplay = if (obj.has(AnthropicReplayCodec.FIELD)) AnthropicReplayCodec.unavailable() else null,
             )
             "media" -> {
                 val b64 = obj.optString("b64", "")
@@ -161,6 +182,17 @@ object ChatStreamJsonl {
             "queue" -> LLMStreamChunk.QueueStatus(obj.optInt("w", 0))
             else -> null
         }
+    }
+
+    /** Exact-tree path only for an existing Finished with its optional structured field. */
+    private fun decodeReplayFinished(line: String): LLMStreamChunk.Finished? {
+        val obj = runCatching { Json.parseToJsonElement(line) as? JsonObject }.getOrNull() ?: return null
+        if (obj["t"] != JsonPrimitive("finished") || AnthropicReplayCodec.FIELD !in obj) return null
+        return LLMStreamChunk.Finished(
+            stopReason = (obj["stop"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.ifEmpty { null },
+            truncated = (obj["truncated"] as? JsonPrimitive)?.booleanOrNull ?: false,
+            anthropicReplay = AnthropicReplayCodec.decode(obj[AnthropicReplayCodec.FIELD]),
+        )
     }
 
     /** True if the line carries a stream-terminal signal. */

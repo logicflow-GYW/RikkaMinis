@@ -38,7 +38,7 @@ class BackupR2WiringTest {
     }
 
     @Test
-    fun `import outcome controls both existing tray variables`() {
+    fun `import outcome controls the existing tray variables`() {
         val block = between(
             readSource("ui/settings/BackupSettingsScreen.kt"),
             "                    importReport = report",
@@ -46,8 +46,10 @@ class BackupR2WiringTest {
         )
         assertTrue(block.contains("val outcome = restoreNotifyOutcome("))
         assertTrue(block.contains("fatal = report?.fatal"))
+        assertTrue(block.contains("providerPersistenceWarning = report?.providerPersistenceWarning"))
         assertTrue(block.contains("fatalHeadline = context.getString(R.string.backup_done_fatal)"))
         assertTrue(block.contains("restoredOk = outcome.ok"))
+        assertTrue(block.contains("restoredDegraded = outcome.degraded"))
         assertTrue(block.contains("restoredMsg = outcome.body"))
     }
 
@@ -58,8 +60,9 @@ class BackupR2WiringTest {
             "            // Always notify completion from the tray",
             "    // [meta-audit-1028 D4 F-02]",
         )
-        assertTrue(block.contains("if (restoredOk) R.string.webdav_notify_title_restored"))
-        assertTrue(block.contains("else R.string.webdav_notify_title_failed"))
+        assertTrue(block.contains("restoredDegraded -> R.string.backup_import"))
+        assertTrue(block.contains("restoredOk -> R.string.webdav_notify_title_restored"))
+        assertTrue(block.contains("else -> R.string.webdav_notify_title_failed"))
         assertTrue(block.contains("body = restoredMsg ?: \"\""))
     }
 }

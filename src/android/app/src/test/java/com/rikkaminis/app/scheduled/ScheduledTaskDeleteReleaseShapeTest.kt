@@ -72,7 +72,7 @@ class ScheduledTaskDeleteReleaseShapeTest {
     fun importDocument_preservesTheUnreadableFileBeforeOverwritingIt() {
         val body = functionBody(storeCode(), "suspend fun importDocument(")
         val preserve = body.indexOf("preserveUnreadableLocked(context)")
-        val write = body.indexOf("writeLocked(context")
+        val write = body.indexOf("writeTransitionLocked(context, live")
         assertTrue("the unreadable-file preservation is gone", preserve >= 0)
         assertTrue("preservation must run BEFORE the overwrite", write > preserve)
         assertTrue(

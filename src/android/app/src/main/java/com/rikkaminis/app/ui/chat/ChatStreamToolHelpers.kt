@@ -71,7 +71,7 @@ internal fun buildLlmMessagesFromParsed(
             )
         )
     }
-    return result
+    return guardAnthropicReplayHistory(result)
 }
 
 internal fun buildSingleLlmMessage(
@@ -90,8 +90,9 @@ internal fun buildSingleLlmMessage(
     val textContent = StringBuilder()
 
     if (malformed) {
-        textContent.append(partsJson)
-        contentParts.add(AgentContentPart.Text(partsJson))
+        val publicFallback = com.rikkaminis.app.data.AnthropicReplayPublicProjection.partsJson(partsJson)
+        textContent.append(publicFallback)
+        contentParts.add(AgentContentPart.Text(publicFallback))
     } else {
         for (part in parts) {
             when (part) {
@@ -158,6 +159,7 @@ internal fun buildSingleLlmMessage(
         contentParts = contentParts,
         dbMessageId = entity.id,
         reasoningContent = entity.reasoningContent,
+        anthropicReplay = if (malformed) null else readAnthropicReplayPart(partsJson, entity.role, parts),
     )
 }
 

@@ -72,6 +72,14 @@ object TruncatedToolCallPolicy {
     }
 
     /**
+     * Input + output exhausted the context window, NOT the output allowance.
+     * Keep separate from isTruncatedFinish: length-wall callers must not resend
+     * the same overfull input as an output-limit continuation.
+     */
+    fun isContextWindowTruncated(reason: String?): Boolean =
+        reason?.trim()?.lowercase() == "model_context_window_exceeded"
+
+    /**
      * The synthetic tool result to hand back instead of executing, or null
      * when the call may run normally. Keeping this in one place means the
      * guard site and its test share the same wording and the same trigger.
@@ -94,6 +102,11 @@ object TruncatedToolCallPolicy {
      * grep it; only the explanation clause differs.
      */
     fun rejectionReason(toolName: String, finishReason: String?, turnTruncated: Boolean = false): String? {
+        if (isContextWindowTruncated(finishReason)) {
+            return "[CONTEXT_TRUNCATED] Tool '$toolName' was NOT executed: the context window " +
+                "was exhausted before the response completed, so its arguments may " +
+                "be incomplete. Reduce the input context before planning a complete call."
+        }
         val ceilingDeclared = isTruncatedFinish(finishReason)
         if (!ceilingDeclared && !turnTruncated) return null
         if (ceilingDeclared) {

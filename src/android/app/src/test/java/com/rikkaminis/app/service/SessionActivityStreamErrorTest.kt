@@ -6,6 +6,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.rikkaminis.app.scheduled.ScheduledRunMarker
+import com.rikkaminis.app.scheduled.ScheduledRunRef
 import com.rikkaminis.app.scheduled.ScheduledTask
 import com.rikkaminis.app.scheduled.ScheduledTaskTransitions
 import com.rikkaminis.app.scheduled.ScheduledTasksFile
@@ -238,33 +240,14 @@ class SessionActivityStreamErrorTest {
      * deferred sites park the banner in `loopState.pendingInlineError` for
      * the turn tail to drain through `TerminalErrorPlacement` into the SAME
      * funnel — an inline call before the turn's row exists would stamp the
-     * banner onto the previous turn's row. `>=` and not `==` on both counts
-     * on purpose: adding a funnel site is correct; removing one, breaking
-     * the tail drain (or opening a second error channel) is the regression.
+     * banner onto the previous turn's row. Each real site is named by its
+     * call and owning control-flow block below: adding another site must not
+     * compensate for losing one. Production and mutation assertions share
+     * that exact manifest, including the deferred context-window banner.
      */
     @Test
     fun `the engine keeps a single error funnel and no bypass channel`() {
         assertWiring(engineFunnelIntact(engineSource()), audience = "AgentLoopEngine funnel")
-        val body = normalize(engineSource())
-        val inline = occurrences(body, "host.setInlineError(")
-        val deferred = occurrences(body, "loopState.pendingInlineError = host.string(")
-        // [FIX-R4-Q F-01] Floor 5 -> 3: the empty-response hint and the
-        // EOF give-up banner are fall-through branches whose row is persisted
-        // by the turn tail BELOW them, so an inline write there would stamp
-        // the banner onto the PREVIOUS turn's row (the shape
-        // TerminalErrorPlacementTest rejects). They park in the deferred slot
-        // instead — the second shape this very KDoc endorses. Site total is
-        // unchanged (10 before, 10 now: 2 moved direct -> deferred); the
-        // surviving direct three are the two "persist an empty row first"
-        // branches plus the tail flush.
-        assertTrue("expected at least 3 direct funnel sites, found $inline", inline >= 3)
-        // [FIX-R4-Q F-01] Floor 5 -> 6: the EOF give-up banner became a
-        // deferred site (its row is now persisted by the turn tail below it),
-        // and `normalize` collapses that multi-line assignment onto one line,
-        // so the live count is 6. The floor has to move with the live count —
-        // at 5 the negative control below ("remove one deferred site") stayed
-        // green, i.e. the funnel could lose a site unnoticed.
-        assertTrue("expected at least 6 deferred banner sites, found $deferred", deferred >= 6)
     }
 
     /**
@@ -283,6 +266,8 @@ class SessionActivityStreamErrorTest {
         )
         assertWiring(runnerMapsVerdict(runner), audience = "ScheduledTaskRunner.onSessionSettled")
 
+        // [A03] A settle is credited only for the run the document names, so
+        // the fixture is the fire pass's own state: task + ITS marker.
         val file = ScheduledTasksFile(
             globalEnabled = true,
             tasks = listOf(
@@ -296,6 +281,7 @@ class SessionActivityStreamErrorTest {
                     failStreak = 0,
                 ),
             ),
+            running = ScheduledRunMarker(taskId = "t-1", sessionId = "s1", startedAt = 1_000L),
         )
 
         // A flagged run settles as failed (RESULT_ERROR = "error").
@@ -303,7 +289,7 @@ class SessionActivityStreamErrorTest {
         flags.mark("s1")
         val outcome = if (flags.consume("s1")) ScheduledTask.RESULT_ERROR else ScheduledTask.RESULT_OK
         assertEquals("error", outcome)
-        val failed = ScheduledTaskTransitions.completeRun(file, "t-1", outcome, "2026-10-15")
+        val failed = ScheduledTaskTransitions.completeRun(file, ScheduledRunRef("t-1", "s1"), outcome, "2026-10-15")
         assertEquals("a failed run counts one failure", 1, failed.task!!.failStreak)
         assertNull(
             "a failed run must NOT advance the daily gate — that is what keeps the day's retry open",
@@ -316,7 +302,7 @@ class SessionActivityStreamErrorTest {
         val cleanOutcome =
             if (clean.consume("s1")) ScheduledTask.RESULT_ERROR else ScheduledTask.RESULT_OK
         assertEquals("ok", cleanOutcome)
-        val ok = ScheduledTaskTransitions.completeRun(file, "t-1", cleanOutcome, "2026-10-15")
+        val ok = ScheduledTaskTransitions.completeRun(file, ScheduledRunRef("t-1", "s1"), cleanOutcome, "2026-10-15")
         assertEquals(0, ok.task!!.failStreak)
         assertEquals("2026-10-15", ok.task.lastRunDate)
     }
@@ -462,6 +448,72 @@ class SessionActivityStreamErrorTest {
         assertTrue("a second error channel in the engine must fail the funnel probe", threw)
     }
 
+    @Test
+    fun `each real funnel site independently rejects deletion and duplication`() {
+        val body = normalize(engineCode(engineSource()))
+        assertWiring(engineFunnelIntact(body), "unmodified real source")
+        for (site in engineFunnelSites()) {
+            val position = funnelSiteOffsets(body, site).single()
+            val deleted = body.removeRange(position, position + site.call.length)
+            assertFunnelRejected(deleted, "delete ${site.name}")
+            val duplicated = body.substring(0, position) + site.call + "; " + body.substring(position)
+            assertFunnelRejected(duplicated, "duplicate ${site.name}")
+            println("FUNNEL_NEGATIVE delete+duplicate ${site.name}")
+        }
+    }
+
+    @Test
+    fun `same resource sibling or new site cannot compensate for a missing site`() {
+        val body = normalize(engineCode(engineSource()))
+        val sites = engineFunnelSites()
+        val missing = sites.single { it.name == "deterministic empty wall" }
+        val sibling = sites.single { it.name == "repetition-dominated wall" }
+        val missingAt = funnelSiteOffsets(body, missing).single()
+        val lost = body.removeRange(missingAt, missingAt + missing.call.length)
+        val siblingAt = funnelSiteOffsets(lost, sibling).single()
+        // Same key and SAME total: duplicate another owner cannot replace it.
+        assertFunnelRejected(lost.substring(0, siblingAt) + sibling.call + "; " + lost.substring(siblingAt),
+            "same resource sibling compensation")
+        assertFunnelRejected(lost + "\n" + missing.call, "relocated out of its owning guard")
+        assertFunnelRejected(body + "\nhost.setInlineError(host.string(R.string.error_stream_interrupted))",
+            "unlisted added direct site")
+        assertFunnelRejected(body + "\nloopState.pendingInlineError = host.string(R.string.error_context_window_exceeded)",
+            "unlisted added deferred site")
+    }
+
+    @Test
+    fun `comments strings and inert guard names cannot replace an owned site`() {
+        val body = normalize(engineCode(engineSource()))
+        val quote = '"'
+        for (site in engineFunnelSites()) {
+            val position = funnelSiteOffsets(body, site).single()
+            val head = body.substring(0, position)
+            val tail = body.substring(position + site.call.length)
+            for (decoy in listOf("/* ${site.call} */", "// ${site.call}\n", "$quote${site.call}$quote")) {
+                assertFunnelRejected(head + decoy + tail, "decoy ${site.name}")
+            }
+        }
+        val context = engineFunnelSites().single { it.name == "context-window exhaustion" }
+        val owner = context.owners.last()
+        val inertOwner = body.replace(owner, "if (false) { /* $owner */")
+        assertFunnelRejected(inertOwner, "commented owning context guard")
+        val decoys = "/* outer /* nested */ end */\nval s = " + quote + "URL // " + '$' +
+            "{" + quote + "x" + quote + "} /* text */" + quote
+        assertFalse("literal content must not become code", engineCode(decoys).contains("URL"))
+        assertWiring(engineFunnelIntact(body + "\n/* ${context.call} */\n" + quote + context.call + quote),
+            "harmless non-code duplicates")
+    }
+
+    private fun assertFunnelRejected(source: String, audience: String) {
+        val rejected = try {
+            assertWiring(engineFunnelIntact(source), audience)
+            false
+        } catch (_: AssertionError) {
+            true
+        }
+        assertTrue("$audience must fail the SAME production wiring assertion", rejected)
+    }
+
     // ── the wiring assertions themselves (reused by the controls) ────────────
 
     private fun assertWiring(verdict: String?, audience: String) {
@@ -548,26 +600,133 @@ class SessionActivityStreamErrorTest {
         else -> null
     }
 
+    private data class FunnelSite(
+        val name: String,
+        val call: String,
+        val owners: List<String>,
+        val outside: List<String> = emptyList(),
+    )
+
+    /** Resource/call + owning real branch, not the total number of banners.
+     * The five output-wall sites share a key, but never share an owner. */
+    private fun engineFunnelSites(): List<FunnelSite> {
+        val noTools = "if (toolCalls.isEmpty()) {"
+        val errorFinish = "if (toolCalls.isEmpty() && ContentFilterFinishPolicy.isErrorShapedFinish(turnFinishReason)) {"
+        val errorPartial = "if (turnTextRaw.isNotEmpty()) {"
+        val length = "if (TruncatedToolCallPolicy.isTruncatedFinish(turnFinishReason)) {"
+        val emptyWall = "if (turnText.isEmpty()) {"
+        val deterministic = "if (loopState.deterministicEmptyStreak >= com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.deterministicEmptyLimit()) {"
+        val deferred = "loopState.pendingInlineError = host.string(R.string."
+        val outputWall = deferred + "error_output_truncated_repeated)"
+        return listOf(
+            FunnelSite("error-shaped partial ceiling", deferred + "error_stream_interrupted)", listOf(errorFinish, errorPartial),
+                listOf("if (loopState.eofStubContinues < eofStubMax) {")),
+            FunnelSite("error-shaped empty after retry", "host.setInlineError(host.string(R.string.error_stream_interrupted))",
+                listOf(errorFinish), listOf(errorPartial)),
+            FunnelSite("content-filter refusal", "host.setInlineError(host.string(R.string.error_content_filtered))",
+                listOf("if (blockedEmptyReply) {")),
+            FunnelSite("context-window exhaustion", deferred + "error_context_window_exceeded)",
+                listOf(noTools, "if (TruncatedToolCallPolicy.isContextWindowTruncated(turnFinishReason)) {")),
+            FunnelSite("deterministic empty wall", outputWall, listOf(noTools, length, emptyWall, deterministic)),
+            FunnelSite("empty wall retry ceiling", outputWall, listOf(noTools, length, emptyWall), listOf(deterministic)),
+            FunnelSite("repetition-dominated wall", outputWall, listOf(noTools, length, "if (isRepetitionDominated(turnText)) {")),
+            FunnelSite("visible wall continuation ceiling", outputWall, listOf(noTools, length,
+                "if (loopState.lengthWallContinues >= com.rikkaminis.app.data.AgentRuntimeLimitsPrefs.lengthWallContinues()) {")),
+            FunnelSite("empty clean-turn hint", "loopState.pendingInlineError = hint", listOf(noTools,
+                "if (TurnVisibleContent.isEmptyTurn(turnText, turnVisibleBlocks, turnFinishReason, turnTruncated)) {")),
+            FunnelSite("EOF partial continuation ceiling", outputWall,
+                listOf(noTools, "if (turnTruncated && hasVisibleContent) {")),
+            FunnelSite("persisted tail banner drain", "host.setInlineError(banner)", listOf(noTools, "?.let { banner ->")),
+        )
+    }
+
+    private fun funnelSiteOffsets(body: String, site: FunnelSite): List<Int> {
+        fun scopes(guard: String): List<IntRange> = Regex(Regex.escape(guard)).findAll(body).mapNotNull {
+            val open = body.indexOf('{', it.range.first)
+            val close = matchingBrace(body, open)
+            if (close > open) open..close else null
+        }.toList()
+        val inside = site.owners.map { scopes(it) }
+        val outside = site.outside.map { scopes(it) }
+        if (inside.any { it.isEmpty() } || outside.any { it.isEmpty() }) return emptyList()
+        return Regex(Regex.escape(site.call)).findAll(body).map { it.range.first }
+            .filter { p -> inside.all { group -> group.any { p in it } } &&
+                outside.none { group -> group.any { p in it } } }.toList()
+    }
+
+    /** Blank comments and literals without changing offsets; interpolation
+     * strings and nested block comments cannot forge a code-site or guard. */
+    private fun engineCode(source: String): String {
+        val out = source.toCharArray()
+        var i = 0
+        while (i < source.length) {
+            val end = when {
+                source.startsWith("//", i) || source.startsWith("/*", i) -> engineCommentEnd(source, i)
+                source[i] == '"' || source[i] == '\'' -> engineLiteralEnd(source, i)
+                else -> { i++; continue }
+            }
+            for (p in i until end) if (out[p] != '\n') out[p] = ' '
+            i = end
+        }
+        return String(out)
+    }
+
+    private fun engineCommentEnd(s: String, start: Int): Int {
+        if (s.startsWith("//", start)) return s.indexOf('\n', start).let { if (it < 0) s.length else it }
+        var depth = 1
+        var i = start + 2
+        while (i < s.length && depth > 0) {
+            when {
+                s.startsWith("/*", i) -> { depth++; i += 2 }
+                s.startsWith("*/", i) -> { depth--; i += 2 }
+                else -> i++
+            }
+        }
+        return i
+    }
+
+    private fun engineLiteralEnd(s: String, start: Int): Int {
+        val quote = s[start]
+        val triple = s.startsWith("\"\"\"", start)
+        var i = start + if (triple) 3 else 1
+        while (i < s.length) {
+            when {
+                triple && s.startsWith("\"\"\"", i) -> return i + 3
+                !triple && s[i] == '\\' -> i += 2
+                !triple && s[i] == quote -> return i + 1
+                quote == '"' && s.startsWith("\${", i) -> i = engineTemplateEnd(s, i + 2)
+                else -> i++
+            }
+        }
+        return s.length
+    }
+
+    private fun engineTemplateEnd(s: String, start: Int): Int {
+        var depth = 1
+        var i = start
+        while (i < s.length && depth > 0) {
+            when {
+                s.startsWith("//", i) || s.startsWith("/*", i) -> i = engineCommentEnd(s, i)
+                s[i] == '"' || s[i] == '\'' -> i = engineLiteralEnd(s, i)
+                s[i] == '{' -> { depth++; i++ }
+                s[i] == '}' -> { depth--; i++ }
+                else -> i++
+            }
+        }
+        return i
+    }
+
     private fun engineFunnelIntact(source: String): String? {
-        val body = normalize(source)
-        // One funnel, two shapes [fix/da1015-funnel-evidence]: immediate
-        // sites call host.setInlineError inline; [deep-audit-1015 BUG-01b]
-        // deferred sites park the banner in loopState.pendingInlineError and
-        // the turn tail drains the slot through TerminalErrorPlacement into
-        // the SAME funnel (persist first, then surface — an inline call
-        // before the turn's row exists stamps the banner onto the PREVIOUS
-        // turn's row). The literal call count therefore split in two, but
-        // the invariant did not: every banner must still land in
-        // host.setInlineError, and no second error channel may open.
-        val inline = occurrences(body, "host.setInlineError(")
-        // [FIX-R4-Q F-01] 3, not 5 — see the note in the test above: two
-        // fall-through sites moved to the deferred shape (the funnel itself,
-        // the drain and the no-second-channel rule below are unchanged).
-        if (inline < 3) return "the engine lost direct funnel sites: found $inline, expected at least 3"
-        val deferred = occurrences(body, "loopState.pendingInlineError = host.string(")
-        // [FIX-R4-Q F-01] 6, not 5 — see the note in the test above (the EOF
-        // give-up banner is now a deferred site, so a removed site must go red).
-        if (deferred < 6) return "the engine lost deferred banner sites: found $deferred, expected at least 6"
+        val body = normalize(engineCode(source))
+        val actual = Regex("""host\.setInlineError\s*\(|loopState\.pendingInlineError\s*=(?!\s*null\b)""")
+            .findAll(body).map { it.range.first }.toSet()
+        val owned = mutableSetOf<Int>()
+        for (site in engineFunnelSites()) {
+            val matches = funnelSiteOffsets(body, site)
+            if (matches.size != 1) return "${site.name}: expected exactly its own funnel site, found ${matches.size}"
+            if (!owned.add(matches.single())) return "${site.name}: two manifest entries claimed one site"
+        }
+        if (actual != owned) return "unlisted or missing funnel sites: actual=$actual owned=$owned"
         // The deferred slot must actually drain: the tail hands BOTH the
         // banner and the persist result to TerminalErrorPlacement and puts
         // what comes back onto the same funnel. A slot nobody drains would

@@ -241,8 +241,9 @@ internal fun buildChatMessagesTranscript(
         // :151) vanished on session reload. The verdict now goes through the
         // ONE shared predicate every visible-content entry point uses.
         if (entity.role == "user" && !userRowHasVisibleContent(text, restoredImageUris, restoredAttachmentUris)) return@mapNotNull null
-        // Skip assistant messages that became empty
-        if (entity.role == "assistant" && text.isBlank() && blocks.isEmpty()) return@mapNotNull null
+        // [FIX-D01-COLD] A persisted terminal error is visible content even
+        // when the provider emitted no text. Keep ordinary empty rows hidden.
+        if (entity.role == "assistant" && text.isBlank() && blocks.isEmpty() && entity.errorInfo.isNullOrBlank()) return@mapNotNull null
         ChatMessage(
             id = entity.id,
             role = entity.role,

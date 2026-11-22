@@ -927,7 +927,7 @@ internal suspend fun ChatViewModel.generateCompactSummary(conversationText: Stri
                         "[Compact] summary TRUNCATED on ${candidate.model.displayName} " +
                             "candidate=${index + 1}/${chain.size} ($label) — trying next",
                     )
-                    lastFailure = compactSummaryTruncatedFailure(candidate.model.displayName)
+                    lastFailure = compactSummaryTruncatedFailure(candidate.model.displayName, r.response.stopReason)
                     continue
                 }
                 AppLogger.info(
@@ -1085,28 +1085,26 @@ internal fun compactionCandidateKey(
 }
 
 /**
- * [fix/compact-truncation-guard-1005] True when the summary response was cut
- * at the output ceiling and must NOT be adopted. The provider passes
- * `finish_reason` through verbatim; the output-ceiling probe over 8
- * OpenAI-compatible relays (compact-exp-1004/capprobe) showed silent
- * truncation arrives as the OpenAI spelling "length" (WorkBuddy), while
- * relays that error out go through SendResult.RemoteFailure instead — so
- * only that one spelling is intercepted. Null / "end_turn" / "stop" /
- * unrecognised values pass (conservative: a channel's non-standard
- * completion marker must never cost a good summary its candidacy).
- * Deliberately narrower than [TruncatedToolCallPolicy.isTruncatedFinish],
- * which guards a different contract (turn tool-calls) with a wider set.
+ * A summary cut at an output or context limit must NOT replace history.
+ * Reuse the shared, known-reason predicates: OpenAI length and the native
+ * Anthropic/Gemini max_tokens spellings carry the same incomplete contract.
+ * Null, normal and unknown nonstandard markers still pass; no guessed errors.
+ * Context exhaustion rejects adoption without turning into a length-wall retry.
  */
 internal fun compactSummaryIsTruncated(stopReason: String?): Boolean =
-    stopReason?.trim()?.lowercase() == "length"
+    com.rikkaminis.app.ui.chat.TruncatedToolCallPolicy.isTruncatedFinish(stopReason) ||
+        com.rikkaminis.app.ui.chat.TruncatedToolCallPolicy.isContextWindowTruncated(stopReason)
 
 /**
  * [fix/compact-truncation-guard-1005] The failure recorded when a candidate's
  * summary came back truncated — assigned to `lastFailure`, so an
  * all-truncated chain throws the same shape the timeout/failure paths use.
  */
-internal fun compactSummaryTruncatedFailure(modelDisplayName: String): IllegalStateException =
-    IllegalStateException("compaction summary truncated (stopReason=length) on $modelDisplayName")
+internal fun compactSummaryTruncatedFailure(
+    modelDisplayName: String,
+    stopReason: String? = "length",
+): IllegalStateException =
+    IllegalStateException("compaction summary truncated (stopReason=$stopReason) on $modelDisplayName")
 
 /**
  * [fix/compact-telemetry-superseded-1005] Telemetry segment appended to the

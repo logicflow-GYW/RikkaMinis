@@ -304,6 +304,41 @@ class ChatBackupBudgetTest {
         assertEquals("""{"path":"/tmp/a"}""", tu.optString("input"))
     }
 
+    // ── Private replay has no portable backup/import lane ────────────────
+
+    @Test
+    fun privateReplayIsRemovedOnBothBackupFaces() {
+        val raw = """[{"type":"text","value":"公开 hello"},{"type":"anthropicReplayV1","value":{"signature":"SIG_SYNTH_D05","data":"DATA_SYNTH_D05"}},{"type":"toolUse","value":{"toolUseId":"c","name":"file_read","input":"{}"}},{"type":"toolResult","value":{"toolUseId":"c","output":"ok","success":true}},{"type":"futurePart","value":"keep"}]"""
+        for (out in listOf(ConfigBackup.sanitizeChatParts(raw)!!, ConfigBackup.sanitizeIncomingParts(raw))) {
+            assertTrue(!out.contains("SIG_SYNTH_D05") && !out.contains("DATA_SYNTH_D05"))
+            val parts = JSONArray(out)
+            assertEquals(4, parts.length())
+            assertEquals("公开 hello", parts.getJSONObject(0).getString("value"))
+            assertEquals("toolUse", parts.getJSONObject(1).getString("type"))
+            assertEquals("ok", parts.getJSONObject(2).getJSONObject("value").getString("output"))
+            assertEquals("futurePart", parts.getJSONObject(3).getString("type"))
+        }
+    }
+
+    @Test
+    fun malformedReplayCannotRideImportRawFallback() {
+        val raw = """[{"type":"anthropicReplayV1","value":{"data":"DATA_SYNTH_D05"}"""
+        assertNull(ConfigBackup.sanitizeChatParts(raw))
+        assertEquals("", ConfigBackup.sanitizeIncomingParts(raw))
+        assertEquals("ordinary broken [", ConfigBackup.sanitizeIncomingParts("ordinary broken ["))
+        assertEquals("", ConfigBackup.sanitizeIncomingParts("""[{"type":"anthropicReplayV1","value":{}}]"""))
+    }
+
+    @Test
+    fun importStillKeepsLargePublicTextAfterDroppingReplay() {
+        val text = "日".repeat(160_000)
+        val raw = JSONArray().put(JSONObject().put("type", "text").put("value", text))
+            .put(JSONObject().put("type", "anthropicReplayV1").put("value", JSONObject().put("data", "DATA_SYNTH_D05"))).toString()
+        val imported = ConfigBackup.sanitizeIncomingParts(raw)
+        assertEquals(text, JSONArray(imported).getJSONObject(0).getString("value"))
+        assertTrue(!imported.contains("DATA_SYNTH_D05"))
+    }
+
     // ── chatTruncated visibility (payload shape import reads) ───────────
 
     @Test

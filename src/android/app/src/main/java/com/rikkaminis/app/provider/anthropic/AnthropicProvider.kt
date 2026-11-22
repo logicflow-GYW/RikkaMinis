@@ -3,6 +3,7 @@ package com.rikkaminis.app.provider.anthropic
 import android.util.Base64
 import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.AgentToolDefinition
+import com.rikkaminis.app.data.model.AnthropicReplay
 import com.rikkaminis.app.data.model.sanitizeToolId
 import com.rikkaminis.app.data.model.LLMError
 import com.rikkaminis.app.data.model.parseRetryAfterMs
@@ -26,21 +27,30 @@ import com.rikkaminis.app.provider.ImageBudget
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.TOOL_LOG_INPUT_STEP_CHARS
 import com.rikkaminis.app.provider.applyUserAgentOverride
-import com.rikkaminis.app.provider.extractHttpErrorMessage
+import com.rikkaminis.app.provider.executeOrCancel
 import com.rikkaminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import org.json.JSONException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -48,7 +58,6 @@ import java.io.InputStreamReader
 import java.io.IOException
 import com.rikkaminis.app.sandbox.offload.FirstChunkTimeoutPolicy
 import java.util.concurrent.TimeUnit
-import com.rikkaminis.app.provider.causeChainSummary
 import com.rikkaminis.app.provider.failOnSilentEmptyCompletion
 import com.rikkaminis.app.provider.nonStreamCeilingCutLogLine
 import com.rikkaminis.app.provider.nonStreamOutputCeilingCut
@@ -72,10 +81,16 @@ class AnthropicProvider(
     override val name = "Anthropic"
     override var instanceContext: com.rikkaminis.app.data.model.ProviderInstance? = null
     override val defaultMaxOutputTokens: Int get() = 64_000
-    // Anthropic Messages API: a truncated (max_tokens) reply is continued by
-    // appending the partial assistant content back into messages and re-sending
-    // (see "Stop reasons and fallback" → max_tokens → continue the response).
-    override val supportsPrefill: Boolean get() = true
+    // There is no unconditional prefill capability: generation AND this
+    // request's actual thinking emission determine whether assistant-final is legal.
+    override val supportsPrefill: Boolean get() = false
+
+    override fun supportsPrefillForRequest(maxTokens: Int, thinkingLevel: ThinkingLevel): Boolean {
+        val plan = buildRequestPlan(maxTokens, null, clampThinkingLevel(thinkingLevel))
+        val thinkingType = plan.optJSONObject("thinking")?.optString("type")
+        return modelAllowsLegacyPrefill(model.id) &&
+            (thinkingType == null || thinkingType == "disabled")
+    }
 
     /**
      * [T-android-enhanced-cache] Enhanced Cache toggle — when true, every
@@ -132,24 +147,25 @@ class AnthropicProvider(
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
-        val body = buildRequestBody(messages, systemPrompt, maxTokens, stream = false, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
-        val request = buildRequest(body.toString(), body)
-        // [fix/audit-s4m1] response was never closed on success OR error — the
-        // .use{} guarantees release on all three paths (success / mapHttpError
-        // throw / any other exception). Previously every non-streaming call
-        // leaked a Response + connection handle.
-        client.newCall(request).execute().use { response ->
-            val responseBody = response.body?.string() ?: ""
-
+        val prepared = prepareRequest(messages, systemPrompt, maxTokens, false, temperature, imageParts, tools, thinkingLevel)
+        val request = prepared.request
+        val client = clientForMessages(prepared)
+        // The consume overload keeps cancellation armed through headers AND the
+        // blocking body read, and owns/closes the Response on every exit.
+        client.newCall(request).executeOrCancel { response ->
             if (!response.isSuccessful) {
                 throw mapHttpError(
                     response.code,
-                    responseBody,
+                    publicAnthropicError(response.peekBody(ANTHROPIC_ERROR_BYTES + 1).string(), prepared.hasNative),
                     parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis()),
                 )
             }
 
-            val json = JSONObject(responseBody)
+            val responseBody = response.body?.string() ?: ""
+            val json = try { JSONObject(responseBody) } catch (_: JSONException) {
+                // Android's JSONException includes the input, not just a parse position.
+                throw JSONException("Invalid Anthropic message JSON")
+            }
             // [FIX-FW-NONSTREAM C1] A 2xx is not the same thing as a successful
             // Messages call: relays and edge hops answer `200 {"type":"error",
             // "error":{…}}`, and a body with neither `content` nor a
@@ -169,11 +185,14 @@ class AnthropicProvider(
                     // error frame (anthropicStreamErrorStatus + mapHttpError),
                     // so a rate limit is RateLimited and a revoked key is
                     // InvalidApiKey on both paths.
-                    throw mapHttpError(verdict.status, responseBody)
-                is AnthropicNonStreamVerdict.EmptyMessage ->
-                    throw LLMError.ProviderError(verdict.describe())
+                    throw mapHttpError(verdict.status, publicAnthropicError(responseBody, prepared.hasNative))
+                is AnthropicNonStreamVerdict.EmptyMessage -> throw LLMError.ProviderError(
+                    "Anthropic returned no message content: ${publicAnthropicError(responseBody, prepared.hasNative)}",
+                )
             }
-            val parsed = parseResponse(json)
+            val parsed = try { parseResponse(json) } catch (_: JSONException) {
+                throw LLMError.ProviderError("Invalid Anthropic message content")
+            }
             // [FIX-FW-NONSTREAM C2] The turn was cut at the output ceiling.
             // Deliberately NOT an exception: retrying with the same max_tokens
             // hits the same ceiling, so a throw would only produce a pointless
@@ -186,7 +205,12 @@ class AnthropicProvider(
                     nonStreamCeilingCutLogLine(name, parsed.stopReason, parsed.text.length),
                 )
             }
-            parsed
+            val source = prepared.responseSource(response)
+            parsed.copy(anthropicReplay = when {
+                source != null -> captureNativeResponse(responseBody, source)
+                prepared.source != null -> unavailableReplay("response_source")
+                else -> null
+            })
         }
     }
 
@@ -211,13 +235,8 @@ class AnthropicProvider(
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = callbackFlow {
-        val body = buildRequestBody(messages, systemPrompt, maxTokens, stream = true, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
-        // T302: serialize the body exactly once and pass the string to
-        // buildRequest. Pre-T302 body.toString() ran twice per call (once
-        // here, once inside buildRequest); each emitted string was tens of
-        // MB on long agent loops and stacked under GC pressure.
-        val bodyStr = body.toString()
-        val request = buildRequest(bodyStr, body)
+        val prepared = prepareRequest(messages, systemPrompt, maxTokens, true, temperature, imageParts, tools, thinkingLevel)
+        val request = prepared.request
 
         val startTime = System.currentTimeMillis()
 
@@ -227,7 +246,7 @@ class AnthropicProvider(
             headerMap[name] = request.headers[name] ?: ""
         }
 
-        val call = client.newCall(request)
+        val call = clientForMessages(prepared).newCall(request)
         val ttfbTimedOut = java.util.concurrent.atomic.AtomicBoolean(false)
         val headersArrived = java.util.concurrent.atomic.AtomicBoolean(false)
         val ttfbWatchdog = launch {
@@ -286,8 +305,9 @@ class AnthropicProvider(
         val durationMs = System.currentTimeMillis() - startTime
 
         if (!response.isSuccessful) {
-            val errorBody = response.body?.string() ?: ""
-            response.close()
+            val errorDetail = response.use {
+                publicAnthropicError(it.peekBody(ANTHROPIC_ERROR_BYTES + 1).string(), prepared.hasNative)
+            }
             // T302: skip the LLMRequestLog write entirely on release builds —
             // see OpenAIProvider for the full rationale (release users never
             // reach debug.llmRequests, so retaining multi-MB request bodies
@@ -298,17 +318,17 @@ class AnthropicProvider(
                         provider = "anthropic",
                         requestURL = request.url.toString(),
                         requestHeaders = headerMap,
-                        requestBody = bodyStr,
+                        requestBody = prepared.publicBody,
                         durationMs = durationMs,
                         responseStatusCode = response.code,
-                        responseBody = errorBody.take(2000),
+                        responseBody = errorDetail,
                     )
                 )
             }
-            android.util.Log.e("AnthropicProvider", "Stream failed: ${response.code} body=${errorBody.take(300)}")
+            android.util.Log.e("AnthropicProvider", "Stream failed: ${response.code} $errorDetail")
             throw mapHttpError(
                 response.code,
-                errorBody,
+                errorDetail,
                 parseRetryAfterMs(response.headers["Retry-After"], System.currentTimeMillis()),
             )
         }
@@ -320,7 +340,7 @@ class AnthropicProvider(
                     provider = "anthropic",
                     requestURL = request.url.toString(),
                     requestHeaders = headerMap,
-                    requestBody = bodyStr,
+                    requestBody = prepared.publicBody,
                     durationMs = durationMs,
                     responseStatusCode = response.code,
                 )
@@ -333,6 +353,10 @@ class AnthropicProvider(
         // to body.charStream() would change byte handling for the raw stream
         // paths without fixing anything observable.
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
+        val source = prepared.responseSource(response)
+        val nativeStream = source?.let { AnthropicNativeStream() }
+        var privateErrorContext = prepared.hasNative
+        var terminal: LLMStreamChunk.Finished? = null
         // Track current tool_use block being streamed.
         // [Rhub-1105 F-03] The block state lives in AnthropicToolBlock so the
         // argument-resolution rule (delta buffer wins; the announcement's own
@@ -391,11 +415,19 @@ class AnthropicProvider(
                 val payload = sseDataPayload(l)?.trim() ?: continue
                 firstDataArrived.set(true)
                 firstDataWatchdog.cancel()
-                if (payload == "[DONE]") break
+                if (payload == "[DONE]") {
+                    nativeStream?.reject("unexpected_done_marker")
+                    break
+                }
 
-                val event = try { JSONObject(payload) } catch (_: Exception) { continue }
-                android.util.Log.d("ToolChain[Provider]", "RAW SSE: $payload")
+                nativeStream?.accept(payload)
+                val event = try { JSONObject(payload) } catch (_: JSONException) { continue }
                 val eventType = event.safeOptString("type", "")
+                if (eventType in setOf("content_block_start", "content_block_delta", "content_block_stop")) {
+                    android.util.Log.d("ToolChain[Provider]", "SSE event=$eventType index=${event.optInt("index", -1)}")
+                } else if (eventType in setOf("message_start", "message_delta", "message_stop", "error")) {
+                    android.util.Log.d("ToolChain[Provider]", "SSE event=$eventType")
+                }
 
                 when (eventType) {
                     "message_start" -> {
@@ -408,6 +440,7 @@ class AnthropicProvider(
                     }
                     "content_block_start" -> {
                         val contentBlock = event.optJSONObject("content_block")
+                        if (contentBlock?.safeOptString("type") in setOf("thinking", "redacted_thinking")) privateErrorContext = true
                         // [Rhub-1105 F-03] Every block header resets the
                         // block-scoped state: the previous block's initial
                         // input must never reach the next one. Called for
@@ -448,10 +481,13 @@ class AnthropicProvider(
                                 val text = delta.safeOptString("text", "")
                                 if (text.isNotEmpty()) {
                                     contentChars += text.length
+                                    android.util.Log.d("ToolChain[Provider]", "SSE text=${JSONObject.quote(text.take(240))}")
                                     send(LLMStreamChunk.Text(text))
                                 }
                             }
+                            "signature_delta" -> privateErrorContext = true
                             "thinking_delta" -> {
+                                privateErrorContext = true
                                 val thinking = delta.safeOptString("thinking", "")
                                 if (thinking.isNotEmpty()) {
                                     contentChars += thinking.length
@@ -488,7 +524,7 @@ class AnthropicProvider(
                             // initial input is the fallback for relays that
                             // never stream `input_json_delta`.
                             val args = toolBlock.resolveArgs()
-                            android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=$currentToolId name=$currentToolName args=${args.toString().take(300)}")
+                            android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=$currentToolId name=$currentToolName fields=${args.length()}")
                             send(LLMStreamChunk.ToolCallComplete(currentToolId, currentToolName, args))
                             // [dv29 A-01] Defence in depth for a completed tool
                             // block that never streamed a delta (zero-argument
@@ -520,11 +556,18 @@ class AnthropicProvider(
                         }
                         val stopReason = event.optJSONObject("delta")
                             ?.safeOptString("stop_reason", "")?.ifEmpty { null }
-                        // message_delta with stop_reason is the Anthropic clean
-                        // terminal — mark it so the EOF path below doesn't emit
-                        // a redundant truncated Finished.
-                        sawClearFinish = true
-                        send(LLMStreamChunk.Finished(stopReason))
+                        // A message_delta can precede content_block_stop on a
+                        // cut/invalid stream. Preserve the open block for the
+                        // orphan flush and mark its arguments incomplete even
+                        // if the declared reason looks normal.
+                        // model_context_window_exceeded stays a DECLARED reason:
+                        // shared admission refuses it before JSON repair, but
+                        // it is not an EOF/output wall that should resend the
+                        // same full context. Already streamed text is retained.
+                        if (stopReason != null) {
+                            sawClearFinish = true
+                            terminal = LLMStreamChunk.Finished(stopReason, truncated = toolBlock.isOpen || terminal?.truncated == true)
+                        }
                     }
                     // [FIX-1 / F-195] The Messages streaming protocol carries a
                     // mid-stream `error` event (rate limit, overloaded, invalid
@@ -541,14 +584,9 @@ class AnthropicProvider(
                         val errType = event.optJSONObject("error")
                             ?.safeOptString("type", "")
                             ?.takeIf { it.isNotBlank() }
-                        android.util.Log.e(
-                            "AnthropicProvider",
-                            "Stream error event: ${event.toString().take(500)}",
-                        )
-                        throw mapHttpError(
-                            anthropicStreamErrorStatus(errType),
-                            event.toString(),
-                        )
+                        val detail = publicAnthropicError(payload, privateErrorContext)
+                        android.util.Log.e("AnthropicProvider", "Stream error event: $detail")
+                        throw mapHttpError(anthropicStreamErrorStatus(errType), detail)
                     }
                 }
             }
@@ -575,6 +613,7 @@ class AnthropicProvider(
                 )
                 send(LLMStreamChunk.ToolCallComplete(currentToolId, currentToolName, args))
                 toolBlock.clear()
+                terminal = terminal?.copy(truncated = true)
             }
             // [RC2-truncated-detection] Loop exited by EOF / [DONE] before any
             // message_delta (server cut mid-stream after text/thinking deltas but
@@ -586,7 +625,10 @@ class AnthropicProvider(
             // the argument deltas AND the block completion) — a fully empty EOF is
             // handled by failOnSilentEmptyCompletion and must not be flagged.
             if (!sawClearFinish && (contentChars > 0 || toolChars > 0)) {
-                send(LLMStreamChunk.Finished(null, truncated = true))
+                send(LLMStreamChunk.Finished(
+                    null, truncated = true,
+                    anthropicReplay = prepared.source?.let { unavailableReplay("incomplete_stream") },
+                ))
             }
         } catch (e: Exception) {
             // [F-177] same defect as OpenAIProvider: a cause-less
@@ -604,13 +646,14 @@ class AnthropicProvider(
             if (consumerCancel != null) {
                 com.rikkaminis.app.logging.AppLogger.info(
                     "AnthropicProvider",
-                    "[F-177] stream cancelled by consumer: ${e.causeChainSummary()}",
+                    "[F-177] stream cancelled by consumer (${e.javaClass.simpleName})",
                 )
                 cancel(consumerCancel)
             } else {
                 cancel("Stream error", mapError(e))
             }
         } finally {
+            firstDataWatchdog.cancel()
             reader.close()
             response.close()
             // The body left the read loop under its own power: a later scope
@@ -618,6 +661,19 @@ class AnthropicProvider(
             cancelBridge.markStreamCompleted()
         }
         cancelBridge.dispose()
+        // A declared reason is public metadata, not proof of a complete Messages response.
+        // Only publish it after the body drains and closes normally; a late error or cancel
+        // must not publish an apparently successful terminal frame.
+        if (isActive && !call.isCanceled()) {
+            ensureActive()
+            terminal?.let { finished ->
+                send(finished.copy(anthropicReplay = when {
+                    source != null -> nativeStream?.finish(source, finished.truncated)
+                    prepared.source != null -> unavailableReplay("response_source")
+                    else -> null
+                }))
+            }
+        }
         channel.close()
         awaitClose()
         // [fix/provider-stream-flowon] Same starvation as OpenAIProvider: the
@@ -645,20 +701,17 @@ class AnthropicProvider(
         })
     }
 
-    private fun buildRequestBody(
-        messages: List<LLMMessage>,
-        systemPrompt: String?,
+    /** One emitter for wire parameters and request-aware capability queries.
+     * Keep max_tokens and legacy budget derivation together: both must read
+     * the same clamped value, including out-of-band calls above the model cap.
+     * The public entry already clamps thinking; the query performs that same clamp.
+     */
+    private fun buildRequestPlan(
         maxTokens: Int,
-        stream: Boolean,
         temperature: Double?,
-        imageParts: List<LLMMessage.ImagePart>,
-        tools: List<AgentToolDefinition> = emptyList(),
-        // [T-android-thinking-level-arch] Already clamped to the model ceiling by
-        // LLMProvider.streamMessage/sendMessage before reaching here.
-        thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+        thinkingLevel: ThinkingLevel,
     ): JSONObject {
         val body = JSONObject()
-        body.put("model", model.id)
         // Defense-in-depth clamp: upstream dynamicMaxTokens() is already in
         // range; this guards out-of-band callers (sub-agent budgets, synthesized
         // requests) from a deterministic 400 on over-range max_tokens.
@@ -673,7 +726,6 @@ class AnthropicProvider(
         // budget_tokens=65536 and got a deterministic 400.
         val cappedMaxTokens = clampOutboundMaxTokens(maxTokens, effectiveMaxOutputTokens(model))
         body.put("max_tokens", cappedMaxTokens)
-        body.put("stream", stream)
 
         if (temperature != null && !thinkingLevel.isEnabled && !modelRejectsTemperature(model.id)) {
             // Anthropic's documented temperature range is 0..1.
@@ -756,6 +808,90 @@ class AnthropicProvider(
             body.put("thinking", JSONObject().put("type", "disabled"))
         }
 
+        return body
+    }
+
+    private class PreparedRequest(
+        val request: Request,
+        val source: AnthropicReplay.Source?,
+        val publicBody: String,
+        val hasNative: Boolean,
+    ) {
+        fun responseSource(response: Response): AnthropicReplay.Source? {
+            val initial = source ?: return null
+            if (response.request.method != "POST") return null
+            var hop: Response? = response
+            while (hop != null) {
+                val actual = AnthropicReplay.Source.fromActualRequest(hop.request.url.toString(), initial.model, initial.instanceId)
+                if (actual != initial) return null
+                hop = hop.priorResponse
+            }
+            return initial
+        }
+    }
+
+    // Replay is already bound to the initial official Messages URL. An automatic
+    // follow-up could send its POST body to another origin before we see the response.
+    private fun clientForMessages(prepared: PreparedRequest): OkHttpClient =
+        if (prepared.hasNative) client.newBuilder().followRedirects(false).build() else client
+
+    private fun prepareRequest(
+        messages: List<LLMMessage>,
+        systemPrompt: String?,
+        maxTokens: Int,
+        stream: Boolean,
+        temperature: Double?,
+        imageParts: List<LLMMessage.ImagePart>,
+        tools: List<AgentToolDefinition>,
+        thinkingLevel: ThinkingLevel,
+    ): PreparedRequest {
+        val rawUrl = messagesUrl()
+        val url = rawUrl.toHttpUrl()
+        val modelId = model.id
+        val instanceId = instanceContext?.id
+        val source = AnthropicReplay.Source.fromActualRequest(url.toString(), modelId, instanceId)
+            ?.takeIf { it == AnthropicReplay.Source.fromActualRequest(rawUrl, modelId, instanceId) }
+        val native = mutableMapOf<JSONObject, JsonArray>()
+        val body = buildRequestBody(messages, systemPrompt, maxTokens, stream, temperature, imageParts, tools,
+            thinkingLevel, modelId, source, native)
+        // T302: the legacy/debug body is serialized once, with no private fields.
+        // Only a qualified request gets the final exact-tree substitution. Only that
+        // tree, not the rounded public projection, is ever used for native content.
+        val publicBody = body.toString()
+        val wireBody = if (native.isEmpty()) publicBody else {
+            val root = Json.parseToJsonElement(publicBody) as JsonObject
+            val publicMessages = root.getValue("messages") as JsonArray
+            val merged = body.getJSONArray("messages")
+            val exactMessages = publicMessages.mapIndexed { i, message ->
+                val blocks = native[merged.getJSONObject(i)]
+                if (blocks == null) message else JsonObject((message as JsonObject) + ("content" to blocks))
+            }
+            // JsonObject's native tree renderer preserves numeric literals. The generic
+            // JsonElement encoder routes non-integral literals through Double and rounds
+            // signed tool inputs, even though the captured tree is still exact.
+            JsonObject(root + ("messages" to JsonArray(exactMessages))).toString()
+        }
+        return PreparedRequest(buildRequest(wireBody, body, url), source, publicBody, native.isNotEmpty())
+    }
+
+    private fun buildRequestBody(
+        messages: List<LLMMessage>,
+        systemPrompt: String?,
+        maxTokens: Int,
+        stream: Boolean,
+        temperature: Double?,
+        imageParts: List<LLMMessage.ImagePart>,
+        tools: List<AgentToolDefinition>,
+        // Already clamped by LLMProvider before reaching here.
+        thinkingLevel: ThinkingLevel,
+        modelId: String,
+        source: AnthropicReplay.Source?,
+        native: MutableMap<JSONObject, JsonArray>,
+    ): JSONObject {
+        val body = buildRequestPlan(maxTokens, temperature, thinkingLevel)
+        body.put("model", modelId)
+        body.put("stream", stream)
+
         // System prompt blocks — mirrors iOS AnthropicProvider.resolveSystemPrompt.
         val systemArray = resolveSystemPrompt(systemPrompt)
         if (systemArray != null) {
@@ -782,8 +918,8 @@ class AnthropicProvider(
         }
 
         // Build and merge messages
-        val rawMessages = buildMessages(messages, imageParts)
-        val merged = mergeConsecutiveSameRole(rawMessages)
+        val rawMessages = buildMessages(messages, imageParts, source, body.optJSONObject("thinking")?.optString("type"), native)
+        val merged = mergeConsecutiveSameRole(rawMessages, native)
 
         // Inject cache_control on last 2 user messages
         injectMessageCacheControl(merged)
@@ -804,8 +940,8 @@ class AnthropicProvider(
      * back: 400 `content[].thinking in the thinking mode must be passed back
      * to the API`. The captured reasoning already lives on
      * `LLMMessage.reasoningContent`; we replay it as a synthesized
-     * `{"type":"thinking","thinking":…}` block (no `signature` — we never
-     * capture one off the wire).
+     * `{"type":"thinking","thinking":…}` block. This legacy path is for messages
+     * without private replay metadata and must not synthesize a stripped signature.
      *
      * Mirrors iOS AnthropicAgentProvider's `echoReasoning` gate exactly:
      *   echo = supportsReasoning != false        (model may reason)
@@ -829,6 +965,9 @@ class AnthropicProvider(
     private fun buildMessages(
         rawMessages: List<LLMMessage>,
         imageParts: List<LLMMessage.ImagePart>,
+        source: AnthropicReplay.Source?,
+        thinkingType: String?,
+        native: MutableMap<JSONObject, JsonArray>,
     ): JSONArray {
         // Sanitize orphan tool_use/tool_result pairing before serialization
         // (defense-in-depth; upstream history construction is the first line).
@@ -845,7 +984,7 @@ class AnthropicProvider(
         // (the `isLastUser` arm below), so a media-only turning point must not
         // be filtered out before that arm can see it.
         val rawLastUserIndex = sanitizedRaw.indexOfLast { it.role == LLMMessage.Role.USER }
-        val messages = sanitizedRaw
+        val retained = sanitizedRaw.indices
             // Drop messages that became empty (orphan-only removed). An empty
             // content array is itself a 400 on Anthropic. Pristine empty
             // messages (e.g. empty USER text) are handled by the serializer
@@ -856,12 +995,17 @@ class AnthropicProvider(
             // payload — see OpenAIProvider's twin filter. Without the media
             // arms a `minis-model-use` turn carrying only an image or audio
             // block was deleted here and the model never saw the bytes.
-            .filterIndexed { index, m ->
-                m.hasWirePayload(
+            .filter { index ->
+                val message = sanitizedRaw[index]
+                message.hasWirePayload(
                     isLastUserTurn = index == rawLastUserIndex,
                     turnImageCount = imageParts.size,
                 )
             }
+        val messages = retained.map(sanitizedRaw::get)
+        val replay = if (rawMessages.any { it.anthropicReplay != null && it.anthropicReplay.state != AnthropicReplay.State.ABSENT }) {
+            nativeToolReplay(rawMessages, sanitizedRaw, retained, source, thinkingType)
+        } else emptyMap()
         // [T-android-anthropic-thinking-echo] (issue #70) Compute once — the
         // gate depends only on the model + endpoint, not the message.
         val echoThinking = shouldEchoInterleavedThinking()
@@ -883,6 +1027,8 @@ class AnthropicProvider(
         for ((index, msg) in messages.withIndex()) {
             val obj = JSONObject()
             obj.put("role", msg.role.value)
+            val echoUnsigned = echoThinking && msg.role == LLMMessage.Role.ASSISTANT &&
+                (msg.anthropicReplay == null || msg.anthropicReplay.state == AnthropicReplay.State.ABSENT)
 
             if (msg.contentParts.isNotEmpty()) {
                 val contentArray = JSONArray()
@@ -905,7 +1051,7 @@ class AnthropicProvider(
                 // the compat proxy still 400s. Mirrors iOS
                 // injectThinkingBlocksForCompatProxy (unsigned block, no
                 // signature). User turns never carry thinking.
-                if (echoThinking && msg.role == LLMMessage.Role.ASSISTANT) {
+                if (echoUnsigned) {
                     contentArray.put(JSONObject().apply {
                         put("type", "thinking")
                         put("thinking", msg.reasoningContent ?: "")
@@ -1154,7 +1300,7 @@ class AnthropicProvider(
                         })
                     }
                     obj.put("content", contentArray)
-                } else if (echoThinking && msg.role == LLMMessage.Role.ASSISTANT) {
+                } else if (echoUnsigned) {
                     // [T-android-anthropic-thinking-echo] (issue #70) Assistant
                     // turn with no structured parts (plain-text reply, or history
                     // rehydrated without contentParts). Still must carry its
@@ -1181,6 +1327,7 @@ class AnthropicProvider(
                 }
             }
 
+            replay[retained[index]]?.let { native[obj] = it }
             messagesArray.put(obj)
         }
         return messagesArray
@@ -1192,12 +1339,19 @@ class AnthropicProvider(
      * For assistant messages, reorder: text/image first, then tool_use (Anthropic
      * rejects text appearing after tool_use in the same message).
      */
-    private fun mergeConsecutiveSameRole(messages: JSONArray): JSONArray {
+    private fun mergeConsecutiveSameRole(messages: JSONArray, native: Map<JSONObject, JsonArray>): JSONArray {
         if (messages.length() <= 1) return messages
         val result = JSONArray()
         var i = 0
         while (i < messages.length()) {
             val current = messages.getJSONObject(i)
+            if (current in native) {
+                // Admission already proved neither adjacent wire role is assistant.
+                // Keep the JSON object identity for exact substitution after caching.
+                result.put(current)
+                i++
+                continue
+            }
             val role = current.getString("role")
             // Collect all consecutive messages with same role
             val contentBlocks = mutableListOf<JSONObject>()
@@ -1321,10 +1475,22 @@ class AnthropicProvider(
             return major to minor
         }
 
-        /**
-         * Claude models from 4.6 onward reject the `temperature` parameter.
-         * Returns true when the model id parses as Claude version >= 4.6.
+        /** Only identified legacy generations get the optimisation. Unknown
+         * ids/versions stay on the reminder path, even if a relay's label
+         * happens to contain Claude plus some old-looking version digits.
          */
+        private fun modelAllowsLegacyPrefill(modelId: String): Boolean {
+            val legacyVersion = parseClaudeVersion(modelId) in setOf(
+                2 to 0, 2 to 1, 3 to 0, 3 to 5, 3 to 7,
+                4 to 0, 4 to 1, 4 to 5,
+            )
+            val identifiedClaude = Regex(
+                """(?:anthropic[/.])?claude-(?:(?:haiku|sonnet|opus)-\d+(?:[-.]\d+)?(?:-\d{8})?|\d+(?:[-.]\d+)?-(?:haiku|sonnet|opus)(?:-\d{8})?|2(?:[.-]1)?)""",
+            ).matches(modelId.lowercase())
+            return legacyVersion && identifiedClaude
+        }
+
+        /** Claude models from 4.6 onward reject `temperature`. */
         fun modelRejectsTemperature(modelId: String): Boolean {
             val (major, minor) = parseClaudeVersion(modelId) ?: return false
             return major > 4 || (major == 4 && minor >= 6)
@@ -1420,15 +1586,7 @@ class AnthropicProvider(
         }
     }
 
-    /**
-     * T302: takes the pre-serialized body string AND the JSONObject. The
-     * string is used directly for the OkHttp RequestBody so we don't pay
-     * for a second `body.toString()` (each call is tens of MB on long
-     * agent loops). The JSONObject is still needed for header logic that
-     * inspects fields like `thinking`. See OpenAIProvider.buildRequest
-     * for the same pattern.
-     */
-    private fun buildRequest(bodyStr: String, body: JSONObject): Request {
+    private fun messagesUrl(): String {
         // T192: `basePath` may already end in `/v1` because
         // `ProviderInstance.effectiveBaseURL` appends `/v1` when
         // `appendV1Suffix=true` and the user-entered base doesn't end in `/v1`.
@@ -1439,8 +1597,13 @@ class AnthropicProvider(
         val cleanBase = basePath.trimEnd('/').let {
             if (it.endsWith("/v1")) it.dropLast(3).trimEnd('/') else it
         }
+        return "$cleanBase/v1/messages"
+    }
+
+    /** The pre-serialized body is the wire; the public plan is only for headers. */
+    private fun buildRequest(bodyStr: String, body: JSONObject, url: HttpUrl): Request {
         val builder = Request.Builder()
-            .url("$cleanBase/v1/messages")
+            .url(url)
             .post(bodyStr.toRequestBody("application/json".toMediaType()))
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -1546,25 +1709,15 @@ class AnthropicProvider(
         )
     }
 
-    private fun mapHttpError(statusCode: Int, body: String, retryAfterMs: Long? = null): LLMError {
+    private fun mapHttpError(statusCode: Int, publicDetail: String, retryAfterMs: Long? = null): LLMError {
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
         if (statusCode == 429) return LLMError.RateLimited(retryAfterMs = retryAfterMs)
 
-        val message = try {
-            val errorType = JSONObject(body).optJSONObject("error")
-                ?.safeOptString("type", "")
-                ?.takeIf { it.isNotBlank() }
-                ?: "error"
-            "[$errorType] ${extractHttpErrorMessage(body)}"
-        } catch (_: Exception) {
-            "[error] ${body.take(500)}"
-        }
-
         val transientCodes = setOf(500, 502, 503, 504, 529)
         if (statusCode in transientCodes) {
-            return LLMError.TransientError(message)
+            return LLMError.TransientError(publicDetail)
         }
-        return LLMError.ProviderError(message)
+        return LLMError.ProviderError(publicDetail)
     }
 
     private fun mapError(error: Throwable): LLMError {
