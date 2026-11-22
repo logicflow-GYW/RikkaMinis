@@ -1,6 +1,6 @@
 # 大手术最终收口：完整审查、三处阻断修复与并集验收（2026-11-22）
 
-STATUS: VERIFIED_COMBINED_CANDIDATE_PENDING_MAIN
+STATUS: MERGED_TO_MAIN（`3383e0e0bb892f68a782c66a93cd3162520a5a02`）并已发布 `android-latest`
 
 ## 对象与规模
 
@@ -59,6 +59,21 @@ STATUS: VERIFIED_COMBINED_CANDIDATE_PENDING_MAIN
 4. 条件 P2 已登记 backlog，未借此扩施工：超 8MiB terminal spool 恢复不闭合、载体/持久包装深度预算、AOSP 合成 DONE+1e400 夹具差异、裸 near-name 投影误剥、非规范坏行 fallback、IPC 双文档/sidecar/解析前能耗。下载单槽替换少一条失败反馈为刻意取舍（P3）。
 5. 新发现但未修的四类 P3（DEAD 棘轮、锁外准入判据、终态锁内文件 IO、锁外 poison 写）均为公开基线同形存量，未扩半径。
 
-## 发布边界
+## 留下的判据与入口
 
-用户已明确授权：本轮完整审查、发现真实问题直接修、通过后合 main。未自动装机、未强杀当前 app、未删分支/工作树。main 推送将触发现有 main-only 滚动发布，须另核 main CI 与实际 publish 步骤，不把 job success 当作已发布。
+这次固化的可复用东西不在代码量里，在三个地方：
+
+1. **[跨边界协议不变量](protocol-invariants.md)**：13 条不变量 + 每条的唯一入口、绕过症状、守卫测试，以及六域地图。改 worker / 提交 / 取消 / rootfs / 恢复 / 调度 / Provider 终态 / 导出之前先读它。
+2. **测试形态的转变**：新增 38 个测试文件里 31 个是纯行为测试（真实对象、真实文件、真实 Engine），关键修复都做过变异负控——"删掉这一行必须变红"，而不是"源码里有这个字符串"。
+3. **可追溯的域地图**：六个域的审查对象、符号位置与未验边界都在本文 §覆盖方式 / §明确未验证里；后续再审从本文的收口点起算，不从头建图。
+
+同时明确记下**折旧条件**：这些资产的价值等于"未来不许为了过 CI 放宽容忍度"的纪律强度；测试被改松，它们会在一两个版本内变成摆设。详见 protocol-invariants §4。
+
+## 合并与发布
+
+用户已明确授权：本轮完整审查、发现真实问题直接修、通过后合 main。未自动装机、未强杀当前 app、未删分支/工作树。
+
+- 并集 `303ac2d2` 与 main `fe72bb9cd` 以 `--no-ff` 合并为 **`3383e0e0b`**（父数 2，树 `aeb3c7a3` 与候选逐字一致），已推送并核对远端 SHA。
+- main CI **#3453 / run 44969067495** 五个 job 全部 success：unit 10860 PASSED / 0 真 FAILED、scan 115、lint、build、publish 发布步骤实际执行；`android-latest` 已移动到该提交，Release 日志显示先删除旧 asset 再上传 `RikkaMinis-arm64-v8a.apk`（15,045,057 B）。
+- 设备侧安装包与 Release 资产大小一致、SHA-256 以 `5a6f408d…aec7` 开头（完整值在装机核对记录里，不在本文件重复）。
+- 真机复测（1.0.0+3453）：真实 worker 短回复逐字一致；取消握手 settled / reclaimed 均为 true，取消后新请求成功、并发两请求均成功；Room 同会话两次读回 ID/role/text 一致；WebView 无 token 的三次调用均被拒绝且无非法文件产出；未覆盖边界见上节。
