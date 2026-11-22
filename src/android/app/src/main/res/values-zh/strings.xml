@@ -826,7 +826,7 @@
     <string name="model_group_detail_thinking_auto">自动</string>
     <string name="model_group_detail_limit_context_window">限制上下文窗口</string>
     <string name="model_group_detail_max_context">最大上下文</string>
-    <string name="model_group_detail_custom_context">自定义…</string>
+    <string name="model_group_detail_custom_context">自定义</string>
     <string name="model_group_detail_custom_context_title">自定义上下文上限</string>
     <string name="model_group_detail_custom_context_input">上下文上限（K tokens）</string>
     <string name="model_group_detail_custom_context_range">最低 64,000 tokens</string>

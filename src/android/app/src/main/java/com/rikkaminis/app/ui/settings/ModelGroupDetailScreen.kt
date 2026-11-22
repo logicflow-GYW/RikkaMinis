@@ -797,7 +797,7 @@ fun ModelGroupDetailScreen(
 
 /**
  * Discrete max-context slider. Stops:
- * 64K / 128K / 256K / 512K / 1M / Custom…
+ * 64K / 128K / 256K / 512K / 1M / Custom
  *
  * The ladder is always shown verbatim regardless of which models (if any) are
  * in the group. Model metadata is unreliable (e.g. image-output / router models
@@ -848,7 +848,6 @@ private fun ContextLimitSlider(
     var customDraft by remember { mutableStateOf("") }
     val currentLabel: String = when {
         value == null || ContextLimitLadder.isLegacyUnlimited(value) -> customLabel
-        ContextLimitLadder.isCustomValue(value) -> ContextLimitLadder.customLabel(value)
         else -> ContextLimitLadder.label(value)
     }
 

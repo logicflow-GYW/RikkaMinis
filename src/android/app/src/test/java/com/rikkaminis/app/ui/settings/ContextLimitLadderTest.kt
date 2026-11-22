@@ -8,7 +8,8 @@ import org.junit.Test
 
 /**
  * Pins the group context-limit ladder: five power-of-two fixed stops plus one
- * K-unit custom stop. The retired unlimited sentinel is recognised as legacy
+ * K-unit custom stop whose display auto-scales to K or M. The retired
+ * unlimited sentinel is recognised as legacy
  * and never becomes a slider stop. Older persisted values that used to be
  * fixed stops (32K / 200K / 400K / 2M) classify as custom without being
  * rewritten.
@@ -33,12 +34,12 @@ class ContextLimitLadderTest {
     }
 
     @Test
-    fun `custom labels always use K including above one million`() {
-        assertEquals("800K", ContextLimitLadder.customLabel(800_000))
-        assertEquals("1500K", ContextLimitLadder.customLabel(1_500_000))
-        assertEquals("1950K", ContextLimitLadder.customLabel(1_950_000))
-        assertEquals("200.5K", ContextLimitLadder.customLabel(200_500))
-        assertEquals("2000K", ContextLimitLadder.customLabel(2_000_000))
+    fun `custom values auto-scale K to M for display`() {
+        assertEquals("800K", ContextLimitLadder.label(800_000))
+        assertEquals("200.5K", ContextLimitLadder.label(200_500))
+        assertEquals("1.5M", ContextLimitLadder.label(1_500_000))
+        assertEquals("1.95M", ContextLimitLadder.label(1_950_000))
+        assertEquals("2M", ContextLimitLadder.label(2_000_000))
     }
 
     @Test

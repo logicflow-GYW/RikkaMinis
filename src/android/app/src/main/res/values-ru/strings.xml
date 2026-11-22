@@ -773,7 +773,7 @@
     <string name="model_group_detail_thinking_auto">Авто</string>
     <string name="model_group_detail_limit_context_window">Ограничить контекстное окно</string>
     <string name="model_group_detail_max_context">Макс. контекст</string>
-    <string name="model_group_detail_custom_context">Другой…</string>
+    <string name="model_group_detail_custom_context">Другой</string>
     <string name="model_group_detail_custom_context_title">Свой лимит контекста</string>
     <string name="model_group_detail_custom_context_input">Лимит контекста (K токенов)</string>
     <string name="model_group_detail_custom_context_range">Минимум 64,000 токенов</string>

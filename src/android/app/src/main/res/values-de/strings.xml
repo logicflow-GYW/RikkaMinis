@@ -1383,7 +1383,7 @@
     <string name="model_group_detail_thinking_ultra">Ultra</string>
     <string name="model_group_detail_limit_context_window">Kontextfenster begrenzen</string>
     <string name="model_group_detail_max_context">Max. Kontext</string>
-    <string name="model_group_detail_custom_context">Benutzerdefiniert…</string>
+    <string name="model_group_detail_custom_context">Benutzerdefiniert</string>
     <string name="model_group_detail_custom_context_title">Benutzerdefiniertes Kontextlimit</string>
     <string name="model_group_detail_custom_context_input">Kontextlimit (K-Tokens)</string>
     <string name="model_group_detail_custom_context_range">Mindestens 64,000 Tokens</string>

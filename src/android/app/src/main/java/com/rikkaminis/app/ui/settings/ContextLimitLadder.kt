@@ -18,8 +18,9 @@ import kotlin.math.roundToLong
  * "no group override" path. Values saved by older builds as the old unlimited
  * sentinel are treated as off at the UI boundary without rewriting config.
  *
- * Custom input is expressed in K: entering 800 stores 800,000 tokens and the
- * value is displayed as "800K".
+ * Custom input is expressed in K: entering 800 stores 800,000 tokens.
+ * Display auto-scales to the friendliest unit (800K, 1.5M, 2M) instead of
+ * forcing a fixed K suffix on large values.
  */
 object ContextLimitLadder {
     const val customMinTokens: Int = 64_000
@@ -56,9 +57,6 @@ object ContextLimitLadder {
             .trimEnd('.')
         return "$amount$suffix"
     }
-
-    /** Custom values always use K, including values above one million. */
-    fun customLabel(tokens: Int): String = "${formatK(tokens)}K"
 
     /** Pre-fills the K-unit dialog without its suffix. */
     fun customInputValue(tokens: Int): String = formatK(tokens)

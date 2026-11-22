@@ -982,7 +982,7 @@
     <string name="model_group_detail_thinking_auto">Auto</string>
     <string name="model_group_detail_limit_context_window">Limit Context Window</string>
     <string name="model_group_detail_max_context">Max Context</string>
-    <string name="model_group_detail_custom_context">Custom…</string>
+    <string name="model_group_detail_custom_context">Custom</string>
     <string name="model_group_detail_custom_context_title">Custom context limit</string>
     <string name="model_group_detail_custom_context_input">Context limit (K tokens)</string>
     <string name="model_group_detail_custom_context_range">Minimum 64,000 tokens</string>

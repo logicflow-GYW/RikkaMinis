@@ -1390,7 +1390,7 @@
     <string name="model_group_detail_thinking_ultra">ウルトラ</string>
     <string name="model_group_detail_limit_context_window">コンテキストウィンドウを制限</string>
     <string name="model_group_detail_max_context">最大コンテキスト</string>
-    <string name="model_group_detail_custom_context">カスタム…</string>
+    <string name="model_group_detail_custom_context">カスタム</string>
     <string name="model_group_detail_custom_context_title">カスタムコンテキスト上限</string>
     <string name="model_group_detail_custom_context_input">コンテキスト上限（K トークン）</string>
     <string name="model_group_detail_custom_context_range">最低 64,000 トークン</string>

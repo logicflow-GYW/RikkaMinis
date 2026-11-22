@@ -1382,7 +1382,7 @@
     <string name="model_group_detail_thinking_ultra">울트라</string>
     <string name="model_group_detail_limit_context_window">컨텍스트 창 제한</string>
     <string name="model_group_detail_max_context">최대 컨텍스트</string>
-    <string name="model_group_detail_custom_context">사용자 지정…</string>
+    <string name="model_group_detail_custom_context">사용자 지정</string>
     <string name="model_group_detail_custom_context_title">사용자 지정 컨텍스트 한도</string>
     <string name="model_group_detail_custom_context_input">컨텍스트 한도(K 토큰)</string>
     <string name="model_group_detail_custom_context_range">최소 64,000 토큰</string>
