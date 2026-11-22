@@ -36,14 +36,37 @@ if HERE not in sys.path:
 from _kotlin_lexer import KotlinLexError, mask_code, mask_strings  # noqa: E402
 from _kotlin_ast import function_body  # noqa: E402
 from _kotlin_valueflow import call_args, path_feasible  # noqa: E402
+from _kotlin_ast import match_bracket  # noqa: E402
 
 ENGINE_REL = "src/android/app/src/main/java/com/rikkaminis/app/ui/chat/AgentLoopEngine.kt"
 SELFTEST_MARK = "TRANSCRIPT_COMMIT_ORDER_SELFTEST=PASS"
 ESCAPE = "transcript-commit-ok:"
 FUN_RE = re.compile(r"\bfun\s+(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\s*\(")
 HELP_RE = re.compile(r"(?<![.\w])(plan|commit)TranscriptRow\s*\(")
-WRITE_NAMES = (("host.persistAssistantTurn", "insert"),
-               ("host.updatePersistedAssistantTurn", "update"))
+# [fix/protocol-gate-teeth-1122 F1] Sites are derived from the METHOD NAME, not
+# from the receiver spelling.
+#
+# The set used to be `host.persistAssistantTurn` / `host.updatePersistedAssistantTurn`,
+# matched as literals. Measured on the real tree: rewriting the single update
+# call as `this.host.updatePersistedAssistantTurn(` made the gate report PASS
+# with an empty violation list — the site simply vanished from the set, and
+# nothing noticed. The same held for `val target = host; target.persistAssistantTurn(`
+# (a new bypass that was never judged) and for `theHost.` (caught only by luck,
+# via the wrapper's "exactly one insert" arm).
+#
+# A receiver is a spelling; the decision point is the call. Deriving by method
+# name makes a rename/re-alias irrelevant, and a new bypass is judged the day it
+# lands. `(?<![\w])` keeps `updatePersistedAssistantTurn` from matching the
+# shorter name.
+WRITE_METHODS = (("persistAssistantTurn", "insert"),
+                 ("updatePersistedAssistantTurn", "update"))
+WRITE_CALL_RE = re.compile(r"(?<![\w])(persistAssistantTurn|updatePersistedAssistantTurn)\s*\(")
+_KIND_OF = dict(WRITE_METHODS)
+
+
+def write_sites(code):
+    """[(pos, kind)] for every write call, whatever the receiver is spelled."""
+    return [(m.start(), _KIND_OF[m.group(1)]) for m in WRITE_CALL_RE.finditer(code)]
 
 
 def line_of(src, pos):
@@ -118,6 +141,85 @@ def has_escape(raw, start, end):
     return ESCAPE in text[start:end]
 
 
+def row_identity(code, pos, kind):
+    """The expression naming the row this write settles, or None if unknown.
+
+    [fix/protocol-gate-teeth-1122 F2] "A commit exists later in this function"
+    is not the invariant. `runAgentLoop` is one 4,300-line body holding five
+    write sites and five commits, so a sibling site's commit satisfied the old
+    check: measured on the real tree, deleting the commit of the
+    stream-interrupted / content-filtered / terminal-error rows left the gate at
+    rc=0. What the invariant actually says is that a row is settled BY ITS OWN
+    id — so the identity has to be extracted from the write and matched against
+    the commit's argument.
+
+    Three shapes exist in the tree, and each is derived rather than assumed:
+      * insert bound to a variable:      `val rowId = host.persistAssistantTurn(...)`
+      * insert settled in an inline lambda:
+            `host.persistAssistantTurn(...).also { rowId -> commitTranscriptRow(loopState, rowId) }`
+      * update of an existing row:       `host.updatePersistedAssistantTurn(earlyId, ...)`
+            (the first positional argument IS the row being settled)
+    """
+    if kind == "update":
+        op = code.find("(", pos)
+        if op < 0:
+            return None
+        args = call_args(code, op)
+        if not args:
+            return None
+        a, b = args[0]
+        text = re.sub(r"\s+", "", code[a:b])
+        # A named argument (`rowId = x`) is not the shape the tree uses; refuse
+        # rather than guess which parameter carries the id.
+        return None if (not text or re.match(r"[A-Za-z_]\w*=", text)) else text
+
+    # `pos` points at the METHOD name, so the text before it ends with the
+    # receiver chain (`host.`, `this.host.`, `target.`) rather than with `= `.
+    # Consume that chain so the binding name is what comes back.
+    prefix = code[:pos]
+    m = re.search(r"(?:val|var)?\s*([A-Za-z_][\w.]*)\s*=\s*(?:[A-Za-z_][\w.]*\s*\.\s*)*$", prefix)
+    if m:
+        return re.sub(r"\s+", "", m.group(1))
+    op = code.find("(", pos)
+    close = match_bracket(code, op) if op >= 0 else -1
+    if close > 0:
+        m = re.match(r"\s*\.\s*also\s*\{\s*([A-Za-z_]\w*)\s*->", code[close + 1:])
+        if m:
+            return m.group(1)
+    return None
+
+
+def commit_settles(code, pos, hi, identity):
+    """Is there a feasible commit after `pos` that settles exactly `identity`?
+
+    [fix/protocol-gate-teeth-1122 F2, second pass] Matching the identity alone is
+    still not the invariant when two sites bind the SAME name. Measured on the
+    real tree: the stream-interrupted site (L3295) and the content-filtered site
+    (L3409) both bind `carriedRowId`, so deleting L3295's commit left L3409's
+    sibling commit satisfying the identity match and the gate stayed at rc=0.
+    A row is settled by a commit that belongs to ITS OWN site, so the search
+    window ends at the next write site: a commit after that belongs to the
+    neighbour, not to this row.
+    """
+    window_hi = hi
+    for wpos, _wkind in write_sites(code):
+        if pos < wpos < window_hi:
+            window_hi = wpos
+    for cpos in call_positions(code, "commitTranscriptRow"):
+        if not (pos < cpos < window_hi):
+            continue
+        if not path_feasible(code, cpos, {}):
+            continue
+        op = code.find("(", cpos)
+        args = call_args(code, op) if op >= 0 else []
+        if len(args) < 2:
+            continue
+        a, b = args[1]
+        if re.sub(r"\s+", "", code[a:b]) == identity:
+            return True
+    return False
+
+
 def judge_site(code, raw, funcs, pos, kind):
     """Violations for ONE write site."""
     out = []
@@ -149,16 +251,15 @@ def judge_site(code, raw, funcs, pos, kind):
                            "a preceding planTranscriptRow in this function"
                            % (line_of(code, pos), stable))
 
-    settled = False
-    for cpos in call_positions(code, "commitTranscriptRow"):
-        if not (pos < cpos < hi):
-            continue
-        if path_feasible(code, cpos, {}):
-            settled = True
-            break
-    if not settled:
-        out.append("AgentLoopEngine.kt:%d: %s is never followed by commitTranscriptRow in the same "
-                   "function — the attempt spool stays unmarked" % (line_of(code, pos), kind))
+    identity = row_identity(code, pos, kind)
+    if identity is None:
+        out.append("AgentLoopEngine.kt:%d: cannot tell which row this %s settles — cannot judge (ROT)"
+                   % (line_of(code, pos), kind))
+        return out
+    if not commit_settles(code, pos, hi, identity):
+        out.append("AgentLoopEngine.kt:%d: %s is never followed by commitTranscriptRow for its own row "
+                   "('%s') in the same function — the attempt spool stays unmarked"
+                   % (line_of(code, pos), kind, identity))
     return out
 
 
@@ -179,7 +280,7 @@ def check_source(src):
     for name, lo, hi in funcs:
         if name != "persistTranscriptRow":
             continue
-        writes = [p for p in call_positions(code, "host.persistAssistantTurn") if lo <= p < hi]
+        writes = [p for p, k in write_sites(code) if k == "insert" and lo <= p < hi]
         if len(writes) != 1:
             v.append("AgentLoopEngine.kt:%d: persistTranscriptRow must own exactly one insert; found %d"
                      % (line_of(code, lo), len(writes)))
@@ -192,12 +293,19 @@ def check_source(src):
             v.append("AgentLoopEngine.kt:%d: wrapper returns without settling its pending handles"
                      % line_of(code, write))
 
-    for name, kind in WRITE_NAMES:
-        for pos in call_positions(code, name):
-            enc = enclosing(funcs, pos)
-            if enc and enc[0] == "persistTranscriptRow":
-                continue
-            v.extend(judge_site(code, src, funcs, pos, kind))
+    # [fix/protocol-gate-teeth-1122 F1] Derive sites from the method name so a
+    # receiver rename (`this.host.`, `theHost.`, a local alias) cannot empty the
+    # set, and a new bypass is judged the day it lands.
+    sites = write_sites(code)
+    if not sites:
+        v.append("AgentLoopEngine.kt: no persistAssistantTurn / updatePersistedAssistantTurn call "
+                 "found at all (ROT — the write funnel moved or this gate is looking at the wrong "
+                 "method names)")
+    for pos, kind in sites:
+        enc = enclosing(funcs, pos)
+        if enc and enc[0] == "persistTranscriptRow":
+            continue
+        v.extend(judge_site(code, src, funcs, pos, kind))
     return v
 
 
@@ -341,7 +449,68 @@ def selftest():
     _arm("commit helper deleted", GOOD.replace("commitTranscriptRow", "settledRow"),
          1, "is gone (ROT", failures)
 
-    # 8. the documented escape hatch works, and only inside its own function
+    # 8. [fix/protocol-gate-teeth-1122 F1] A receiver RENAME must not empty the
+    # site set. Under the old spelling-based derivation this arm passed with an
+    # empty violation list: `host.persistAssistantTurn` simply stopped matching.
+    renamed = GOOD.replace(
+        """        val rowId = host.persistAssistantTurn(parts, stableId = plannedId)
+        commitTranscriptRow(loopState, rowId)
+    }
+
+    suspend fun refreshRow""",
+        """        val rowId = host.persistAssistantTurn(parts, stableId = plannedId)
+    }
+
+    suspend fun refreshRow""").replace("host.persistAssistantTurn", "this.host.persistAssistantTurn")
+    _arm("receiver renamed, commit dropped", renamed, 1,
+         "is never followed by commitTranscriptRow for its own row", failures)
+
+    # 9. [F1] A local ALIAS as the receiver is a new site, judged the day it lands.
+    aliased = GOOD + """
+    suspend fun aliasBypass(loopState: LoopState) {
+        val target = host
+        target.persistAssistantTurn(parts, stableId = null)
+    }
+"""
+    _arm("aliased receiver bypass", aliased, 1, "passes no stableId", failures)
+
+    # 10. [F2] A commit that settles a DIFFERENT row must not count. The old
+    # check only asked "is there a commit after this write".
+    wrong_id = GOOD.replace(
+        """        val rowId = host.persistAssistantTurn(parts, stableId = plannedId)
+        commitTranscriptRow(loopState, rowId)
+    }
+
+    suspend fun refreshRow""",
+        """        val rowId = host.persistAssistantTurn(parts, stableId = plannedId)
+        commitTranscriptRow(loopState, otherRowId)
+    }
+
+    suspend fun refreshRow""")
+    _arm("commit settles another row", wrong_id, 1, "for its own row", failures)
+
+    # 11. [F2] The regression that motivated the pairing: in ONE function body a
+    # sibling site's commit used to rescue the site above it. `runAgentLoop` is
+    # a single 4,300-line body with five writes and five commits, so this shape
+    # is the real one, not a contrivance.
+    sibling = GOOD + """
+    suspend fun twoRows(loopState: LoopState) {
+        val planA = planTranscriptRow(loopState, 0)
+        val rowA = host.persistAssistantTurn(parts, stableId = planA)
+        val planB = planTranscriptRow(loopState, 1)
+        val rowB = host.persistAssistantTurn(parts, stableId = planB)
+        commitTranscriptRow(loopState, rowB)
+    }
+"""
+    _arm("sibling commit does not rescue", sibling, 1, "for its own row ('rowA')", failures)
+
+    # 12. [F1] Zero sites at all is a ROT, not a pass — the funnel moving is a
+    # gate event.
+    _arm("write funnel vanished", GOOD.replace("persistAssistantTurn", "writeAssistantRow")
+         .replace("updatePersistedAssistantTurn", "rewriteAssistantRow"),
+         1, "no persistAssistantTurn", failures)
+
+    # 13. the documented escape hatch works, and only inside its own function
     escaped = GOOD.replace(
         """    suspend fun refreshRow(loopState: LoopState) {""",
         """    // transcript-commit-ok: non-streamed maintenance row, no spool to settle

@@ -62,6 +62,13 @@ DECISION_VALUES = (
 SELF_REAP = "selfReap"
 LOCK = "lifecycleLock"
 LOCKED_SUFFIX = "Locked"
+# Where the outside world enters the Service. The upward walk of the reap path
+# stops here: these are boundaries, not decision code, and climbing past them
+# would drag the whole service file (and then the app) into the closure.
+ENTRY_POINTS = frozenset({
+    "onCreate", "onStartCommand", "onBind", "onUnbind", "onRebind",
+    "onDestroy", "onTaskRemoved", "onLowMemory", "onTrimMemory",
+})
 
 
 def line_of(src, pos):
@@ -120,6 +127,160 @@ def call_positions(code, name):
     return [m.start() for m in re.finditer(r"(?<![\w.])" + re.escape(name) + r"\s*\(", code)]
 
 
+def enclosing(funcs, pos):
+    best = None
+    for name, lo, hi in funcs:
+        if lo <= pos < hi and (best is None or lo > best[1]):
+            best = (name, lo, hi)
+    return best
+
+
+def brace_depth(code, pos):
+    """Brace nesting depth at [pos] (masked code, so literals/comments are gone).
+
+    Class body sits at depth 1, a companion object's members at 2. Used to tell a
+    real field declaration from a local `val` inside a function body.
+    """
+    depth = 0
+    for ch in code[:pos]:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+    return depth
+
+
+def field_sites(code, name):
+    """[(pos, scope)] for declarations of [name]; scope ∈ companion/instance/local.
+
+    [fix/protocol-gate-teeth-1122 F5] Depth-aware on purpose: a local `val` that
+    happens to share a name with a decision value is NOT an instance copy, and
+    calling it one would make the gate cry wolf on innocent code.
+    """
+    comps = companion_spans(code)
+    out = []
+    for m in re.finditer(r"\b(?:private\s+|internal\s+|public\s+|protected\s+|@\w+\s+)*"
+                         r"(?:val|var)\s+" + re.escape(name) + r"\b", code):
+        pos = m.start()
+        if any(a <= pos < b for a, b in comps):
+            out.append((pos, "companion"))
+        elif brace_depth(code, pos) == 1:
+            out.append((pos, "instance"))
+        else:
+            out.append((pos, "local"))
+    return out
+
+
+# Read shapes that mean "this value feeds a decision": an atomic/map/semaphore
+# read, or a monitor being taken.
+DECISION_READ_RE = re.compile(
+    r"(?<![\w.])([A-Za-z_]\w*)\s*\.\s*"
+    r"(?:get|isEmpty|size|value|incrementAndGet|decrementAndGet|addAndGet|compareAndSet)\b")
+SYNC_ARG_RE = re.compile(r"synchronized\s*\(\s*([A-Za-z_]\w*)\s*\)")
+
+
+def reachable_functions(code):
+    """Functions on the reap path, walking the call graph in BOTH directions.
+
+    [F5] The decision surface is not a list of names — it is whatever the reap
+    path actually reads. A NEW read on that path must become visible without
+    anyone editing a constant.
+
+    Direction matters, and only one of them was implemented at first: walking
+    DOWN from `selfReap()` finds what the kill itself touches, but the
+    QUIESCENCE TEST lives in the CALLER —
+    `if (activeRequests.get() == 0) maybeSelfReapLocked()` — so an
+    instance-declared `activeRequests` was missed and both "instance copy" arms
+    of the selftest went green. The path is the whole chain, so both directions
+    are followed.
+
+    Upward expansion stops at the Android lifecycle entry points: those are the
+    boundary where the outside world enters, not part of the decision, and
+    climbing past them would pull the entire service file into the closure.
+    """
+    funcs = all_functions(code)
+    by_name = {}
+    for name, lo, hi in funcs:
+        by_name.setdefault(name, []).append((lo, hi))
+
+    callees, callers = {}, {}
+    for name, lo, hi in funcs:
+        body = code[lo:hi]
+        for m in re.finditer(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", body):
+            callee = m.group(1)
+            if callee in by_name and callee != name:
+                callees.setdefault(name, set()).add(callee)
+                callers.setdefault(callee, set()).add(name)
+
+    seeds = {SELF_REAP}
+    for pos in call_positions(code, SELF_REAP):
+        enc = enclosing(funcs, pos)
+        if enc is not None:
+            seeds.add(enc[0])
+
+    closure = set(seeds)
+    todo = list(seeds)
+    while todo:
+        name = todo.pop()
+        for nxt in callees.get(name, set()):
+            if nxt not in closure:
+                closure.add(nxt)
+                todo.append(nxt)
+        for up in callers.get(name, set()):
+            if up in ENTRY_POINTS or up in closure:
+                continue
+            closure.add(up)
+            todo.append(up)
+    return [(name, lo, hi) for name, spans in by_name.items() if name in closure
+            for lo, hi in spans]
+
+
+def instance_mutable_fields(code):
+    """Names declared `var` (or annotated @Volatile) at class-body depth.
+
+    These are the fields whose VALUE can change under a replaced instance, so
+    reading one from the reap path is the defect regardless of the read shape.
+    Plain `val` constants (poll intervals, timeouts) are deliberately excluded —
+    they are immutable and identical per instance.
+    """
+    out = set()
+    comps = companion_spans(code)
+    for m in re.finditer(r"((?:@\w+\s+)*)(?:private\s+|internal\s+|public\s+|protected\s+)*"
+                         r"(val|var)\s+([A-Za-z_]\w*)\b", code):
+        pos = m.start()
+        if any(a <= pos < b for a, b in comps) or brace_depth(code, pos) != 1:
+            continue
+        ann, kind, name = m.group(1), m.group(2), m.group(3)
+        if kind == "var" or "@Volatile" in ann:
+            out.add(name)
+    return out
+
+
+def decision_values(code):
+    """Names the reap path reads as decision input, derived from USE.
+
+    [F5] Replaces the hardcoded seven-name list. The old list meant a new
+    instance-level counter wired into the quiescence check passed silently, while
+    RENAMING one of the seven made the gate report ROT — both halves of the
+    docstring's promise ("renaming keeps the gate working, dropping a decision
+    does not") were false. Deriving from the reachable closure fixes both
+    directions at once: a rename is followed, a new read is caught.
+    """
+    reach = reachable_functions(code)
+    names = set()
+    closure_text = []
+    for _name, lo, hi in reach:
+        body = code[lo:hi]
+        closure_text.append(body)
+        names |= set(DECISION_READ_RE.findall(body))
+        names |= set(SYNC_ARG_RE.findall(body))
+    joined = "\n".join(closure_text)
+    for field in instance_mutable_fields(code):
+        if re.search(r"(?<![\w.])" + re.escape(field) + r"\b", joined):
+            names.add(field)
+    return names, bool(reach)
+
+
 def locked_scopes(code):
     """synchronized blocks + `…Locked()` function bodies whose calls are all locked.
 
@@ -151,6 +312,30 @@ def locked_scopes(code):
     return scopes, funcs
 
 
+def async_spans(code):
+    """Bodies that run on ANOTHER thread/coroutine than the one that opens them.
+
+    [fix/protocol-gate-teeth-1122 F6] A `…Locked()` helper inherits its caller's
+    lock only on the SAME thread. `Thread { selfReap() }.start()` placed inside a
+    `synchronized(lifecycleLock)` block runs with NO lock held — precisely the
+    pass-1 defect — yet the old enclosing-scope test passed it, because the call
+    position sits inside the synchronized span. Extracting the boundaries lets
+    the call check demand a lock taken INSIDE the new thread.
+    """
+    out = []
+    pat = (r"(?<![\w.])(?:"
+           r"Thread\s*(?:\([^()]*\))?|thread\s*(?:\([^()]*\))?|"
+           r"launch\s*(?:\([^()]*\))?|async\s*(?:\([^()]*\))?|"
+           r"GlobalScope\s*\.\s*launch\s*(?:\([^()]*\))?|"
+           r"CoroutineScope\s*\([^()]*\)\s*\.\s*launch\s*(?:\([^()]*\))?"
+           r")\s*\{")
+    for m in re.finditer(pat, code):
+        close = match_bracket(code, m.end() - 1)
+        if close > 0:
+            out.append((m.end() - 1, close))
+    return out
+
+
 def check_service(src):
     v = []
     try:
@@ -162,18 +347,20 @@ def check_service(src):
         return ["ModelExecutionService.kt: no companion object — the process-scoped reap decision "
                 "has no home (ROT)"]
 
-    for name in DECISION_VALUES:
-        sites = declaration_sites(code, name)
-        if not sites:
-            v.append("ModelExecutionService.kt: reap-decision value `%s` is not declared at all "
-                     "(ROT — update this gate)" % name)
-            continue
-        outside = [p for p, inside_companion in sites if not inside_companion]
-        if outside:
-            v.append("ModelExecutionService.kt:%d: `%s` is declared on the Service INSTANCE — the "
-                     "instance is replaced by stopSelf while old run threads live, so this copy is a "
-                     "second (wrong) truth for a decision that kills the whole process"
-                     % (line_of(code, outside[0]), name))
+    # [F5] The decision surface is derived from USE on the reap path, not from a
+    # list of seven names. See [decision_values] for why both directions of the
+    # old list were wrong.
+    decisions, found_path = decision_values(code)
+    if not found_path:
+        v.append("ModelExecutionService.kt: no selfReap() call site found, so the reap path cannot "
+                 "be derived (ROT — update this gate)")
+    for name in sorted(decisions):
+        for pos, scope in field_sites(code, name):
+            if scope == "instance":
+                v.append("ModelExecutionService.kt:%d: `%s` is read by the reap path and declared on "
+                         "the Service INSTANCE — the instance is replaced by stopSelf while old run "
+                         "threads live, so this copy is a second (wrong) truth for a decision that "
+                         "kills the whole process" % (line_of(code, pos), name))
 
     body, decl_pos = function_text(code, SELF_REAP)
     if body is None:
@@ -188,11 +375,22 @@ def check_service(src):
     if not scopes:
         v.append("ModelExecutionService.kt: no locked scope found at all (ROT)")
         return v
+    asyncs = async_spans(code)
     decl_end = decl_pos + len(body)
     for pos in call_positions(code, SELF_REAP):
         if decl_pos <= pos < decl_end:
             continue
-        if not any(a <= pos < b for a, b in scopes):
+        # [F6] A lock opened BEFORE an async boundary is not held by the thread
+        # that boundary starts, so only a scope beginning at or after that
+        # boundary can protect the call.
+        floor = max([a for a, b in asyncs if a <= pos < b], default=0)
+        if any(a <= pos < b and a >= floor for a, b in scopes):
+            continue
+        if floor:
+            v.append("ModelExecutionService.kt:%d: selfReap() runs on a new thread/coroutine with no "
+                     "lock of its own — the enclosing lock belongs to the spawning thread, so this "
+                     "kill reads a snapshot it does not own" % line_of(code, pos))
+        else:
             v.append("ModelExecutionService.kt:%d: selfReap() is called outside a locked scope — it "
                      "can kill a process another instance just admitted a request into"
                      % line_of(code, pos))
