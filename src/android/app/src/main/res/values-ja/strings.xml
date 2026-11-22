@@ -1395,7 +1395,7 @@
     <string name="model_group_detail_custom_context">カスタム…</string>
     <string name="model_group_detail_custom_context_title">カスタムコンテキスト上限</string>
     <string name="model_group_detail_custom_context_input">コンテキスト上限（トークン）</string>
-    <string name="model_group_detail_custom_context_range">最低 64K トークン</string>
+    <string name="model_group_detail_custom_context_range">最低 64,000 トークン</string>
     <string name="add_provider_subtitle_openai">OpenAI と、DeepSeek、Moonshot、Groq などの互換サービスに対応</string>
     <string name="add_provider_subtitle_anthropic">ClaudeおよびAnthropicプロトコル互換サービスで動作します</string>
     <string name="add_provider_subtitle_gemini">GeminiシリーズおよびGoogle AI Studioで動作します</string>

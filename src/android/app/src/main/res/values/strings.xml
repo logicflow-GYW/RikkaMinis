@@ -987,7 +987,7 @@
     <string name="model_group_detail_custom_context">Custom…</string>
     <string name="model_group_detail_custom_context_title">Custom context limit</string>
     <string name="model_group_detail_custom_context_input">Context limit (tokens)</string>
-    <string name="model_group_detail_custom_context_range">Minimum 64K tokens</string>
+    <string name="model_group_detail_custom_context_range">Minimum 64,000 tokens</string>
     <string name="model_groups_model_groups">Model Groups</string>
     <string name="model_groups_new_group">New Group</string>
     <string name="model_groups_no_model_groups">No model groups</string>

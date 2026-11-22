@@ -36,7 +36,7 @@ object ContextLimitLadder {
             tokens < Int.MAX_VALUE &&
             tokens !in presets
 
-    /** Compact display label: 64K, 128K, 1M, 1.5M, 200K, … */
+    /** Compact label for a fixed stop: 64K, 128K, 256K, 512K, 1M. */
     fun label(tokens: Int): String {
         val (divisor, suffix) = if (tokens >= 1_000_000) {
             1_000_000.0 to "M"
@@ -48,6 +48,14 @@ object ContextLimitLadder {
             .trimEnd('.')
         return "$amount$suffix"
     }
+
+    /**
+     * Custom values are shown as the exact token count. A user-entered value
+     * is not a K/M approximation: "200500" must not read as "200.5K" while the
+     * input field asks for tokens. Fixed stops keep their compact labels.
+     */
+    fun customLabel(tokens: Int): String =
+        String.format(Locale.US, "%,d", tokens)
 
     /**
      * Slider stop for a persisted value. Legacy values outside [presets]

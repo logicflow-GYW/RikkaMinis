@@ -804,7 +804,8 @@ fun ModelGroupDetailScreen(
  *
  * The custom stop is a real slider stop, but its label is the selected value
  * once one exists: "Custom…" is only the affordance that opens the number
- * dialog; after confirmation the stop reads "800K" / "2M" like any other stop.
+ * dialog; after confirmation the stop reads the exact count ("800,000"), so
+ * the shaper never turns a user-entered token count into a K/M approximation.
  * Selecting it does not write anything until the dialog is confirmed, and
  * cancelling restores the slider to the persisted value.
  *
@@ -832,7 +833,7 @@ private fun ContextLimitSlider(
     onValueChange: (Int) -> Unit,
 ) {
     val customValue = value?.takeIf { ContextLimitLadder.isCustomValue(it) }
-    val customStepLabel = customValue?.let(ContextLimitLadder::label) ?: customLabel
+    val customStepLabel = customValue?.let(ContextLimitLadder::customLabel) ?: customLabel
     val steps = remember(unlimitedLabel, customStepLabel) {
         ContextLimitLadder.presets.map { ContextLimitStep(ContextLimitLadder.label(it), it) } +
             ContextLimitStep(customStepLabel, CONTEXT_LIMIT_CUSTOM_STEP_TOKEN) +
@@ -851,6 +852,7 @@ private fun ContextLimitSlider(
     var customDraft by remember { mutableStateOf("") }
     val currentLabel: String = when {
         value == null || value >= CONTEXT_LIMIT_UNLIMITED_SENTINEL -> unlimitedLabel
+        ContextLimitLadder.isCustomValue(value) -> ContextLimitLadder.customLabel(value)
         else -> ContextLimitLadder.label(value)
     }
 

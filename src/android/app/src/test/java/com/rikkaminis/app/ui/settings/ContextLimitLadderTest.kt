@@ -32,10 +32,11 @@ class ContextLimitLadderTest {
     }
 
     @Test
-    fun `custom labels preserve useful precision`() {
-        assertEquals("1.5M", ContextLimitLadder.label(1_500_000))
-        assertEquals("1.95M", ContextLimitLadder.label(1_950_000))
-        assertEquals("200.5K", ContextLimitLadder.label(200_500))
+    fun `custom labels are exact token counts not K M approximations`() {
+        assertEquals("1,500,000", ContextLimitLadder.customLabel(1_500_000))
+        assertEquals("1,950,000", ContextLimitLadder.customLabel(1_950_000))
+        assertEquals("200,500", ContextLimitLadder.customLabel(200_500))
+        assertEquals("2,000,000", ContextLimitLadder.customLabel(2_000_000))
     }
 
     @Test

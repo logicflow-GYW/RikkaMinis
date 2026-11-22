@@ -1366,7 +1366,7 @@
     <string name="model_group_detail_custom_context">自訂…</string>
     <string name="model_group_detail_custom_context_title">自訂上下文上限</string>
     <string name="model_group_detail_custom_context_input">上下文上限（tokens）</string>
-    <string name="model_group_detail_custom_context_range">最低 64K tokens</string>
+    <string name="model_group_detail_custom_context_range">最低 64,000 tokens</string>
     <string name="model_group_no_usable_models_badge">無可用模型</string>
     <string name="settings_section_notifications">通知</string>
     <string name="settings_task_notifications">任務通知</string>
