@@ -195,7 +195,6 @@
     <string name="token_usage_context_window_group_limit">（组限制 %1$s）</string>
     <string name="token_usage_context_window_group_limit_applied">（按组限制 %1$s）</string>
     <string name="token_usage_context_window_heuristic_warning">模型未上报真实上下文窗口，此为推测值，可在模型详情页修正</string>
-    <string name="token_usage_context_window_group_unlimited">（组设置：不限）</string>
     <string name="token_usage_max_output">最大输出</string>
     <string name="context_full_dialog_title">上下文已满</string>
     <string name="context_full_dialog_body">对话上下文已达上限。请新建对话或清空对话以继续。你的草稿已保存 — 取消可恢复。</string>
@@ -827,7 +826,10 @@
     <string name="model_group_detail_thinking_auto">自动</string>
     <string name="model_group_detail_limit_context_window">限制上下文窗口</string>
     <string name="model_group_detail_max_context">最大上下文</string>
-    <string name="model_group_detail_unlimited">不限</string>
+    <string name="model_group_detail_custom_context">自定义</string>
+    <string name="model_group_detail_custom_context_title">自定义上下文上限</string>
+    <string name="model_group_detail_custom_context_input">上下文上限（K tokens）</string>
+    <string name="model_group_detail_custom_context_range">最低 64,000 tokens</string>
     <string name="model_groups_model_groups">模型分组</string>
     <string name="model_groups_new_group">新建分组</string>
     <string name="model_groups_no_model_groups">暂无模型分组</string>

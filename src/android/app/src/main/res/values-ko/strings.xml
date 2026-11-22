@@ -159,7 +159,6 @@
     <string name="token_usage_context_window_group_limit"> (그룹 제한 %1$s)</string>
     <string name="token_usage_context_window_group_limit_applied"> (그룹 제한 기준 %1$s)</string>
     <string name="token_usage_context_window_heuristic_warning">모델이 실제 컨텍스트 윈도우를 보고하지 않습니다. 이는 추정치입니다. 모델 상세 화면에서 수정하세요.</string>
-    <string name="token_usage_context_window_group_unlimited"> (무제한)</string>
     <string name="token_usage_max_output">최대 출력</string>
     <string name="context_full_dialog_title">컨텍스트 가득 참</string>
     <string name="context_full_dialog_body">대화 컨텍스트가 한도에 도달했습니다. 계속하려면 새 채팅을 시작하거나 채팅을 비우세요. 초안이 저장되었습니다 — 취소하면 복원됩니다.</string>
@@ -1383,7 +1382,10 @@
     <string name="model_group_detail_thinking_ultra">울트라</string>
     <string name="model_group_detail_limit_context_window">컨텍스트 창 제한</string>
     <string name="model_group_detail_max_context">최대 컨텍스트</string>
-    <string name="model_group_detail_unlimited">무제한</string>
+    <string name="model_group_detail_custom_context">사용자 지정</string>
+    <string name="model_group_detail_custom_context_title">사용자 지정 컨텍스트 한도</string>
+    <string name="model_group_detail_custom_context_input">컨텍스트 한도(K 토큰)</string>
+    <string name="model_group_detail_custom_context_range">최소 64,000 토큰</string>
     <string name="add_provider_subtitle_openai">OpenAI 및 DeepSeek, Moonshot, Groq 등 호환 서비스 지원</string>
     <string name="add_provider_subtitle_anthropic">Claude 및 Anthropic 프로토콜 호환 서비스와 작동합니다.</string>
     <string name="add_provider_subtitle_gemini">Gemini 시리즈 및 Google AI Studio와 작동합니다.</string>

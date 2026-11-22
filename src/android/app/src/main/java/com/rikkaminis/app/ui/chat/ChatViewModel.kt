@@ -2482,7 +2482,7 @@ class ChatViewModel(
      *      the entry can't be found (e.g. synced sessions before config
      *      finished loading);
      *   2. the result is clamped by the bound group's `contextLimitTokens`
-     *      (null / <=0 = unlimited).
+     *      (null / <=0 = no group override).
      *
      * [T-context-window-sources] GROUP-PRIORITY policy: when the model's
      * context window is only a heuristic id-guess (`[LLMModel.ContextWindowSource].HEURISTIC` —
@@ -2493,7 +2493,7 @@ class ChatViewModel(
      * authoritative budget (the user's deliberate expression of how much they
      * want to spend), so we use it directly instead of `minOf(guess, group)`.
      * The guess is only kept as a display/capacity fallback when the group has
-     * no limit set either (unlimited). When the model window is EXPLICIT (real
+     * no limit set either. When the model window is EXPLICIT (real
      * value), we keep the minOf clamp — never assume a window larger than the
      * model physically supports.
      */
@@ -2507,9 +2507,9 @@ class ChatViewModel(
         // Group-priority: if the model window is only guessed and the user set
         // an explicit group limit, the group limit IS the budget.
         if (liveModel?.contextWindowSource == LLMModel.ContextWindowSource.HEURISTIC && groupLimit != null) {
-            // "Unlimited" means "no override — use the model's own window", so
-            // honour that intent by falling back to the model's (heuristic)
-            // window rather than returning Int.MAX_VALUE as a real capacity.
+            // A legacy Int.MAX_VALUE limit meant "no override — use the model's
+            // own window", so fall back to the model's (heuristic) window
+            // rather than returning Int.MAX_VALUE as a real capacity.
             if (groupLimit == Int.MAX_VALUE) return window
             return groupLimit
         }
@@ -2540,38 +2540,29 @@ class ChatViewModel(
      * sheet explain when the effective window is smaller than the group
      * limit — the model's physical window is the binding constraint (see
      * [effectiveContextWindowTokens]'s minOf clamp), which would otherwise
-     * look like the sheet "disagrees" with the group editor. `unlimited` is
-     * true when the group's limit is the "Unlimited" sentinel
-     * (Int.MAX_VALUE), in which case the sheet shows the model's native
-     * window without a numeric annotation.
+     * look like the sheet "disagrees" with the group editor.
+     *
+     * A legacy Int.MAX_VALUE group limit meant "no override". It is reported
+     * as null here, matching the group editor's switch-off state, so the sheet
+     * never surfaces a retired "unlimited" label.
      */
     val currentGroupContextLimit: GroupContextLimit?
         get() {
             val tokens = _selectedGroupId.value
                 ?.let { gid -> providerRepository.config.value.modelGroups.find { it.id == gid }?.contextLimitTokens }
                 ?: return null
-            if (tokens <= 0) return null
-            return GroupContextLimit(
-                tokens = tokens,
-                unlimited = tokens >= UNLIMITED_GROUP_CONTEXT_LIMIT,
-            )
+            if (tokens <= 0 || tokens >= Int.MAX_VALUE) return null
+            return GroupContextLimit(tokens)
         }
 
     /**
      * The bound group's context-limit configuration for the current session,
      * as read live by [currentGroupContextLimit]. `tokens` is the raw
-     * `contextLimitTokens` value; `unlimited` is true when it is the
-     * "Unlimited" slider stop (Int.MAX_VALUE sentinel — the runtime consumer
-     * treats it as "no override, use the model's native window").
+     * `contextLimitTokens` value.
      */
     data class GroupContextLimit(
         val tokens: Int,
-        val unlimited: Boolean,
     )
-
-    /** Sentinel used by the group editor's "Unlimited" stop; mirrors
-     * ModelGroupDetailScreen.CONTEXT_LIMIT_UNLIMITED_SENTINEL. */
-    private val UNLIMITED_GROUP_CONTEXT_LIMIT: Int = Int.MAX_VALUE
 
 
 
