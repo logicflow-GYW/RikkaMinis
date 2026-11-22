@@ -43,10 +43,10 @@ class ContextLimitLadderTest {
     }
 
     @Test
-    fun `custom labels never round to a different token count`() {
-        assertEquals("1999.999K", ContextLimitLadder.label(1_999_999))
-        assertEquals("1000.001K", ContextLimitLadder.label(1_000_001))
-        assertEquals("1950.001K", ContextLimitLadder.label(1_950_001))
+    fun `rounded display does not round the editable token count`() {
+        assertEquals("2M", ContextLimitLadder.label(1_999_999))
+        assertEquals("1999.999", ContextLimitLadder.customInputValue(1_999_999))
+        assertEquals(1_999_999, ContextLimitLadder.parseCustomK("1999.999"))
     }
 
     @Test
@@ -115,16 +115,29 @@ class ContextLimitLadderTest {
 
     @Test
     fun `custom K input keeps digits and one decimal point`() {
-        assertEquals("200.5", ContextLimitLadder.sanitizeCustomKInput("200.5"))
-        assertEquals("2000", ContextLimitLadder.sanitizeCustomKInput("2,000"))
-        assertEquals("2.05", ContextLimitLadder.sanitizeCustomKInput("2.0.5"))
-        assertEquals("", ContextLimitLadder.sanitizeCustomKInput("abc"))
+        assertEquals("200.5", ContextLimitLadder.sanitizeCustomKInput("200.5", '.'))
+        assertEquals("2000", ContextLimitLadder.sanitizeCustomKInput("2,000", '.'))
+        assertEquals("2.05", ContextLimitLadder.sanitizeCustomKInput("2.0.5", '.'))
+        assertEquals("", ContextLimitLadder.sanitizeCustomKInput("abc", '.'))
     }
 
     @Test
     fun `custom K input honours the locale decimal separator`() {
         assertEquals("64.5", ContextLimitLadder.sanitizeCustomKInput("64,5", ','))
         assertEquals(64_500, ContextLimitLadder.parseCustomK(ContextLimitLadder.sanitizeCustomKInput("64,5", ',')))
-        assertEquals("2000", ContextLimitLadder.sanitizeCustomKInput("2.000", ','))
+    }
+
+    @Test
+    fun `comma locale editing preserves the normalized draft and prefill`() {
+        assertEquals("64.56", ContextLimitLadder.sanitizeCustomKInput("64.56", ','))
+        assertEquals(
+            "200.5",
+            ContextLimitLadder.sanitizeCustomKInput(ContextLimitLadder.customInputValue(200_500), ','),
+        )
+        for (separator in listOf('.', ',', '\u066b')) {
+            val normalized = ContextLimitLadder.sanitizeCustomKInput("64${separator}5", separator)
+            assertEquals("64.5", normalized)
+            assertEquals(normalized, ContextLimitLadder.sanitizeCustomKInput(normalized, separator))
+        }
     }
 }

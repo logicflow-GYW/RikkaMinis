@@ -46,23 +46,23 @@ object ContextLimitLadder {
     fun isLegacyUnlimited(tokens: Int?): Boolean =
         tokens != null && tokens >= Int.MAX_VALUE
 
-    /** Compact label that never rounds to a different persisted token count. */
+    /** Readable display label only; parsing and persistence use the raw token count. */
     fun label(tokens: Int): String {
-        if (tokens >= 1_000_000) {
-            val amount = String.format(Locale.US, "%.2f", tokens / 1_000_000.0)
-                .trimEnd('0')
-                .trimEnd('.')
-            if ((amount.toDouble() * 1_000_000.0).roundToLong() == tokens.toLong()) {
-                return "${amount}M"
-            }
+        val (divisor, suffix) = if (tokens >= 1_000_000) {
+            1_000_000.0 to "M"
+        } else {
+            1_000.0 to "K"
         }
-        return "${formatK(tokens)}K"
+        val amount = String.format(Locale.US, "%.2f", tokens / divisor)
+            .trimEnd('0')
+            .trimEnd('.')
+        return "$amount$suffix"
     }
 
     /** Pre-fills the K-unit dialog without its suffix. */
     fun customInputValue(tokens: Int): String = formatK(tokens)
 
-    /** Normalizes the locale decimal separator; other grouping marks are dropped. */
+    /** Normalizes the locale separator to '.', keeping the canonical draft stable. */
     fun sanitizeCustomKInput(
         raw: String,
         decimalSeparator: Char = DecimalFormatSymbols.getInstance().decimalSeparator,
@@ -72,7 +72,7 @@ object ContextLimitLadder {
         for (ch in raw) {
             when {
                 ch.isDigit() -> out.append(ch)
-                ch == decimalSeparator && !hasDecimalPoint -> {
+                (ch == '.' || ch == decimalSeparator) && !hasDecimalPoint -> {
                     out.append('.')
                     hasDecimalPoint = true
                 }
