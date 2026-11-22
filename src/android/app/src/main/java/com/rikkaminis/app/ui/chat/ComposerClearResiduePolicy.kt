@@ -195,11 +195,28 @@ internal fun hasReplayConverged(
     clearedText: String,
     msSinceClear: Long,
 ): Boolean {
+    if (!isWholeClearedBody(incoming, clearedText)) return false
+    return isSuperhumanTypingRate(stripImeTrailingNoise(incoming).length, msSinceClear)
+}
+
+/**
+ * [fix/composer-short-body-replay-1122] Is [incoming] the ENTIRE body a clear
+ * removed (ignoring the IME's trailing punctuation / space)?
+ *
+ * Separate from [hasReplayConverged] because the two are asked at different
+ * points and answer different questions: convergence additionally requires the
+ * body to have arrived faster than a human could type it, while this is the
+ * content half alone. Arm A needs the content half by itself — see the floor
+ * lift in [composerResidueVerdict].
+ *
+ * Both use this one definition on purpose: a second hand-rolled comparison is
+ * how the two would drift apart on the trailing-noise rule.
+ */
+internal fun isWholeClearedBody(incoming: String, clearedText: String): Boolean {
     val incomingNorm = stripImeTrailingNoise(incoming)
     val clearedNorm = stripImeTrailingNoise(clearedText)
     if (incomingNorm.isEmpty() || clearedNorm.isEmpty()) return false
-    if (incomingNorm != clearedNorm) return false
-    return isSuperhumanTypingRate(incomingNorm.length, msSinceClear)
+    return incomingNorm == clearedNorm
 }
 
 /**
@@ -490,7 +507,19 @@ internal fun composerResidueVerdict(
     //  * ...and only then does the rate test get a vote, which is what still
     //    catches a short body replayed in one frame.
     if (boxEmpty) {
-        val longEnough = incoming.length >= minReplayChars
+        // [fix/composer-short-body-replay-1122] The fragment floor must not
+        // filter out a WHOLE-body replay. For a body shorter than the floor
+        // ("做", "ok", "好的") the fragment rule can never fire: `len >= 4` is
+        // false by construction, so the exact text the user just sent walks
+        // straight back into the emptied composer. Device log from the report:
+        //   `allowed a short fragment of the cleared body (len=1 of 1,
+        //    composition=false, dt=1ms)` — the guard SAW the replay and let it
+        // through. Equality with the whole body is the strongest signal
+        // available here, so it lifts the floor and leaves the decision to the
+        // rate test: a human cannot type a message within a few dozen
+        // milliseconds of a clear that hid the keyboard and dropped focus.
+        val wholeBody = isWholeClearedBody(incoming, clearedText)
+        val longEnough = incoming.length >= minReplayChars || wholeBody
         val phrase = incoming.length >= COMPOSER_SINGLE_EDIT_PHRASE_CHARS
         val covers = coversEnoughOfClearedBody(incoming, clearedText)
         val drop = longEnough &&
