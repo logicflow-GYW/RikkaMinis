@@ -1385,6 +1385,10 @@
     <string name="model_group_detail_limit_context_window">Kontextfenster begrenzen</string>
     <string name="model_group_detail_max_context">Max. Kontext</string>
     <string name="model_group_detail_unlimited">Unbegrenzt</string>
+    <string name="model_group_detail_custom_context">Benutzerdefiniert…</string>
+    <string name="model_group_detail_custom_context_title">Benutzerdefiniertes Kontextlimit</string>
+    <string name="model_group_detail_custom_context_input">Kontextlimit (Tokens)</string>
+    <string name="model_group_detail_custom_context_range">Mindestens 64K Tokens</string>
     <string name="add_provider_subtitle_openai">OpenAI und kompatible Dienste wie DeepSeek, Moonshot und Groq</string>
     <string name="add_provider_subtitle_anthropic">Funktioniert mit Claude und Diensten, die das Anthropic-Protokoll unterstützen</string>
     <string name="add_provider_subtitle_gemini">Funktioniert mit der Gemini-Serie und Google AI Studio</string>

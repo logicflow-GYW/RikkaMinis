@@ -775,6 +775,10 @@
     <string name="model_group_detail_limit_context_window">Ограничить контекстное окно</string>
     <string name="model_group_detail_max_context">Макс. контекст</string>
     <string name="model_group_detail_unlimited">Без ограничений</string>
+    <string name="model_group_detail_custom_context">Другой…</string>
+    <string name="model_group_detail_custom_context_title">Свой лимит контекста</string>
+    <string name="model_group_detail_custom_context_input">Лимит контекста (токены)</string>
+    <string name="model_group_detail_custom_context_range">Минимум 64K токенов</string>
     <string name="model_groups_model_groups">Группы моделей</string>
     <string name="model_groups_new_group">Новая группа</string>
     <string name="model_groups_no_model_groups">Нет групп моделей</string>

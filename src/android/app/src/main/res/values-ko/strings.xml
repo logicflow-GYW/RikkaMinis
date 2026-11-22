@@ -1384,6 +1384,10 @@
     <string name="model_group_detail_limit_context_window">컨텍스트 창 제한</string>
     <string name="model_group_detail_max_context">최대 컨텍스트</string>
     <string name="model_group_detail_unlimited">무제한</string>
+    <string name="model_group_detail_custom_context">사용자 지정…</string>
+    <string name="model_group_detail_custom_context_title">사용자 지정 컨텍스트 한도</string>
+    <string name="model_group_detail_custom_context_input">컨텍스트 한도(토큰)</string>
+    <string name="model_group_detail_custom_context_range">최소 64K 토큰</string>
     <string name="add_provider_subtitle_openai">OpenAI 및 DeepSeek, Moonshot, Groq 등 호환 서비스 지원</string>
     <string name="add_provider_subtitle_anthropic">Claude 및 Anthropic 프로토콜 호환 서비스와 작동합니다.</string>
     <string name="add_provider_subtitle_gemini">Gemini 시리즈 및 Google AI Studio와 작동합니다.</string>

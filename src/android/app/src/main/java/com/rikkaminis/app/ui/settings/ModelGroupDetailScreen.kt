@@ -32,6 +32,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -56,6 +57,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
@@ -614,12 +616,13 @@ fun ModelGroupDetailScreen(
                     }
                     val contextEnabled = contextLimitTokens != null
                     // T-android-ctx-slider-cap (port iOS fa77f493): the slider
-                    // is now a fixed 7-stop ladder decoupled from member-model
-                    // metadata. We no longer derive an `unlimitedTokens` cap
-                    // from `max(member.contextWindow)`, because that field is
-                    // unreliable (image-output / router models report no
-                    // window, falling through to the 128K heuristic default)
-                    // and silently shrunk the picker. Per-model enforcement
+                    // is a fixed five-stop ladder plus custom/unlimited,
+                    // decoupled from member-model metadata. We no longer derive
+                    // an `unlimitedTokens` cap from `max(member.contextWindow)`,
+                    // because that field is unreliable (image-output / router
+                    // models report no window, falling through to the 128K
+                    // heuristic default) and silently shrunk the picker.
+                    // Per-model enforcement
                     // still happens at runtime via the consumer of
                     // `contextLimitTokens` (min(groupLimit, modelLimit)).
                     SettingsSwitchRow(
@@ -674,6 +677,10 @@ fun ModelGroupDetailScreen(
                         ContextLimitSlider(
                             value = contextLimitTokens,
                             unlimitedLabel = stringResource(R.string.model_group_detail_unlimited),
+                            customLabel = stringResource(R.string.model_group_detail_custom_context),
+                            customDialogTitle = stringResource(R.string.model_group_detail_custom_context_title),
+                            customInputLabel = stringResource(R.string.model_group_detail_custom_context_input),
+                            customRangeLabel = stringResource(R.string.model_group_detail_custom_context_range),
                             maxContextLabel = stringResource(R.string.model_group_detail_max_context),
                             onValueChange = { newTokens ->
                                 contextLimitTokens = newTokens
@@ -783,69 +790,70 @@ fun ModelGroupDetailScreen(
 }
 
 /**
- * Discrete-step max-context slider that mirrors iOS `ContextLimitSlider`
- * (ModelGroupDetailView.swift, fa77f493). Step labels:
- * 32K / 64K / 128K / 200K / 400K / 1M / Unlimited.
+ * Discrete max-context slider. Fixed stops:
+ * 64K / 128K / 256K / 512K / 1M / Custom… / Unlimited.
  *
- * Fixed 7-stop ladder, always shown verbatim regardless of which models (if
- * any) are in the group. The previous behaviour clipped the ladder to the
- * largest member-declared context window, but model metadata is unreliable
- * (e.g. image-output / router models report no window and fall through to
- * the 128K heuristic default) and the per-model field is already enforced
- * at runtime when assembling requests via `min(groupLimit, modelLimit)`.
- * Keeping the ladder fixed makes the UI a pure user-intent slider —
- * "I want this group to cap context at N" — and removes the entire family
- * of bugs where adding/removing a model would silently shrink the picker.
+ * The ladder is always shown verbatim regardless of which models (if any) are
+ * in the group. Model metadata is unreliable (e.g. image-output / router models
+ * report no window and fall through to a heuristic default) and the per-model
+ * field is already enforced at runtime when assembling requests via
+ * `min(groupLimit, modelLimit)`. Keeping the ladder fixed makes the UI a pure
+ * user-intent slider — "I want this group to cap context at N" — and removes
+ * the entire family of bugs where adding/removing a model silently changed the
+ * picker.
+ *
+ * The custom stop is a real slider stop, but its label is the selected value
+ * once one exists: "Custom…" is only the affordance that opens the number
+ * dialog; after confirmation the stop reads "800K" / "2M" like any other stop.
+ * Selecting it does not write anything until the dialog is confirmed, and
+ * cancelling restores the slider to the persisted value.
  *
  * The "Unlimited" stop maps to `Int.MAX_VALUE` in the binding; the runtime
  * consumer treats anything `>= Int.MAX_VALUE` as "no override, use the
  * model's native window".
  */
 private const val CONTEXT_LIMIT_UNLIMITED_SENTINEL: Int = Int.MAX_VALUE
+private const val CONTEXT_LIMIT_CUSTOM_STEP_TOKEN: Int = -1
 
-private val CONTEXT_LIMIT_PRESETS = listOf(
-    32_000,
-    64_000,
-    128_000,
-    200_000,
-    400_000,
-    1_000_000,
+private data class ContextLimitStep(
+    val label: String,
+    val tokens: Int,
 )
-
-private fun formatPresetLabel(tokens: Int): String =
-    if (tokens >= 1_000_000) "${tokens / 1_000_000}M" else "${tokens / 1_000}K"
 
 @Composable
 private fun ContextLimitSlider(
     value: Int?,
     unlimitedLabel: String,
+    customLabel: String,
+    customDialogTitle: String,
+    customInputLabel: String,
+    customRangeLabel: String,
     maxContextLabel: String,
     onValueChange: (Int) -> Unit,
 ) {
-    data class Step(val label: String, val tokens: Int)
-    val steps = remember(unlimitedLabel) {
-        CONTEXT_LIMIT_PRESETS.map { Step(formatPresetLabel(it), it) } +
-            Step(unlimitedLabel, CONTEXT_LIMIT_UNLIMITED_SENTINEL)
+    val customValue = value?.takeIf { ContextLimitLadder.isCustomValue(it) }
+    val customStepLabel = customValue?.let(ContextLimitLadder::label) ?: customLabel
+    val steps = remember(unlimitedLabel, customStepLabel) {
+        ContextLimitLadder.presets.map { ContextLimitStep(ContextLimitLadder.label(it), it) } +
+            ContextLimitStep(customStepLabel, CONTEXT_LIMIT_CUSTOM_STEP_TOKEN) +
+            ContextLimitStep(unlimitedLabel, CONTEXT_LIMIT_UNLIMITED_SENTINEL)
     }
-    // Track the selected stop by index. Snap to nearest stop <= value
-    // so legacy saved values (e.g. 350K) land on the next stop down (200K).
-    var selectedIndex by remember(steps, value) {
-        mutableStateOf(
-            when {
-                value == null -> steps.lastIndex
-                value >= CONTEXT_LIMIT_UNLIMITED_SENTINEL -> steps.lastIndex
-                else -> steps.indexOfLast { it.tokens <= value }.takeIf { it >= 0 } ?: 0
-            }
-        )
+    val customIndex = steps.size - 2
+
+    fun indexFor(v: Int?): Int =
+        ContextLimitLadder.stepIndexFor(v, customIndex, steps.lastIndex)
+
+    // The selected stop is tracked locally so the custom stop can be previewed
+    // (and cancelled) without writing a value. Any external value change
+    // re-anchors it, including a config-flow update from another screen.
+    var selectedIndex by remember(steps, value) { mutableStateOf(indexFor(value)) }
+    var showCustomDialog by remember { mutableStateOf(false) }
+    var customDraft by remember { mutableStateOf("") }
+    val currentLabel: String = when {
+        value == null || value >= CONTEXT_LIMIT_UNLIMITED_SENTINEL -> unlimitedLabel
+        else -> ContextLimitLadder.label(value)
     }
-    val currentLabel: String = run {
-        val v = value
-        when {
-            v == null -> steps.last().label
-            v >= CONTEXT_LIMIT_UNLIMITED_SENTINEL -> unlimitedLabel
-            else -> steps.firstOrNull { it.tokens == v }?.label ?: "${v / 1000}K"
-        }
-    }
+
     SettingsCardBlock {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -863,10 +871,18 @@ private fun ContextLimitSlider(
         Slider(
             value = selectedIndex.toFloat(),
             onValueChange = { newIndex ->
-                val idx = newIndex.roundToInt().coerceIn(0, steps.lastIndex)
-                if (idx != selectedIndex) {
-                    selectedIndex = idx
-                    onValueChange(steps[idx].tokens)
+                selectedIndex = newIndex.roundToInt().coerceIn(0, steps.lastIndex)
+            },
+            onValueChangeFinished = {
+                // Commit only on release. Persisting every intermediate stop
+                // while the thumb crosses the ladder makes "cancel custom"
+                // unable to restore the previous value.
+                if (selectedIndex == customIndex) {
+                    customDraft = customValue?.toString().orEmpty()
+                    showCustomDialog = true
+                } else {
+                    val tokens = steps[selectedIndex].tokens
+                    if (tokens != value) onValueChange(tokens)
                 }
             },
             valueRange = 0f..steps.lastIndex.toFloat().coerceAtLeast(1f),
@@ -886,6 +902,63 @@ private fun ContextLimitSlider(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+
+    if (showCustomDialog) {
+        val parsed = ContextLimitLadder.parseCustom(customDraft)
+        fun dismissCustom() {
+            showCustomDialog = false
+            selectedIndex = indexFor(value)
+        }
+        AlertDialog(
+            onDismissRequest = { dismissCustom() },
+            title = { Text(customDialogTitle) },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = customDraft,
+                        onValueChange = { input ->
+                            customDraft = input.filter(Char::isDigit).take(10)
+                        },
+                        label = { Text(customInputLabel) },
+                        supportingText = { Text(customRangeLabel) },
+                        singleLine = true,
+                        isError = customDraft.isNotEmpty() && parsed == null,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                parsed?.let {
+                                    onValueChange(it)
+                                    showCustomDialog = false
+                                }
+                            },
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                MinisTextButton(
+                    onClick = {
+                        parsed?.let {
+                            onValueChange(it)
+                            showCustomDialog = false
+                        }
+                    },
+                    enabled = parsed != null,
+                ) {
+                    Text(stringResource(R.string.common_save))
+                }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { dismissCustom() }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        )
     }
 }
 

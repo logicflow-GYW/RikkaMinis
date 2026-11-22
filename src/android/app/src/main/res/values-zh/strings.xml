@@ -828,6 +828,10 @@
     <string name="model_group_detail_limit_context_window">限制上下文窗口</string>
     <string name="model_group_detail_max_context">最大上下文</string>
     <string name="model_group_detail_unlimited">不限</string>
+    <string name="model_group_detail_custom_context">自定义…</string>
+    <string name="model_group_detail_custom_context_title">自定义上下文上限</string>
+    <string name="model_group_detail_custom_context_input">上下文上限（tokens）</string>
+    <string name="model_group_detail_custom_context_range">最低 64K tokens</string>
     <string name="model_groups_model_groups">模型分组</string>
     <string name="model_groups_new_group">新建分组</string>
     <string name="model_groups_no_model_groups">暂无模型分组</string>
