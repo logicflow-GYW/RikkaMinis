@@ -43,6 +43,13 @@ class ContextLimitLadderTest {
     }
 
     @Test
+    fun `custom labels never round to a different token count`() {
+        assertEquals("1999.999K", ContextLimitLadder.label(1_999_999))
+        assertEquals("1000.001K", ContextLimitLadder.label(1_000_001))
+        assertEquals("1950.001K", ContextLimitLadder.label(1_950_001))
+    }
+
+    @Test
     fun `custom input value is the K amount without suffix`() {
         assertEquals("200.5", ContextLimitLadder.customInputValue(200_500))
         assertEquals("800", ContextLimitLadder.customInputValue(800_000))
@@ -112,5 +119,12 @@ class ContextLimitLadderTest {
         assertEquals("2000", ContextLimitLadder.sanitizeCustomKInput("2,000"))
         assertEquals("2.05", ContextLimitLadder.sanitizeCustomKInput("2.0.5"))
         assertEquals("", ContextLimitLadder.sanitizeCustomKInput("abc"))
+    }
+
+    @Test
+    fun `custom K input honours the locale decimal separator`() {
+        assertEquals("64.5", ContextLimitLadder.sanitizeCustomKInput("64,5", ','))
+        assertEquals(64_500, ContextLimitLadder.parseCustomK(ContextLimitLadder.sanitizeCustomKInput("64,5", ',')))
+        assertEquals("2000", ContextLimitLadder.sanitizeCustomKInput("2.000", ','))
     }
 }

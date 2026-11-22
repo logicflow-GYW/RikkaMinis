@@ -1,5 +1,6 @@
 package com.rikkaminis.app.ui.settings
 
+import java.text.DecimalFormatSymbols
 import java.util.Locale
 import kotlin.math.roundToLong
 
@@ -45,30 +46,33 @@ object ContextLimitLadder {
     fun isLegacyUnlimited(tokens: Int?): Boolean =
         tokens != null && tokens >= Int.MAX_VALUE
 
-    /** Compact label for a fixed stop: 64K, 128K, 256K, 512K, 1M. */
+    /** Compact label that never rounds to a different persisted token count. */
     fun label(tokens: Int): String {
-        val (divisor, suffix) = if (tokens >= 1_000_000) {
-            1_000_000.0 to "M"
-        } else {
-            1_000.0 to "K"
+        if (tokens >= 1_000_000) {
+            val amount = String.format(Locale.US, "%.2f", tokens / 1_000_000.0)
+                .trimEnd('0')
+                .trimEnd('.')
+            if ((amount.toDouble() * 1_000_000.0).roundToLong() == tokens.toLong()) {
+                return "${amount}M"
+            }
         }
-        val amount = String.format(Locale.US, "%.2f", tokens / divisor)
-            .trimEnd('0')
-            .trimEnd('.')
-        return "$amount$suffix"
+        return "${formatK(tokens)}K"
     }
 
     /** Pre-fills the K-unit dialog without its suffix. */
     fun customInputValue(tokens: Int): String = formatK(tokens)
 
-    /** Allows digits and a single decimal point; grouping commas are dropped. */
-    fun sanitizeCustomKInput(raw: String): String {
+    /** Normalizes the locale decimal separator; other grouping marks are dropped. */
+    fun sanitizeCustomKInput(
+        raw: String,
+        decimalSeparator: Char = DecimalFormatSymbols.getInstance().decimalSeparator,
+    ): String {
         val out = StringBuilder()
         var hasDecimalPoint = false
         for (ch in raw) {
             when {
                 ch.isDigit() -> out.append(ch)
-                ch == '.' && !hasDecimalPoint -> {
+                ch == decimalSeparator && !hasDecimalPoint -> {
                     out.append('.')
                     hasDecimalPoint = true
                 }
