@@ -909,6 +909,15 @@ private fun ContextLimitSlider(
             showCustomDialog = false
             selectedIndex = indexFor(value)
         }
+        fun confirmCustom() {
+            parsed?.let { tokens ->
+                // A same-value save does not change remember(steps, value), so
+                // explicitly leave the preview stop even when no write is needed.
+                selectedIndex = indexFor(tokens)
+                if (tokens != value) onValueChange(tokens)
+                showCustomDialog = false
+            }
+        }
         AlertDialog(
             onDismissRequest = { dismissCustom() },
             title = { Text(customDialogTitle) },
@@ -928,12 +937,7 @@ private fun ContextLimitSlider(
                             imeAction = ImeAction.Done,
                         ),
                         keyboardActions = KeyboardActions(
-                            onDone = {
-                                parsed?.let {
-                                    onValueChange(it)
-                                    showCustomDialog = false
-                                }
-                            },
+                            onDone = { confirmCustom() },
                         ),
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -941,12 +945,7 @@ private fun ContextLimitSlider(
             },
             confirmButton = {
                 MinisTextButton(
-                    onClick = {
-                        parsed?.let {
-                            onValueChange(it)
-                            showCustomDialog = false
-                        }
-                    },
+                    onClick = { confirmCustom() },
                     enabled = parsed != null,
                 ) {
                     Text(stringResource(R.string.common_save))

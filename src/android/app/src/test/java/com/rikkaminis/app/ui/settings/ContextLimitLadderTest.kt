@@ -1,5 +1,6 @@
 package com.rikkaminis.app.ui.settings
 
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -139,5 +140,37 @@ class ContextLimitLadderTest {
             assertEquals("64.5", normalized)
             assertEquals(normalized, ContextLimitLadder.sanitizeCustomKInput(normalized, separator))
         }
+    }
+
+    @Test
+    fun `button and IME confirmation share same value thumb reset`() {
+        val relative = "src/android/app/src/main/java/com/rikkaminis/app/ui/settings/ModelGroupDetailScreen.kt"
+        var directory: File? = File(".").absoluteFile
+        var screen: File? = null
+        while (directory != null && screen == null) {
+            val current = directory
+            screen = listOf(File(current, relative), File(current, "src/android/app/$relative"))
+                .firstOrNull { it.isFile }
+            directory = current.parentFile
+        }
+        val source = requireNotNull(screen) { "Cannot locate group screen; wiring test must not skip" }
+            .readText()
+        val code = source.lines().filterNot {
+            val line = it.trimStart()
+            line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")
+        }.joinToString("\n")
+        val helperMatch = Regex("fun confirmCustom\\(\\)\\s*\\{([\\s\\S]*?)\\n        }\\n        AlertDialog")
+            .find(code)
+        val helper = requireNotNull(helperMatch) { "Missing shared custom confirmation" }.groupValues[1]
+        val reset = Regex("selectedIndex\\s*=\\s*indexFor\\(tokens\\)").find(helper)
+        val write = Regex("if \\(tokens != value\\) onValueChange\\(tokens\\)").find(helper)
+        val hide = Regex("showCustomDialog\\s*=\\s*false").find(helper)
+        assertTrue("Same-value saves must re-anchor independently of config emissions", reset != null)
+        assertTrue("Changed values must still be persisted", write != null)
+        assertTrue("Confirmation must close the dialog", hide != null)
+        assertTrue(reset!!.range.first < write!!.range.first)
+        assertTrue(reset.range.first < hide!!.range.first)
+        assertEquals(1, Regex("onDone\\s*=\\s*\\{\\s*confirmCustom\\(\\)\\s*}").findAll(code).count())
+        assertEquals(1, Regex("onClick\\s*=\\s*\\{\\s*confirmCustom\\(\\)\\s*}").findAll(code).count())
     }
 }
