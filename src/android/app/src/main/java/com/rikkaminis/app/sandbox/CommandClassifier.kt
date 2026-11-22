@@ -339,12 +339,44 @@ internal enum class HeavyGateClass { LIGHT, INTERPRETER, GLOBAL }
  * at 3 MB — pure socket polling. During the 687 s window another session's
  * one-second command queued 151.2 s behind it.
  *
- * Kept deliberately narrow: only the shipping wait entry points match, so an
- * arbitrary `python3 script.py` cannot claim the exemption.
+ * The exemption is decided from the interpreter's FIRST script argument (and,
+ * where relevant, its first subcommand). A substring elsewhere in the command
+ * cannot claim it: `python3 build.py --task gh_ci_wait.sh` remains an ordinary
+ * interpreter workload.
  */
-private val WAIT_ONLY_INTERPRETER = Regex(
-    """(?:^|[\s=|;&/])(?:gh_ci\.py\s+wait\b|gh_ci_wait\.[a-z]+\b|gh_ci_wait\b|gh_sync\.sh\s+wait\b)""",
+private val WAIT_ONLY_SCRIPTS = setOf(
+    "gh_ci_wait", "gh_ci_wait.py", "gh_ci_wait.sh",
 )
+
+private val WAIT_SUBCOMMAND_SCRIPTS = setOf(
+    "gh_ci.py", "gh_sync.sh",
+)
+
+private fun unquoteArgument(argument: String): String =
+    argument.removeSurrounding("\"").removeSurrounding("'")
+
+private fun isWaitOnlyInterpreterInvocation(statement: String): Boolean {
+    val tokens = statement.split(' ').filter { it.isNotEmpty() }
+    var index = 1
+    while (index < tokens.size) {
+        val token = tokens[index]
+        if (token.startsWith("-")) {
+            // Inline code can contain anything, including a wait helper's name.
+            // Never infer its resource shape from that string.
+            if (token == "-c" || token == "-e") return false
+            index++
+            continue
+        }
+
+        val script = unquoteArgument(token).substringAfterLast('/')
+        if (script in WAIT_ONLY_SCRIPTS) return true
+        if (script !in WAIT_SUBCOMMAND_SCRIPTS) return false
+
+        val subcommand = tokens.getOrNull(index + 1)?.let(::unquoteArgument)
+        return subcommand == "wait"
+    }
+    return false
+}
 
 /**
  * Classify a whole command for the global gate. Never throws; unparseable
@@ -379,7 +411,7 @@ private fun gateClassOfStatement(rawStatement: String): HeavyGateClass {
     }
     if (verb in DETERMINISTIC_HEAVY_VERBS) return HeavyGateClass.GLOBAL
     if (isInterpreterVerb(verb)) {
-        return if (WAIT_ONLY_INTERPRETER.containsMatchIn(s)) {
+        return if (isWaitOnlyInterpreterInvocation(s)) {
             HeavyGateClass.LIGHT
         } else {
             HeavyGateClass.INTERPRETER

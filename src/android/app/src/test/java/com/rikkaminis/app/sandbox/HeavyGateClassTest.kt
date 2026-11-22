@@ -52,8 +52,22 @@ class HeavyGateClassTest {
             "python3 gh_ci.py wait --repo o/r --workflow build-apk.yml",
             "cd /var/minis/skills/github-ops/scripts && python3 gh_ci.py wait --repo o/r",
             "python3 /var/minis/skills/github-ops/scripts/gh_ci_wait.py wait",
+            "python3 '/var/minis/skills/github-ops/scripts/gh_ci_wait.sh'",
+            "nice -n 10 python3 gh_ci_wait.py wait",
         )) {
             assertEquals(c, HeavyGateClass.LIGHT, classifyHeavyGate(c))
+        }
+    }
+
+    @Test
+    fun `a wait helper mentioned by another script cannot claim the exemption`() {
+        for (c in listOf(
+            "python3 build.py --task gh_ci_wait.sh",
+            "python3 process.py --arg gh_ci.py wait",
+            "python3 -c \"import subprocess; subprocess.run(['gh_ci.py', 'wait'])\"",
+            "python3 gh_ci.py runs --repo o/r --run-id 1",
+        )) {
+            assertEquals(c, HeavyGateClass.INTERPRETER, classifyHeavyGate(c))
         }
     }
 
