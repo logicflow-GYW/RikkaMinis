@@ -203,6 +203,13 @@ class RestoreFieldsPersistenceTest {
     private suspend fun withDefaults(block: suspend (RestoreTestStore, ConfigRegistry) -> Unit) {
         val store = RestoreTestStore()
         store.repo.awaitConfigLoaded()
+        // awaitConfigLoaded only covers the first load. The init block then runs
+        // selection-only migration and voice-template reconciliation on loadScope.
+        // Join those real jobs before asserting counts or holding submissions,
+        // otherwise they can add a second submission or drop the entry we just added.
+        val scopeField = ProviderRepository::class.java.getDeclaredField("loadScope").apply { isAccessible = true }
+        val scope = scopeField.get(store.repo) as kotlinx.coroutines.CoroutineScope
+        scope.coroutineContext[kotlinx.coroutines.Job]!!.children.forEach { it.join() }
         store.repo.addInstance(ProviderInstance("field-owner", "Field owner", ProviderType.openAI, ProviderCredential.apiKey))
         store.repo.replaceEntries("field-owner", listOf(LLMModel("field-model", "Field model", "OpenAI")))
         store.repo.addGroup(ModelGroup(id = "field-group", name = "Field group"))
