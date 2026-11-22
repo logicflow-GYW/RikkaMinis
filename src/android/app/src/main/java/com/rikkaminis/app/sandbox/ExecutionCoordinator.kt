@@ -466,9 +466,35 @@ object ExecutionCoordinator {
         // with no suspension point: the coroutine went Cancelling, the shell
         // stayed reserved, and the session's next command reported "System busy"
         // until the timeout expired.
-        val heavyGateAcquired = cmdClass == CommandClass.HEAVY &&
+        // [fix/heavy-gate-scope] SECOND AXIS — which commands must serialize.
+        // The ONE permit is now for deterministic-buffer work only. An
+        // interpreter call is admitted WITHOUT it while the system has headroom:
+        // its footprint is decided by the SCRIPT, the per-session mutex already
+        // serializes it inside its own session, and the child-RSS high-water
+        // mark + recycle path still bound it. Under pressure (memAvail below
+        // the ample threshold) it falls back to the serialized path, which is
+        // exactly the pre-split behaviour.
+        val gateClass = classifyHeavyGate(command)
+        val gateRequired = gateClass == HeavyGateClass.GLOBAL ||
+            (gateClass == HeavyGateClass.INTERPRETER && memAvailableMB < MEM_AVAIL_AMPLE_MB)
+        if (gateRequired) {
+            Log.i(
+                TAG,
+                "[$sessionId] heavy gate: class=$gateClass memAvail=${memAvailableMB}MB timeout=${heavyGateTimeoutMs}ms",
+            )
+        }
+        // [fix/heavy-gate-scope] Observe the wait from OUTSIDE the wrapper:
+        // exec_gate_release_check pins the wrapper body (exactly one acquire in a
+        // direct `runInterruptible` block), so the progress report lives here.
+        val gateWaitStartMs = System.currentTimeMillis()
+        val heavyGateAcquired = gateRequired &&
             awaitHeavyGatePermitInterruptibly(heavyGate, heavyGateTimeoutMs)
-        if (cmdClass == CommandClass.HEAVY && !heavyGateAcquired) {
+        val gateWaitMs = System.currentTimeMillis() - gateWaitStartMs
+        if (gateRequired && gateWaitMs >= 1_000L) {
+            Log.w(TAG, "[$sessionId] heavy gate waited ${gateWaitMs}ms (class=$gateClass) before acquiring")
+            MemorySpikeRecorder.onEvent("gate-wait", "session=$sessionId class=$gateClass waitedMs=$gateWaitMs")
+        }
+        if (gateRequired && !heavyGateAcquired) {
             Log.w(TAG, "[$sessionId] Heavy gate timeout after ${heavyGateTimeoutMs}ms — another heavy command still running")
             postRecycleMemoryRecovery()
             return CommandResult(
@@ -671,7 +697,7 @@ object ExecutionCoordinator {
 
             // [mem-spike-diag] 命令结束归因：ΔRSS + PRoot 子进程聚合，落盘
             // memspike-<date>.log。诊断旁路，不影响返回值。
-            MemorySpikeRecorder.onCommandEnd(durationMs, rssBeforeKb)
+            MemorySpikeRecorder.onCommandEnd(sessionId, durationMs, rssBeforeKb)
             // [deep-audit-1018 ISSUE-03] L1: carry the retry verdict's outcomeKnown
             // through the truncation re-wrap. Pre-fix this construction dropped it,
             // so the SAME command's two exits disagreed (executeWithShellRetry
@@ -687,7 +713,7 @@ object ExecutionCoordinator {
     } finally {
         // [mem-spike-diag] 兜底配对：异常 / 提前 return 的路径也把命令上下文收尾，
         // 避免 ΔRSS 归因丢行（幂等，成功路径已收尾时为 no-op）。
-        MemorySpikeRecorder.onCommandEndIfPending(rssBeforeKb = rssBeforeKb)
+        MemorySpikeRecorder.onCommandEndIfPending(sessionId, rssBeforeKb = rssBeforeKb)
         // [P2-global-concurrency] Release the global concurrency slot.
         // This runs after the per-session mutex is released (the mutex is
         // inside the try block), so the next session waiting on the

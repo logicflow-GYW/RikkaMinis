@@ -4,6 +4,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -354,9 +355,9 @@ class MemorySpikeRecorderTest {
         MemorySpikeRecorder.sink = { written.add(it) }
         MemorySpikeRecorder.snapshotProvider = { snap(600L) }
         MemorySpikeRecorder.onCommandStart("s", "LIGHT", "tool --password local-only")
-        assertEquals("tool --password ***", MemorySpikeRecorder.currentCommand()!!.preview)
+        assertEquals("tool --password ***", MemorySpikeRecorder.currentCommand("s")!!.preview)
         assertTrue(MemorySpikeRecorder.sampleOnce(MemorySpikeRecorder.LoopState()))
-        MemorySpikeRecorder.onCommandEnd(durationMs = 3L, rssBeforeKb = 599L * 1024L)
+        MemorySpikeRecorder.onCommandEnd("s", durationMs = 3L, rssBeforeKb = 599L * 1024L)
 
         assertEquals(3, written.size)
         assertTrue(written[0].contains("[cmd-start]"))
@@ -458,7 +459,7 @@ class MemorySpikeRecorderTest {
         MemorySpikeRecorder.snapshotProvider = { snap(1000L, nativeMb = 145L) }
 
         MemorySpikeRecorder.onCommandStart("sess-9", "HEAVY", "find . -name '*.kt'")
-        MemorySpikeRecorder.onCommandEnd(durationMs = 12_340L, rssBeforeKb = 316L * 1024L)
+        MemorySpikeRecorder.onCommandEnd("sess-9", durationMs = 12_340L, rssBeforeKb = 316L * 1024L)
 
         assertEquals(2, written.size)
         assertTrue(written[0].contains("[cmd-start]"))
@@ -473,16 +474,34 @@ class MemorySpikeRecorderTest {
     fun `onCommandEndIfPending is a no-op without a pending command`() {
         val written = mutableListOf<String>()
         MemorySpikeRecorder.sink = { written.add(it) }
-        MemorySpikeRecorder.onCommandEndIfPending()
+        MemorySpikeRecorder.onCommandEndIfPending("s")
         assertTrue(written.isEmpty())
 
         MemorySpikeRecorder.onCommandStart("s", "LIGHT", "echo hi")
         written.clear()
-        MemorySpikeRecorder.onCommandEndIfPending(durationMs = 5L)
+        MemorySpikeRecorder.onCommandEndIfPending("s", durationMs = 5L)
         assertEquals(1, written.size)
         // 已收尾 → 再调为 no-op
-        MemorySpikeRecorder.onCommandEndIfPending()
+        MemorySpikeRecorder.onCommandEndIfPending("s")
         assertEquals(1, written.size)
+    }
+
+    @Test
+    fun `concurrent commands keep their own context per session`() {
+        val written = mutableListOf<String>()
+        MemorySpikeRecorder.sink = { written.add(it) }
+        MemorySpikeRecorder.snapshotProvider = { snap(500L) }
+
+        MemorySpikeRecorder.onCommandStart("a", "HEAVY", "python3 a.py")
+        MemorySpikeRecorder.onCommandStart("b", "LIGHT", "ls")
+        // b finishes first: it must consume B's context, never a's.
+        MemorySpikeRecorder.onCommandEnd("b", durationMs = 2L)
+
+        val endB = written.last()
+        assertTrue(endB.contains("LIGHT session=b"))
+        assertTrue(endB.contains(":: ls"))
+        assertEquals("python3 a.py", MemorySpikeRecorder.currentCommand("a")!!.preview)
+        assertNull(MemorySpikeRecorder.currentCommand("b"))
     }
 
     @Test
