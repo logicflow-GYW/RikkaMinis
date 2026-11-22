@@ -3217,7 +3217,7 @@ def test_scan_parallel_local_refusal():
     """[LOCAL_REFUSAL] The full gate suite must refuse to run outside CI.
 
     This is a MECHANISM, not a reminder, because the same mistake was made
-    twice and cost two working sessions: all 115 gates were run locally inside
+    twice and cost two working sessions: the whole gate suite was run locally inside
     the PRoot sandbox. The reasons are recorded at
     `scan_parallel.LOCAL_REFUSAL`; what matters here is that the rule cannot
     be forgotten, compacted away, or outweighed by "I'll just verify locally".
@@ -3249,7 +3249,7 @@ def test_scan_parallel_local_refusal():
 
     # The refusal must also say where the work belongs: a message that only
     # says "no" leaves the next session guessing.
-    msg = scan_parallel.LOCAL_REFUSAL.format(total=115)
+    msg = scan_parallel.LOCAL_REFUSAL.format(total=len(scan_parallel.parse_blocks()))
     check("the refusal names the cloud job", "scan-gate" in msg)
     check("the refusal names the single-gate alternative",
           "scripts/scan/<gate>.py" in msg and "test_scan.py" in msg)
@@ -3407,7 +3407,7 @@ def test_scan_parallel_block_numbering():
     """[gateway-context-1112] The block-numbering contract of the driver.
 
     The failure this pins is REAL, not hypothetical: the denominator was
-    bumped in the 115 header lines of `scan_blocks.sh` but missed in
+    bumped in the per-block header lines of `scan_blocks.sh` but missed in
     `scan_parallel.py`'s `HEADER_RE`, so the driver matched ZERO blocks and
     the whole gate went red with "no check blocks found" — a failure that
     pointed nowhere near its cause.
@@ -3789,6 +3789,35 @@ def test_dv27_gates():
 # what runs — serial and parallel share it, so there is no second list to rot.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [surgery-1122] Protocol gates: the three cross-boundary invariants that used to
+# be guarded by JUnit alone. Each ships its own --selftest whose negative arms
+# are the pre-fix SHAPES an independent review caught twice (instance-scoped reap
+# decision, dispatch without a synchronous preflight, a write site whose plan
+# belongs to a sibling function) — a stubbed gate that only echoes PASS fails the
+# marker arm, and an emptied tree fails the real-tree arm.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SURGERY_1122_GATES = [
+    # (script without .py, selftest marker that proves the negative arms ran)
+    ("transcript_commit_order_check", "TRANSCRIPT_COMMIT_ORDER_SELFTEST=PASS"),
+    ("provider_dispatch_cancel_check", "PROVIDER_DISPATCH_CANCEL_SELFTEST=PASS"),
+    ("worker_process_scope_check", "WORKER_PROCESS_SCOPE_SELFTEST=PASS"),
+]
+
+def test_surgery_1122_gates():
+    print("━━━ surgery-1122 protocol gates (selftest teeth + real tree) ━━━")
+    for script, marker in SURGERY_1122_GATES:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPT_DIR, script + ".py"), "--selftest"],
+            capture_output=True, text=True,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        check("%s selftest has teeth (%s)" % (script, marker),
+              proc.returncode == 0 and marker in out, out[-280:])
+        rc, out = run_scanner(script + ".py", REPO_ROOT)
+        check("%s real tree green" % script, rc == 0, out[-280:])
+
 TEST_ORDER = (
     "test_four_way",
     "test_four_way_derived",
@@ -3843,6 +3872,7 @@ TEST_ORDER = (
     "test_gate_body_external_fixtures",
     "test_real_repo",
     "test_scan_parallel_local_refusal",
+    "test_surgery_1122_gates",
 )
 
 RESULT_TAG = "@@TEST_RESULT@@"
