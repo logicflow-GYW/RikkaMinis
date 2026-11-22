@@ -54,10 +54,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
@@ -802,12 +804,12 @@ fun ModelGroupDetailScreen(
  * the entire family of bugs where adding/removing a model silently changed the
  * picker.
  *
- * The custom stop is a real slider stop, but its label is the selected value
- * once one exists: "Custom…" is only the affordance that opens the number
- * dialog; after confirmation the stop reads the exact count ("800,000"), so
- * the shaper never turns a user-entered token count into a K/M approximation.
- * Selecting it does not write anything until the dialog is confirmed, and
- * cancelling restores the slider to the persisted value.
+ * Every stop carries its own label so the ladder is readable at a glance;
+ * the selected stop is emphasized. The custom stop always reads "Custom…" to
+ * identify the level, while the header shows the selected exact count
+ * ("800,000") — a user-entered token count is never rewritten as a K/M
+ * approximation. Selecting custom does not write anything until the dialog is
+ * confirmed, and cancelling restores the slider to the persisted value.
  *
  * The "Unlimited" stop maps to `Int.MAX_VALUE` in the binding; the runtime
  * consumer treats anything `>= Int.MAX_VALUE` as "no override, use the
@@ -833,10 +835,9 @@ private fun ContextLimitSlider(
     onValueChange: (Int) -> Unit,
 ) {
     val customValue = value?.takeIf { ContextLimitLadder.isCustomValue(it) }
-    val customStepLabel = customValue?.let(ContextLimitLadder::customLabel) ?: customLabel
-    val steps = remember(unlimitedLabel, customStepLabel) {
+    val steps = remember(unlimitedLabel, customLabel) {
         ContextLimitLadder.presets.map { ContextLimitStep(ContextLimitLadder.label(it), it) } +
-            ContextLimitStep(customStepLabel, CONTEXT_LIMIT_CUSTOM_STEP_TOKEN) +
+            ContextLimitStep(customLabel, CONTEXT_LIMIT_CUSTOM_STEP_TOKEN) +
             ContextLimitStep(unlimitedLabel, CONTEXT_LIMIT_UNLIMITED_SENTINEL)
     }
     val customIndex = steps.size - 2
@@ -891,19 +892,7 @@ private fun ContextLimitSlider(
             steps = (steps.size - 2).coerceAtLeast(0),
             modifier = Modifier.fillMaxWidth(),
         )
-        Row {
-            Text(
-                steps.first().label,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                unlimitedLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        ContextLimitStopLabels(steps = steps, selectedIndex = selectedIndex)
     }
 
     if (showCustomDialog) {
@@ -961,6 +950,56 @@ private fun ContextLimitSlider(
                 }
             },
         )
+    }
+}
+
+/**
+ * One label per discrete stop, placed at the stop's actual fraction of the
+ * track instead of relying on equal-weight cells (which drift away from the
+ * first/last ticks). Edge labels are clamped inside the row so "64K" and
+ * "Unlimited" never clip on narrow screens. The selected stop is emphasized,
+ * making the ladder's distinct levels visible rather than showing only the two
+ * endpoints.
+ */
+@Composable
+private fun ContextLimitStopLabels(
+    steps: List<ContextLimitStep>,
+    selectedIndex: Int,
+) {
+    Layout(
+        content = {
+            steps.forEachIndexed { index, step ->
+                val selected = index == selectedIndex
+                Text(
+                    text = step.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) { measurables, constraints ->
+        val placeables = measurables.map { it.measure(Constraints()) }
+        val width = constraints.maxWidth
+        val height = placeables.maxOfOrNull { it.height } ?: 0
+        layout(width, height) {
+            val lastIndex = placeables.lastIndex
+            placeables.forEachIndexed { index, placeable ->
+                val center = if (lastIndex <= 0) {
+                    width / 2
+                } else {
+                    (width.toLong() * index / lastIndex).toInt()
+                }
+                val x = (center - placeable.width / 2)
+                    .coerceIn(0, (width - placeable.width).coerceAtLeast(0))
+                placeable.placeRelative(x, 0)
+            }
+        }
     }
 }
 
