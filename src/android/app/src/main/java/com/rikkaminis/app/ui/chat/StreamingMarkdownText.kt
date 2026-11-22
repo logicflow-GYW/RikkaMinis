@@ -272,6 +272,77 @@ private val BaseLineHeight: TextUnit
 
 private val InlineCodeCornerRadius = 6.dp
 
+/**
+ * [Perf][draw-cache] Inline-code background rects for one laid-out AnnotatedString.
+ *
+ * Hoisted verbatim (T299 semantics preserved) out of [MdText]'s drawBehind:
+ * the old code walked every character with getBoundingBox on EVERY frame —
+ * a full-span getStringAnnotations scan plus N getBoundingBox calls per
+ * inline-code line, executed each time the layer was redrawn (i.e. on every
+ * scroll frame). The inputs are all known before draw (text + TextLayoutResult
+ * + insets), so the same math runs once per layout instead.
+ *
+ * Per-character min(left)/max(right) is deliberate — getPathForRange(...)
+ * .getBounds() regressed on an inline-code span containing an internal space
+ * inside CJK prose (zero-width sub-paths at run boundaries widened the union
+ * into a sibling run). Each per-character box is a single glyph's tight rect,
+ * immune to that.
+ *
+ * Stale-layout guard kept: during streaming the AnnotatedString can be one
+ * recomposition ahead of the laid-out text, and maxLines can clip the tail.
+ * All offsets/line indices are clamped to the layout's actual extents before
+ * calling getLineStart/getLineEnd (getLineStart(lineCount) throws).
+ */
+private fun computeInlineCodeRects(
+    result: androidx.compose.ui.text.TextLayoutResult,
+    text: AnnotatedString,
+    topInsetPx: Float,
+    bottomInsetPx: Float,
+): List<androidx.compose.ui.geometry.Rect> {
+    val laidOutText = result.layoutInput.text.text
+    val maxOffset = laidOutText.length
+    val lineCount = result.lineCount
+    if (maxOffset == 0 || lineCount == 0) return emptyList()
+    val annotations = text.getStringAnnotations("inline_code", 0, text.length)
+    if (annotations.isEmpty()) return emptyList()
+    val out = ArrayList<androidx.compose.ui.geometry.Rect>(annotations.size)
+    for (ann in annotations) {
+        val startOffset = ann.start.coerceIn(0, maxOffset)
+        val endOffset = ann.end.coerceIn(0, maxOffset)
+        if (endOffset <= startOffset) continue
+        val startLine = result.getLineForOffset(startOffset).coerceIn(0, lineCount - 1)
+        val endLine = result.getLineForOffset(endOffset - 1).coerceIn(0, lineCount - 1)
+        if (endLine < startLine) {
+            android.util.Log.d(
+                "StreamingMd",
+                "skip inline_code: endLine<startLine annStart=${ann.start} annEnd=${ann.end} " +
+                    "clamped=[$startOffset,$endOffset) lineCount=$lineCount maxOffset=$maxOffset",
+            )
+            continue
+        }
+        for (line in startLine..endLine) {
+            val lineStart = if (line == startLine) startOffset else result.getLineStart(line)
+            val lineEnd = if (line == endLine) endOffset else result.getLineEnd(line)
+            if (lineEnd <= lineStart) continue
+            var left = Float.POSITIVE_INFINITY
+            var right = Float.NEGATIVE_INFINITY
+            for (offset in lineStart until lineEnd) {
+                val box = result.getBoundingBox(offset)
+                // 0-width box = offset on a soft line break; skip so the
+                // accumulator doesn't pick up a stray edge.
+                if (box.width <= 0f) continue
+                if (box.left < left) left = box.left
+                if (box.right > right) right = box.right
+            }
+            if (!left.isFinite() || right <= left) continue
+            val top = result.getLineTop(line) + topInsetPx
+            val bottom = result.getLineBottom(line) - bottomInsetPx
+            out.add(androidx.compose.ui.geometry.Rect(left, top, right, bottom))
+        }
+    }
+    return out
+}
+
 /** Text composable that draws rounded-rect backgrounds for inline code spans. */
 @Composable
 private fun MdText(
@@ -343,6 +414,23 @@ private fun MdText(
     val context = LocalContext.current
     val hasUrlAnnotation = remember(text) { text.getStringAnnotations("url", 0, text.length).isNotEmpty() }
     val hasInlineCodeAnnotation = remember(text) { text.getStringAnnotations("inline_code", 0, text.length).isNotEmpty() }
+
+    // [Perf][draw-cache] Computed once per (text, layout, insets) instead of
+    // once per redraw. See computeInlineCodeRects for why the per-character
+    // aggregation is kept and what the stale-layout clamping protects.
+    val inlineCodeRects = remember(
+        text,
+        layoutResult,
+        inlineCodeTopInsetPx,
+        inlineCodeBottomInsetPx,
+    ) {
+        val result = layoutResult
+        if (result == null) {
+            emptyList()
+        } else {
+            computeInlineCodeRects(result, text, inlineCodeTopInsetPx, inlineCodeBottomInsetPx)
+        }
+    }
 
     // [T-android-stream-fade] When this MdText is the streaming last block,
     // overlay a fade-in alpha on each freshly-appended word range. Off by
@@ -452,72 +540,22 @@ private fun MdText(
                 }
             }
             .drawBehind {
-            val result = layoutResult ?: return@drawBehind
-            // Guard against stale layout during streaming: the AnnotatedString `text`
-            // in the closure can be one recomposition ahead of the laid-out text in
-            // `result`, and maxLines can clip the tail. Clamp all offsets/line indices
-            // to the layout's actual extents before calling get*Line* APIs — otherwise
-            // getLineStart(lineCount) throws IllegalArgumentException and crashes the
-            // draw phase (see #StreamingMd crash on Pixel).
-            val laidOutText = result.layoutInput.text.text
-            val maxOffset = laidOutText.length
-            val lineCount = result.lineCount
-            if (maxOffset == 0 || lineCount == 0) return@drawBehind
-            val annotations = text.getStringAnnotations("inline_code", 0, text.length)
-            for (ann in annotations) {
-                val startOffset = ann.start.coerceIn(0, maxOffset)
-                val endOffset = ann.end.coerceIn(0, maxOffset)
-                if (endOffset <= startOffset) continue
-                val startLine = result.getLineForOffset(startOffset).coerceIn(0, lineCount - 1)
-                val endLine = result.getLineForOffset(endOffset - 1).coerceIn(0, lineCount - 1)
-                if (endLine < startLine) {
-                    android.util.Log.d(
-                        "StreamingMd",
-                        "skip inline_code: endLine<startLine annStart=${ann.start} annEnd=${ann.end} " +
-                            "clamped=[$startOffset,$endOffset) lineCount=$lineCount maxOffset=$maxOffset"
-                    )
-                    continue
-                }
-                for (line in startLine..endLine) {
-                    val lineStart = if (line == startLine) startOffset else result.getLineStart(line)
-                    val lineEnd = if (line == endLine) endOffset else result.getLineEnd(line)
-                    if (lineEnd <= lineStart) continue
-                    // T299: walk per-character via getBoundingBox and take
-                    // min(left)/max(right) directly. T265 used
-                    // getPathForRange(lineStart, lineEnd).getBounds() which
-                    // was correct for bidi-pure runs but regressed when an
-                    // inline code span itself contains an internal space and
-                    // sits inside CJK prose (e.g. prose like "put it next to
-                    // `Hermes Agent notes.md` and `Minis tutorial.md`"). The
-                    // path returned for that range can include zero-width
-                    // sub-paths at run boundaries; getBounds()'s union then
-                    // expands left to a coordinate from a sibling run, which
-                    // ends up painted behind the surrounding prose instead
-                    // of the code. Per-character boxes are immune to that
-                    // because each box is a single character's tight
-                    // rectangle. iOS uses fillBackgroundRectArray which has
-                    // the same per-glyph guarantee.
-                    var left = Float.POSITIVE_INFINITY
-                    var right = Float.NEGATIVE_INFINITY
-                    for (offset in lineStart until lineEnd) {
-                        val box = result.getBoundingBox(offset)
-                        // getBoundingBox returns a 0-width rect for offsets
-                        // that fall on a soft line break; skip those so the
-                        // accumulator doesn't pick up a stray edge.
-                        if (box.width <= 0f) continue
-                        if (box.left < left) left = box.left
-                        if (box.right > right) right = box.right
-                    }
-                    if (!left.isFinite() || right <= left) continue
-                    val top = result.getLineTop(line) + inlineCodeTopInsetPx
-                    val bottom = result.getLineBottom(line) - inlineCodeBottomInsetPx
-                    drawRoundRect(
-                        color = inlineCodeBg,
-                        topLeft = androidx.compose.ui.geometry.Offset(left, top),
-                        size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerPx, cornerPx),
-                    )
-                }
+            // [Perf][draw-cache] The rects are precomputed once per layout in
+            // `inlineCodeRects` above. Draw-phase work is what the 2026-11-22
+            // specimen measurement pinned as the bottleneck: of a 143-154ms
+            // frame, 129-141ms landed in IssueDrawCommands while layout was
+            // 0.1ms, and Slow issue draw commands outnumbered Slow UI thread
+            // 288:136 on the scroll group. Nothing here is per-character any
+            // more; this loop is O(number of inline-code spans), not
+            // O(characters).
+            if (inlineCodeRects.isEmpty()) return@drawBehind
+            for (rect in inlineCodeRects) {
+                drawRoundRect(
+                    color = inlineCodeBg,
+                    topLeft = rect.topLeft,
+                    size = rect.size,
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerPx, cornerPx),
+                )
             }
         },
     )
