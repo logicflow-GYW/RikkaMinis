@@ -1885,16 +1885,42 @@ def selftest(root):
                      "                        repo.voiceInputGroupId = null\n"),
     )
     # w6 (dual-gate): Stage 3 keeps the remap call and hands `decoded` over.
+    #
+    # [surgery-1122] The anchor used to be the two adjacent lines
+    # `field.valueSchema.validate(value)` / `field.write(value)`. The surgery
+    # wrapped the write in `persistence.capture { … }`, so the verbatim pair no
+    # longer exists and the arm raised AssertionError — the gate failed OPEN on
+    # its own selftest, and nobody saw it because CI skips the fixtures whenever
+    # `scripts/scan/**` is untouched. Derive the two lines from the tree instead:
+    # an arm that cannot find its anchor must report DRIFT, never crash.
+    def stage3_write_arm():
+        # Anchor on the FIRST remap call, then the first validate/write AFTER it —
+        # that is the exact hand-off the criterion judges. Taking the first match
+        # in the whole file would mutate an unrelated Stage-1/2 write.
+        call = REMAP_CALL.search(cfg)
+        if not call:
+            return None
+        tail = cfg[call.start():]
+        validate = re.search(r"\bfield\s*\.\s*valueSchema\s*\.\s*validate\s*\(\s*([A-Za-z_]\w*)\s*\)", tail)
+        write = re.search(r"\bfield\s*\.\s*write\s*\(\s*([A-Za-z_]\w*)\s*\)", tail)
+        if not validate or not write or write.start() < validate.start():
+            return None
+        base = call.start()
+        mutated = cfg
+        for m in sorted((validate, write), key=lambda x: -x.start(1)):
+            at = base + m.start(1)
+            mutated = mutated[:at] + "decoded" + mutated[at + len(m.group(1)):]
+        return mutated
+
+    mutated_cfg = stage3_write_arm()
+    if mutated_cfg is None:
+        raise SystemExit(
+            "backup_remap_rollup_check selftest: the Stage 3 field write moved — "
+            "re-anchor the w6 arm (fail-closed, not a silent pass)")
     arm(
         "w6 stage3 writes the pre-remap value",
         on_cfg(check_stage3_remap_consumed),
-        cfg=sub_once(
-            cfg,
-            "                    field.valueSchema.validate(value)\n"
-            "                    field.write(value)\n",
-            "                    field.valueSchema.validate(decoded)\n"
-            "                    field.write(decoded)\n",
-        ),
+        cfg=mutated_cfg,
     )
     # [FIX-P1A / RT-S5] the alias hop must not launder the hand-off: the local
     # that IS written has to derive from the remap outcome, so re-pointing that

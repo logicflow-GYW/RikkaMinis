@@ -429,6 +429,10 @@ object ModelsDevApi {
         }
     }
 
+    // cancel-guard-ok: background registry refresh (48h timer + first cold
+    // start) on a daemon thread — it belongs to no run, so there is no cancel
+    // marker to honour. Routing it through executeOrCancel() would only add a
+    // guard lookup that is always absent.
     private fun refreshFromNetwork() {
         try {
             // [model-defaults-1112] Conditional GET: the registry is ~6 MB, it only

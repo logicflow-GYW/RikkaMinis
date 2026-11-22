@@ -90,6 +90,7 @@ RikkaMinis 里最难复现的一类问题，不是"算错了"，而是**跨边�
 
 这十几条不变量的价值，等于"未来改代码时不许为了过 CI 放宽容忍度"的纪律强度。具体：
 
+0. **改这 3 条不变量时先跑对应门。** `scripts/scan/transcript_commit_order_check.py`、`provider_dispatch_cancel_check.py`、`worker_process_scope_check.py` 各带 `--selftest`（负控就是修复前的形状）。改门本身要走真实树变异回放：改一个决定点，门必须在自己那条判据上变红。
 1. **不许删负控、不许降下限。** 测试里的"≥N 次"型断言在新增站点后会静默失牙；正确做法是改成精确的逐站清单 + 每站删除/重复负控（例：`SessionActivityStreamErrorTest` 的 60 项）。
 2. **改测试必须写清"原断言为什么失效"**，并在提交信息里给出证据，不允许"改了断言让它绿"。
 3. **新增跨边界路径必须经过唯一入口。** 要绕，先在本文登记一个新不变量和它的测试。
@@ -101,7 +102,7 @@ RikkaMinis 里最难复现的一类问题，不是"算错了"，而是**跨边�
 
 | 缺口 | 现状 | 触发条件 |
 |---|---|---|
-| 没有对应的静态门 | 这 13 条只有 JUnit 守卫，`scripts/scan` 里 **0 条**新门。测试可以被改松，门不行。 | 下次大改本域时，考虑把 3～4 条最高频的（提交顺序、取消同步、公开投影单出口）落成带 `--selftest` 的门 |
+| 静态门覆盖面 | 13 条里已有 3 条配了静态门：提交顺序（`transcript_commit_order_check`）、取消同步（`provider_dispatch_cancel_check`）、回收进程作用域（`worker_process_scope_check`），注册为 scan 块 116–118。其余 10 条仍只有 JUnit 守卫。 | 再动其余不变量所在的域时，优先把该域的判据补成门（每条门要带 `--selftest` 负控 + 真实树变异回放） |
 | 超 8 MiB terminal spool | reaper 保留、recovery 看不见 DONE ⇒ 不删也不恢复 | 单条回答 spool 超 8 MiB 且正常结束 |
 | 真机验证不可重跑 | 进程死亡 / Room·ACK 竞争 / rootfs reset 是一次性 adb 操作，没有装置 | 下次要验同样边界 |
 | 产品语义未拍板 | 快照"回滚"实际是 merge（UI 已改成实话）；跨源 redirect 保留 `api-key`；iframe 来源信任只到"未证可利用" | 用户提出精确回滚 / 收紧网络或 WebView 来源 |

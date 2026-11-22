@@ -48,7 +48,7 @@ BLOCKS = os.path.join(HERE, "scan_blocks.sh")
 # ── [LOCAL_REFUSAL] the full gate suite is a CLOUD job ──────────────────────
 #
 # Twice now the same mistake has cost a working session: a full local run of
-# all 115 gates inside the PRoot sandbox. It is the wrong place for this work
+# the whole gate suite inside the PRoot sandbox. It is the wrong place for this work
 # on two independent counts, and neither is a matter of taste:
 #
 #   1. it is already being done. `.github/workflows/build-apk.yml` runs
@@ -133,7 +133,7 @@ def parse_blocks(path=BLOCKS):
     # the number of blocks.
     #
     # This is the check that would have caught the failure this branch
-    # actually hit: the denominator was bumped in the 115 header lines but
+    # actually hit: the denominator was bumped in the per-block headers but
     # missed in HEADER_RE, so the driver matched ZERO blocks and the whole
     # gate went red with "no check blocks found" — a failure that pointed
     # nowhere near the cause. The denominator is now ignored by the parser

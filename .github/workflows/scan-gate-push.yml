@@ -1,6 +1,6 @@
 name: Scan Gate (main push / apparatus-only branches)
 
-# Two triggers, one purpose: run the 112 static gates + their fixture self-test
+# Two triggers, one purpose: run the whole static gate suite + its fixture self-test
 # WITHOUT Gradle, NDK, signing or a release asset. ~7 min instead of ~20-27 min.
 #
 # 1. `push` to main touching scripts/** — those paths are outside
