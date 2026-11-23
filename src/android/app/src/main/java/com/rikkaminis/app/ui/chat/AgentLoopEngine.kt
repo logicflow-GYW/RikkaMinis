@@ -2137,8 +2137,15 @@ internal class AgentLoopEngine(
                         // [log-diet 2026-09-14] `len=` preserves the full-size
                         // signal that the now-debug-gated per-delta trace used
                         // to carry.
+                        //
+                        // [fix/tool-args-log-redaction-1123] Redact BEFORE the
+                        // 300-char cut: truncating first can slice a credential
+                        // in half, and a half-token no longer matches any rule —
+                        // the fragment then lands in the log verbatim.
                         val argsJson = chunk.args.toString()
-                        android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolCallComplete id=$toolCompleteId name=${chunk.name} args=${argsJson.take(300)} len=${argsJson.length}")
+                        val safeArgs = com.rikkaminis.app.data.EnvVarRedactor
+                            .redactForDiagnostics(argsJson).text
+                        android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolCallComplete id=$toolCompleteId name=${chunk.name} args=${safeArgs.take(300)} len=${argsJson.length}")
                         toolCalls.add(Triple(toolCompleteId, chunk.name, chunk.args))
                         val idx = loopState.allToolBlocks.indexOfFirst { it.id == toolCompleteId }
                         if (idx >= 0) {

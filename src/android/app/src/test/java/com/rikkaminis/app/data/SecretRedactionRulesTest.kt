@@ -198,4 +198,45 @@ class SecretRedactionRulesTest {
         val text = "monkey=banana12 hockeyScore=abcdefg"
         assertEquals(text, redact(text).text)
     }
+
+    // ── [fix/tool-args-log-redaction-1123] ordering contract ───────────────
+    //
+    // The four `ToolCallComplete ... args=` log sites truncate to 300 chars.
+    // If the truncation runs FIRST, a credential straddling the cut is left as
+    // a fragment that matches no rule, and that fragment is written verbatim.
+    // These two tests pin the order the production sites must keep.
+
+    @Test
+    fun `redacting before the cut leaves no credential fragment`() {
+        val filler = "x".repeat(280)
+        val token = "sk-" + "LIVEprobe".repeat(4) + "abcdefghij"
+        val payload = "{\"command\":\"" + filler + " " + token + "\"}"
+        val cut = 300
+
+        // Correct order: redact the WHOLE payload, then cut.
+        val safe = EnvVarRedactor.redactForDiagnostics(payload).text.take(cut)
+
+        assertFalse(safe.contains(token.substring(0, 6)))
+        assertTrue(safe.contains(SecretRedactionRules.PLACEHOLDER))
+    }
+
+    @Test
+    fun `cutting before redaction leaks the straddling fragment`() {
+        val filler = "x".repeat(280)
+        val token = "sk-" + "LIVEprobe".repeat(4) + "abcdefghij"
+        val payload = "{\"command\":\"" + filler + " " + token + "\"}"
+        val cut = 300
+
+        // The WRONG order, pinned so the failure mode stays documented and the
+        // two call sites cannot "simplify" back to it without a red test.
+        val leaky = EnvVarRedactor.redactForDiagnostics(payload.take(cut)).text
+
+        assertTrue("truncating first must be shown to leak", leaky.contains(token.substring(0, 6)))
+    }
+
+    @Test
+    fun `plain arguments are not rewritten by the log projection`() {
+        val plain = "{\"path\":\"/tmp/plain.txt\",\"lines\":12}"
+        assertEquals(plain, EnvVarRedactor.redactForDiagnostics(plain).text)
+    }
 }

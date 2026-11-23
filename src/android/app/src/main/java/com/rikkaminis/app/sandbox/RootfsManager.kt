@@ -790,6 +790,8 @@ class RootfsManager private constructor(private val context: Context) {
             return@withContext true
         }
         val args = targets.map { "${it.name}=${it.version}" }
+        // args-log-ok: `args` here is the apk-add package list (`name=version`),
+        // not model tool arguments; no credential can reach it.
         Log.i(TAG, "[ApkWorld] restoring ${args.size} packages: ${args.take(6).joinToString()}")
         val code = runApkAddInGuest(args)
         if (code == 0) {

@@ -3819,6 +3819,38 @@ def test_surgery_1122_gates():
         rc, out = run_scanner(script + ".py", REPO_ROOT)
         check("%s real tree green" % script, rc == 0, out[-280:])
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [fix/tool-args-log-redaction-1123] The tool-argument log guard ships its own
+# --selftest whose arms are the exact pre-fix shapes (unredacted `take(300)` on
+# argsJson, and a bare `+ args` concatenation) plus the two false-positive
+# shapes that a name-only rule gets wrong (a counter access, and a local bound
+# to a redactor result). Registering it here is what makes those arms WITNESSED
+# in CI — a gate that is never invoked in the fixture run can be emptied out and
+# still report green.
+# ─────────────────────────────────────────────────────────────────────────────
+
+TOOL_ARGS_LOG_GATES = [
+    ("tool_args_log_redaction_check", "SELFTEST=PASS", (REPO_ROOT,)),
+]
+
+def test_tool_args_log_redaction_gate():
+    print("━━━ tool-argument log redaction gate (selftest teeth + real tree) ━━━")
+    for script, marker, real_args in TOOL_ARGS_LOG_GATES:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPT_DIR, script + ".py"), "--selftest"],
+            capture_output=True, text=True,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        check("%s selftest has teeth (%s)" % (script, marker),
+              proc.returncode == 0 and marker in out, out[-280:])
+        # The negative arm: with the fixture's redactor removed the gate MUST
+        # report a violation, otherwise the selftest could be passing on a gate
+        # that never flags anything.
+        check("%s selftest caught the dirty fixture" % script,
+              "dirty fixture is caught" in out, out[-280:])
+        rc, out = run_scanner(script + ".py", *real_args)
+        check("%s real tree green" % script, rc == 0, out[-280:])
+
 TEST_ORDER = (
     "test_four_way",
     "test_four_way_derived",
@@ -3874,6 +3906,7 @@ TEST_ORDER = (
     "test_real_repo",
     "test_scan_parallel_local_refusal",
     "test_surgery_1122_gates",
+    "test_tool_args_log_redaction_gate",
 )
 
 RESULT_TAG = "@@TEST_RESULT@@"
