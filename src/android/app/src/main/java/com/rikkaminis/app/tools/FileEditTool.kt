@@ -125,9 +125,7 @@ object FileEditTool {
 
             // [fix/tool-output-redaction-1123] Refuse the one destructive
             // shape: replacing a real credential with the display marker.
-            if (newString.contains(com.rikkaminis.app.data.SecretRedactionRules.PLACEHOLDER) &&
-                com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(oldString).hits > 0
-            ) {
+            if (com.rikkaminis.app.data.EnvVarRedactor.wouldEraseCredential(oldString, newString)) {
                 return ToolExecutionResult(
                     "Error: refusing to replace a real credential in $path with a privacy-mode " +
                         "placeholder. Edit another field, or let a shell command read the real file and " +

@@ -170,7 +170,7 @@ object FileWriteTool {
                     )
                 }
                 if (guardText != null &&
-                    com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(guardText).hits > 0
+                    com.rikkaminis.app.data.EnvVarRedactor.wouldEraseCredential(guardText, effectiveContent)
                 ) {
                     return ToolExecutionResult(
                         "Error: refusing to write the privacy-mode placeholder over $path — the existing " +
@@ -270,7 +270,12 @@ object FileWriteTool {
      */
     private fun readForPlaceholderGuard(file: File): String? {
         if (!file.exists() || file.length() > PLACEHOLDER_GUARD_SCAN_LIMIT) return null
-        return runCatching { file.readText() }.getOrNull()
+        return runCatching {
+            file.inputStream().use { input ->
+                com.rikkaminis.app.ui.settings.readAtMost(input, PLACEHOLDER_GUARD_SCAN_LIMIT)
+                    ?.toString(Charsets.UTF_8)
+            }
+        }.getOrNull()
     }
 
     /** Above this size the guard refuses rather than reading the whole file. */

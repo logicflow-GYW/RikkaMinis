@@ -588,7 +588,7 @@
 
     <string name="env_var_privacy_header">隱私</string>
     <string name="env_var_privacy_toggle">隱私模式</string>
-    <string name="env_var_privacy_footer">開啟後，shell-execute 輸出中偵測到的環境變數值會在送達模型前被打碼（例如 `sk-1********ajhks`）。少於 8 個字元的值會被全部替換為 `*`。聊天中使用者可見的輸出維持不變。</string>
+    <string name="env_var_privacy_footer">隱私模式會在工具結果、重新載入的歷史和摘要送達模型前隱藏已知憑據及明確的敏感欄位。新診斷記錄和工具歷史一律脫敏。原檔案與圖片不變；不辨識圖片內或任意編碼的秘密。修改檔案時請局部編輯非敏感欄位，不要用脫敏副本覆蓋原檔案。</string>
     <string name="env_var_restart_terminal_note">助理執行的指令每次都會重新讀取這些變數（刪除也一樣），無需重啟終端。時區和代理的改動會推送到已開啟的終端，其他變數不會。已經在執行的程式仍持有它啟動時的環境。</string>
     <string name="env_var_restart_terminal_body">變數在工作階段啟動時注入。已經開啟的終端會保留舊環境，關閉後重新開啟即可生效。</string>
     <string name="env_var_restart_terminal_title">終端工作階段</string>

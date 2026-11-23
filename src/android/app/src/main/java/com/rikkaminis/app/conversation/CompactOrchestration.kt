@@ -619,14 +619,19 @@ internal fun ChatViewModel.compactAll(
  */
 private fun redactToolResultsForSummary(messages: List<LLMMessage>): List<LLMMessage> =
     messages.map { msg ->
-        if (msg.contentParts.none { it is AgentContentPart.ToolResult }) msg
+        if (msg.contentParts.none { it is AgentContentPart.ToolResult || it is AgentContentPart.ToolUse }) msg
         else msg.copy(contentParts = msg.contentParts.map { part ->
-            if (part is AgentContentPart.ToolResult) {
-                part.copy(
-                    content = com.rikkaminis.app.data.EnvVarRedactor
-                        .redactForModel(part.content).text,
+            when (part) {
+                is AgentContentPart.ToolResult -> part.copy(
+                    content = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(part.content).text,
                 )
-            } else part
+                is AgentContentPart.ToolUse -> {
+                    val raw = part.input.toString()
+                    val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(raw)
+                    if (view.hits == 0) part else part.copy(input = org.json.JSONObject(view.text))
+                }
+                else -> part
+            }
         })
     }
 
@@ -646,7 +651,8 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     // and re-merge it with this fold's user text at the exit.
     val pinNew = if (depth == 0) extractPinnedUserMessages(messages) else emptyList()
     val pinCarried = if (depth == 0) pinnedSectionInner(previousSummary) else null
-    val prevSummaryStripped = if (depth == 0) stripPinnedSection(previousSummary) else previousSummary
+    var prevSummaryStripped = if (depth == 0) stripPinnedSection(previousSummary) else previousSummary
+    prevSummaryStripped = prevSummaryStripped?.let { com.rikkaminis.app.ui.chat.redactUnpinnedSummary(it) }
     // [fix/tool-output-redaction-1123] The summarizer is another model
     // request: project tool results and the carried summary BEFORE the 500-char
     // truncation in buildConversationTextForSummary, so a secret crossing that
@@ -654,9 +660,7 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     val transcript = buildConversationTextForSummary(redactToolResultsForSummary(messages))
     val conversationText = ContextCompactor.compactInputText(prevSummaryStripped, transcript)
     val summary = try {
-        generateCompactSummary(
-            com.rikkaminis.app.data.EnvVarRedactor.redactForModel(conversationText).text,
-        )
+        generateCompactSummary(conversationText)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {

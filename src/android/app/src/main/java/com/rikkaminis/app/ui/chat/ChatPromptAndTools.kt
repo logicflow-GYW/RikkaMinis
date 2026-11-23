@@ -390,8 +390,10 @@ internal suspend fun ChatViewModel.executeTool(
     // the T7 outcome flag must read what actually ran. `modelResult` is the
     // only copy handed to the model.
     val diagView = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.output)
+    val modelView = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(result.output)
     val modelResult = result.copy(
-        output = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(result.output).text,
+        output = modelView.text,
+        privacyRedacted = result.privacyRedacted || modelView.hits > 0 || diagView.hits > 0 || safeArgs != argsJson,
     )
 
     // T9: record tool result event
@@ -432,12 +434,12 @@ internal suspend fun ChatViewModel.executeTool(
         // no match → the result flows unchanged.
         val defectHint = defectRegistryHintFor(result.output)
         if (defectHint != null) {
-            // SandboxDefectRegistryTest pins this exact statement by source
-            // shape (its negative control deletes the call above). `result` is
-            // already the projected model view and the hint is static registry
-            // text, so appending it cannot reintroduce a credential.
+            // Keep the registry match on the executor bytes, then project the
+            // decorated MODEL copy. The outcome flag still describes execution.
             return result.copy(output = result.output + defectHint).let { hinted ->
-                hinted.copy(output = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(hinted.output).text)
+                val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(hinted.output)
+                hinted.copy(output = view.text,
+                    privacyRedacted = hinted.privacyRedacted || view.hits > 0 || diagView.hits > 0 || safeArgs != argsJson)
             }
         }
     }

@@ -338,7 +338,7 @@ internal fun ChatViewModel.offloadContextIfNeeded(
             is AgentContentPart.ToolResult -> {
                 if (part.content.length > 500) {
                     linuxPath = ContextOffload.offloadContent(
-                        context, sid, part.content,
+                        context, sid, com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(part.content).text,
                         toolId = part.id, toolName = part.name,
                     )
                 }

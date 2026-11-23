@@ -275,7 +275,7 @@
     <string name="env_var_add">添加</string>
     <string name="env_var_privacy_header">隐私</string>
     <string name="env_var_privacy_toggle">隐私模式</string>
-    <string name="env_var_privacy_footer">开启后，shell-execute 输出中检测到的环境变量值在送达模型前会被打码（例如 `sk-1********ajhks`）。少于 8 个字符的值会被全部替换为 `*`。聊天中用户可见的输出保持不变。</string>
+    <string name="env_var_privacy_footer">隐私模式会在工具结果、重载历史和摘要送达模型前隐藏已知凭据及明确的敏感字段。新诊断记录和工具历史始终脱敏。原文件与图片不变；不识别图片内或任意编码的秘密。修改文件时请局部编辑非敏感字段，不要用脱敏副本覆盖原文件。</string>
     <string name="env_var_restart_terminal_note">助手执行的命令每次都会重新读取这些变量（删除也一样），无需重启终端。时区和代理的改动会推送到已打开的终端，其他变量不会。已经在运行的进程仍持有它启动时的环境。</string>
     <string name="env_var_restart_terminal_body">变量在终端会话启动时注入。已经打开的终端会保留旧环境，关闭后重新打开即可生效。</string>
     <string name="env_var_restart_terminal_title">终端会话</string>

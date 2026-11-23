@@ -127,7 +127,8 @@ internal suspend fun executeBrowserUseTool(
     return try {
         val result = tabPool.execute(input)
 
-        var output = result.text
+        val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(result.text)
+        var output = view.text
         // [T-android-browser-toolresult-guard] Bound browser tool result text
         // before it enters ToolExecutionResult → message → renderer/LLM context.
         // A 900KiB get_text (Fix-03 cap) made the main thread hang (ANR) when
@@ -203,6 +204,7 @@ internal suspend fun executeBrowserUseTool(
             pageURL = result.pageURL,
             imageFilePath = persistentImagePath,
             imageLinuxPath = linuxImagePath,
+            privacyRedacted = view.hits > 0,
         )
     } catch (e: CancellationException) {
         throw e

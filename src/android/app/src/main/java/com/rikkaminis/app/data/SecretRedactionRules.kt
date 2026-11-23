@@ -33,12 +33,16 @@ internal object SecretRedactionRules {
 
     /** Names whose value is a credential when bound as `NAME=value` / `NAME: value`. */
     private val SECRET_SEGMENTS = setOf(
-        "KEY", "TOKEN", "SECRET", "SECRETS", "PASSWORD", "PASSWD", "PWD",
-        "CREDENTIAL", "CREDENTIALS", "AUTH", "AUTHORIZATION", "SIGNATURE", "COOKIE", "APIKEY",
+        "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PWD", "CREDENTIAL", "CREDENTIALS",
+        "AUTH", "AUTHORIZATION", "COOKIE", "APIKEY",
     )
 
-    /** Unsegmented names that still signal a credential (`clientSecret`, `dbPassword`). */
-    private val SECRET_SUBSTRINGS = listOf("PASSWORD", "PASSWD", "SECRET", "CREDENTIAL", "APIKEY")
+    private val SECRET_NAMES = setOf(
+        "APIKEY", "XAPIKEY", "ACCESSKEY", "ACCESSKEYID", "SECRETACCESSKEY", "PRIVATEKEY",
+        "SIGNINGKEY", "ENCRYPTIONKEY", "CLIENTSECRET", "CLIENTTOKEN", "ACCESSTOKEN",
+        "REFRESHTOKEN", "IDTOKEN", "SESSIONTOKEN", "BEARERTOKEN", "AUTHTOKEN",
+        "XAUTHTOKEN", "AUTHORIZATION", "PROXYAUTHORIZATION", "SETCOOKIE", "COOKIES",
+    )
 
     /**
      * Explicit non-credential names. Kept small and literal: the proof is that a
@@ -49,8 +53,7 @@ internal object SecretRedactionRules {
         "TOKENCOUNT", "TOKENS", "MAXTOKENS", "MINTOKENS", "TOKENIZER", "TOKENUSAGE",
         "TOKENLIMIT", "TOKENBUDGET", "TOKENESTIMATE", "INPUTTOKENS", "OUTPUTTOKENS",
         "TOTLTOKENS", "TOTALTOKENS", "LATESTCONTEXTTOKENS", "CONTEXTTOKENS",
-        "KEYCODE", "KEYSTROKE", "KEYSTROKES", "KEYS", "KEYBOARD", "KEYMAP",
-        "COOKIES", "SIGNATURES",
+        "KEYCODE", "KEYSTROKE", "KEYSTROKES", "KEYS", "KEYBOARD", "KEYMAP", "SIGNATURES",
     )
 
     /** Well-known prefixes that carry a credential with no name beside them. */
@@ -65,43 +68,36 @@ internal object SecretRedactionRules {
 
     // ── entry point ───────────────────────────────────────────────────────
 
-    fun redact(input: String, knownValues: Collection<String>): SecretRedaction {
+    fun redact(input: String, knownValues: Collection<String>, onRedacted: ((String) -> Unit)? = null): SecretRedaction {
         if (input.isEmpty()) return SecretRedaction(input, 0)
-
-        var current = input
-        var hits = 0
-
-        // 1) Known real values first: exact strings are the strongest evidence.
-        //    Longest-first so a shorter value inside a longer one cannot pre-empt it.
-        val values = knownValues.asSequence()
-            .filter { it.length >= MIN_VALUE_LENGTH }
-            .toSet()
-            .sortedByDescending { it.length }
+        val values = knownValues.asSequence().filter {
+            it.length >= MIN_VALUE_LENGTH && it.any { c -> !c.isDigit() }
+        }.toSet().sortedByDescending { it.length }.toList()
+        // Match the ORIGINAL bytes once. Repeated replace() could mask a value
+        // occurring inside a placeholder emitted by an earlier replacement.
+        val protected = placeholderRanges(input)
+        val spans = ArrayList<IntRange>()
         for (value in values) {
-            if (current.contains(value)) {
-                current = current.replace(value, PLACEHOLDER)
-                hits++
+            var from = 0
+            while (from < input.length) {
+                val at = input.indexOf(value, from)
+                if (at < 0) break
+                spans.add(at until at + value.length)
+                from = at + value.length
             }
         }
-
-        // 2) Inline data URIs are exempt from *shape* inference (a base64 image
-        //    can contain any prefix by chance); known values were already handled.
-        //    Existing placeholders are protected too, so a second pass cannot
-        //    re-mask the marker itself (textual idempotence).
-        val protected = dataUriRanges(current) + placeholderRanges(current)
-
-        // 3) Shape evidence: name-bound values, bare tokens, JWTs, PEM keys.
-        val spans = ArrayList<IntRange>()
-        spans.addAll(nameBoundValueSpans(current))
-        spans.addAll(bareTokenSpans(current))
-        spans.addAll(jwtSpans(current))
-        spans.addAll(pemPrivateKeySpans(current))
+        spans.addAll(nameBoundValueSpans(input))
+        spans.addAll(quotedValueSpans(input, values))
+        val data = dataUriRanges(input)
+        spans.addAll((bareTokenSpans(input) + jwtSpans(input)).filter { span ->
+            data.none { p -> p.first <= span.first && span.last <= p.last }
+        })
+        spans.addAll(pemPrivateKeySpans(input))
         val usable = spans.filter { span ->
-            span.first >= 0 && span.last < current.length &&
-                protected.none { p -> p.first <= span.last && span.first <= p.last }
+            span.first >= 0 && span.last < input.length &&
+                protected.none { p -> p.first <= span.first && span.last <= p.last }
         }
-        val (masked, shapeHits) = applySpans(current, usable)
-        hits += shapeHits
+        val (masked, hits) = applySpans(input, usable, onRedacted)
         return SecretRedaction(masked, hits)
     }
 
@@ -116,14 +112,16 @@ internal object SecretRedactionRules {
     private fun isValueTerminator(c: Char): Boolean =
         c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
             c == ',' || c == ';' || c == ')' || c == ']' || c == '}' ||
-            c == '"' || c == '\'' || c == '`' || c == '<' || c == '>'
+            c == '"' || c == '\'' || c == '`' || c == '<' || c == '>' ||
+            c == '&' || c == '#'
+
+    internal fun isSecretName(name: String): Boolean = looksLikeSecretName(name)
 
     private fun looksLikeSecretName(name: String): Boolean {
-        val upper = name.uppercase()
-        if (upper.isEmpty()) return false
-        if (upper in NON_SECRET_NAMES) return false
-        if (SECRET_SUBSTRINGS.any { upper.contains(it) }) return true
-        return nameSegments(name).any { it.uppercase() in SECRET_SEGMENTS }
+        val upper = name.filter { it.isLetterOrDigit() }.uppercase(java.util.Locale.ROOT)
+        if (upper.isEmpty() || upper in NON_SECRET_NAMES) return false
+        if (upper in SECRET_NAMES) return true
+        return nameSegments(name).any { it.uppercase(java.util.Locale.ROOT) in SECRET_SEGMENTS }
     }
 
     /** Split on `_` / `-` / `.` and camelCase boundaries; `MONKEY` stays one segment. */
@@ -145,50 +143,111 @@ internal object SecretRedactionRules {
         return out
     }
 
-    private fun nameBoundValueSpans(text: String): List<IntRange> {
-        val spans = ArrayList<IntRange>()
-        for (i in text.indices) {
+    private data class Quoted(val from: Int, val end: Int, val closed: Boolean, val value: String)
+
+    /** Decode only a string token; do not round/reorder the surrounding JSON. */
+    private fun quoted(text: String, from: Int): Quoted {
+        val quote = text[from]
+        val out = StringBuilder()
+        var i = from + 1
+        while (i < text.length && text[i] != '\n' && text[i] != '\r') {
             val c = text[i]
-            if (c != '=' && c != ':') continue
-            var end = i
-            while (end > 0 && (text[end - 1] == ' ' || text[end - 1] == '\t')) end--
-            if (end > 0 && (text[end - 1] == '"' || text[end - 1] == '\'' || text[end - 1] == '`')) end--
-            var start = end
-            while (start > 0 && isNameChar(text[start - 1])) start--
-            val name = text.substring(start, end)
-            if (name.isEmpty() || !looksLikeSecretName(name)) continue
-            // `=` inside `==` / `=>` is not an assignment to a secret name.
-            if (i + 1 < text.length && (text[i + 1] == '=' || text[i + 1] == '>')) continue
-            valueSpan(text, i + 1)?.let { spans.add(it) }
+            if (c == quote) return Quoted(from, i, true, out.toString())
+            if (c == '\\' && i + 1 < text.length) {
+                val escaped = text[i + 1]
+                if (escaped == 'u' && i + 5 < text.length) {
+                    val code = text.substring(i + 2, i + 6).toIntOrNull(16)
+                    if (code != null) { out.append(code.toChar()); i += 6; continue }
+                }
+                out.append(when (escaped) {
+                    'n' -> '\n'; 'r' -> '\r'; 't' -> '\t'; 'b' -> '\b'; 'f' -> '\u000c'
+                    else -> escaped
+                })
+                i += 2
+            } else { out.append(c); i++ }
+        }
+        return Quoted(from, i, false, out.toString())
+    }
+
+    private fun quotedValueSpans(text: String, values: List<String>): List<IntRange> {
+        val spans = ArrayList<IntRange>()
+        var i = 0
+        while (i < text.length) {
+            if (text[i] != '"' && text[i] != '\'' && text[i] != '`') { i++; continue }
+            val token = quoted(text, i)
+            var after = if (token.closed) token.end + 1 else token.end
+            while (after < text.length && (text[after] == ' ' || text[after] == '\t')) after++
+            val isKey = token.closed && after < text.length && (text[after] == ':' || text[after] == '=')
+            if (isKey && looksLikeSecretName(token.value)) {
+                valueSpan(text, after + 1, token.value, text[after] == ':')?.let { spans.add(it) }
+            } else if (!isKey && token.value != PLACEHOLDER &&
+                (values.any { token.value.contains(it) } ||
+                    bareTokenSpans(token.value).isNotEmpty() || jwtSpans(token.value).isNotEmpty() ||
+                    nameBoundValueSpans(token.value, skipQuoted = false).isNotEmpty() || pemPrivateKeySpans(token.value).isNotEmpty()) &&
+                !token.value.startsWith("data:")
+            ) {
+                if (token.end > i + 1) spans.add((i + 1) until token.end)
+            } else if (!isKey && values.any { token.value.contains(it) } && token.value != PLACEHOLDER) {
+                if (token.end > i + 1) spans.add((i + 1) until token.end)
+            }
+            i = maxOf(i + 1, if (token.closed) token.end + 1 else token.end)
         }
         return spans
     }
 
-    private fun valueSpan(text: String, afterSep: Int): IntRange? {
+    private fun nameBoundValueSpans(text: String, skipQuoted: Boolean = true): List<IntRange> {
+        val spans = ArrayList<IntRange>()
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (skipQuoted && (c == '"' || c == '\'' || c == '`')) {
+                val token = quoted(text, i)
+                i = maxOf(i + 1, if (token.closed) token.end + 1 else token.end)
+                continue
+            }
+            if (c != '=' && c != ':') { i++; continue }
+            var end = i
+            while (end > 0 && (text[end - 1] == ' ' || text[end - 1] == '\t')) end--
+            var start = end
+            while (start > 0 && isNameChar(text[start - 1])) start--
+            val name = text.substring(start, end)
+            if (looksLikeSecretName(name) && !(i + 1 < text.length &&
+                    (text[i + 1] == '=' || text[i + 1] == '>')) &&
+                !(i > 0 && text[i - 1] == '=')
+            ) valueSpan(text, i + 1, name, c == ':' && start > 0 && text[start - 1] == '{')
+                ?.let { spans.add(it) }
+            i++
+        }
+        return spans
+    }
+
+    private fun valueSpan(text: String, afterSep: Int, name: String, json: Boolean): IntRange? {
         var i = afterSep
         while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i++
-        if (i >= text.length) return null
-        val quote = text[i]
-        if (quote == '"' || quote == '\'' || quote == '`') {
-            val end = text.indexOf(quote, i + 1)
-            // Unterminated quote: be conservative and hide the rest of the line.
-            if (end < 0) {
-                var j = i + 1
-                while (j < text.length && text[j] != '\n' && text[j] != '\r') j++
-                return if (j - (i + 1) >= MIN_VALUE_LENGTH) (i + 1) until j else null
-            }
-            val inner = text.substring(i + 1, end).trim()
-            if (inner == PLACEHOLDER) return null
-            return if (end - (i + 1) >= MIN_VALUE_LENGTH) (i + 1) until end else null
+        if (i >= text.length || text.startsWith(PLACEHOLDER, i)) return null
+        val q = text[i]
+        if (q == '"' || q == '\'' || q == '`') {
+            val token = quoted(text, i)
+            return if (token.value.isNotEmpty() && token.value != PLACEHOLDER) (i + 1) until token.end else null
+        }
+        if (text[i] == '{' || text[i] == '[') return null
+        val normalized = name.filter { it.isLetterOrDigit() }.uppercase(java.util.Locale.ROOT)
+        // Cookie/Digest headers are compound credentials; hiding only their
+        // first token leaks session cookies or nonce material later in the line.
+        if (!json && normalized in setOf("COOKIE", "COOKIES", "SETCOOKIE", "AUTHORIZATION", "PROXYAUTHORIZATION")) {
+            var end = i
+            while (end < text.length && text[end] != '\n' && text[end] != '\r' && text[end] != '}') end++
+            return if (end > i) i until end else null
         }
         var j = i
         while (j < text.length && !isValueTerminator(text[j])) j++
-        if (j - i < MIN_VALUE_LENGTH) return null
+        if (j == i) return null
         val token = text.substring(i, j)
-        if (token == PLACEHOLDER) return null
-        // `Authorization: Bearer <credential>` — the credential is the SECOND
-        // token, so stopping at the space would mask the scheme and leak the key.
-        if (token.uppercase() in AUTH_SCHEME_WORDS) {
+        if (json && token in setOf("null", "true", "false")) return null
+        // A name-bound numeric password must become a STRING placeholder,
+        // otherwise the replacement makes a valid JSON object invalid.
+        if (json) return i until j
+        if (token.uppercase(java.util.Locale.ROOT) in AUTH_SCHEME_WORDS) {
             var k = j
             while (k < text.length && (text[k] == ' ' || text[k] == '\t')) k++
             var e = k
@@ -330,20 +389,30 @@ internal object SecretRedactionRules {
 
     // ── span replacement ──────────────────────────────────────────────────
 
-    private fun applySpans(text: String, spans: List<IntRange>): Pair<String, Int> {
+    private fun applySpans(text: String, spans: List<IntRange>, onRedacted: ((String) -> Unit)?): Pair<String, Int> {
         if (spans.isEmpty()) return text to 0
+        val merged = ArrayList<IntRange>()
+        for (span in spans.sortedWith(compareBy<IntRange> { it.first }.thenByDescending { it.last })) {
+            val last = merged.lastOrNull()
+            if (last != null && span.first <= last.last) {
+                merged[merged.lastIndex] = last.first..maxOf(last.last, span.last)
+            } else merged.add(span)
+        }
         val out = StringBuilder(text.length)
         var cursor = 0
-        var hits = 0
-        for (span in spans.sortedBy { it.first }) {
-            if (span.first < cursor || span.last >= text.length) continue
+        for (span in merged) {
+            onRedacted?.invoke(text.substring(span.first, span.last + 1))
             out.append(text, cursor, span.first)
+            val numericJson = span.first > 0 && span.last + 1 < text.length &&
+                text[span.first].let { it.isDigit() || it == '-' } &&
+                run { var p = span.first - 1; while (p >= 0 && text[p].isWhitespace()) p--; p >= 0 && text[p] == ':' } &&
+                run { var p = span.last + 1; while (p < text.length && text[p].isWhitespace()) p++; p < text.length && (text[p] == ',' || text[p] == '}') }
+            if (numericJson) out.append('"')
             out.append(PLACEHOLDER)
+            if (numericJson) out.append('"')
             cursor = span.last + 1
-            hits++
         }
-        if (cursor == 0) return text to 0
         out.append(text, cursor, text.length)
-        return out.toString() to hits
+        return out.toString() to merged.size
     }
 }

@@ -63,16 +63,41 @@ object EnvVarRedactor {
      * metadata). Always on: a persisted log is not the model payload, and the
      * user's Privacy Mode choice must not turn a trace file into a secret store.
      */
-    internal fun redactForDiagnostics(output: String): SecretRedaction {
+    internal fun redactForDiagnostics(output: String, onRedacted: ((String) -> Unit)? = null): SecretRedaction {
         val repo = envVarRepository
-        val values = ArrayList<String>()
-        if (repo != null) {
-            values.addAll(repo.allAsDict().values.filter { it.isNotEmpty() })
+        return try {
+            val values = ArrayList<String>()
+            if (repo != null) {
+                values.addAll(repo.allAsDict().filterKeys(SecretRedactionRules::isSecretName).values)
+            }
+            additionalSecretValues?.invoke()?.let(values::addAll)
+            SecretRedactionRules.redact(output, values, onRedacted)
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            // The tool already ran. Do not throw (which could prompt a replay)
+            // and do not fall back to raw output when a credential source fails.
+            SecretRedaction("[MINIS_REDACTED: privacy filtering unavailable; tool execution unchanged]", 1)
         }
-        additionalSecretValues?.invoke()?.let { extra ->
-            values.addAll(extra.filter { it.isNotEmpty() })
+    }
+
+    /** A capture cap loses context at its final line; never expose that unprovable tail. */
+    internal fun hideTruncatedCaptureTail(output: String): String {
+        val lineStart = maxOf(output.lastIndexOf('\n'), output.lastIndexOf('\r')) + 1
+        return output.substring(0, lineStart) +
+            "[MINIS_REDACTED: incomplete captured tail hidden]"
+    }
+
+    /** Only refuse a display-copy overwrite that actually removes protected bytes. */
+    internal fun wouldEraseCredential(original: String, replacement: String): Boolean {
+        if (!replacement.contains(SecretRedactionRules.PLACEHOLDER)) return false
+        var missing = false
+        var witnessed = 0
+        val view = redactForDiagnostics(original) { protected ->
+            witnessed++
+            if (!replacement.contains(protected)) missing = true
         }
-        return SecretRedactionRules.redact(output, values)
+        return missing || (view.hits > 0 && witnessed == 0)
     }
 
     fun mask(value: String): String {
