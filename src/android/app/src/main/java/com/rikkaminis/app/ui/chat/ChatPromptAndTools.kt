@@ -389,8 +389,11 @@ internal suspend fun ChatViewModel.executeTool(
     // `result` stays the executor's own bytes: the defect-registry match and
     // the T7 outcome flag must read what actually ran. `modelResult` is the
     // only copy handed to the model.
-    val diagView = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.output)
-    val modelView = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(result.output)
+    // [fix/replay-guard-cost-1123] Both projections decrypt every credential;
+    // share one snapshot instead of paying the decrypt twice per tool result.
+    val privacySnapshot = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
+    val diagView = com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(result.output, privacySnapshot, null)
+    val modelView = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(result.output, privacySnapshot)
     val modelResult = result.copy(
         output = modelView.text,
         privacyRedacted = result.privacyRedacted || modelView.hits > 0 || diagView.hits > 0 || safeArgs != argsJson,

@@ -122,13 +122,19 @@ internal fun buildUsageJson(usage: LLMUsage): String =
  * via grep + ConfigBackup already strips it on export), and it inflated every
  * persisted tool-result row by up to 30 lines of redundant JSON.
  */
-internal fun buildToolResultPartsJson(results: List<AgentContentPart.ToolResult>): String = buildString {
-    append("[")
-    results.forEachIndexed { index, result ->
-        if (index > 0) append(",")
-        append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.content).text)},"success":${!result.isError}}}""")
+internal fun buildToolResultPartsJson(results: List<AgentContentPart.ToolResult>): String {
+    if (results.isEmpty()) return "[]"
+    // [fix/replay-guard-cost-1123] One credential snapshot for the whole batch.
+    // One result = one decrypt-all was fine; a 10-tool batch paid it 10 times.
+    val snapshot = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
+    return buildString {
+        append("[")
+        results.forEachIndexed { index, result ->
+            if (index > 0) append(",")
+            append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(result.content, snapshot, null).text)},"success":${!result.isError}}}""")
+        }
+        append("]")
     }
-    append("]")
 }
 
 // NOTE (FE-5): extractPartialStringValue / findUnescapedEnd /

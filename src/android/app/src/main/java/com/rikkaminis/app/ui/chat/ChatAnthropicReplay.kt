@@ -175,30 +175,36 @@ internal fun guardAnthropicReplayHistory(
     messages: List<LLMMessage>,
     original: List<LLMMessage> = messages,
     compactedThroughIndex: Int = -1,
-): List<LLMMessage> = messages.mapIndexed { index, message ->
-    val replay = message.anthropicReplay ?: return@mapIndexed message
-    val next = messages.getOrNull(index + 1)
-    val uses = nativeTools(replay)
-    val results = next?.contentParts?.filterIsInstance<AgentContentPart.ToolResult>().orEmpty()
-    val paired = next?.role == LLMMessage.Role.USER && uses.isNotEmpty() &&
-        uses == results.map { it.id to it.name } &&
-        results.none { it.content == SANITIZE_PLACEHOLDER_RESULT_CONTENT }
-    // Match THIS assistant and its adjacent real result, not unrelated copies
-    // elsewhere (e.g. an already-existing compact summary injected on every
-    // request). Keep the predecessor row edge so slicing cannot detach a group
-    // from its immediate context. Actual compact/trim/offload still explicitly
-    // clear old groups; this is NOT preserved-thinking/full-prefix proof.
-    val sourceIndex = original.indices.singleOrNull { sameHistoryRow(message, original[it]) }
-    val unchanged = sourceIndex != null && sourceIndex > compactedThroughIndex &&
-        messages.count { sameHistoryRow(message, it) } == 1 &&
-        sameHistoryRow(messages.getOrNull(index - 1), original.getOrNull(sourceIndex - 1)) &&
-        sameHistoryRow(next, original.getOrNull(sourceIndex + 1)) &&
-        message.copy(contentParts = emptyList(), anthropicReplay = null) ==
-            original[sourceIndex].copy(contentParts = emptyList(), anthropicReplay = null) &&
-        replayMatchesPublic(replay, original[sourceIndex].contentParts) &&
-        next?.copy(anthropicReplay = null) == original.getOrNull(sourceIndex + 1)?.copy(anthropicReplay = null)
-    if (!unchanged || message.role != LLMMessage.Role.ASSISTANT || !paired ||
-        !replayMatchesPublic(replay, message.contentParts)) message.copy(anthropicReplay = null) else message
+): List<LLMMessage> {
+    // [fix/replay-guard-cost-1123] Built on the first replay-bearing row only:
+    // a history without any replay metadata keeps the old O(n) map cost.
+    var locator: HistoryRowLocator? = null
+    return messages.mapIndexed { index, message ->
+        val replay = message.anthropicReplay ?: return@mapIndexed message
+        val rows = locator ?: HistoryRowLocator(original, messages).also { locator = it }
+        val next = messages.getOrNull(index + 1)
+        val uses = nativeTools(replay)
+        val results = next?.contentParts?.filterIsInstance<AgentContentPart.ToolResult>().orEmpty()
+        val paired = next?.role == LLMMessage.Role.USER && uses.isNotEmpty() &&
+            uses == results.map { it.id to it.name } &&
+            results.none { it.content == SANITIZE_PLACEHOLDER_RESULT_CONTENT }
+        // Match THIS assistant and its adjacent real result, not unrelated copies
+        // elsewhere (e.g. an already-existing compact summary injected on every
+        // request). Keep the predecessor row edge so slicing cannot detach a group
+        // from its immediate context. Actual compact/trim/offload still explicitly
+        // clear old groups; this is NOT preserved-thinking/full-prefix proof.
+        val sourceIndex = rows.sourceIndexOf(message)
+        val unchanged = sourceIndex != null && sourceIndex > compactedThroughIndex &&
+            rows.occurrenceCount(message) == 1 &&
+            sameHistoryRow(messages.getOrNull(index - 1), original.getOrNull(sourceIndex - 1)) &&
+            sameHistoryRow(next, original.getOrNull(sourceIndex + 1)) &&
+            message.copy(contentParts = emptyList(), anthropicReplay = null) ==
+                original[sourceIndex].copy(contentParts = emptyList(), anthropicReplay = null) &&
+            replayMatchesPublic(replay, original[sourceIndex].contentParts) &&
+            next?.copy(anthropicReplay = null) == original.getOrNull(sourceIndex + 1)?.copy(anthropicReplay = null)
+        if (!unchanged || message.role != LLMMessage.Role.ASSISTANT || !paired ||
+            !replayMatchesPublic(replay, message.contentParts)) message.copy(anthropicReplay = null) else message
+    }
 }
 
 /** Existing marker state supplies the old compacted range; no new generation/journal. */

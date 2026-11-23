@@ -994,6 +994,11 @@ class OpenAIProvider constructor(
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
+            // [fix/replay-guard-cost-1123] A ToolCallComplete log line used to
+            // decrypt every credential, once per completed tool call. Capture
+            // one snapshot lazily for this stream: no tool call, no decrypt.
+            var toolLogSnapshot: com.rikkaminis.app.data.EnvVarRedactor.SecretSnapshot? = null
+
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
                 // Tolerate `data:` with or without the optional space — the
@@ -1178,7 +1183,9 @@ class OpenAIProvider constructor(
                                 if (key != null) responsesToolCalls.remove(key)
                                 val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
                                 val combined = combineResponsesAPIIds(acc.callId, acc.itemId)
-                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(args.toString()).text.take(300)}")
+                                val logSnap = toolLogSnapshot
+                                    ?: com.rikkaminis.app.data.EnvVarRedactor.snapshot().also { toolLogSnapshot = it }
+                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(args.toString(), logSnap, null).text.take(300)}")
                                 send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                             }
                         }
@@ -1246,7 +1253,9 @@ class OpenAIProvider constructor(
                                 val argsStr = if (authoritative.isNotEmpty()) authoritative else acc.args.toString()
                                 val args = try { JSONObject(argsStr) } catch (_: Exception) { JSONObject() }
                                 val combined = combineResponsesAPIIds(acc.callId, acc.itemId)
-                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(args.toString()).text.take(300)}")
+                                val logSnap = toolLogSnapshot
+                                    ?: com.rikkaminis.app.data.EnvVarRedactor.snapshot().also { toolLogSnapshot = it }
+                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(args.toString(), logSnap, null).text.take(300)}")
                                 send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                             }
                         }
@@ -1550,7 +1559,9 @@ class OpenAIProvider constructor(
             for ((_, acc) in toolCallAccumulators) {
                 if (acc.id.isNotEmpty() && acc.name.isNotEmpty()) {
                     val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
-                    android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=${acc.id} name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(args.toString()).text.take(300)}")
+                    val logSnap = toolLogSnapshot
+                        ?: com.rikkaminis.app.data.EnvVarRedactor.snapshot().also { toolLogSnapshot = it }
+                    android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=${acc.id} name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(args.toString(), logSnap, null).text.take(300)}")
                     send(LLMStreamChunk.ToolCallComplete(acc.id, acc.name, args))
                 }
             }

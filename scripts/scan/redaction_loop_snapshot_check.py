@@ -74,13 +74,30 @@ WITH_SNAPSHOT = re.compile(r"\bEnvVarRedactor\.redactForModel\s*\([^()]*(?:snaps
 # multiplication actually happened (one call per element).
 LOOP_HEAD = re.compile(r"\b(?:for|while)\s*\(")
 ITER_COMBINATOR = re.compile(
-    r"\.(?:forEach|map|flatMap|filter|any|all|none|fold|onEach|mapNotNull)\s*[({]"
+    r"\.(?:forEach|map|flatMap|filter|any|all|none|fold|onEach|mapNotNull|"
+    r"forEachIndexed|mapIndexed|mapIndexedNotNull|foldIndexed|reduce|reduceIndexed)\s*[({]"
 )
 
 EXEMPT = "snapshot-ok:"
 
 # One logical line, tolerating a trailing `//` comment.
 LINE_COMMENT = re.compile(r"//[^\n]*")
+
+# `mask_code` blanks string LITERALS, which also blanks real code inside a
+# `${...}` template expression. `buildToolResultPartsJson` builds its JSON in a
+# raw string, so the per-result redaction call lived entirely inside a template
+# and the gate could not see it (verified: the pre-fix file scanned clean).
+# Re-open only the template expression segments — never the literal body.
+TEMPLATE_EXPR = re.compile(r"\$\{([^{}]*)\}")
+
+
+def _template_single_shot(raw_line):
+    """A single-shot redaction call inside `${...}` on this raw source line."""
+    for match in TEMPLATE_EXPR.finditer(raw_line):
+        expr = match.group(1)
+        if SINGLE_SHOT.search(expr) and not WITH_SNAPSHOT.search(expr):
+            return True
+    return False
 
 
 def _exempted(lines, idx):
@@ -133,7 +150,10 @@ def scan_text(src):
 
         # A single-shot call while any loop body is still open. A call that
         # already receives a snapshot is the FIX, not the bug.
-        if SINGLE_SHOT.search(code) and not WITH_SNAPSHOT.search(code):
+        raw_here = raw_lines[n] if n < len(raw_lines) else ""
+        code_has_single = SINGLE_SHOT.search(code) and not WITH_SNAPSHOT.search(code)
+        template_has_single = _template_single_shot(raw_here)
+        if (code_has_single or template_has_single):
             inside = [d for d in loop_depths if depth >= d]
             if inside and not _exempted(raw_lines, n):
                 snippet = " ".join(raw_lines[n].strip().split())[:120]
@@ -235,6 +255,43 @@ class Fake5 {
 }
 '''
 
+# The gap this arm pins: `forEachIndexed` / `mapIndexed` were NOT in the
+# combinator list, so `buildToolResultPartsJson` (one decrypt-all per result)
+# scanned clean on main even though it is exactly the per-item re-read.
+DIRTY_INDEXED = '''
+class Fake6 {
+    fun f(results: List<String>) {
+        results.forEachIndexed { index, r ->
+            val v = EnvVarRedactor.redactForDiagnostics(r)
+        }
+    }
+}
+'''
+
+# The second blind spot this arm pins: `mask_code` blanks string literals, so a
+# call inside a `${...}` template expression was invisible. This is exactly the
+# buildToolResultPartsJson shape (JSON built in a raw string).
+DIRTY_TEMPLATE = '''
+class Fake7 {
+    fun f(results: List<String>) {
+        results.forEachIndexed { index, r ->
+            append("""{"o":${escape(EnvVarRedactor.redactForDiagnostics(r).text)}}""")
+        }
+    }
+}
+'''
+
+CLEAN_TEMPLATE_SNAPSHOT = '''
+class Fake8 {
+    fun f(results: List<String>) {
+        val snap = EnvVarRedactor.snapshot()
+        results.forEachIndexed { index, r ->
+            append("""{"o":${escape(EnvVarRedactor.redactWithSnapshot(r, snap, null).text)}}""")
+        }
+    }
+}
+'''
+
 
 def selftest():
     failures = 0
@@ -257,6 +314,12 @@ def selftest():
           "got %r" % (scan_text(CLEAN_SINGLE),))
     check("inline exemption is recognised", scan_text(EXEMPTED_LOOP) == [],
           "got %r" % (scan_text(EXEMPTED_LOOP),))
+    check("dirty forEachIndexed is caught", len(scan_text(DIRTY_INDEXED)) == 1,
+          "got %r" % (scan_text(DIRTY_INDEXED),))
+    check("dirty call inside a ${...} template is caught", len(scan_text(DIRTY_TEMPLATE)) == 1,
+          "got %r" % (scan_text(DIRTY_TEMPLATE),))
+    check("template with a hoisted snapshot passes", scan_text(CLEAN_TEMPLATE_SNAPSHOT) == [],
+          "got %r" % (scan_text(CLEAN_TEMPLATE_SNAPSHOT),))
 
     # Negative control: hoisting the snapshot MUST make the dirty fixture clean.
     fixed = DIRTY_LOOP.replace(
