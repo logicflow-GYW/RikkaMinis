@@ -50,6 +50,7 @@ class CompactSplitCarryWiringTest {
     @Test
     fun depthZeroAssemblyGoesThroughTheSharedFramer() {
         val code = code(ORCH_REL)
+        val declarationShape = code.replace("var prevSummaryStripped =", "val prevSummaryStripped =")
         assertTrue(
             "the depth-0 summarizer input must be built by the shared framer, not by an "
                 + "inline copy that can drift from the recursion",
@@ -59,7 +60,7 @@ class CompactSplitCarryWiringTest {
             "the previous summary is no longer stripped of its pinned block before it "
                 + "reaches the model",
             "val prevSummaryStripped = if (depth == 0) stripPinnedSection(previousSummary) "
-                + "else previousSummary" in code,
+                + "else previousSummary" in declarationShape,
         )
     }
 

@@ -35,7 +35,7 @@ import kotlinx.coroutines.withContext
 // buildLlmMessages / findModelEntry) stay in ChatViewModel.
 
 internal fun ChatViewModel.effectiveAgentHistory(): List<LLMMessage> {
-    val summary = _compactSummary.value
+    val summary = _compactSummary.value?.let(::redactUnpinnedSummary)
     val marker = _cachedLatestMarker
     // No compact in play → return full history untouched.
     if (summary.isNullOrBlank() || marker == null) return agentHistory.toList()

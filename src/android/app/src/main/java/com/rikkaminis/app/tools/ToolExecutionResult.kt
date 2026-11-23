@@ -37,6 +37,8 @@ data class ToolExecutionResult(
      * tool family except shell is outcome-known by construction.
      */
     val outcomeKnown: Boolean = true,
+    /** Execution-local fact: a model-facing projection changed real tool bytes. Not persisted/IPC. */
+    val privacyRedacted: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -46,7 +48,8 @@ data class ToolExecutionResult(
             imageMimeType == other.imageMimeType && toolTitle == other.toolTitle &&
             pageURL == other.pageURL && imageFilePath == other.imageFilePath &&
             imageLinuxPath == other.imageLinuxPath &&
-            timedOut == other.timedOut && outcomeKnown == other.outcomeKnown
+            timedOut == other.timedOut && outcomeKnown == other.outcomeKnown &&
+            privacyRedacted == other.privacyRedacted
     }
 
     override fun hashCode(): Int {
@@ -60,6 +63,7 @@ data class ToolExecutionResult(
         result = 31 * result + (imageLinuxPath?.hashCode() ?: 0)
         result = 31 * result + timedOut.hashCode()
         result = 31 * result + outcomeKnown.hashCode()
+        result = 31 * result + privacyRedacted.hashCode()
         return result
     }
 }

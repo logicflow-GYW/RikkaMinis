@@ -4804,7 +4804,7 @@ internal class AgentLoopEngine(
                 val name = p.name
                 val paramsMap = p.paramsMap
                 val result = resultsById[id]!!
-                android.util.Log.d("ToolChain[VM]", "[turn=$turn] host.executeTool END name=$name success=${result.success} title=${result.toolTitle} outputLen=${result.output.length} output=${result.output.take(200)}")
+                android.util.Log.d("ToolChain[VM]", "[turn=$turn] host.executeTool END name=$name success=${result.success} title=${result.toolTitle} outputLen=${result.output.length} output=${com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.output).text.take(200)}")
 
                 // Record post-execution. WARNING text is appended to the tool
                 // result so the model sees it on its next turn. No block here —
@@ -4817,6 +4817,9 @@ internal class AgentLoopEngine(
                     errorMessage = errMsgForDetector,
                     toolCallId = id,
                 )
+                if (result.privacyRedacted) {
+                    transcriptRedactions[id] = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.output).text
+                }
                 val outputForLLM = if (postRecord.level == Level.WARNING && postRecord.message != null) {
                     AppLogger.debug("ChatViewModel",
                         "appending loop-warning to tool result name=$name key=${postRecord.warningKey}")

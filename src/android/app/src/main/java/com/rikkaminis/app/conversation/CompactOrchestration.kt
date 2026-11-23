@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.data.db.CompactMarkerEntity
+import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.ThinkingLevel
@@ -611,6 +612,29 @@ internal fun ChatViewModel.compactAll(
  * LLM to merge the two partial summaries into one — prioritizing Part 2
  * (more recent) when space is tight, again matching iOS behavior.
  */
+/**
+ * [fix/tool-output-redaction-1123] Model-facing projection for the summarizer
+ * input. Only ToolResult payloads are rewritten; user text and assistant prose
+ * keep the existing compact contract.
+ */
+private fun redactToolResultsForSummary(messages: List<LLMMessage>): List<LLMMessage> =
+    messages.map { msg ->
+        if (msg.contentParts.none { it is AgentContentPart.ToolResult || it is AgentContentPart.ToolUse }) msg
+        else msg.copy(contentParts = msg.contentParts.map { part ->
+            when (part) {
+                is AgentContentPart.ToolResult -> part.copy(
+                    content = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(part.content).text,
+                )
+                is AgentContentPart.ToolUse -> {
+                    val raw = part.input.toString()
+                    val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(raw)
+                    if (view.hits == 0) part else part.copy(input = org.json.JSONObject(view.text))
+                }
+                else -> part
+            }
+        })
+    }
+
 internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     messages: List<LLMMessage>,
     previousSummary: String? = null,
@@ -627,8 +651,13 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     // and re-merge it with this fold's user text at the exit.
     val pinNew = if (depth == 0) extractPinnedUserMessages(messages) else emptyList()
     val pinCarried = if (depth == 0) pinnedSectionInner(previousSummary) else null
-    val prevSummaryStripped = if (depth == 0) stripPinnedSection(previousSummary) else previousSummary
-    val transcript = buildConversationTextForSummary(messages)
+    var prevSummaryStripped = if (depth == 0) stripPinnedSection(previousSummary) else previousSummary
+    prevSummaryStripped = prevSummaryStripped?.let { com.rikkaminis.app.ui.chat.redactUnpinnedSummary(it) }
+    // [fix/tool-output-redaction-1123] The summarizer is another model
+    // request: project tool results and the carried summary BEFORE the 500-char
+    // truncation in buildConversationTextForSummary, so a secret crossing that
+    // boundary cannot survive as a recognisable prefix/suffix.
+    val transcript = buildConversationTextForSummary(redactToolResultsForSummary(messages))
     val conversationText = ContextCompactor.compactInputText(prevSummaryStripped, transcript)
     val summary = try {
         generateCompactSummary(conversationText)

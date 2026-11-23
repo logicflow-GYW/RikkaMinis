@@ -71,7 +71,7 @@ internal fun buildLlmMessagesFromParsed(
             )
         )
     }
-    return guardAnthropicReplayHistory(result)
+    return redactToolHistoryForModel(guardAnthropicReplayHistory(result))
 }
 
 internal fun buildSingleLlmMessage(

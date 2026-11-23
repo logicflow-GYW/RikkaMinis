@@ -50,10 +50,10 @@ internal fun buildAssistantTurnPartsJson(
                 val name = part.name
                 if (name.isBlank()) return@forEach
                 if (emitted++ > 0) append(",")
-                val inputStr = part.input.toString()
+                val inputStr = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(part.input.toString()).text
                 val meta = toolBlockMeta[part.id]
-                val desc = meta?.toolTitle ?: ""
-                val pageURL = meta?.browserURL ?: ""
+                val desc = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(meta?.toolTitle ?: "").text
+                val pageURL = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(meta?.browserURL ?: "").text
                 val imgPath = meta?.imageFilePath ?: ""
                 append("""{"type":"toolUse","value":{"toolUseId":${escapeJson(part.id)},"name":${escapeJson(name)},"input":${escapeJson(inputStr)},"description":${escapeJson(desc)},"pageURL":${escapeJson(pageURL)},"imageFilePath":${escapeJson(imgPath)},"thoughtSignature":null}}""")
             }
@@ -61,7 +61,11 @@ internal fun buildAssistantTurnPartsJson(
         }
     }
     append("]")
-}, anthropicReplay)
+}, anthropicReplay?.takeIf {
+    parts.filterIsInstance<AgentContentPart.ToolUse>().all { tool ->
+        com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(tool.input.toString()).hits == 0
+    }
+})
 
 /**
  * Build a JSON parts array matching the ChatRepository schema so a
@@ -112,7 +116,7 @@ internal fun buildToolResultPartsJson(results: List<AgentContentPart.ToolResult>
     append("[")
     results.forEachIndexed { index, result ->
         if (index > 0) append(",")
-        append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(result.content)},"success":${!result.isError}}}""")
+        append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.content).text)},"success":${!result.isError}}}""")
     }
     append("]")
 }

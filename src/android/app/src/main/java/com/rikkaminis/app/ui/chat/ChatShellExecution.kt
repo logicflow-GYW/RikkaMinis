@@ -289,6 +289,7 @@ internal suspend fun executeShellCommandEngine(
         // [deep-audit-1018 ISSUE-03] stamp from the coordinator verdict, so a
         // withheld replay reaches the trace layer as an unknown outcome.
         outcomeKnown = result.outcomeKnown,
+        privacyRedacted = redactHits > 0 || (result.truncated && com.rikkaminis.app.data.EnvVarPrivacyStore.isEnabled),
     )
 }
 
@@ -306,6 +307,7 @@ internal data class ToolResultShell(
      * rejected input), so the field can never be silently dropped on a new path.
      */
     val outcomeKnown: Boolean = true,
+    val privacyRedacted: Boolean = false,
 ) {
     companion object {
         fun error(message: String, toolTitle: String) =
@@ -328,6 +330,7 @@ internal fun ToolResultShell.toToolExecutionResult(): com.rikkaminis.app.tools.T
         toolTitle = toolTitle,
         timedOut = timedOut,
         outcomeKnown = outcomeKnown,
+        privacyRedacted = privacyRedacted,
     )
 
 /**

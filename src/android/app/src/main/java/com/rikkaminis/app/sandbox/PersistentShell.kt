@@ -339,7 +339,12 @@ class PersistentShell(
             synchronized(outputLock) { byteBudget.appendTo(output, text) }
         }
 
-        fun snapshotOutput(): String = synchronized(outputLock) { output.toString() }
+        fun snapshotOutput(): String = synchronized(outputLock) {
+            val captured = output.toString()
+            if (byteBudget.truncated && com.rikkaminis.app.data.EnvVarPrivacyStore.isEnabled) {
+                com.rikkaminis.app.data.EnvVarRedactor.hideTruncatedCaptureTail(captured)
+            } else captured
+        }
 
         /** Signal completion, but only the first caller wins. Returns whether
          *  THIS caller won (used by the stall guard: if the command completed on
@@ -518,7 +523,8 @@ class PersistentShell(
             Thread({
                 val br = p.errorStream.bufferedReader(StandardCharsets.UTF_8)
                 try {
-                    for (line in br.lineSequence()) Log.d("PRootStderr", line)
+                    for (line in br.lineSequence()) Log.d("PRootStderr",
+                        com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(line).text)
                 } catch (_: Exception) {}
             }, "PersistentShell-stderr").apply {
                 isDaemon = true

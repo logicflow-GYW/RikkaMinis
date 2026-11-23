@@ -286,7 +286,12 @@ internal suspend fun ChatViewModel.executeTool(
 
     // T9: record tool call event
     val etStartMs = System.currentTimeMillis()
-    traceObserver.agentTraceRecorder.toolCall(traceObserver.activeTraceTurn, toolId, name, argsJson)
+    // [fix/tool-output-redaction-1123] Diagnostics never receive the raw
+    // argument copy, even with Privacy Mode off: a persisted trace is a
+    // durable surface, not the model payload. The executor still gets the
+    // original [argsJson]; only this copy is projected.
+    val safeArgs = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(argsJson).text
+    traceObserver.agentTraceRecorder.toolCall(traceObserver.activeTraceTurn, toolId, name, safeArgs)
     // T7-A: 观察 —— 工具调用消耗 tool_calls 预算（advisory，不阻断）
     // T7-C: tool_calls 预算耗尽 → 不执行工具，返回明确错误给 LLM（不是静默失败）
     if (!traceObserver.t7ConsumeAndTrace(AgentTraceRecorder.DIMENSION_TOOL_CALLS) { it.consumeToolCall() }) {
@@ -375,13 +380,29 @@ internal suspend fun ChatViewModel.executeTool(
         )
     }
 
+    // [fix/tool-output-redaction-1123] One shared safe projection for every
+    // executor above (file_read / browser_use / memory_* / shell / app_guide /
+    // conversation_history / spawn_agent / unknown). Both the model payload and
+    // the durable diagnostics are projected BEFORE this method returns, because
+    // the loop used to log `result.output.take(200)` and the failure hook wrote
+    // the raw body into `.learnings/ERRORS.md` before any loop-level filtering.
+    // `result` stays the executor's own bytes: the defect-registry match and
+    // the T7 outcome flag must read what actually ran. `modelResult` is the
+    // only copy handed to the model.
+    val diagView = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.output)
+    val modelView = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(result.output)
+    val modelResult = result.copy(
+        output = modelView.text,
+        privacyRedacted = result.privacyRedacted || modelView.hits > 0 || diagView.hits > 0 || safeArgs != argsJson,
+    )
+
     // T9: record tool result event
     traceObserver.agentTraceRecorder.toolResult(
         turn = traceObserver.activeTraceTurn,
         toolId = toolId,
         name = name,
         success = result.success,
-        output = result.output,
+        output = diagView.text,
         durationMs = System.currentTimeMillis() - etStartMs,
     )
     // T7-A: 观察 —— 工具结束（ToolFinished 语义）
@@ -398,7 +419,8 @@ internal suspend fun ChatViewModel.executeTool(
     // without relying on the agent remembering to check the skill.
     if (!result.success) {
         runCatching {
-            toolFailureHook.recordFailure(name, result.output, argsJson, activeSessionId)
+            // Durable side channel — safe text, never the raw failed body.
+            toolFailureHook.recordFailure(name, diagView.text, safeArgs, activeSessionId)
         }
         // Deliberately swallowed: a logging failure must never break the
         // tool-result path back to the model.
@@ -411,9 +433,17 @@ internal suspend fun ChatViewModel.executeTool(
         // the moment of failure, not one file-read away. No registry file /
         // no match → the result flows unchanged.
         val defectHint = defectRegistryHintFor(result.output)
-        if (defectHint != null) return result.copy(output = result.output + defectHint)
+        if (defectHint != null) {
+            // Keep the registry match on the executor bytes, then project the
+            // decorated MODEL copy. The outcome flag still describes execution.
+            return result.copy(output = result.output + defectHint).let { hinted ->
+                val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(hinted.output)
+                hinted.copy(output = view.text,
+                    privacyRedacted = hinted.privacyRedacted || view.hits > 0 || diagView.hits > 0 || safeArgs != argsJson)
+            }
+        }
     }
-    return result
+    return modelResult
 }
 
 /**

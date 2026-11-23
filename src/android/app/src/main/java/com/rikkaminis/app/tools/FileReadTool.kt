@@ -177,14 +177,41 @@ object FileReadTool {
 
         val bounds = windowBounds(direction, offset, lineCount, totalLines)
         val capped = buildCappedContent(collected, maxLength)
+        // Complete selected lines are available here; project BEFORE max_length
+        // cuts a credential in half. The on-disk file/line metadata is unchanged.
+        val fullSelection: String
+        val privacyRescanIncomplete: Boolean
+        if (capped.truncated && com.rikkaminis.app.data.EnvVarPrivacyStore.isEnabled) {
+            // The selected collector may have stopped once the visible prefix
+            // crossed maxLength. Re-read only the same selected lines and stop
+            // at an explicit privacy ceiling; never materialize the whole file.
+            var overflow = bounds.selSize > MAX_PRIVACY_RESCAN_LINES
+            fullSelection = file.bufferedReader().use { reader ->
+                val safeLines = minOf(bounds.selSize, MAX_PRIVACY_RESCAN_LINES)
+                val window = streamWindow(reader, bounds.showStart - 1, safeLines, MAX_PRIVACY_RESCAN_CHARS - 1)
+                val joined = window.lines.joinToString("\n")
+                if (joined.length >= MAX_PRIVACY_RESCAN_CHARS) overflow = true
+                joined
+            }
+            privacyRescanIncomplete = overflow
+        } else {
+            fullSelection = collected.joinToString("\n")
+            privacyRescanIncomplete = false
+        }
+        val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(fullSelection)
+        var safeContent = view.text.take(maxLength)
+        if (privacyRescanIncomplete) {
+            safeContent = com.rikkaminis.app.data.EnvVarRedactor.hideTruncatedCaptureTail(safeContent)
+        }
 
         val header = "[$displayPath | $size bytes | $totalLines lines | showing ${bounds.showStart}-${bounds.showEnd} of $totalLines" +
             // [audit-0917] Tell the agent the range was cut mid-way: the old header
             // kept claiming "showing X-Y" even when only the capped chars
             // survived, so a paginating agent silently saw partial content.
             (if (capped.truncated) " | content truncated by the max_length cap" else "") + "]"
-        val content = if (capped.truncated) capped.content + "\n... (truncated)" else capped.content
-        return ToolExecutionResult("$header\n$content", true, toolTitle = toolTitle)
+        val content = if (capped.truncated) safeContent + "\n... (truncated)" else safeContent
+        return ToolExecutionResult("$header\n$content", true, toolTitle = toolTitle,
+            privacyRedacted = view.hits > 0 || privacyRescanIncomplete)
     }
 }
 
@@ -202,6 +229,9 @@ object FileReadTool {
  * is not silently cut by the character cap.
  */
 internal const val DEFAULT_TAIL_LINES = 100
+/** Bounded second pass for pre-cap privacy projection; larger tails fail closed by hiding the captured edge. */
+internal const val MAX_PRIVACY_RESCAN_LINES = 2_000
+internal const val MAX_PRIVACY_RESCAN_CHARS = 256_000
 
 /**
  * [FULLSCAN-1119 F-13] The line count the selection is actually built from.

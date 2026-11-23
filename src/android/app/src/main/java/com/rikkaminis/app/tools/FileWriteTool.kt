@@ -152,6 +152,36 @@ object FileWriteTool {
             //    a >=8 KiB file by more than half — leaves a sibling snapshot
             //    first, so a mistake that still gets through costs a copy.
             val existed = file.exists()
+            // [fix/tool-output-redaction-1123] A redacted copy is not the
+            // original file. If the model saw `[MINIS_REDACTED]` and now writes
+            // a whole-file replace that still carries the marker, the real
+            // credential would be destroyed. Refuse; the agent still has a
+            // local, non-model path (file_edit on one field, or a shell command
+            // that reads the real file).
+            if (!append && effectiveContent.contains(com.rikkaminis.app.data.SecretRedactionRules.PLACEHOLDER)) {
+                val guardText = if (existed) readForPlaceholderGuard(file) else ""
+                if (existed && guardText == null) {
+                    return ToolExecutionResult(
+                        "Error: refusing to replace $path with a redacted copy — the existing file is too " +
+                            "large to verify safely. Edit the specific field instead (file_edit), or let a " +
+                            "shell command read the real file and change only that field.",
+                        false,
+                        toolTitle = toolTitle,
+                    )
+                }
+                if (guardText != null &&
+                    com.rikkaminis.app.data.EnvVarRedactor.wouldEraseCredential(guardText, effectiveContent)
+                ) {
+                    return ToolExecutionResult(
+                        "Error: refusing to write the privacy-mode placeholder over $path — the existing " +
+                            "file contains a credential and a whole-file replace would erase it. Read the " +
+                            "file again and use file_edit on a field that does not contain the secret, or " +
+                            "let a shell command read the real file and change only that field.",
+                        false,
+                        toolTitle = toolTitle,
+                    )
+                }
+            }
             val currentBytes = if (existed) file.length() else 0L
             val incomingBytes = effectiveContent.toByteArray(Charsets.UTF_8).size.toLong()
             val appendOnly = AppendOnlyWriteGuard.isAppendOnly(path)
@@ -232,6 +262,24 @@ object FileWriteTool {
             ToolExecutionResult("Error writing file: ${e.message}", false, toolTitle = toolTitle)
         }
     }
+
+    /**
+     * [fix/tool-output-redaction-1123] Bounded read for the placeholder guard.
+     * Returns null when the file is missing, unreadable, or larger than the
+     * scan ceiling — "cannot prove it is safe" is a refusal in the caller.
+     */
+    private fun readForPlaceholderGuard(file: File): String? {
+        if (!file.exists() || file.length() > PLACEHOLDER_GUARD_SCAN_LIMIT) return null
+        return runCatching {
+            file.inputStream().use { input ->
+                com.rikkaminis.app.ui.settings.readAtMost(input, PLACEHOLDER_GUARD_SCAN_LIMIT)
+                    ?.toString(Charsets.UTF_8)
+            }
+        }.getOrNull()
+    }
+
+    /** Above this size the guard refuses rather than reading the whole file. */
+    private const val PLACEHOLDER_GUARD_SCAN_LIMIT = 2L * 1024 * 1024
 
     /**
      * [fix/append-only-write-guard-1116] Sibling `.bak-<stamp>` copy written

@@ -51,7 +51,7 @@ internal fun ChatViewModel.streamChatTurnOffloaded(
         context = context,
         instance = instance,
         model = provider.model,
-        messages = messages,
+        messages = redactToolHistoryForModel(messages),
         systemPrompt = systemPrompt,
         maxTokens = maxTokens,
         temperature = temperature,

@@ -37,6 +37,69 @@ object EnvVarRedactor {
     @Volatile
     var envVarRepository: EnvVarRepository? = null
 
+    /**
+     * [fix/tool-output-redaction-1123] Extra credential values that are not
+     * environment variables (provider API keys). Installed once by the app
+     * wiring; returns a short-lived snapshot, never a cache of raw values.
+     * A null provider means "no extra sources", not "trust everything".
+     */
+    @Volatile
+    internal var additionalSecretValues: (() -> Collection<String>)? = null
+
+    /**
+     * Tool-output projection for the MODEL payload. Disabled Privacy Mode keeps
+     * the historical behaviour (raw text to the model); diagnostics still use
+     * [redactForDiagnostics] regardless.
+     *
+     * Unlike [redactIfEnabled], this path always runs the shared shape rules:
+     * an empty or unreadable env-var index used to mean "return the output
+     * unchanged", which is exactly when an unregistered sk-/Bearer token leaks.
+     */
+    internal fun redactForModel(output: String): SecretRedaction =
+        if (!EnvVarPrivacyStore.isEnabled) SecretRedaction(output, 0) else redactForDiagnostics(output)
+
+    /**
+     * Tool-output projection for durable diagnostics (trace, ERROR block, replay
+     * metadata). Always on: a persisted log is not the model payload, and the
+     * user's Privacy Mode choice must not turn a trace file into a secret store.
+     */
+    internal fun redactForDiagnostics(output: String, onRedacted: ((String) -> Unit)? = null): SecretRedaction {
+        val repo = envVarRepository
+        return try {
+            val values = ArrayList<String>()
+            if (repo != null) {
+                values.addAll(repo.allAsDict().filterKeys(SecretRedactionRules::isSecretName).values)
+            }
+            additionalSecretValues?.invoke()?.let(values::addAll)
+            SecretRedactionRules.redact(output, values, onRedacted)
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            // The tool already ran. Do not throw (which could prompt a replay)
+            // and do not fall back to raw output when a credential source fails.
+            SecretRedaction("[MINIS_REDACTED: privacy filtering unavailable; tool execution unchanged]", 1)
+        }
+    }
+
+    /** A capture cap loses context at its final line; never expose that unprovable tail. */
+    internal fun hideTruncatedCaptureTail(output: String): String {
+        val lineStart = maxOf(output.lastIndexOf('\n'), output.lastIndexOf('\r')) + 1
+        return output.substring(0, lineStart) +
+            "[MINIS_REDACTED: incomplete captured tail hidden]"
+    }
+
+    /** Only refuse a display-copy overwrite that actually removes protected bytes. */
+    internal fun wouldEraseCredential(original: String, replacement: String): Boolean {
+        if (!replacement.contains(SecretRedactionRules.PLACEHOLDER)) return false
+        var missing = false
+        var witnessed = 0
+        val view = redactForDiagnostics(original) { protected ->
+            witnessed++
+            if (!replacement.contains(protected)) missing = true
+        }
+        return missing || (view.hits > 0 && witnessed == 0)
+    }
+
     fun mask(value: String): String {
         val n = value.length
         if (n < 8) return "*".repeat(n)
