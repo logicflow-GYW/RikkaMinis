@@ -45,6 +45,13 @@ class ChatToolPrivacyTest {
         assertFalse((messages.single().contentParts.single() as AgentContentPart.ToolResult).content.contains("1234"))
         assertEquals(raw, row.partsJson)
     }
+    @Test fun durableWriterRedactsEvenWhenPrivacyModeIsOff() {
+        EnvVarPrivacyStore.setEnabled(false)
+        val json = buildToolResultPartsJson(listOf(AgentContentPart.ToolResult("id", "read_probe", "password=1234")))
+        assertFalse(json.contains("1234"))
+        assertTrue(json.contains("MINIS_REDACTED"))
+        EnvVarPrivacyStore.setEnabled(true)
+    }
     @Test fun derivedSummaryOnlyIsFilteredAndPinnedUserTextSurvives() {
         val user = "user literal password=1234"
         val pin = "<pinned-user-messages>password=2468</pinned-user-messages>"
