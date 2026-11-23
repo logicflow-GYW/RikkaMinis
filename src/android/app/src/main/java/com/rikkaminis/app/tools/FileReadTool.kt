@@ -181,7 +181,7 @@ object FileReadTool {
         // cuts a credential in half. The on-disk file/line metadata is unchanged.
         val fullSelection: String
         val privacyRescanIncomplete: Boolean
-        if (capped.truncated) {
+        if (capped.truncated && com.rikkaminis.app.data.EnvVarPrivacyStore.isEnabled) {
             // The selected collector may have stopped once the visible prefix
             // crossed maxLength. Re-read only the same selected lines and stop
             // at an explicit privacy ceiling; never materialize the whole file.

@@ -61,6 +61,11 @@ class FileReadToolPrivacyTest {
             val out = FileReadTool.readFileText(file, "/probe/large", "head", 1, null, 10)
             assertTrue(out.privacyRedacted)
             assertTrue(out.output.contains("incomplete captured tail hidden"))
+            EnvVarPrivacyStore.setEnabled(false)
+            val raw = FileReadTool.readFileText(file, "/probe/large", "head", 1, null, 10)
+            assertFalse(raw.privacyRedacted)
+            assertTrue(raw.output.contains("line0 ordi"))
+            assertFalse(raw.output.contains("incomplete captured tail hidden"))
         } finally { file.delete() }
     }
     @Test fun resultCopyEqualityAndHashIncludePrivacyFactAndKeepImageBytes() {
