@@ -89,6 +89,20 @@ object MarkdownParser {
      */
     private val numberedListMarkerRegex = Regex("^\\s{0,3}\\d{1,2}[.)](?:\\s|$)")
 
+    // [fix/replay-guard-cost-1123] These five were constructed INSIDE parse()'s
+    // per-line loops: a 500-line answer compiled the same regex up to ~1500
+    // times per render. Hoisting is behavior-identical (Regex is immutable).
+    /** Thematic break (`---`, `***`, `___`, with optional inner spaces). */
+    private val thematicBreakRegex = Regex("^\\s{0,3}([-*_])\\s*\\1\\s*\\1(\\s*\\1)*\\s*$")
+    /** Closing `#` run on an ATX heading (only when whitespace-preceded). */
+    private val closingHashRegex = Regex("\\s+#+$")
+    /** Bullet item body. */
+    private val bulletItemRegex = Regex("^\\s{0,3}[-*+]\\s+(.*)$")
+    /** Bullet marker prefix — the continuation break test. */
+    private val bulletMarkerRegex = Regex("^\\s{0,3}[-*+]\\s")
+    /** GFM table alignment cell (`---`, `:--:`, ...). */
+    private val tableCellRegex = Regex("^:?-+:?$")
+
     /**
      * A blockquote line is `>` at end of line, or `>` followed by a space or a
      * tab. `>foo` / `>5` / `>=` are PROSE — shell output and comparisons that
@@ -192,7 +206,7 @@ object MarkdownParser {
             }
 
             // Thematic break
-            if (line.matches(Regex("^\\s{0,3}([-*_])\\s*\\1\\s*\\1(\\s*\\1)*\\s*$"))) {
+            if (line.matches(thematicBreakRegex)) {
                 blocks.add(Block.ThematicBreak)
                 i++
                 continue
@@ -206,7 +220,7 @@ object MarkdownParser {
                 // '#' only when preceded by whitespace (CommonMark). The old
                 // removeSuffix("#") both ate content ("## C#" → "C") and left
                 // residue on space-preceded closers ("## title ##" → "title #").
-                val content = Regex("\\s+#+$").replace(headingMatch.groupValues[2].trimEnd(), "").trimEnd()
+                val content = closingHashRegex.replace(headingMatch.groupValues[2].trimEnd(), "").trimEnd()
                 blocks.add(Block.Heading(level, content))
                 i++
                 continue
@@ -246,11 +260,11 @@ object MarkdownParser {
             }
 
             // Bullet list (-, *, +)
-            val bulletMatch = Regex("^\\s{0,3}[-*+]\\s+(.*)$").find(line)
+            val bulletMatch = bulletItemRegex.find(line)
             if (bulletMatch != null) {
                 val items = mutableListOf<ListItem>()
                 while (i < lines.size) {
-                    val bm = Regex("^\\s{0,3}[-*+]\\s+(.*)$").find(lines[i])
+                    val bm = bulletItemRegex.find(lines[i])
                     if (bm == null) break
                     val content = bm.groupValues[1]
                     items.add(parseListItem(content))
@@ -269,7 +283,7 @@ object MarkdownParser {
                     // the same hole; an empty `\(`\)` inside such a body crashed the
                     // renderer there). Keep the two parsers in sync.
                     while (i < lines.size && lines[i].startsWith("  ") &&
-                        !Regex("^\\s{0,3}[-*+]\\s").containsMatchIn(lines[i]) &&
+                        !bulletMarkerRegex.containsMatchIn(lines[i]) &&
                         !lines[i].trimStart().startsWith("```")) {
                         items[items.lastIndex] = items.last().copy(
                             content = items.last().content + "\n" + lines[i].trimStart()
@@ -368,10 +382,10 @@ object MarkdownParser {
                     // is the bug.
                     atxHeadingRegex.matches(pl.trimStart()) ||
                     isBlockquoteLine(pl) ||
-                    Regex("^\\s{0,3}[-*+]\\s+").containsMatchIn(pl) ||
+                    bulletMarkerRegex.containsMatchIn(pl) ||
                     // Keep in sync with the numbered-list marker above (≤2 digits).
                     numberedListMarkerRegex.containsMatchIn(pl) ||
-                    pl.matches(Regex("^\\s{0,3}([-*_])\\s*\\1\\s*\\1(\\s*\\1)*\\s*$")) ||
+                    pl.matches(thematicBreakRegex) ||
                     // [dv15/B-07] A table glued to a paragraph: the Table rule
                     // above only fires when the header row is a block start, so
                     // without this break the header+separator were absorbed as
@@ -406,7 +420,7 @@ object MarkdownParser {
         val trimmed = line.trim()
         if (!trimmed.contains('-')) return false
         val cells = trimmed.split('|').filter { it.isNotBlank() }
-        return cells.all { it.trim().matches(Regex("^:?-+:?$")) }
+        return cells.all { it.trim().matches(tableCellRegex) }
     }
 
     private fun parseTable(lines: List<String>, startIdx: Int): Pair<Block.Table, Int>? {

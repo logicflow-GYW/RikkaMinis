@@ -117,13 +117,15 @@ import com.rikkaminis.app.ui.components.MinisTextButton
  * serve this table.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+// [fix/replay-guard-cost-1123] Was constructed per line inside the fallback loop.
+private val tableSeparatorLineRegex = Regex("^\\|?[\\s\\-:|]+\\|?$")
+
 @Composable
 private fun BorderedMarkdownTable(
     content: String,
     node: ASTNode,
     textStyle: TextStyle,
-) {
-    val borderColor = ChatColors.tableBorder
+) {    val borderColor = ChatColors.tableBorder
     val inlineCodeText = ChatColors.inlineCodeText
     val inlineCodeBg = ChatColors.inlineCodeBg
     val linkColor = ChatColors.link
@@ -179,7 +181,7 @@ private fun BorderedMarkdownTable(
         for ((index, line) in lines.withIndex()) {
             val trimmed = line.trim()
             // Skip separator lines (e.g., |---|---|)
-            if (trimmed.matches(Regex("^\\|?[\\s\\-:|]+\\|?$"))) continue
+            if (trimmed.matches(tableSeparatorLineRegex)) continue
             val cells = trimmed.split("|")
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
