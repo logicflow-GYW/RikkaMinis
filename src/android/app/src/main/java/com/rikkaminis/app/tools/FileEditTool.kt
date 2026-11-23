@@ -99,6 +99,19 @@ object FileEditTool {
             }
 
             if (count == 0) {
+                if (oldString.contains(com.rikkaminis.app.data.SecretRedactionRules.PLACEHOLDER)) {
+                    // [fix/tool-output-redaction-1123] The model is trying to
+                    // match text it read from the redacted (model-facing)
+                    // copy. Name the cause so it can re-read real content
+                    // instead of guessing at the secret.
+                    return ToolExecutionResult(
+                        "Error: 'old_string' contains [MINIS_REDACTED], which is a privacy-mode display " +
+                            "marker, not the file's real text. Read the file again and edit a field that " +
+                            "does not contain the secret, or let a shell command read the real file.",
+                        false,
+                        toolTitle = toolTitle,
+                    )
+                }
                 return ToolExecutionResult("Error: old_string not found in $path", false, toolTitle = toolTitle)
             }
 
@@ -107,6 +120,20 @@ object FileEditTool {
                     "Error: old_string found $count times in $path. Use replace_all=true to replace all occurrences, " +
                         "or provide a more specific old_string that matches exactly once.",
                     false, toolTitle = toolTitle
+                )
+            }
+
+            // [fix/tool-output-redaction-1123] Refuse the one destructive
+            // shape: replacing a real credential with the display marker.
+            if (newString.contains(com.rikkaminis.app.data.SecretRedactionRules.PLACEHOLDER) &&
+                com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(oldString).hits > 0
+            ) {
+                return ToolExecutionResult(
+                    "Error: refusing to replace a real credential in $path with a privacy-mode " +
+                        "placeholder. Edit another field, or let a shell command read the real file and " +
+                        "change only the intended field.",
+                    false,
+                    toolTitle = toolTitle,
                 )
             }
 

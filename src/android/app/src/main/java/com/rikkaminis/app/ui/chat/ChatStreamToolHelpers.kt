@@ -118,10 +118,17 @@ internal fun buildSingleLlmMessage(
                     ))
                 }
                 is ParsedPart.ToolResult -> {
+                    // [fix/tool-output-redaction-1123] Rows written before this
+                    // change may still carry a raw credential. Project the
+                    // model-facing working copy on every load; the DB row is
+                    // never rewritten here (that would be a separate,
+                    // destructive migration decision).
+                    val safeOutput = com.rikkaminis.app.data.EnvVarRedactor
+                        .redactForModel(part.output).text
                     contentParts.add(AgentContentPart.ToolResult(
                         id = part.toolUseId,
                         name = part.name,
-                        content = part.output,
+                        content = safeOutput,
                         isError = !part.success,
                     ))
                 }

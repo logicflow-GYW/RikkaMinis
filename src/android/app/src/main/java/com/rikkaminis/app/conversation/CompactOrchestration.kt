@@ -611,6 +611,24 @@ internal fun ChatViewModel.compactAll(
  * LLM to merge the two partial summaries into one — prioritizing Part 2
  * (more recent) when space is tight, again matching iOS behavior.
  */
+/**
+ * [fix/tool-output-redaction-1123] Model-facing projection for the summarizer
+ * input. Only ToolResult payloads are rewritten; user text and assistant prose
+ * keep the existing compact contract.
+ */
+private fun redactToolResultsForSummary(messages: List<LLMMessage>): List<LLMMessage> =
+    messages.map { msg ->
+        if (msg.contentParts.none { it is AgentContentPart.ToolResult }) msg
+        else msg.copy(contentParts = msg.contentParts.map { part ->
+            if (part is AgentContentPart.ToolResult) {
+                part.copy(
+                    content = com.rikkaminis.app.data.EnvVarRedactor
+                        .redactForModel(part.content).text,
+                )
+            } else part
+        })
+    }
+
 internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     messages: List<LLMMessage>,
     previousSummary: String? = null,
@@ -628,8 +646,15 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     val pinNew = if (depth == 0) extractPinnedUserMessages(messages) else emptyList()
     val pinCarried = if (depth == 0) pinnedSectionInner(previousSummary) else null
     val prevSummaryStripped = if (depth == 0) stripPinnedSection(previousSummary) else previousSummary
-    val transcript = buildConversationTextForSummary(messages)
-    val conversationText = ContextCompactor.compactInputText(prevSummaryStripped, transcript)
+    // [fix/tool-output-redaction-1123] The summarizer is another model
+    // request: project tool results and the carried summary BEFORE the 500-char
+    // truncation in buildConversationTextForSummary, so a secret crossing that
+    // boundary cannot survive as a recognisable prefix/suffix.
+    val transcript = buildConversationTextForSummary(redactToolResultsForSummary(messages))
+    val conversationText = ContextCompactor.compactInputText(
+        com.rikkaminis.app.data.EnvVarRedactor.redactForModel(prevSummaryStripped).text,
+        transcript,
+    )
     val summary = try {
         generateCompactSummary(conversationText)
     } catch (e: CancellationException) {

@@ -645,6 +645,15 @@ class MinisApp : Application(), ImageLoaderFactory {
         // EnvVarPrivacyStore.init / EnvVarRedactor static handoff.
         com.rikkaminis.app.data.EnvVarPrivacyStore.init(this)
         com.rikkaminis.app.data.EnvVarRedactor.envVarRepository = envVarRepository
+        // [fix/tool-output-redaction-1123] Provider keys are credentials too,
+        // but they are not environment variables. Read-only snapshot at call
+        // time (never cached here); multi-key strings use the same splitter the
+        // roulette uses, so a stored "k1, k2" does not redact as one blob.
+        com.rikkaminis.app.data.EnvVarRedactor.additionalSecretValues = {
+            providerRepository.instances
+                .mapNotNull { instance -> providerRepository.loadApiKey(instance.id) }
+                .flatMap { raw -> com.rikkaminis.app.data.KeyRoulette.candidates(raw) }
+        }
 
         // Start network monitoring — mirrors iOS NetworkMonitor.shared.start().
         // The monitor writes /etc/resolv.conf immediately and on every

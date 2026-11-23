@@ -37,6 +37,44 @@ object EnvVarRedactor {
     @Volatile
     var envVarRepository: EnvVarRepository? = null
 
+    /**
+     * [fix/tool-output-redaction-1123] Extra credential values that are not
+     * environment variables (provider API keys). Installed once by the app
+     * wiring; returns a short-lived snapshot, never a cache of raw values.
+     * A null provider means "no extra sources", not "trust everything".
+     */
+    @Volatile
+    internal var additionalSecretValues: (() -> Collection<String>)? = null
+
+    /**
+     * Tool-output projection for the MODEL payload. Disabled Privacy Mode keeps
+     * the historical behaviour (raw text to the model); diagnostics still use
+     * [redactForDiagnostics] regardless.
+     *
+     * Unlike [redactIfEnabled], this path always runs the shared shape rules:
+     * an empty or unreadable env-var index used to mean "return the output
+     * unchanged", which is exactly when an unregistered sk-/Bearer token leaks.
+     */
+    internal fun redactForModel(output: String): SecretRedaction =
+        if (!EnvVarPrivacyStore.isEnabled) SecretRedaction(output, 0) else redactForDiagnostics(output)
+
+    /**
+     * Tool-output projection for durable diagnostics (trace, ERROR block, replay
+     * metadata). Always on: a persisted log is not the model payload, and the
+     * user's Privacy Mode choice must not turn a trace file into a secret store.
+     */
+    internal fun redactForDiagnostics(output: String): SecretRedaction {
+        val repo = envVarRepository
+        val values = ArrayList<String>()
+        if (repo != null) {
+            values.addAll(repo.allAsDict().values.filter { it.isNotEmpty() })
+        }
+        additionalSecretValues?.invoke()?.let { extra ->
+            values.addAll(extra.filter { it.isNotEmpty() })
+        }
+        return SecretRedactionRules.redact(output, values)
+    }
+
     fun mask(value: String): String {
         val n = value.length
         if (n < 8) return "*".repeat(n)
