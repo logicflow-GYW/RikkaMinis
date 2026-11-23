@@ -49,6 +49,14 @@ Criterion (mechanical, not "does it look right")
       measured tuning constant (see the KDoc it sits in), so changing it must be
       a deliberate act that also updates this gate.
 
+  G8  `sessionDidTerminate` only runs the recycle GC when it actually removed a
+      shell (`shells.remove` returned non-null), while the per-id bookkeeping
+      (`lastInjectedKeys` / `lastActiveMs`) still runs for EVERY terminate.
+      Recovery is INLINE for non-main callers, and draft promotion calls
+      terminate for ids that never had a shell, inside the send shell before
+      the user row is persisted — two GC rounds plus settles there were measured
+      as 643-714 ms of the ~900 ms first-send delay (2026-11-23).
+
 Deliberately NOT checked: that `execute()` calls the wrappers by name — a rename
 is visible in review, and pinning call-site text is the brittle kind of rule
 that makes a gate get disabled later. The two wrapper bodies are pinned instead.
@@ -100,6 +108,8 @@ MARK_SETTLE = "[exec-gate] calibrated settle changed"
 MARK_ANCHOR = "[exec-gate] anchor lost"
 MARK_DEAD = "[exec-gate] decision short-circuited by a constant"
 MARK_INNER = "[exec-gate] blocking acquire outside the interruptible block"
+# [fix/first-send-recovery-skip-1123] 终止一个从未拥有 shell 的 id 时不得回收。
+MARK_TERMINATE = "[exec-gate] session terminate recovery not guarded"
 # [wide4] 新增两条：词法解析失败 fail-closed，以及可中断包装跑在错误的调度器上
 # （`runInterruptible(Dispatchers.Main)` 里做阻塞等待 = 主线程卡死，4b 的镜像面）。
 MARK_LEX = "[exec-gate] unparseable Kotlin source"
@@ -1010,6 +1020,51 @@ def main() -> int:
             "synchronous body must stay reachable for background callers"
         )
 
+    # --- G8: a terminate that tore down no shell must not collect -------------
+    terminate = body_of(masked, "fun sessionDidTerminate(")
+    if not terminate:
+        findings.append(f"{MARK_ANCHOR}: `sessionDidTerminate` not found")
+    else:
+        # The per-id bookkeeping is not recovery: it must run even when there was
+        # no shell, so a future shell for the same id starts from a clean
+        # baseline (T124a) and the idle sweeper sees no stale activity stamp.
+        for key in ("lastInjectedKeys", "lastActiveMs"):
+            # EVERY occurrence, not just the first: leaving one unconditional
+            # copy beside a conditional one would still pass a first-hit probe.
+            sites = [m.start() for m in re.finditer(re.escape("%s.remove(" % key), terminate)]
+            if not sites:
+                findings.append(
+                    f"{MARK_TERMINATE}: `{key}.remove(...)` is gone from "
+                    "sessionDidTerminate — an id that never had a shell keeps its "
+                    "stale environment/activity record"
+                )
+                continue
+            guarded = [site for site in sites
+                       if any("shell" in str(cond[1]).replace(" ", "")
+                              for cond in covering_conditions(terminate, site))]
+            if guarded:
+                findings.append(
+                    f"{MARK_TERMINATE}: `{key}` cleanup sits behind a shell check — "
+                    "bookkeeping must run for every terminate"
+                )
+        recovery = re.search(r"postRecycleMemoryRecovery\s*\(\s*\)", terminate)
+        if not recovery:
+            findings.append(
+                f"{MARK_ANCHOR}: `postRecycleMemoryRecovery()` is gone from "
+                "sessionDidTerminate — a real shell teardown would no longer "
+                "reclaim app-process native heap"
+            )
+        else:
+            conds = [normalize_expr(str(c[1]))
+                     for c in covering_conditions(terminate, recovery.start())]
+            if not any(c in ("shell!=null", "null!=shell") for c in conds):
+                findings.append(
+                    f"{MARK_TERMINATE}: the recycle GC is not guarded by the removed "
+                    f"shell (covering conditions: {conds}) — terminating an id that "
+                    "never had a shell runs two System.gc() rounds plus settles on "
+                    "the caller thread, which is the first-send stall"
+                )
+
     # --- G6: the calibrated settle value --------------------------------------
     if "Thread.sleep(120)" not in masked.replace("  ", " "):
         findings.append(
@@ -1060,8 +1115,26 @@ DISPATCH_BODY = (
 )
 
 
+# G8: the recycle GC after a terminate, and the shape that must be red.
+TERMINATE_TAIL_GUARDED = "        if (shell != null) postRecycleMemoryRecovery()\n"
+TERMINATE_TAIL_UNGUARDED = "        postRecycleMemoryRecovery()\n"
+TERMINATE_TAIL_CONDITIONAL_CLEANUP = (
+    "        if (shell != null) { lastInjectedKeys.remove(sessionId) }\n"
+    "        lastActiveMs.remove(sessionId)\n"
+    "        shell?.stop()\n"
+    "        if (shell != null) postRecycleMemoryRecovery()\n"
+)
+TERMINATE_TAIL_NO_RECOVERY = "        shell?.stop()\n"
+
 def selftest_fixture(shape):
     """The criterion written out — one dirty shape per wide3 witness."""
+    terminate_tail = TERMINATE_TAIL_GUARDED
+    if shape == "unguarded_terminate_recovery":
+        terminate_tail = TERMINATE_TAIL_UNGUARDED
+    elif shape == "conditional_terminate_cleanup":
+        terminate_tail = TERMINATE_TAIL_CONDITIONAL_CLEANUP
+    elif shape == "no_terminate_recovery":
+        terminate_tail = TERMINATE_TAIL_NO_RECOVERY
     heavy = HEAVY_WRAPPER
     if shape == "acquire_outside_lambda":
         # wide3 G2: the wrapper keeps `runInterruptible(` and the file keeps two
@@ -1254,6 +1327,14 @@ def selftest_fixture(shape):
         "    private fun postRecycleMemoryRecoveryNow() {\n"
         "        Thread.sleep(120)\n"
         "    }\n"
+        "\n"
+        "    fun sessionDidTerminate(sessionId: String) {\n"
+        "        val shell = shells.remove(sessionId)\n"
+        "        lastInjectedKeys.remove(sessionId)\n"
+        "        lastActiveMs.remove(sessionId)\n"
+        "        shell?.stop()\n"
+        + terminate_tail +
+        "    }\n"
         "}\n"
     )
 
@@ -1300,6 +1381,13 @@ def selftest():
          "dead_finally_release", 1, MARK_PERMIT),
         ("r3-structure: a guarded try with no finally is red", "no_finally",
          1, MARK_PERMIT),
+        # ---- [fix/first-send-recovery-skip-1123] G8 ------------------------
+        ("g8: unguarded recycle on an empty terminate", "unguarded_terminate_recovery",
+         1, MARK_TERMINATE),
+        ("g8: per-id cleanup made conditional on the shell",
+         "conditional_terminate_cleanup", 1, MARK_TERMINATE),
+        ("g8: a real shell teardown lost its recycle", "no_terminate_recovery",
+         1, MARK_ANCHOR),
     ]
     ok = True
     for name, shape, want_rc, needle in arms:

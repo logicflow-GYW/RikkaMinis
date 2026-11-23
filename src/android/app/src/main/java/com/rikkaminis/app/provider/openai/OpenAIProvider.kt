@@ -994,10 +994,19 @@ class OpenAIProvider constructor(
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
-            // [fix/replay-guard-cost-1123] A ToolCallComplete log line used to
-            // decrypt every credential, once per completed tool call. Capture
-            // one snapshot lazily for this stream: no tool call, no decrypt.
-            var toolLogSnapshot: com.rikkaminis.app.data.EnvVarRedactor.SecretSnapshot? = null
+            // [fix/replay-guard-and-send-latency-1123] These three log lines used
+            // a snapshot cached for the WHOLE stream. `EnvVarRedactor.SecretSnapshot`
+            // is documented as "one logical operation, never across an await", and a
+            // stream awaits every SSE read: a credential rotated mid-stream would
+            // have kept being missed by the cached values for the rest of the turn.
+            //
+            // They go back to the single-shot projection (what shipped before
+            // [fix/replay-guard-cost-1123]) and carry an explicit `snapshot-ok:`
+            // marker, because they DO sit inside loops. The trade is deliberate and
+            // bounded: one credential read per COMPLETED TOOL CALL (not per streamed
+            // delta), so the cost scales with the tool count of a turn, while a
+            // stream-scoped snapshot would trade a security contract for that saving.
+            // A per-event cost this small is not worth a new caching mechanism.
 
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
@@ -1183,9 +1192,9 @@ class OpenAIProvider constructor(
                                 if (key != null) responsesToolCalls.remove(key)
                                 val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
                                 val combined = combineResponsesAPIIds(acc.callId, acc.itemId)
-                                val logSnap = toolLogSnapshot
-                                    ?: com.rikkaminis.app.data.EnvVarRedactor.snapshot().also { toolLogSnapshot = it }
-                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(args.toString(), logSnap, null).text.take(300)}")
+                                // snapshot-ok: per completed tool call, not per delta — a stream-scoped
+                                // snapshot would cross SSE awaits and miss a rotated credential.
+                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(args.toString()).text.take(300)}")
                                 send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                             }
                         }
@@ -1253,9 +1262,9 @@ class OpenAIProvider constructor(
                                 val argsStr = if (authoritative.isNotEmpty()) authoritative else acc.args.toString()
                                 val args = try { JSONObject(argsStr) } catch (_: Exception) { JSONObject() }
                                 val combined = combineResponsesAPIIds(acc.callId, acc.itemId)
-                                val logSnap = toolLogSnapshot
-                                    ?: com.rikkaminis.app.data.EnvVarRedactor.snapshot().also { toolLogSnapshot = it }
-                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(args.toString(), logSnap, null).text.take(300)}")
+                                // snapshot-ok: per completed tool call, not per delta — a stream-scoped
+                                // snapshot would cross SSE awaits and miss a rotated credential.
+                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(args.toString()).text.take(300)}")
                                 send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                             }
                         }
@@ -1559,9 +1568,9 @@ class OpenAIProvider constructor(
             for ((_, acc) in toolCallAccumulators) {
                 if (acc.id.isNotEmpty() && acc.name.isNotEmpty()) {
                     val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
-                    val logSnap = toolLogSnapshot
-                        ?: com.rikkaminis.app.data.EnvVarRedactor.snapshot().also { toolLogSnapshot = it }
-                    android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=${acc.id} name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(args.toString(), logSnap, null).text.take(300)}")
+                    // snapshot-ok: per completed tool call, not per delta — a stream-scoped
+                    // snapshot would cross SSE awaits and miss a rotated credential.
+                    android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=${acc.id} name=${acc.name} args=${com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(args.toString()).text.take(300)}")
                     send(LLMStreamChunk.ToolCallComplete(acc.id, acc.name, args))
                 }
             }

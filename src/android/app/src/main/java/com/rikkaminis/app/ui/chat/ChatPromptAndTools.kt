@@ -440,7 +440,12 @@ internal suspend fun ChatViewModel.executeTool(
             // Keep the registry match on the executor bytes, then project the
             // decorated MODEL copy. The outcome flag still describes execution.
             return result.copy(output = result.output + defectHint).let { hinted ->
-                val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(hinted.output)
+                // [fix/replay-guard-and-send-latency-1123] Reuse the snapshot
+                // this function already took: this branch decorated the same
+                // tool result and then paid a SECOND full credential decrypt.
+                // Bounded to this one call — the snapshot must not outlive the
+                // operation, so it is never hoisted above the executor.
+                val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(hinted.output, privacySnapshot)
                 hinted.copy(output = view.text,
                     privacyRedacted = hinted.privacyRedacted || view.hits > 0 || diagView.hits > 0 || safeArgs != argsJson)
             }

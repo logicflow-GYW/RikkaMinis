@@ -116,16 +116,18 @@ import com.rikkaminis.app.ui.components.MinisTextButton
  * with 3 branches, vs 11 in `StreamingMarkdownText`'s — it exists only to
  * serve this table.
  */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-// [fix/replay-guard-cost-1123] Was constructed per line inside the fallback loop.
+// [fix/replay-guard-and-send-latency-1123] Was constructed per line inside the
+// fallback loop.
 private val tableSeparatorLineRegex = Regex("^\\|?[\\s\\-:|]+\\|?$")
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun BorderedMarkdownTable(
     content: String,
     node: ASTNode,
     textStyle: TextStyle,
-) {    val borderColor = ChatColors.tableBorder
+) {
+    val borderColor = ChatColors.tableBorder
     val inlineCodeText = ChatColors.inlineCodeText
     val inlineCodeBg = ChatColors.inlineCodeBg
     val linkColor = ChatColors.link

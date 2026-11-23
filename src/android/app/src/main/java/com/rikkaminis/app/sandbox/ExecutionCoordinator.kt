@@ -1126,7 +1126,23 @@ object ExecutionCoordinator {
         // process native heap (DirectByteBuffers, LOS objects, talloc) is
         // still held. Trigger GC + wait for it to settle so the next command
         // starts with a lower baseline.
-        postRecycleMemoryRecovery()
+        //
+        // [fix/first-send-recovery-skip-1123] Only a terminate that actually
+        // TORE DOWN a shell can have released native heap worth collecting.
+        // `shells.remove()` is the atomic evidence: when it returns null there
+        // was nothing to stop, so this is bookkeeping for an id that never had
+        // a shell (the draft-promotion path always calls us, even for a fresh
+        // chat that never ran a tool).
+        //
+        // Why it matters: recovery runs INLINE for non-main callers, and
+        // promotion runs on Dispatchers.IO inside the send shell BEFORE the
+        // user row is persisted, so two `System.gc()` rounds plus a 120 ms
+        // settle each used to sit between the send tap and the bubble
+        // (device log 2026-11-23: 887-981 ms to first row, 643-714 ms of it
+        // explicit GC). Recovery stays mandatory where a shell really died —
+        // idle sweep, mid-command recycle, timeout/stall reclaim, onCleared
+        // with a live shell — and the pressure/refusal sites call it directly.
+        if (shell != null) postRecycleMemoryRecovery()
     }
 
     /**
