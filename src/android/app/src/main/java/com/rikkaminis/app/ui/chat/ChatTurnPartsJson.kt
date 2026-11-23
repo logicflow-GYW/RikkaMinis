@@ -30,11 +30,16 @@ internal fun buildAssistantTurnPartsJson(
     parts: List<AgentContentPart>,
     toolBlockMeta: Map<String, AssistantBlock>,
     anthropicReplay: AnthropicReplay? = null,
-): String = appendAnthropicReplayPart(buildString {
+): String {
     // [fix/session-load-redaction-cost-1123] ONE credential read for the whole
     // parts list. Each single-shot redaction call decrypts every env var and
     // every provider key; this loop used to pay that up to 4x per tool part.
+    //
+    // Declared at FUNCTION scope, not inside the buildString block: the
+    // replay-eligibility argument below is a SIBLING lambda, and CI caught the
+    // narrower scope as `Unresolved reference 'snap'` (run 45185943724).
     val snap = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
+    return appendAnthropicReplayPart(buildString {
     append("[")
     // [audit-0917] Track what was actually emitted instead of using the loop
     // index. A skipped part (blank-name ToolUse) left the separator decision
@@ -70,6 +75,7 @@ internal fun buildAssistantTurnPartsJson(
         com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(tool.input.toString(), snap, null).hits == 0
     }
 })
+}
 
 /**
  * Build a JSON parts array matching the ChatRepository schema so a
