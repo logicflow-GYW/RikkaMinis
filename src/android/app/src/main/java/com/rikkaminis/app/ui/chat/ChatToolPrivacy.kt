@@ -6,7 +6,10 @@ import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
 
 /** Only derived context-summary blocks are projected, never direct user prose or pinned text. */
-internal fun redactDerivedSummaryText(text: String): String {
+internal fun redactDerivedSummaryText(
+    text: String,
+    snapshot: EnvVarRedactor.SecretSnapshot? = null,
+): String {
     if (!EnvVarPrivacyStore.isEnabled || !text.contains("<context-summary>")) return text
     val startTag = "<context-summary>"
     val endTag = "</context-summary>"
@@ -19,7 +22,7 @@ internal fun redactDerivedSummaryText(text: String): String {
         val bodyStart = start + startTag.length
         val end = text.indexOf(endTag, bodyStart)
         val bodyEnd = if (end < 0) text.length else end
-        out.append(redactUnpinnedSummary(text.substring(bodyStart, bodyEnd)))
+        out.append(redactUnpinnedSummary(text.substring(bodyStart, bodyEnd), snapshot))
         cursor = bodyEnd
         if (end < 0) break
         out.append(endTag)
@@ -29,17 +32,28 @@ internal fun redactDerivedSummaryText(text: String): String {
 }
 
 /** The existing pinned section is user-authored data, not generated summary text. */
-internal fun redactUnpinnedSummary(text: String): String {
+internal fun redactUnpinnedSummary(
+    text: String,
+    snapshot: EnvVarRedactor.SecretSnapshot? = null,
+): String {
     val startTag = "<pinned-user-messages>"
     val endTag = "</pinned-user-messages>"
     val start = text.indexOf(startTag)
-    if (start < 0) return EnvVarRedactor.redactForModel(text).text
+    if (start < 0) return redactText(text, snapshot)
     val end = text.indexOf(endTag, start + startTag.length)
-    if (end < 0) return EnvVarRedactor.redactForModel(text.substring(0, start)).text + text.substring(start)
+    if (end < 0) return redactText(text.substring(0, start), snapshot) + text.substring(start)
     val after = end + endTag.length
-    return EnvVarRedactor.redactForModel(text.substring(0, start)).text + text.substring(start, after) +
-        EnvVarRedactor.redactForModel(text.substring(after)).text
+    return redactText(text.substring(0, start), snapshot) + text.substring(start, after) +
+        redactText(text.substring(after), snapshot)
 }
+
+/**
+ * [fix/session-load-redaction-cost-1123] One redaction through the shared
+ * credential snapshot when the caller has one, else the single-shot path.
+ */
+private fun redactText(text: String, snapshot: EnvVarRedactor.SecretSnapshot?): String =
+    if (snapshot != null) EnvVarRedactor.redactForModel(text, snapshot).text
+    else EnvVarRedactor.redactForModel(text).text
 
 /**
  * Recheck immediately before a chat request and before context offload.
@@ -48,17 +62,23 @@ internal fun redactUnpinnedSummary(text: String): String {
  */
 internal fun redactToolHistoryForModel(messages: List<LLMMessage>): List<LLMMessage> {
     if (!EnvVarPrivacyStore.isEnabled) return messages
+    // [fix/session-load-redaction-cost-1123] ONE credential read for the whole
+    // history. The single-shot form decrypts every env var and every provider
+    // key per call, so a 266-part session paid that 266 times: 935-1375 ms on
+    // device, against ~30 ms of actual rule matching. The snapshot lives only
+    // for this call, so a rotated credential is still picked up next turn.
+    val snapshot = EnvVarRedactor.snapshot()
     var changed = false
     val projected = messages.map { message ->
-        val content = redactDerivedSummaryText(message.content)
+        val content = redactDerivedSummaryText(message.content, snapshot)
         val parts = message.contentParts.map { part ->
             when (part) {
                 is AgentContentPart.ToolResult -> {
-                    val redaction = EnvVarRedactor.redactForModel(part.content)
+                    val redaction = EnvVarRedactor.redactForModel(part.content, snapshot)
                     if (redaction.text == part.content) part else part.copy(content = redaction.text)
                 }
                 is AgentContentPart.Text -> {
-                    val text = redactDerivedSummaryText(part.text)
+                    val text = redactDerivedSummaryText(part.text, snapshot)
                     if (text == part.text) part else part.copy(text = text)
                 }
                 else -> part

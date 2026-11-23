@@ -299,4 +299,61 @@ class EnvVarRedactorTest {
         assertFalse(out, out.contains(value))
         assertEquals(1, hits)
     }
+    // ── [fix/session-load-redaction-cost-1123] snapshot contract ──────────
+    //
+    // A session load projects every part through redactForModel. The
+    // single-shot form re-reads (and therefore re-DECRYPTS) every credential
+    // per call, which multiplied the decrypt cost by the part count: measured
+    // 935-1375 ms for a 266-part session whose rule matching is ~30 ms.
+    //
+    // The tests below pin the two properties the fix relies on: the batched
+    // path is textually IDENTICAL to the single-shot path, and the credential
+    // source is read ONCE for the whole batch.
+
+    private fun withSecretSource(values: List<String>, onRead: () -> Unit = {}) {
+        EnvVarRedactor.envVarRepository = null
+        EnvVarRedactor.additionalSecretValues = { onRead(); values }
+    }
+
+    @Test
+    fun `snapshot redaction is textually identical to single-shot`() {
+        withSecretSource(listOf("abcdef1234567890", "sk-realkeyvalue1234567890"))
+        val cases = listOf(
+            "plain text with no secret at all",
+            "API_KEY=abcdef1234567890",
+            "token sk-realkeyvalue1234567890 here",
+            "already [MINIS_REDACTED] here",
+            "",
+        )
+        for (text in cases) {
+            val single = EnvVarRedactor.redactForDiagnostics(text)
+            val snap = EnvVarRedactor.snapshot()
+            val batched = EnvVarRedactor.redactWithSnapshot(text, snap, null)
+            assertEquals("text mismatch for len=${text.length}", single.text, batched.text)
+            assertEquals("hit mismatch for len=${text.length}", single.hits, batched.hits)
+        }
+        EnvVarRedactor.additionalSecretValues = null
+    }
+
+    @Test
+    fun `one snapshot serves a whole batch with a single credential read`() {
+        var reads = 0
+        withSecretSource(listOf("abcdef1234567890")) { reads++ }
+        val snap = EnvVarRedactor.snapshot()
+        repeat(50) { EnvVarRedactor.redactWithSnapshot("API_KEY=abcdef1234567890", snap, null) }
+        assertEquals("a batch must read the credential source exactly once", 1, reads)
+        EnvVarRedactor.additionalSecretValues = null
+    }
+
+    @Test
+    fun `snapshot stays fail-closed when a credential source throws`() {
+        EnvVarRedactor.envVarRepository = null
+        EnvVarRedactor.additionalSecretValues = { throw IllegalStateException("source down") }
+        val snap = EnvVarRedactor.snapshot()
+        assertTrue("snapshot must record the failure", snap.unavailable)
+        val view = EnvVarRedactor.redactWithSnapshot("API_KEY=abcdef1234567890", snap, null)
+        // Must not fall back to raw text when the credential source is broken.
+        assertFalse(view.text.contains("abcdef1234567890"))
+        EnvVarRedactor.additionalSecretValues = null
+    }
 }

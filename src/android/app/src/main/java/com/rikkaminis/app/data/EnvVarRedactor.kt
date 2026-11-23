@@ -59,9 +59,77 @@ object EnvVarRedactor {
         if (!EnvVarPrivacyStore.isEnabled) SecretRedaction(output, 0) else redactForDiagnostics(output)
 
     /**
+     * [fix/session-load-redaction-cost-1123] A credential snapshot for ONE
+     * logical operation (one session load, one request build, one tool result).
+     *
+     * Why this exists: every `redactForDiagnostics` call re-reads every env var
+     * (`allAsDict()` decrypts each value out of EncryptedSharedPreferences with
+     * AES-GCM) AND re-reads every provider API key. Restoring a 266-part
+     * session called that once per part, so the decrypt cost multiplied by the
+     * part count - measured 935-1375 ms for a load whose pure rule matching is
+     * ~30 ms.
+     *
+     * A snapshot is deliberately NOT a cache: it is created at the start of one
+     * operation and dropped at the end, so a value rotated mid-session cannot
+     * be missed. Callers must not hold it across an await or across turns.
+     */
+    internal class SecretSnapshot internal constructor(
+        internal val values: List<String>,
+        /** A credential source failed while snapshotting - stay fail-closed. */
+        internal val unavailable: Boolean,
+    )
+
+    /** Capture the credential values ONCE for a batch of redactions. */
+    internal fun snapshot(): SecretSnapshot {
+        val repo = envVarRepository
+        return try {
+            val values = ArrayList<String>()
+            if (repo != null) {
+                values.addAll(repo.allAsDict().filterKeys(SecretRedactionRules::isSecretName).values)
+            }
+            additionalSecretValues?.invoke()?.let(values::addAll)
+            SecretSnapshot(values, unavailable = false)
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            // Same fail-closed contract as redactForDiagnostics: a source that
+            // cannot be read must not silently downgrade to "no secrets".
+            SecretSnapshot(emptyList(), unavailable = true)
+        }
+    }
+
+    /**
+     * Redact against a pre-captured snapshot. Same rules and same fail-closed
+     * result as [redactForDiagnostics]; only the credential read is shared.
+     */
+    internal fun redactForModel(output: String, snapshot: SecretSnapshot): SecretRedaction =
+        if (!EnvVarPrivacyStore.isEnabled) SecretRedaction(output, 0)
+        else redactWithSnapshot(output, snapshot, null)
+
+    internal fun redactWithSnapshot(
+        output: String,
+        snapshot: SecretSnapshot,
+        onRedacted: ((String) -> Unit)?,
+    ): SecretRedaction {
+        if (snapshot.unavailable) {
+            return SecretRedaction("[MINIS_REDACTED: privacy filtering unavailable; tool execution unchanged]", 1)
+        }
+        return try {
+            SecretRedactionRules.redact(output, snapshot.values, onRedacted)
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            SecretRedaction("[MINIS_REDACTED: privacy filtering unavailable; tool execution unchanged]", 1)
+        }
+    }
+
+    /**
      * Tool-output projection for durable diagnostics (trace, ERROR block, replay
      * metadata). Always on: a persisted log is not the model payload, and the
      * user's Privacy Mode choice must not turn a trace file into a secret store.
+     *
+     * For a batch (N results in one operation) use [snapshot] once plus
+     * [redactWithSnapshot]; this single-shot form re-reads the credentials.
      */
     internal fun redactForDiagnostics(output: String, onRedacted: ((String) -> Unit)? = null): SecretRedaction {
         val repo = envVarRepository
