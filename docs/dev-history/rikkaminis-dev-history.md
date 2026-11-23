@@ -1,11 +1,11 @@
-# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-22）
+# RikkaMinis 开发日志合并导出（2026-08-03 ～ 2026-11-23）
 
 > 📌 **注意**：本文件是 raw dump（归档快照，按时间正序排列）。
 > 按天索引见 **rikkaminis-dev-history-INDEX.md**，精炼时间线见 **RikkaMinis-开发时间线全记录.md**。
 
-- 合并范围：2026-08-03 ～ 2026-11-22，共 110 天
-- 条目总数：2902（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
-- 总字符数：4618231 / 总行数：53878
+- 合并范围：2026-08-03 ～ 2026-11-23，共 111 天
+- 条目总数：2919（按时间戳正序排序，已剔除与 RikkaMinis 应用开发无关的条目）
+- 总字符数：4639726 / 总行数：54157
 
 ---
 
@@ -53871,6 +53871,285 @@ E01 d12a7f8已闭合（父+POST-AE双确认）。main/android-latest仍fe72；fi
 机械校验：文档引用的 36 个测试类全部存在于仓库；13 个生产符号存在；7 张表列数一致；相对链接有效。修正过一处类名错误：ModelExecutionCancelPolicy → ModelExecutionCancelPolicy.kt 里的实际类 `ModelExecutionCancellationRace` / `ModelExecutionSlotLease`。
 
 可复用：写"地图类"文档必须先机械核对所有类名/文件名存在，否则半年后按文档找不到东西；表格列数用脚本验；docs-only 提交前确认 workflow paths 不含 docs，避免误触发发包。
+
+<!-- 2026-11-22 10:23:08 -->
+## 2026-11-22 10:2x 本地开发档案三件套重建（2801→2902 条）
+
+
+用户「更新一下本地的那个文档」= 只重建本地挂载 `/var/minis/mounts/笔记/RikkaMinis开发档案/`，不推仓库。
+
+**结果**：条目 2801 → **2902**（+101，覆盖 2026-08-03～11-22 / 110 天）；主档 7,263,869 B / 53,877 行；INDEX 677 KB；SAGAS 26 主题。脱敏 main 466 处 + INDEX 58 处，三条独立探针均 `Remaining sensitive: NONE`；结构检查 `anchors==header==2902`、`outOrder=0`、fences even。
+
+**新增 saga `大手术 / 六域终审 / WAVE2 回放`（60 条，11-20～11-22）**：孤儿 260 → **232（8.0%）**，multi4=278。此前 11-20/21/22 有 37 条孤儿，全落在 SURGERY-W1..W8 → WAVE2 D01–D06 固定对象独审 → 终审三支窄修/合并发布 这条主线上，没有轴。
+
+**可复用**：①saga 关键词**不能用 3–4 字符工单代号**（a01/d02/d05）——子串匹配会命中 40-hex commit hash，实测把 8/9/10 月无关条目拉进新 saga（49→83 条）；改用 `d05-`/`d01 `（带空格）/`fix-a01`/`post-ae` 后 60 条且零跨期误命中。已写进 SKILL.md 维护段。②试验关键词用 importlib 加载 build_sagas 并向 SAGAS append 试算，打印命中清单 + 检查 pre-window 日期，比改文件再跑快。③旧档案备份在 `shared/work/devhistory-1122/`（三件套 + build_sagas.py.bak）。
+
+<!-- 2026-11-22 10:38:10 -->
+## 2026-11-22 10:5x 云端 dev-history 快照同步（main 80cd46bbc）
+
+
+用户问「云端的有没有更新」——云端停在 2026-11-19 15:39 的 2801 条快照。已同步到 2902 条。
+
+**结果**：分支 `docs/dev-history-1122` @ `9df0a9a24`（4 文件 +1301/−64）→ `--no-ff` 合 main **`80cd46bbc`**（父数 2：`a8f83d30b` + `9df0a9a24`）。合并后 `git diff HEAD origin/main` 空；三件套 sha256 本地 vs 仓库 vs 远端逐字节一致（主档 f2c6705923634ce7 / 7,263,869 B，INDEX 677,180 B，SAGAS 1,575,144 B）。README 的「截至 11-19 15:39 / 2,801 条 / 107 天」改为「截至 11-22 10:18 / 2,902 条 / 110 天」，概要链接改指 `2026-11-22-surgery-final.md` + `protocol-invariants.md`。docs-only ⇒ 不触发 CI（最新 run 仍 #3453）；raw.githubusercontent 公开读取已验。分支与临时 worktree 已清，远端只剩 main。
+
+**★ 关键教训（用户直接点出来的）**：「存量更新不该遇到体积墙」。我第一次 `git clone` 被 SSL EOF 打断后改走 git-data API `POST /git/blobs`，那是**按文件全量 base64 重传**——7.2MB 主档变 9.7MB 请求体，沙箱出口实测 >1.4MB 单请求就 `Connection reset by peer`（200K/500K/1M 成功，1.5M 失败，约 14s 卡点）。用户一句「应该不是存量更新啊，应该是增量」点醒：**git push 只传新增 pack（本次几百 KB，5.5 秒成功）**。走增量路径后没有任何体积问题。已写进 SKILL.md v2.2.0「Publishing to the cloud」段。
+
+**其它可复用**：①沙箱里 `git clone` 本仓库持续 `early EOF / invalid index-pack output`（重试 3 次含 --depth 1），但**已有宿主仓库 fetch origin main 完全正常**——需要仓库内容时先找 `shared/work/*/` 下残留 clone，别硬克隆（且 S33：失败 fetch 会留下断链对象污染目录）。②`gh_sync.sh delete-branches` 的 FAIL 只来自本地分支（当前分支 + worktree 占用分支），远端已全清；判据看 `git ls-remote --heads origin` 只剩 main 即可。③`git worktree remove` 后才能在宿主仓库 `git branch -D` 掉对应分支。
+
+<!-- 2026-11-22 12:17:19 -->
+## 2026-11-22 三个协议门 + 锚点门入库（main 785fe2efb，已发布）
+
+
+用户「也做了吧」= 把 protocol-invariants 里 3 条最高频不变量补成静态门。分支 `fix/protocol-invariant-gates-1122` → `--no-ff` 合 main **785fe2efb**（父数 2，树与分支逐字一致 1f4c700a）。main CI #3456 五 job success、**publish 真执行**（`android-latest` tag 已移到 785fe2efb，APK 15,045,057 B @04:16:12）。
+
+**新增 4 个门（scan 块 116–119，分母 118→119）**：
+- `transcript_commit_order_check`：站点从树派生，每个 `host.persistAssistantTurn`/`updatePersistedAssistantTurn` 的 `stableId` 必须来自**同一函数体内**前面的 `planTranscriptRow`，之后必须有可达 `commitTranscriptRow`；包装器按自身函数体判，不豁免。
+- `provider_dispatch_cancel_check`：provider 包每个阻塞 `execute` 必须是 `executeOrCancel` 或同函数内先 armed 会 `call.cancel()` 的 `StreamCancelBridge`；另钉 `withCallCancellation` 的同步 preflight 必须在 `block()` 之前。
+- `worker_process_scope_check`：七个回收决策值必须只在 companion；`selfReap` 必须 `holdsLock`；每个调用点须在锁定作用域（`synchronized` 或**调用点全锁的 `…Locked()` helper，传递闭包验证**）。
+- `fixture_anchor_check`：不执行夹具，只问「逐字锚点是否仍在树里」。
+
+**★ 本轮最重要的发现（不是我的门的问题）**：CI 的「`scripts/scan/**` 未动就跳过夹具自测」优化掩盖了一个真缺陷。11-22 大手术把 `field.write(value)` 改成 `persistence.capture { field.write(value) }`，`backup_remap_rollup_check` 的 w6 臂锚点是逐字两行文本 → 断言崩 → **该门在自己的 selftest 上 FAIL OPEN**，因为那次 push 只动 src/，夹具从没跑过。我这次动了 `scripts/scan/**`，夹具真跑才暴露。已修（锚点改为从树派生，锚在 remap 调用之后取第一个 validate/write，否则会误改 Stage1/2 产生 collateral），并加了 `fixture_anchor_check` 把这个盲区本身堵住。回放证据：把新门放到 3383e0e0b 的 checkout 上判红，修后树绿。
+
+**可复用**：
+1. **「优化跳过」必须配一个便宜的替代见证**——跳过夹具省 121s，但代价是夹具可以静默腐烂数天。补的门不执行夹具，只做锚点存在性检查，成本可忽略。
+2. **夹具锚点用逐字文本 = 定时炸弹**。生产改一个包裹层（capture{}/withContext{}）就让整臂崩。正确形态：从树派生位置（先锚唯一决定点，再在其后取目标调用），找不到就显式报 re-anchor 而不是静默通过。
+3. **门的分母守卫抓到了我自己**：改 `scan_blocks.sh` 时先只改了新块的分母，`scan_parallel.parse_blocks()` 立刻报 `denominators seen: [118, 119]`。这类守卫的价值就在于作者本人也会犯。
+4. **自测臂必须区分「我跑错了」和「门真红」**：`discarded_return_guard`/`auto_approve_bypass_check` 用 `--self-test`（连字符），我用 `--selftest` 跑出 rc=1 差点误判成真红。
+5. 沙箱出口偶发 `TLS connect error: unexpected eof`，`gh_sync.sh push` 重试 2–5 次即成功；裸 `git push` 没有凭据通道会报 `could not read Username`。
+
+<!-- 2026-11-22 12:58:21 -->
+## 2026-11-22 12:2x 审查 main 785fe2efb（Merge fix/protocol-invariant-gates-1122）
+
+
+用户「检查一下刚刚合并进去的那个分支」。基线 80cd46bbc → 785fe2efb，12 文件 +1569/−133（生产只 ModelsDevApi.kt +4 注释，其余 scripts/scan + workflow 文案）。
+
+**合并干净**：父数 2（80cd46bbc + c86bca1d4）；merge tree == 分支 tip tree `1f4c700a…`，diff 空；门 115→119 且 comm -23 为空（没删门）；编号 1..119 连续。
+
+**CI 真绿**：#3456/44983174128 attempt1 五 job success，10860 PASSED/0 真 FAILED、`Summary: 119 passed`、`ALL 395 CASES PASS`、**publish 真执行**（android-latest 15,045,057 B / v1.0.0+3456）；scan-gate-push #28 同 SHA 也绿。合并说明的叙事可复现：分支首 run #3454 红在 `backup_remap_rollup_check selftest has teeth`（AssertionError: fixture anchor missing: field.valueSchema.validate(value)/field.write(value)），我在 3383e0e0b 上复现同一崩溃。
+
+**四门牙口（临时 worktree 真实树变异回放，字节快照还原+sha256 对拍）**：G2 删同步预检/预检后移/删豁免注释 → 全红；G3 删 holdsLock / 加实例同名副本 → 全红；G4 换回旧漂移 anchor → 红并指名 FAILING OPEN；派生锚点（write(value)→write(decoded)）门本体仍红。四门跑 fe72bb9cd：G1/G2/G3 红、G4 绿（符合「修前先红」）。
+
+**发现的缺陷（门缺口，生产代码无错）**：
+- F1 P1 G1 站点集按接收者拼写 `host.persistAssistantTurn` 派生：把唯一 update 站点改成 `this.host.…` → PASS 零站点零 ROT；新增 `val target = host; target.persistAssistantTurn(...)` 绕过点 → PASS。
+- F2 P1 G1 commit 判据在 4300 行 runAgentLoop 内互相顶替：逐站删 commit，L914/L4992 红，L3295/L3409/L4171 **绿**；`commitTranscriptRow(loopState, null)` 也绿（不校验 commit 的 id 是不是刚写的行）。docstring 宣称「sibling commit 不顶替」在巨型函数内不成立。
+- F3 P2 G2 豁免是函数级：在 refreshFromNetwork 里再塞一个 execute() → PASS。
+- F4 P2 G2 [C2] 锚参数名 `block()`：改名 body + 预检后移 → PASS（find 返回 -1 跳过 elif）。
+- F5 P2 G3 DECISION_VALUES 硬编码 7 名：新增实例级 inFlightDrains 接进 kill 判据 → PASS；docstring「renaming keeps working」也假（改名即 ROT 红）。
+- F6 P2 G3 锁内判据放过 Locked helper 里新起线程：`Thread { selfReap() }.start()` 在 finishRequestLocked 内 → PASS（正是 pass1/pass2 的形状）。
+- F7 P2 G4 接受集=整棵 app 树拼接文本且只认 sub_once/sub_all/replace_once：跨文件锚点误接受（门自身 selftest 崩、G4 绿）、workflow 行误报 FAILING OPEN、42 处 `_mutate(` + 32 个真实树裸 .replace 门完全未覆盖（全树 1580 处 ≥24 字面量锚点，G4 只看 28）。
+- F8 P3 文档：protocol-invariants.md 写「3 条/块 116–118」，实际 4 条（119 是 fixture_anchor_check，不在 13 条不变量内）。
+
+报告 `shared/work/review-785fe2efb/REPORT.md`。建议单独开 `fix/protocol-gate-teeth-1122` 收 F1/F2，F3–F7 一起，F8 顺手。未改仓库、未合 main、未派代理；临时 worktree 已 remove+prune，宿主仓库 clean。分支 fix/protocol-invariant-gates-1122 ahead_by=0 可删。
+
+<!-- 2026-11-22 14:11:05 -->
+## 2026-11-22 14:xx 长任务越跑越卡 + 发消息即恢复：诊断（只读，未改码）
+
+
+用户现象：发一条指令 → agent loop 长跑 → 会话页越来越卡；再发一条消息 → 卡感消失。
+
+**已确证 A（"发消息就恢复"的机制）**：`ChatViewModel.sendMessage` 在 `_isStreaming` 时走 `[T-user-message-preempts-agent]`：`enqueuePrompt(text)` 后**立刻 `cancelStream()`**（代码 ui/chat/ChatViewModel.kt ~4290-4320）。日志见证 11:07:00 / 12:13:40 / 13:09:25：`cancelStream invoked` → `send runAgentLoop CANCELLED` → `resumeQueueAfterCancel`。即发送 = 抢占，当前 turn 被中断，live 消息冻结 → 高频重排停止；若该消息 >32K 还会被 LargeContentGuard 折叠成 badge。
+
+**已确证 B（长 turn 是真的长）**：`[StreamPerf] turn` 记录 turnS=1800s(13:43)、2163s(12:58)、1057s(14:01)；单 turn 102 次 GC 释放 3110MB、82 次释放 2635MB。全天 851 次 ART copying GC（每次 25-56MB，pause <1ms）。
+
+**已确证 C（帧数据）**：`android-shizuku-cli exec "dumpsys gfxinfo com.rikkaminis.app"`（3.35h 累计）：54505 帧、janky 2.85%（新口径）/ 53.81%（legacy 60Hz 口径）、50th 20ms、90th 28ms、99th 57ms、Slow UI thread 1118。HangDetector 全天 0 次 3s 级 hang ⇒ 不是死锁/STW，是持续性单帧超预算。
+
+**结构判断（代码，待实测归因）**：聚合路径 `AGGREGATE_MESSAGE_ITEMS` 下一条 assistant 消息 = 一个 LazyColumn item（`AssistantMessageItem` → `AssistantMessageView` 内部 `Column` 不虚拟化）。长 turn 内工具块持续增加，整条 item 高度增长；每次流式 publish 都要整条重新 measure/重组。保护：`LargeContentGuard` 在 8K 按**单个 text block** 降级为纯文本尾巴（`STREAM_DEGRADE_CHARS`）；32K 折叠只对 frozen 生效（streaming 永不折叠，按设计避免闪烁）。⇒ live 期间保护不覆盖"整条消息 item"这一层。次因：`MdText.drawBehind` 每帧对 inline_code 做**逐字符 `getBoundingBox`**（无缓存，O(可见字符)），滚动时每帧重算。
+
+**复现/归因方法（给用户的 3 步）**：`reset` → 在卡会话里滑动/等流式 10s → 读 `dumpsys gfxinfo` + `framestats`，看慢帧落在 Layout/UI thread 还是 Draw。备选：`debug.hwui.profile`。
+
+**未做**：未改代码、未开分支、未 reset 用户 gfxinfo 统计。
+
+<!-- 2026-11-22 14:19:56 -->
+## 2026-11-22 14:14–14:20 真机分组实测：长任务卡顿归因（draw 主导 + 83K px 巨型 item）
+
+
+方法：`android-shizuku-cli exec "dumpsys gfxinfo com.rikkaminis.app"` 差值法（T0 清零 / T1 滑动后 / T2 静止后），脚本 `shared/work/longtask-jank-1122/parse_gfx.py`；framestats 解析帧阶段。
+
+| 组 | 帧数 | janky | Slow UI thread | Slow issue draw | 场景 |
+|---|---|---|---|---|---|
+| 对照（普通回复渲染） | 2697 | 2.4% | 51 | 44 | 普通会话 |
+| **G2 静止（纯流式更新）** | 3496 | 4.95% | 122 | 127 | 长 turn 自己出内容 |
+| **G1 滑动** | 3110 | **11.9%** | 136 | **288** | 在巨型 item 内滑动 |
+
+- G1 直方图：>100ms 帧 87 (2.8%)，99th=200ms，50th=19ms。
+- G2 直方图：80.1% 帧落在 17–33ms。
+- framestats top5（切换/静止后）：total 143–154ms，其中 **IssueDrawCommands 129–141ms、layout 0.1ms**、GPU 3–8ms ⇒ 慢帧时间 ~95% 在 draw 命令录制，measure/layout 几乎为零。
+
+**结构性根因（日志实证）**：`[Perf][LongCtx] firstItem.placed size=992x76149 → 82782 → 83262` —— 一条 live assistant 消息就是一个 LazyColumn item，高度 **83,262 px（约 36 屏）**，且随 turn 持续增长。聚合路径 `AssistantMessageView` 用 `Column` 逐块渲染 `message.toolBlocks`（tool_use 每块一个 `ToolCallPill`，**没有** flat 路径的 `AssistantToolRunGroup` 合并/自动折叠），无虚拟化、无整条上限。文本只有 9,174–9,455 字符（已走 8K 纯文本降级），高度主要来自块数量。
+
+每次流式 publish（300–650ms 一次）→ 整条 item 重组 + 全量 measure → 触发整条重绘；滑动时 LazyColumn 无法切分该 item，draw 阶段每帧处理超长 display list；`MdText.drawBehind` 的 inline-code 矩形还是**每帧逐字符 getBoundingBox**（无缓存）。
+
+**发消息即恢复**已在上一条诊断确证：`sendMessage` 在 streaming 中 `enqueuePrompt` + `cancelStream()`，live 消息冻结，重组停止。
+
+**修法优先级**：①（收益最大）给 live item 加块数/高度上限，前面的块折叠成"N 个步骤"摘要，只渲染尾部 K 块；② 聚合路径补 run-group 合并；③ inline-code rect 按 (text, layoutResult) 缓存。未改代码。
+
+<!-- 2026-11-22 15:01:16 -->
+## 2026-11-22 支 A（inline-code rect 缓存）真机 A/B 结果
+
+
+分支 `fix/chat-inline-code-rect-cache-1122` @ `48b8717`（基线 `785fe2efb`，1 文件 +104/−66），CI #3459 五 job 绿、10860 PASSED、scan 119/0、artifact 13,396,944 B。装包版本 `1.0.0+3459`。
+
+**标本负载在装包后变得更重**：那条助手消息从 83,262 px 涨到 **106,721 px**（+28%），turn 已停止（frozen）。
+
+三组差值（`dumpsys gfxinfo` 差值法，脚本 `shared/work/longtask-jank-1122/parse_gfx.py`）：
+
+| 组 | 帧 | janky | Slow UI | Slow draw | >100ms |
+|---|---|---|---|---|---|
+| 改前 G1（83K px，有流式） | 3110 | 11.9% | 4.4% | 9.26% | 87 (2.8%) |
+| 改后冷态（106K px，有流式） | 2252 | 13.99% | 12.9% | 4.26% | 5 (0.2%) |
+| 改后热态（106K px，有流式） | 1783 | 9.42% | 7.9% | 4.04% | 5 (0.3%) |
+| 改后纯滚动（无流式） | 2659 | 9.89% | 8.95% | 2.75% | 4 (0.2%) |
+
+**结论**：支 A 目标达成 —— draw 超时率 -56%、>100ms 帧 87→5（-89%）、99th 200ms→73ms。
+**UI 慢帧上升的归因已排除本改动**：滑动窗口内 `firstItem.compose` 只有 6 次且全是 `chars=57` 的短消息 ⇒ 巨型 item 未重组/未回收，`remember` 里的 inline-code 重算零执行。UI 成本更可能是既有 `MdText.onGloballyPositioned`（每个 MdText 每次布局回调）+ 负载 +28% + 分母口径差异。**新优化点：106K px item 内每个 MdText 的 onGloballyPositioned 每帧回调。**
+
+方法论可复用：**A/B 时先证明"改动路径在目标场景里是否执行"**（compose 计数 + 字符数），比比较总量更硬；否则会把既有成本算到改动头上。
+
+<!-- 2026-11-22 15:10:13 -->
+## 2026-11-22 14:5x–15:1x 四门牙口补齐 F1–F7（分支 fix/protocol-gate-teeth-1122，CI #3460 绿，未合 main）
+
+
+复审 `785fe2efb` 报的 7 条门缺口全部修完，分支 `f48bf5eff`（两个提交：`b31a90a78` 首轮、`f48bf5eff` 二轮），远端本地一致。CI #3460/44995269429 attempt1 五 job success：unit `10860 PASSED/0 FAILED`、scan `Summary: 119 passed, 0 failed`、**夹具真跑**（运行时 notice「scanners moved in this push」+ `ALL 395 CASES PASS`）、publish 两步 skipped。真树四门 PASS，selftest 臂 G1 14 / G2 12 / G3 6 / G4 8。
+
+**反攻回放（旧门 vs 新门，真实树注入）7/7 CAUGHT**（`evidence/counter-attack-old-vs-new.log`）：F2 两个站点的 commit 删除（L3295/L3409）各 old=0 new=1；F1 传 null 代替刚写入的 row id；F3 豁免函数内第二条 `execute()`；F4 参数改名 `block`→`body` + 预检后移；F5 实例作用域新值接进 reap guard；F6 `Thread{selfReap()}.start()` 在 Locked helper 内；F7 三形态 replay PASS。
+
+**★ 本轮教训（我的补丁自己被反攻打回一次）**：首轮 `b31a90a78` 的 F2 只闭合「row id 身份」——两个站点绑定**同名变量** `carriedRowId` 时，兄弟 commit 仍满足身份匹配，删 L3295 的门仍 rc=0，自检 14 臂全绿也没发现。二轮把 commit 搜索窗口改为「到下一个写入站点为止」才闭合。⇒ **自检臂覆盖的是我想到的形态；反攻必须用复审报告给的原始形状逐条注入**，两者不能互相替代。
+
+其它修法要点：G1 站点集改按**被调函数名**派生（不看接收者拼写 `host.`/`this.host.`）；G2 豁免按**站点**不按函数、预检判**位置关系**不锚参数名；G3 决策值判据从 reap 路径**实际读写双向走**派生（类体内声明即违规）+ Locked helper 内新线程即红；G4 锚点按**文件作用域**判定并接受全部变异形态（`sub_once/sub_all/replace_once/裸 replace/_mutate`）。
+
+当前待合 main 三条分支全绿：`fix/composer-short-body-replay-1122`(#3457, 用户报的「发送后对话框还留着」)、`fix/chat-inline-code-rect-cache-1122`(#3459)、`fix/protocol-gate-teeth-1122`(#3460)。`fix/protocol-invariant-gates-1122` ahead_by=0 可删。用户手机上仍是 main 785fe2efb 的旧 build，composer 修复未合 ⇒ 未生效。
+
+<!-- 2026-11-22 16:06:32 -->
+## 2026-11-22 15:5x 云端三支核查并合并 main（d3eb6a803，已发布）
+
+
+用户「检查云端分支，没问题就合并，有问题就处理」。远端原 5 条（main + 4），三条待合 + 一条 ahead_by=0 悬空。
+
+**合并结果**：main `785fe2efb` → **`d3eb6a803`**，三个 `--no-ff`（`cat-file` 核实父数全 2）：
+`cd68f9f61`(rect 48b871751) → `d5cfb49c1`(composer 3a72e0a4d) → `d3eb6a803`(gates f48bf5eff)。
+三支文件集两两零交集（1/2/5 文件），合并后逐支 `git diff <merge> <tip> -- <files>` 全空。
+
+**main CI #3461**（44999139116）attempt1 五 job success、head 逐字符一致：unit `10866 PASSED / 0 真 FAILED / 4 SKIPPED`、scan `Summary: 119 passed, 0 failed`、**夹具真跑**（`##[notice]scanners moved in this push` + `ALL 395 CASES PASS`）、`compileReleaseKotlin`→`minifyReleaseWithR8`→`packageRelease` 13m13s、**publish 真执行**（asset `15,045,057 B @07:53:48Z`，`android-latest` 785fe2e→d3eb6a8）。Scan Gate #29 同 SHA success。main 树上四门 PASS + 四门 selftest 全 `SELFTEST=PASS`。
+
+**★ 关键：审查者自建 harness 反攻回放 7/7 CAUGHT（不复用施工方装置）**
+旧门从 `git show origin/main:scripts/scan/<gate>` 现取，新门用分支树，同一真实源码分别喂两版门；还原走内存字节快照 + sha256 对拍（`6e92ed62`/`d2b84ba1`/`397e4415` 三次复原）。每臂先跑基线证明两版门都 rc=0（装置没坏），再注入：
+F1 `this.host.` 改名+删 commit / F2 删 L3295（同名 `carriedRowId` 兄弟在）/ F3 第二处 `execute()` / F5 新 `@Volatile var inFlightDrains` 接进 quiescence / F6 `Thread { selfReap() }.start()` 放进 `finishRequestLocked` / F7 锚点在树里但不在该门读的文件 —— **六臂旧门全 rc=0（瞎）、新门全 rc=1 并指名行号**；F7 正控（锚点文件被该门声明）两版都 PASS，证明不是无脑红。
+
+**composer 两臂变异负控**：去 floor lift → 3 红（1 字 / 2-3 字 / 带 stale VM）；留 floor lift 去 rate 判据 → 1 红（人工速度重打被误杀）。各自只红自己那组 ⇒ 测试钉在修复点上。
+
+**★ 本轮教训**：
+1. **`verify_branch.sh` 的 scan.sh 项在本机恒 exit 3**（`refusing to run all 119 gates on this machine … CLOUD job`），这是设计而非缺陷。门证据只能取 CI；回报里要显式区分「环境项 FAIL」与「代码项 FAIL」，否则会误判成不能合并。
+2. **`gh_sync.sh delete-branches` 只删它自己看到的分支**，且 `GIT_ASKPASS=/dev/null` 时 `git push --delete` 静默失败（4 条全报 FAIL）。正确做法 = 复用 `ensure_askpass` 的临时 askpass 脚本（`/tmp`、0700、trap 删除），删完逐条 `ls-remote` 核实。
+3. **浅克隆里 `git log --format='%p'` 会输出空父**（grafted），判合并父数必须用 `git cat-file -p <sha> | head -4`。同一 SHA 用 `log` 读出 `parents=` 空、用 `cat-file` 读出两个 parent。
+4. 用户手机仍装 `785fe2efb` 旧 build ⇒ **composer 修复在真机上从未生效过**（真机日志 `allowed a short fragment … len=1 of 1, dt=1ms` 就是修复前现场），必须提示装 `+3461` 后复测。
+
+**清理**：远端 4→1（只剩 main），本地同名分支 `-D`、三个临时 worktree `remove --prune`。回报 `shared/work/branch-check-1122/REPORT.md`，反攻脚本同目录（已复制进 `gate-teeth-1122/`）。三条残余（composer 真机未验 / rect 合并树性能未重测 / F7 的 1580 处裸 `.replace` 失明面）登记 backlog §1122-THREE-BRANCHES-MERGED，scan_debt OK。
+
+<!-- 2026-11-22 17:12:11 -->
+## 2026-11-22 17:1x 跨会话卡顿归因：heavyGate 全局 Semaphore(1)，不是沙箱
+
+
+用户现象：一个回合跑重活时，别的对话里「一两秒的活」要等重活跑完。
+
+**跨会话对照实验（铁证）**：
+- 子会话 47843e03 在 17:08:14 跑 HEAVY `python3 … sleep 150` 占住锁。
+- 当前会话 LIGHT（date/ls/echo）17:08:24.323→.396 = **64 ms**。
+- 当前会话 HEAVY（`python3 -c 'print(1)'`）17:08:37 发起，shell 内 `date` 打印 **17:10:45** → 等待 **128 s**，执行 0 s。
+- 判据：锁释放时刻 = 持锁者结束时刻，精确吻合。
+
+**代码**：`sandbox/ExecutionCoordinator.kt:282` `heavyGate = Semaphore(1, true)`；获取 469、释放 699；`heavyGateTimeoutSec()` 默认 600s。只拦 `CommandClass.HEAVY`（`CommandClassifier.kt`：HEAVY_VERBS = python*/node/npm/tar/zip/gzip/apk/pip/gradle/kotlinc/gcc…/minis-model-use；HEAVY_GIT_SUBCOMMANDS = clone/fetch/pull/push/gc/merge/rebase…）。由来：2026-08-12 多会话大任务 → native 25MB→542MB/12s → SIGABRT，才加的全局串行。
+
+**沙箱不是瓶颈（实测）**：5 核 busy loop 打满 + `dd … conv=fsync` + `find /usr` 循环下，light p50 = 9–11 ms，基线 14 ms。架构上每会话一个 PRoot 实例（PersistentShell per sessionId），per-session Mutex 只串行同会话；全局 shell 槽 cap=16（日志 `shell concurrency cap=16`）；provider 槽默认 6。
+
+**今日统计**：HEAVY cmd-start 514 条，其中 272 条首词是 python3（一次性小脚本），全部进全局锁。
+
+**踩坑**：`memspike-*.log` 的 `dur=` 在并发会话下会串（`currentCmd` 是全局单槽），cmd-end 的 session 字段会被另一会话覆盖 → 不能用 dur 判排队；判排队要用 shell 内时间戳或 cmd-start 墙钟。
+
+**未做**：未改代码。候选改法：①Semaphore(1)→2（一行，风险=回到叠加 OOM）；②H1/H2 两级（解释器一次性调用只走会话串行，不进全局锁）——推荐；③闸门改按内存预算（用现有 MemAvailable + CHILD_RSS 高水位）动态放行。
+
+<!-- 2026-11-22 18:34:15 -->
+## 2026-11-22 晚 heavyGate 作用域修复（分支 fix/heavy-gate-scope @ 417f776，CI #3464 绿，未合 main）
+
+
+按方案 B+C 实施：全局重活锁改为**第二轴**分类，第一轴 `CommandClass` 逐字未动。
+
+**改动**：`CommandClassifier.kt` 新增 `HeavyGateClass {LIGHT, INTERPRETER, GLOBAL}` + `classifyHeavyGate()`；GLOBAL=clone/fetch/pack/编译/装包/压缩；INTERPRETER=python/node/ruby…；`gh_ci.py wait` 类等待型归 LIGHT。`ExecutionCoordinator` 只让 GLOBAL 必拿锁，INTERPRETER 在 memAvailable≥2048MB 时免锁、否则回退串行；闸等待在调用点计时，≥1s 打 gate-wait。`MemorySpikeRecorder` 单槽 → per-session（修了并发下 dur/session 串味）。
+
+**证据**：本地 33 例绿；今日 527 条 HEAVY 回放 → GLOBAL 23 / INTERPRETER 289 / LIGHT 215；今日真实排队 >1s 的 17 条 → 新分类 **GLOBAL 0**（8 LIGHT + 9 INTERPRETER），全部脱困。CI #3464 attempt2 四 job 绿（attempt1 lint 撞 Maven 429，rerun 后绿）。
+
+**踩坑（新）**：`exec_gate_release_check` 门 27 要求 `tryAcquire(` 恰好 2 次且**直接在 `runInterruptible` block 里**（不允许嵌套循环）——首版把分片等待循环写进 wrapper body 被判「acquire 永不执行」；正确做法是 wrapper 恢复单行、把等待计时放到调用点。注释里出现 `tryAcquire(` 字面量也会让计数变 3。
+
+**未验证**：真机（分支不 publish，需合 main 才有 APK）；内存压力回退路径；两个大 python 并发叠加（靠 CHILD_RSS 1024MB 高水位兜底，未实测）。
+
+报告 `shared/work/heavy-gate-1122/REPORT.md`，回放装置 `jvm/`。
+
+<!-- 2026-11-22 18:44:59 -->
+## 2026-11-22 18:36 真机验证 heavyGate 作用域修复（1.0.0+3464）
+
+
+装包 `1.0.0+3464` / versionCode 220003464 / lastUpdate 18:36:35，真机实测（新代码 pid 29250）：
+
+| 场景 | 时刻 | 结果 |
+|---|---|---|
+| INTERPRETER `python3 sleep 90` 在跑，跑 `python3 -c print(1)` | 18:37:47 | **0 秒** |
+| GLOBAL `tar -czf` 循环在跑（ps 确认 tar 存活），跑 `python3 -c print(1)` | 18:43:45 | **0 秒** |
+| GLOBAL 在跑时，另一个 GLOBAL `tar` | 18:38:23 发起 → 18:40:15 取到 | **等 112.2 秒** |
+| LIGHT（date/ls/rg） | 全程 | 从不排队 |
+
+日志证据：
+- `[74e52593] heavy gate: class=GLOBAL` → `heavy gate waited 112173ms (class=GLOBAL)` → memspike `[gate-wait] waitedMs=112173`
+- 我的 `python3 -c print(1)` 那次（18:43:45）日志里 `heavy gate` 计数 **0** = 走免锁路径。
+
+**新发现的边界（保守设计）**：分类器看整条命令文本，包括**传给 minis-sessions-cli send 的 prompt 字符串**。我派发子会话的 prompt 里含 `tar`，导致派发命令自己被判 GLOBAL 取锁（日志 18:43:33 a584d1bd class=GLOBAL）。同理 `ls; tar` 这类混合命令整条先等锁 —— 今天 12:14 那条被堵 151 秒就是此形态。
+
+**测试踩坑**：轮询脚本若含 `tar`（GLOBAL），会持着锁等子会话 → 自死锁 112 秒。轮询必须写成纯 LIGHT/INTERPRETER。
+
+未验证：内存 <2GB 时的回退路径（无法在真机构造）；两个大 INTERPRETER 叠加。
+
+<!-- 2026-11-22 19:47:33 -->
+## 2026-11-22 晚 fix/heavy-gate-scope 审查修复并合并 main（263e846，已发布）
+
+
+发现原分支 CI 等待豁免使用全字符串正则：`python3 build.py --task gh_ci_wait.sh`、`python3 process.py --arg gh_ci.py wait` 会误判 LIGHT，绕过内存压力下的 INTERPRETER 串行门。已改为检查解释器首个脚本 basename + 实际 wait 子命令，`-c/-e` 内联代码不豁免；独立 JVM 修前/修后对照成立，本地 7 + 27 用例绿。最终分支 `4e6fc49` 的 CI #3465 全绿（10874 PASSED、119 门）；`--no-ff` 合并 main 为 `263e846`，父数 2、树与分支相同。main CI #3466 五 job 绿且发布成功：`v1.0.0+3466`、APK 15,046,309 B。远端功能分支已删除，只剩 main。报告 `shared/work/branch-check-1122/REPORT.md`。未在新包真机复测。
+
+<!-- 2026-11-22 23:13:00 -->
+## 2026-11-22 晚 模型组上下文档位重构（分支 d17a39d，CI #3467 绿，未合 main）
+
+
+用户拍板：32K 对智能体无意义；200K/400K 由自定义覆盖；2M 太大也由自定义覆盖；固定档改为 64K/128K/256K/512K/1M + 自定义 + 不限。自定义必须是滑块真实档位，未设置显示“自定义…”，设置后标签显示实际值（如 800K），取消恢复原值。
+
+实现：新纯逻辑 `ContextLimitLadder.kt`（presets、isCustomValue、label、stepIndexFor、parseCustom，64K 下限，Int.MAX-1 上限），`ModelGroupDetailScreen.kt` 滑块改为松手提交；选自定义档才弹数字对话框，确认才写入，取消回退；旧 32K/200K/400K/2M 不重写，映射到自定义档并显示真实值。7 语言新增 4 个字符串。
+
+验证：本地 kotlinc+JUnit 9/9；i18n `ALL CLEAN`（1683 refs/1691 defs）；CI #3467 head `d17a39d77902cc7eefe218454b43a04a1ff40663` 五 job success，unit 10883 PASSED / 0 FAILED，新 `ContextLimitLadderTest` 9 条逐条 PASSED，scan 119 passed/0 failed，build-apk success。未真机看 UI、未合 main、未发布/装机。
+
+## 2026-11-23
+
+<!-- 2026-11-23 00:10:31 -->
+## 2026-11-22 23:5x 上下文档位最终定稿：六档 + 自定义K（分支 ccaf299，CI #3470 绿）
+
+
+用户否掉两版：①刻度标签全显示（太花）→ 回滚；②自定义按 tokens 输入 → 要求单位用 K。
+
+**最终形态**：`64K / 128K / 256K / 512K / 1M / 自定义`，**不限档彻底移除**；滑块下面只保留两端标签（左=首档、右=自定义）。关掉「限制上下文窗口」开关是唯一“无组限制”路径。
+
+**自定义**：输入单位 K（`200` → 200,000 tokens，`200.5` → 200,500），小数键盘，`sanitizeCustomKInput` 只留数字+一个小数点；显示也统一用 K（`2000K`，不转 M）；下限 64K。取消回退原值，松手才提交。
+
+**旧不限（Int.MAX_VALUE）**：不重写配置/备份，UI 视为开关关闭（`isLegacyUnlimited`）；TokenUsage 面板把旧不限当 null，不再出现「组设置：不限」注解，两个 retired 字符串键从 7 语言文件删除。
+
+验证：本地 JUnit 12/12；i18n `ALL CLEAN`（1681 refs / 1691 defs）；CI #3470 head `ccaf2991ae87d25e7326a6c2374ffee187a0767b` 五 job success，unit 10886 PASSED / 0 FAILED，12 条新用例逐条 PASSED，scan 119 passed/0 failed。未真机验证 UI，未合 main。
+
+<!-- 2026-11-23 00:57:17 -->
+## 上下文标签近似显示的用户纠正（2026-11-23）
+
+用户明确：上下文上限服务于按比例触发的自动压缩，应兼顾易读性；1,999,999 显示 2M 是合理 UX，不是 bug，前提是保存/编辑/运行预算仍用原始 tokens。本会话撤回强制精确 K 显示，保留 K/M 自动缩放；独立逐字 VM 预算+真实 ContextPolicy 探针证实原值1,999,999、基础85% compactLine1,699,999（自适应余量会进一步提前）。另修区域小数输入归一化幂等，以及自定义输入与原 preset 同值时保存/IME 两入口 thumb 不复位。任务仍在最终分支 CI 等待阶段，未合 main。
+
+<!-- 2026-11-23 01:33:45 -->
+## 2026-11-23 凌晨上下文档位分支审查、窄修并合主干（a6ac5f126，+3475已发布）
+
+用户授权查正在跑分支、处理问题、等绿合main，特别查常见同族毛病。固定原351567726；独立clone累计849行/12文件全部走查。真实问题两项：区域输入64,5被清成645；custom保存与原128K同值时按钮/IME均thumb留custom。前者用标准DecimalFormatSymbols同时允许规范点，归一化幂等（首补只认区域点会破再次编辑，已再修）；后者局部confirmCustom唯一入口显式reanchor/同值不写。用户纠正精确标签非bug，撤回过度精度修改，保持原K/M2位近似展示。
+最终支9982b2019 #3474五job绿，原日志10890 PASSED/0FAILED/4SKIPPED、新16/16、119/0门，fixture按未改scan机制不跑。独立逐字回调+VM预算+真实ContextPolicy5/5；德国locale全21/21；真实旧确认影子21例3红，去区域2红/去规范点1红，全编译成功，controls/verified.json。
+--no-ff merge main a6ac5f1265aa8d3ed322eda459dfe8da0877fa06，parent2/tree4c337733与已审支相同；main#3475/run45048196375五job绿，原日志同10890/0、新16/16、119/0；rolling tag和Publish真success，删除旧APK+上传新，v1.0.0+3475/code220003475，APK15049337B@17:31:48Z。tag=main；可删资格ahead0后清全部支，远端仅main。报告/原日志/manifest/反向装置shared/work/branch-check-1123/。
+边界：未安装、未Android键盘/Compose/Room真机。verify_branch.sh exit1仅因本地scan.sh设计exit3拒跑119云端门，已有同SHA云端替代证据，不可误判代码fail。最新用户偏好简洁标签已先记日报/自改记录。
 
 ---
 
