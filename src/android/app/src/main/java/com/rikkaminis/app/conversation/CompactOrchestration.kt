@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.data.db.CompactMarkerEntity
+import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.ThinkingLevel
@@ -652,7 +653,7 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     // boundary cannot survive as a recognisable prefix/suffix.
     val transcript = buildConversationTextForSummary(redactToolResultsForSummary(messages))
     val conversationText = ContextCompactor.compactInputText(
-        com.rikkaminis.app.data.EnvVarRedactor.redactForModel(prevSummaryStripped).text,
+        prevSummaryStripped?.let { com.rikkaminis.app.data.EnvVarRedactor.redactForModel(it).text },
         transcript,
     )
     val summary = try {
