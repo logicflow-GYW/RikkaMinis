@@ -652,12 +652,11 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     // truncation in buildConversationTextForSummary, so a secret crossing that
     // boundary cannot survive as a recognisable prefix/suffix.
     val transcript = buildConversationTextForSummary(redactToolResultsForSummary(messages))
-    val conversationText = ContextCompactor.compactInputText(
-        prevSummaryStripped?.let { com.rikkaminis.app.data.EnvVarRedactor.redactForModel(it).text },
-        transcript,
-    )
+    val conversationText = ContextCompactor.compactInputText(prevSummaryStripped, transcript)
     val summary = try {
-        generateCompactSummary(conversationText)
+        generateCompactSummary(
+            com.rikkaminis.app.data.EnvVarRedactor.redactForModel(conversationText).text,
+        )
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {

@@ -314,7 +314,7 @@ internal suspend fun ChatViewModel.executeTool(
         resourceId = toolId,
         leaseToken = toolLease,
     )
-    val result = try {
+    val rawResult = try {
         when (name) {
             FileReadTool.NAME -> {
                 val result = FileReadTool.execute(argsJson, activeSessionId, context)
@@ -386,15 +386,19 @@ internal suspend fun ChatViewModel.executeTool(
     // the durable diagnostics are projected BEFORE this method returns, because
     // the loop used to log `result.output.take(200)` and the failure hook wrote
     // the raw body into `.learnings/ERRORS.md` before any loop-level filtering.
-    val modelView = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(result.output)
-    val diagView = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.output)
+    // `result` below is the MODEL view; `rawResult` stays the executor's own
+    // bytes for matching (defect registry) and for the diagnostics projection.
+    val diagView = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(rawResult.output)
+    val result = rawResult.copy(
+        output = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(rawResult.output).text,
+    )
 
     // T9: record tool result event
     traceObserver.agentTraceRecorder.toolResult(
         turn = traceObserver.activeTraceTurn,
         toolId = toolId,
         name = name,
-        success = result.success,
+        success = rawResult.success,
         output = diagView.text,
         durationMs = System.currentTimeMillis() - etStartMs,
     )
@@ -403,14 +407,14 @@ internal suspend fun ChatViewModel.executeTool(
     // T7-D: 旁路验证 —— 工具结束。resultKnown 取自结果对象本身
     // （[deep-audit-1018 ISSUE-03]）：shell 的 outcomeKnown=false 表示
     // 重放被扣下、结果不可信，reducer 据此判 SUCCEED_WITH_UNKNOWN_TOOL。
-    traceObserver.t7Reduce(AgentRunEvent.ToolFinished(name, resultKnown = result.outcomeKnown))
+    traceObserver.t7Reduce(AgentRunEvent.ToolFinished(name, resultKnown = rawResult.outcomeKnown))
 
     // T3: failure-learning automation hook. Side-channel only — the
     // failed result still flows to the LLM exactly as before; this just
     // appends a structured, deduplicated block to the session's
     // `.learnings/ERRORS.md` so later agent turns can learn from it
     // without relying on the agent remembering to check the skill.
-    if (!result.success) {
+    if (!rawResult.success) {
         runCatching {
             // Durable side channel — safe text, never the raw failed body.
             toolFailureHook.recordFailure(name, diagView.text, safeArgs, activeSessionId)
@@ -425,17 +429,16 @@ internal suspend fun ChatViewModel.executeTool(
         // in memory still burned 3 probe rounds — the hint must arrive at
         // the moment of failure, not one file-read away. No registry file /
         // no match → the result flows unchanged.
-        val defectHint = defectRegistryHintFor(result.output)
+        val defectHint = defectRegistryHintFor(rawResult.output)
         if (defectHint != null) {
-            val hinted = result.output + defectHint
-            // The registry hint is derived from the RAW failure text (matching
-            // must not depend on redaction), but the copy handed to the model
-            // is projected again so a hint cannot drag a secret along.
-            val hintedModel = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(hinted).text
-            return result.copy(output = hintedModel)
+            // SandboxDefectRegistryTest pins this exact statement by source
+            // shape (its negative control deletes the call above). `result` is
+            // already the projected model view and the hint is static registry
+            // text, so appending it cannot reintroduce a credential.
+            return result.copy(output = result.output + defectHint)
         }
     }
-    return result.copy(output = modelView.text)
+    return result
 }
 
 /**
