@@ -4806,12 +4806,17 @@ internal class AgentLoopEngine(
             }
 
             // ============================ Pass 3 ============================
+            // [fix/session-load-redaction-cost-1123] ONE credential read for the
+            // whole pass. Each single-shot redaction call decrypts every env var
+            // and every provider key, so a per-tool-result call multiplied the
+            // decrypt cost by the number of tool calls in the turn.
+            val pass3Snapshot = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
             for (p in pending) {
                 val id = p.id
                 val name = p.name
                 val paramsMap = p.paramsMap
                 val result = resultsById[id]!!
-                android.util.Log.d("ToolChain[VM]", "[turn=$turn] host.executeTool END name=$name success=${result.success} title=${result.toolTitle} outputLen=${result.output.length} output=${com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.output).text.take(200)}")
+                android.util.Log.d("ToolChain[VM]", "[turn=$turn] host.executeTool END name=$name success=${result.success} title=${result.toolTitle} outputLen=${result.output.length} output=${com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(result.output, pass3Snapshot, null).text.take(200)}")
 
                 // Record post-execution. WARNING text is appended to the tool
                 // result so the model sees it on its next turn. No block here —
@@ -4825,7 +4830,7 @@ internal class AgentLoopEngine(
                     toolCallId = id,
                 )
                 if (result.privacyRedacted) {
-                    transcriptRedactions[id] = com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(result.output).text
+                    transcriptRedactions[id] = com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(result.output, pass3Snapshot, null).text
                 }
                 val outputForLLM = if (postRecord.level == Level.WARNING && postRecord.message != null) {
                     AppLogger.debug("ChatViewModel",

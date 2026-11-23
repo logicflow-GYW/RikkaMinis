@@ -617,23 +617,29 @@ internal fun ChatViewModel.compactAll(
  * input. Only ToolResult payloads are rewritten; user text and assistant prose
  * keep the existing compact contract.
  */
-private fun redactToolResultsForSummary(messages: List<LLMMessage>): List<LLMMessage> =
-    messages.map { msg ->
+private fun redactToolResultsForSummary(messages: List<LLMMessage>): List<LLMMessage> {
+    // [fix/session-load-redaction-cost-1123] ONE credential read for the whole
+    // summarizer input. Same shape as the session-load stall: the single-shot
+    // call decrypts every credential, so a per-message/per-part call multiplied
+    // the decrypt cost by the transcript size.
+    val snap = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
+    return messages.map { msg ->
         if (msg.contentParts.none { it is AgentContentPart.ToolResult || it is AgentContentPart.ToolUse }) msg
         else msg.copy(contentParts = msg.contentParts.map { part ->
             when (part) {
                 is AgentContentPart.ToolResult -> part.copy(
-                    content = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(part.content).text,
+                    content = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(part.content, snap).text,
                 )
                 is AgentContentPart.ToolUse -> {
                     val raw = part.input.toString()
-                    val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(raw)
+                    val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(raw, snap)
                     if (view.hits == 0) part else part.copy(input = org.json.JSONObject(view.text))
                 }
                 else -> part
             }
         })
     }
+}
 
 internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     messages: List<LLMMessage>,

@@ -323,6 +323,10 @@ internal fun ChatViewModel.offloadContextIfNeeded(
     var offloadedCount = 0
     var freedTokens = 0
 
+    // [fix/session-load-redaction-cost-1123] ONE credential read for the whole
+    // offload pass: this loop walks every candidate part, and the single-shot
+    // call would decrypt every credential again for each one.
+    val offloadSnapshot = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
     for (candidate in candidates) {
         if (currentTokens <= targetTokens) break
 
@@ -338,7 +342,7 @@ internal fun ChatViewModel.offloadContextIfNeeded(
             is AgentContentPart.ToolResult -> {
                 if (part.content.length > 500) {
                     linuxPath = ContextOffload.offloadContent(
-                        context, sid, com.rikkaminis.app.data.EnvVarRedactor.redactForDiagnostics(part.content).text,
+                        context, sid, com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(part.content, offloadSnapshot, null).text,
                         toolId = part.id, toolName = part.name,
                     )
                 }

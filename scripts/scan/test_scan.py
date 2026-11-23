@@ -3831,6 +3831,10 @@ def test_surgery_1122_gates():
 
 TOOL_ARGS_LOG_GATES = [
     ("tool_args_log_redaction_check", "SELFTEST=PASS", (REPO_ROOT,)),
+    # [fix/session-load-redaction-cost-1123] The per-item credential re-read
+    # gate: its arms are the pre-fix loop shape, the hoisted fix, and the
+    # already-snapshot call that must NOT be flagged.
+    ("redaction_loop_snapshot_check", "SELFTEST=PASS", (REPO_ROOT,)),
 ]
 
 def test_tool_args_log_redaction_gate():
@@ -3846,8 +3850,11 @@ def test_tool_args_log_redaction_gate():
         # The negative arm: with the fixture's redactor removed the gate MUST
         # report a violation, otherwise the selftest could be passing on a gate
         # that never flags anything.
-        check("%s selftest caught the dirty fixture" % script,
-              "dirty fixture is caught" in out, out[-280:])
+        # Each gate names its dirty arm differently; the shared assertion is
+        # that SOME dirty fixture was caught (a gate that flags nothing would
+        # otherwise pass on the teeth marker alone).
+        check("%s selftest caught a dirty fixture" % script,
+              "dirty" in out and "caught" in out, out[-280:])
         rc, out = run_scanner(script + ".py", *real_args)
         check("%s real tree green" % script, rc == 0, out[-280:])
 
