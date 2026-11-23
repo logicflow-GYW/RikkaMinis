@@ -116,6 +116,10 @@ import com.rikkaminis.app.ui.components.MinisTextButton
  * with 3 branches, vs 11 in `StreamingMarkdownText`'s — it exists only to
  * serve this table.
  */
+// [fix/replay-guard-and-send-latency-1123] Was constructed per line inside the
+// fallback loop.
+private val tableSeparatorLineRegex = Regex("^\\|?[\\s\\-:|]+\\|?$")
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun BorderedMarkdownTable(
@@ -179,7 +183,7 @@ private fun BorderedMarkdownTable(
         for ((index, line) in lines.withIndex()) {
             val trimmed = line.trim()
             // Skip separator lines (e.g., |---|---|)
-            if (trimmed.matches(Regex("^\\|?[\\s\\-:|]+\\|?$"))) continue
+            if (trimmed.matches(tableSeparatorLineRegex)) continue
             val cells = trimmed.split("|")
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }

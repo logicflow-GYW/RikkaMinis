@@ -2268,6 +2268,12 @@ def exec_gate_fixture(shape="good"):
     if shape == "no_settle":
         settle = "        Thread.sleep(1)\n"
 
+    terminate_tail = "        if (shell != null) postRecycleMemoryRecovery()\n"
+    if shape == "unguarded_terminate":
+        # G8 regression: a draft id that never had a shell still runs the two
+        # GC rounds inside the send shell, before the user row is persisted.
+        terminate_tail = "        postRecycleMemoryRecovery()\n"
+
     extra_acquire = ""
     if shape == "bare_acquire":
         # A raw blocking acquire reappearing in the command path.
@@ -2333,6 +2339,13 @@ def exec_gate_fixture(shape="good"):
         "\n    private fun postRecycleMemoryRecoveryNow() {\n"
         + settle +
         "    }\n"
+        "\n    fun sessionDidTerminate(sessionId: String) {\n"
+        "        val shell = shells.remove(sessionId)\n"
+        "        lastInjectedKeys.remove(sessionId)\n"
+        "        lastActiveMs.remove(sessionId)\n"
+        "        shell?.stop()\n"
+        + terminate_tail +
+        "    }\n"
         "}\n"
     )
     if shape == "missing_file":
@@ -2390,6 +2403,13 @@ def test_exec_gate():
     code, out = run_scanner("exec_gate_release_check.py", root)
     check("missing target file fails instead of passing silently",
           code == 1 and "anchor lost" in out, f"exit={code}\n{out}")
+    shutil.rmtree(root)
+
+    root = make_tree(exec_gate_fixture("unguarded_terminate"))
+    code, out = run_scanner("exec_gate_release_check.py", root)
+    check("recycle on a shell-less terminate caught",
+          code == 1 and "session terminate recovery not guarded" in out,
+          f"exit={code}\n{out}")
     shutil.rmtree(root)
 
 

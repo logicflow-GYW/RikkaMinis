@@ -49,7 +49,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from _kotlin_lexer import KotlinLexError, mask_code   # noqa: E402
+from _kotlin_lexer import KotlinLexError, mask_code, mask_comments   # noqa: E402
 
 SRC_SUBDIR = "src/android/app/src/main/java"
 
@@ -74,13 +74,52 @@ WITH_SNAPSHOT = re.compile(r"\bEnvVarRedactor\.redactForModel\s*\([^()]*(?:snaps
 # multiplication actually happened (one call per element).
 LOOP_HEAD = re.compile(r"\b(?:for|while)\s*\(")
 ITER_COMBINATOR = re.compile(
-    r"\.(?:forEach|map|flatMap|filter|any|all|none|fold|onEach|mapNotNull)\s*[({]"
+    r"\.(?:forEach|map|flatMap|filter|any|all|none|fold|onEach|mapNotNull|"
+    r"forEachIndexed|mapIndexed|mapIndexedNotNull|foldIndexed|reduce|reduceIndexed)\s*[({]"
 )
 
 EXEMPT = "snapshot-ok:"
 
 # One logical line, tolerating a trailing `//` comment.
 LINE_COMMENT = re.compile(r"//[^\n]*")
+
+# `mask_code` blanks string LITERALS, which also blanks real code inside a
+# `${...}` template expression. `buildToolResultPartsJson` builds its JSON in a
+# raw string, so the per-result redaction call lived entirely inside a template
+# and the gate could not see it (verified: the pre-fix file scanned clean).
+# Re-open only the template expression segments — never the literal body.
+TEMPLATE_EXPR = re.compile(r"\$\{([^{}]*)\}")
+
+# [fix/replay-guard-and-send-latency-1123] The re-opened template must come from
+# the COMMENT-BLANKED view, not from the raw line. Reading `raw_lines` meant a
+# `${...redact...}` written inside a comment or a KDoc example was reported as a
+# per-item re-read (verified: 1 finding on a loop whose only occurrence was a
+# `//` example), which forces a `snapshot-ok:` marker onto prose. Escaped
+# dollars are not templates either, so a `"\${...}"` documentation literal must
+# not report.
+
+
+def _escaped_dollar(line, dollar_at):
+    """True when the `$` at `dollar_at` is preceded by an ODD backslash run."""
+    backslashes = 0
+    j = dollar_at - 1
+    while j >= 0 and line[j] == "\\":
+        backslashes += 1
+        j -= 1
+    return backslashes % 2 == 1
+
+
+def _template_single_shot(line):
+    """A single-shot redaction call inside a live `${...}` on this line."""
+    for match in TEMPLATE_EXPR.finditer(line):
+        expr = match.group(1)
+        if not (SINGLE_SHOT.search(expr) and not WITH_SNAPSHOT.search(expr)):
+            continue
+        # `\$` is an escaped dollar: the span is a string literal, not a template.
+        if _escaped_dollar(line, match.start()):
+            continue
+        return True
+    return False
 
 
 def _exempted(lines, idx):
@@ -102,12 +141,16 @@ def scan_text(src):
     """Return [(line, snippet)] for single-shot redaction inside a loop body."""
     try:
         masked = mask_code(src)
+        # Comments blanked but string literals kept, so `${...}` templates are
+        # still visible while a commented-out example is not.
+        template_view = mask_comments(src)
     except KotlinLexError:
         # Fail closed: an unreadable file is reported, never skipped.
         return [(1, "<unreadable: lexer error — cannot prove loops hoist the snapshot>")]
 
     lines = masked.split("\n")
     raw_lines = src.split("\n")
+    template_lines = template_view.split("\n")
     out = []
 
     # Track the brace depth at which each loop body starts, so a redaction call
@@ -133,7 +176,10 @@ def scan_text(src):
 
         # A single-shot call while any loop body is still open. A call that
         # already receives a snapshot is the FIX, not the bug.
-        if SINGLE_SHOT.search(code) and not WITH_SNAPSHOT.search(code):
+        template_here = template_lines[n] if n < len(template_lines) else ""
+        code_has_single = SINGLE_SHOT.search(code) and not WITH_SNAPSHOT.search(code)
+        template_has_single = _template_single_shot(template_here)
+        if (code_has_single or template_has_single):
             inside = [d for d in loop_depths if depth >= d]
             if inside and not _exempted(raw_lines, n):
                 snippet = " ".join(raw_lines[n].strip().split())[:120]
@@ -235,6 +281,69 @@ class Fake5 {
 }
 '''
 
+# The gap this arm pins: `forEachIndexed` / `mapIndexed` were NOT in the
+# combinator list, so `buildToolResultPartsJson` (one decrypt-all per result)
+# scanned clean on main even though it is exactly the per-item re-read.
+DIRTY_INDEXED = '''
+class Fake6 {
+    fun f(results: List<String>) {
+        results.forEachIndexed { index, r ->
+            val v = EnvVarRedactor.redactForDiagnostics(r)
+        }
+    }
+}
+'''
+
+# The second blind spot this arm pins: `mask_code` blanks string literals, so a
+# call inside a `${...}` template expression was invisible. This is exactly the
+# buildToolResultPartsJson shape (JSON built in a raw string).
+DIRTY_TEMPLATE = '''
+class Fake7 {
+    fun f(results: List<String>) {
+        results.forEachIndexed { index, r ->
+            append("""{"o":${escape(EnvVarRedactor.redactForDiagnostics(r).text)}}""")
+        }
+    }
+}
+'''
+
+CLEAN_TEMPLATE_SNAPSHOT = '''
+class Fake8 {
+    fun f(results: List<String>) {
+        val snap = EnvVarRedactor.snapshot()
+        results.forEachIndexed { index, r ->
+            append("""{"o":${escape(EnvVarRedactor.redactWithSnapshot(r, snap, null).text)}}""")
+        }
+    }
+}
+'''
+
+# [fix/replay-guard-and-send-latency-1123] The re-opened template must not turn
+# prose into a violation. Both arms below were false positives before the fix:
+# a commented-out example (the shape a reviewer writes to document the old
+# pattern) and a KDoc/string literal showing an escaped `\${...}`.
+CLEAN_COMMENTED_TEMPLATE = '''
+class Fake9 {
+    fun f(results: List<String>) {
+        results.forEachIndexed { index, r ->
+            // example: "${EnvVarRedactor.redactForDiagnostics(r).text}"
+            val v = escapeJson(r)
+        }
+    }
+}
+'''
+
+CLEAN_ESCAPED_TEMPLATE = '''
+class Fake10 {
+    fun f(results: List<String>) {
+        results.forEachIndexed { index, r ->
+            val documented = "\\${EnvVarRedactor.redactForDiagnostics(r).text}"
+            val v = escapeJson(r)
+        }
+    }
+}
+'''
+
 
 def selftest():
     failures = 0
@@ -257,6 +366,16 @@ def selftest():
           "got %r" % (scan_text(CLEAN_SINGLE),))
     check("inline exemption is recognised", scan_text(EXEMPTED_LOOP) == [],
           "got %r" % (scan_text(EXEMPTED_LOOP),))
+    check("dirty forEachIndexed is caught", len(scan_text(DIRTY_INDEXED)) == 1,
+          "got %r" % (scan_text(DIRTY_INDEXED),))
+    check("dirty call inside a ${...} template is caught", len(scan_text(DIRTY_TEMPLATE)) == 1,
+          "got %r" % (scan_text(DIRTY_TEMPLATE),))
+    check("template with a hoisted snapshot passes", scan_text(CLEAN_TEMPLATE_SNAPSHOT) == [],
+          "got %r" % (scan_text(CLEAN_TEMPLATE_SNAPSHOT),))
+    check("commented-out template example passes", scan_text(CLEAN_COMMENTED_TEMPLATE) == [],
+          "got %r" % (scan_text(CLEAN_COMMENTED_TEMPLATE),))
+    check("escaped \\${...} documentation literal passes", scan_text(CLEAN_ESCAPED_TEMPLATE) == [],
+          "got %r" % (scan_text(CLEAN_ESCAPED_TEMPLATE),))
 
     # Negative control: hoisting the snapshot MUST make the dirty fixture clean.
     fixed = DIRTY_LOOP.replace(
