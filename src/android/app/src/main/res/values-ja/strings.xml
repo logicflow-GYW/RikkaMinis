@@ -226,7 +226,12 @@
     <string name="env_var_add">追加</string>
     <string name="env_var_privacy_header">プライバシー</string>
     <string name="env_var_privacy_toggle">プライバシーモード</string>
-    <string name="env_var_privacy_footer">プライバシーモードでは、ツール結果、復元した履歴、要約をモデルに送る前に既知の認証情報と明確な機密フィールドを隠します。新しい診断記録とツール履歴は常にマスクされます。元のファイルと画像は変更しません。画像内や任意にエンコードされた秘密は検出しません。マスク済みコピーで元のファイルを上書きせず、機密でないフィールドだけを編集してください。</string>
+    <string name="perm_privacy_mode_header">プライバシーモード</string>
+    <string name="perm_privacy_mode_title">モデル入力の認証情報をマスクする</string>
+    <string name="perm_privacy_mode_desc">モデルが読む前に、ツール結果・復元した履歴・要約・コンテキスト退避ファイル内の既知の認証情報、機密名のフィールド、判別できるトークン形状を隠します。既定はオフです。マスクは保存済みコピーも書き換えるため、マスク済みファイルを書き戻すと実値がプレースホルダーに置き換わることがあり、通常のソースコードで名前が秘密らしく見えるだけの変数もマスクされます。</string>
+    <string name="perm_privacy_mode_footer">永続診断（トレース、エラーブロック、リプレイメタデータ）はこのスイッチの状態に関係なく常にマスクされます。オフにしてもログファイルが秘密の保管場所になることはありません。画像や任意にエンコードされた秘密は検査しません。</string>
+    <string name="env_var_privacy_moved">このスイッチは「設定 → 権限」に移動しました。既定はオフです。</string>
+    <string name="env_var_privacy_moved_row">プライバシーモードは「権限」で管理</string>
     <string name="env_var_restart_terminal_note">アシスタントが実行するコマンドは毎回これらの値を読み直すため（削除も含む）、再起動は不要です。タイムゾーンとプロキシの変更は開いているターミナルに反映されますが、その他の変数は反映されません。すでに実行中のプログラムは起動時の環境を保持します。</string>
     <string name="env_var_restart_terminal_body">変数はターミナルセッションの開始時に注入されます。すでに開いているターミナルは古い環境を保持するため、閉じて開き直すと反映されます。</string>
     <string name="env_var_restart_terminal_title">ターミナルセッション</string>

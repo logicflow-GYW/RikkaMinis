@@ -3878,6 +3878,43 @@ def test_tool_args_log_redaction_gate():
         rc, out = run_scanner(script + ".py", *real_args)
         check("%s real tree green" % script, rc == 0, out[-280:])
 
+def test_privacy_switch_scope_gate():
+    print("━━━ privacy-mode switch scope gate (selftest teeth + real tree) ━━━")
+    script = "privacy_switch_scope_check"
+    proc = subprocess.run(
+        [sys.executable, os.path.join(SCRIPT_DIR, script + ".py"), "--selftest"],
+        capture_output=True, text=True,
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    check("%s selftest has teeth" % script,
+          proc.returncode == 0 and "SELFTEST=PASS" in out, out[-280:])
+    # The gate prints `SELFTEST ARM FAILED: <arm>` for every mutation that did
+    # NOT turn the tree red — i.e. a dirty tree the gate failed to catch. A gate
+    # with no teeth reports arms here instead of PASS.
+    check("%s caught every dirty fixture" % script,
+          "SELFTEST ARM FAILED" not in out, out[-280:])
+    # The negative control that matters most: the real tree must be green with
+    # the gate's own arms covering each judged sink (see _PRIVACY_SCOPE_ARMS).
+    rc, out = run_scanner(script + ".py", ".")
+    check("%s real tree green" % script, rc == 0, out[-280:])
+    for marker in ("DEFAULT_ENABLED", "persisted tool result", "replay gate",
+                   "offload payload", "transcriptRedactions", "privacyRedacted"):
+        check("%s selftest covers %r" % (script, marker), marker in _PRIVACY_SCOPE_ARMS)
+
+
+# Markers the selftest's negative arms target, kept next to the runner so a
+# deleted arm is visible here instead of silently shrinking the coverage.
+_PRIVACY_SCOPE_ARMS = (
+    "DEFAULT_ENABLED",
+    "persisted tool result",
+    "replay gate",
+    "offload payload",
+    "transcriptRedactions",
+    "privacyRedacted",
+    "redactForDiagnostics",
+)
+
+
 TEST_ORDER = (
     "test_four_way",
     "test_four_way_derived",
@@ -3934,6 +3971,7 @@ TEST_ORDER = (
     "test_scan_parallel_local_refusal",
     "test_surgery_1122_gates",
     "test_tool_args_log_redaction_gate",
+    "test_privacy_switch_scope_gate",
 )
 
 RESULT_TAG = "@@TEST_RESULT@@"

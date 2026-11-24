@@ -45,11 +45,23 @@ class ChatToolPrivacyTest {
         assertFalse((messages.single().contentParts.single() as AgentContentPart.ToolResult).content.contains("1234"))
         assertEquals(raw, row.partsJson)
     }
-    @Test fun durableWriterRedactsEvenWhenPrivacyModeIsOff() {
+    @Test fun durableWriterFollowsThePrivacySwitch() {
+        // [feat/privacy-mode-toggle-1124] The persisted copy used to be masked
+        // in BOTH states. A reload then handed the model a placeholder in place
+        // of an argument it must execute (device log 2026-11-24:
+        // `eval: line 892: <marker>: not found`). The switch now governs the
+        // stored copy exactly as it governs the live model view.
+        val part = AgentContentPart.ToolResult("id", "read_probe", "password=opaqueCanary1234")
         EnvVarPrivacyStore.setEnabled(false)
-        val json = buildToolResultPartsJson(listOf(AgentContentPart.ToolResult("id", "read_probe", "password=1234")))
-        assertFalse(json.contains("1234"))
-        assertTrue(json.contains("MINIS_REDACTED"))
+        try {
+            val raw = buildToolResultPartsJson(listOf(part))
+            assertTrue("privacy OFF must persist the real bytes", raw.contains("opaqueCanary1234"))
+        } finally {
+            EnvVarPrivacyStore.setEnabled(true)
+        }
+        val masked = buildToolResultPartsJson(listOf(part))
+        assertFalse("privacy ON must persist the masked copy", masked.contains("opaqueCanary1234"))
+        assertTrue(masked.contains("MINIS_REDACTED"))
         EnvVarPrivacyStore.setEnabled(true)
     }
     @Test fun derivedSummaryOnlyIsFilteredAndPinnedUserTextSurvives() {

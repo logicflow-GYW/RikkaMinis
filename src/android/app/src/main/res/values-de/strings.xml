@@ -226,7 +226,12 @@
     <string name="env_var_add">Hinzufügen</string>
     <string name="env_var_privacy_header">Datenschutz</string>
     <string name="env_var_privacy_toggle">Datenschutzmodus</string>
-    <string name="env_var_privacy_footer">Der Datenschutzmodus verbirgt bekannte Zugangsdaten und eindeutig sensible Felder in Werkzeugergebnissen, wiederhergestelltem Verlauf und Zusammenfassungen vor dem Versand an das Modell. Neue Diagnoseaufzeichnungen und der Werkzeugverlauf werden immer bereinigt. Originaldateien und Bilder bleiben unverändert; Bildinhalte und beliebig kodierte Geheimnisse werden nicht geprüft. Bearbeiten Sie einzelne nicht sensible Felder, statt eine bereinigte Kopie über die Originaldatei zu schreiben.</string>
+    <string name="perm_privacy_mode_header">Datenschutzmodus</string>
+    <string name="perm_privacy_mode_title">Zugangsdaten in der Modelleingabe maskieren</string>
+    <string name="perm_privacy_mode_desc">Verbirgt bekannte Zugangsdaten, als geheim benannte Felder und erkennbare Token-Formen in Werkzeugergebnissen, wiederhergestelltem Verlauf, Zusammenfassungen und Kontext-Auslagerungsdateien, bevor das Modell sie liest. Standardmäßig aus: Das Maskieren schreibt auch die gespeicherte Kopie um, sodass eine maskierte Datei beim Zurückschreiben echte Werte durch den Platzhalter ersetzen kann, und Namen, die in normalem Quelltext nur wie Geheimnisse aussehen, werden ebenfalls maskiert.</string>
+    <string name="perm_privacy_mode_footer">Dauerhafte Diagnosedaten (Trace, Fehlerblöcke, Replay-Metadaten) bleiben unabhängig von diesem Schalter bereinigt; Ausschalten macht aus einer Protokolldatei keinen Geheimnisspeicher. Bilder und beliebig kodierte Geheimnisse werden nicht geprüft.</string>
+    <string name="env_var_privacy_moved">Dieser Schalter ist jetzt unter Einstellungen → Berechtigungen. Standardmäßig aus.</string>
+    <string name="env_var_privacy_moved_row">Datenschutzmodus unter Berechtigungen verwalten</string>
     <string name="env_var_restart_terminal_note">Von der Assistenz ausgeführte Befehle lesen diese Werte jedes Mal neu, Löschungen eingeschlossen, ein Neustart ist dafür nicht nötig. Änderungen an Zeitzone und Proxy werden in offene Terminals übertragen, andere Variablen nicht. Ein bereits laufendes Programm behält die Umgebung, mit der es gestartet ist.</string>
     <string name="env_var_restart_terminal_body">Variablen werden beim Start einer Terminal-Sitzung injiziert. Ein bereits geöffnetes Terminal behält seine alte Umgebung — schließen und neu öffnen, um Änderungen zu übernehmen.</string>
     <string name="env_var_restart_terminal_title">Terminal-Sitzungen</string>

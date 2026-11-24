@@ -275,7 +275,12 @@
     <string name="env_var_add">添加</string>
     <string name="env_var_privacy_header">隐私</string>
     <string name="env_var_privacy_toggle">隐私模式</string>
-    <string name="env_var_privacy_footer">隐私模式会在工具结果、重载历史和摘要送达模型前隐藏已知凭据及明确的敏感字段。新诊断记录和工具历史始终脱敏。原文件与图片不变；不识别图片内或任意编码的秘密。修改文件时请局部编辑非敏感字段，不要用脱敏副本覆盖原文件。</string>
+    <string name="perm_privacy_mode_header">隐私模式</string>
+    <string name="perm_privacy_mode_title">在模型输入中遮蔽凭据</string>
+    <string name="perm_privacy_mode_desc">在模型读取前隐藏工具结果、重载历史、摘要与上下文卸载文件中的已知凭据、名称像敏感字段的值以及可识别的令牌形态。默认关闭：遮蔽同时会改写保存的副本，用脱敏副本回写文件可能把真实值替换成占位符，普通源码里只是名字像秘密的变量也会被遮蔽。</string>
+    <string name="perm_privacy_mode_footer">无论此开关如何设置，落盘诊断（轨迹、错误块、回放元数据）始终脱敏，关掉它不会把日志变成秘密仓库。图片与任意编码的秘密不做识别。</string>
+    <string name="env_var_privacy_moved">此开关已移到「设置 → 权限」，默认关闭。</string>
+    <string name="env_var_privacy_moved_row">在「权限」中管理隐私模式</string>
     <string name="env_var_restart_terminal_note">助手执行的命令每次都会重新读取这些变量（删除也一样），无需重启终端。时区和代理的改动会推送到已打开的终端，其他变量不会。已经在运行的进程仍持有它启动时的环境。</string>
     <string name="env_var_restart_terminal_body">变量在终端会话启动时注入。已经打开的终端会保留旧环境，关闭后重新打开即可生效。</string>
     <string name="env_var_restart_terminal_title">终端会话</string>

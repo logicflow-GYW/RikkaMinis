@@ -1693,17 +1693,17 @@ internal object ConfigBuiltins {
         )
 
         // Privacy Mode toggle. Read/write so the user can ask the
-        // agent to flip it without diving into Settings ("turn off
-        // privacy mode for the next command"). Routed through
+        // agent to flip it without diving into Settings. Routed through
         // EnvVarPrivacyStore.setEnabled so the StateFlow fires and
-        // the Compose Switch stays in sync. Default ON; risk
-        // SENSITIVE because turning it OFF means the next shell
-        // execute can leak unmasked secrets to the model.
+        // the Compose Switch stays in sync. Default OFF (the UI switch
+        // lives in Settings → Permissions); risk SENSITIVE because
+        // turning it ON rewrites what the model reads and what gets
+        // persisted, which can replace real values with a placeholder.
         r.register(
             ClosureField(
                 path = "envvars.privacyMode",
                 displayName = "Privacy Mode",
-                description = "When ON, env-var values that appear in shell-execute output are masked before reaching the model. Turning OFF lets the model see raw values — only do this if the user explicitly asked.",
+                description = "When ON, credential-shaped content in tool results, restored history, summaries and context-offload files is masked before the model reads it, and the persisted copy is masked too. OFF (default) keeps the real bytes. Turning it ON can make a masked file write back the placeholder instead of the real value, so only do this if the user explicitly asked.",
                 valueSchema = ConfigSchema.Bool,
                 risk = ConfigRisk.SENSITIVE,
                 revertable = true,
