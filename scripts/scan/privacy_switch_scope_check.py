@@ -48,6 +48,11 @@ point, not a spelling:
        real bytes". Folding in the diagnostics view or the args copy makes the
        flag true while the model read the real bytes.
 
+  [P8] The history projection (`redactToolHistoryForModel`) re-projects tool
+       ARGUMENTS too. Turning the switch ON after a row was saved OFF must not
+       hand the model the arguments that row legitimately stored, nor keep a
+       replay capsule whose bytes no longer match the request.
+
 ## Fail-closed
 
 A file or symbol that cannot be read is REPORTED, never skipped: "I could not
@@ -75,6 +80,9 @@ PARTS = SRC + "/com/rikkaminis/app/ui/chat/ChatTurnPartsJson.kt"
 CONTEXT = SRC + "/com/rikkaminis/app/ui/chat/ChatContextWindow.kt"
 ENGINE = SRC + "/com/rikkaminis/app/ui/chat/AgentLoopEngine.kt"
 PROMPT = SRC + "/com/rikkaminis/app/ui/chat/ChatPromptAndTools.kt"
+# [fix/privacy-reenable-tooluse-1124] The last model-facing projection: a
+# session reload re-checks what the switch governs at request time.
+HISTORY = SRC + "/com/rikkaminis/app/ui/chat/ChatToolPrivacy.kt"
 
 EXEMPT = "privacy-scope-ok:"
 
@@ -293,6 +301,31 @@ def judge_diagnostics_unconditional(root, rep):
                 "stay redacted in both states")
 
 
+def judge_history(root, rep):
+    """[P8] The reload projection must re-check tool ARGUMENTS, not only results."""
+    src = strip_comments(read(root, HISTORY))
+    body, at = fn_body(src, "internal fun redactToolHistoryForModel(")
+    if body is None:
+        rep.red(HISTORY, "redactToolHistoryForModel not found — the last model-facing "
+                         "projection is unreadable, so no sink can be proven")
+        return
+    arm = body.find("is AgentContentPart.ToolUse ->")
+    if arm < 0:
+        rep.red(HISTORY + ":%d" % line_of(src, at),
+                "history projection has no ToolUse arm — a row saved with the switch OFF "
+                "reaches the model with its real arguments once the switch is turned ON")
+        return
+    # The arm must run the redactor over the arguments AND hand the model the
+    # projected copy; a re-typed `part` alone would leave the bytes untouched.
+    window = body[arm:arm + 1200]
+    if "redactForModel(" not in window:
+        rep.red(HISTORY + ":%d" % line_of(src, at + arm),
+                "ToolUse arm does not project its arguments through the redactor")
+    elif "copy(input" not in window:
+        rep.red(HISTORY + ":%d" % line_of(src, at + arm),
+                "ToolUse arm computes a projection but never builds the model copy")
+
+
 JUDGES = (
     ("P1", judge_store),
     ("P2/P3", judge_parts),
@@ -300,6 +333,7 @@ JUDGES = (
     ("P5", judge_engine),
     ("P7", judge_prompt_flag),
     ("P6", judge_diagnostics_unconditional),
+    ("P8", judge_history),
 )
 
 
@@ -393,6 +427,33 @@ object EnvVarRedactor {
     }
 }
 """,
+    HISTORY: """
+internal fun redactToolHistoryForModel(messages: List<LLMMessage>): List<LLMMessage> {
+    if (!EnvVarPrivacyStore.isEnabled) return messages
+    val snapshot = EnvVarRedactor.snapshot()
+    var changed = false
+    val projected = messages.map { message ->
+        val parts = message.contentParts.map { part ->
+            when (part) {
+                is AgentContentPart.ToolResult -> {
+                    val redaction = EnvVarRedactor.redactForModel(part.content, snapshot)
+                    if (redaction.text == part.content) part else part.copy(content = redaction.text)
+                }
+                is AgentContentPart.ToolUse -> {
+                    val rawInput = part.input.toString()
+                    val redaction = EnvVarRedactor.redactForModel(rawInput, snapshot)
+                    if (redaction.text == rawInput) part
+                    else part.copy(input = projectedToolInput(redaction.text))
+                }
+                else -> part
+            }
+        }
+        if (parts == message.contentParts) message
+        else { changed = true; message.copy(contentParts = parts) }
+    }
+    return if (changed) guardAnthropicReplayHistory(projected, messages) else messages
+}
+""",
 }
 
 
@@ -467,6 +528,19 @@ def selftest():
          mutate(SELFTEST_TREE, PROMPT,
                 "privacyRedacted = result.privacyRedacted || modelView.hits > 0,",
                 "privacyRedacted = result.privacyRedacted || modelView.hits > 0 || safeArgs != argsJson,")),
+        ("P8 history ToolUse arm dropped",
+         mutate(SELFTEST_TREE, HISTORY,
+                """                is AgentContentPart.ToolUse -> {
+                    val rawInput = part.input.toString()
+                    val redaction = EnvVarRedactor.redactForModel(rawInput, snapshot)
+                    if (redaction.text == rawInput) part
+                    else part.copy(input = projectedToolInput(redaction.text))
+                }
+""", "")),
+        ("P8b history ToolUse arm keeps the raw object",
+         mutate(SELFTEST_TREE, HISTORY,
+                "if (redaction.text == rawInput) part\n                    else part.copy(input = projectedToolInput(redaction.text))",
+                "part")),
         ("P6 diagnostics consult the switch",
          mutate(SELFTEST_TREE, REDACTOR,
                 "        return SecretRedactionRules.redact(output, values, onRedacted)",

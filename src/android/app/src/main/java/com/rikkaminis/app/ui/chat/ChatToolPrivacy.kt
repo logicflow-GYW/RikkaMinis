@@ -77,6 +77,20 @@ internal fun redactToolHistoryForModel(messages: List<LLMMessage>): List<LLMMess
                     val redaction = EnvVarRedactor.redactForModel(part.content, snapshot)
                     if (redaction.text == part.content) part else part.copy(content = redaction.text)
                 }
+                // [fix/privacy-reenable-tooluse-1124] The switch can be turned ON
+                // after a row was saved while it was OFF — and
+                // `buildAssistantTurnPartsJson` correctly stored the real arguments
+                // in that state. This function is the LAST projection before the
+                // model reads a reloaded row, so it has to re-check the arguments
+                // too. Without this arm a credential travelled in the tool
+                // arguments, and when the tool result was clean the still-eligible
+                // native replay capsule carried the same bytes.
+                is AgentContentPart.ToolUse -> {
+                    val rawInput = part.input.toString()
+                    val redaction = EnvVarRedactor.redactForModel(rawInput, snapshot)
+                    if (redaction.text == rawInput) part
+                    else part.copy(input = projectedToolInput(redaction.text))
+                }
                 is AgentContentPart.Text -> {
                     val text = redactDerivedSummaryText(part.text, snapshot)
                     if (text == part.text) part else part.copy(text = text)
@@ -89,3 +103,21 @@ internal fun redactToolHistoryForModel(messages: List<LLMMessage>): List<LLMMess
     }
     return if (changed) guardAnthropicReplayHistory(projected, messages) else messages
 }
+
+/**
+ * Re-parse a projected tool-argument document for the model payload.
+ *
+ * Masking substitutes credential VALUES inside valid JSON, so the projected
+ * document normally still parses. If it does not, the raw bytes must never come
+ * back — the caller IS the model payload — and throwing here would fail a whole
+ * session load. A marker object keeps the payload valid JSON while carrying the
+ * already-masked text, so nothing unprojected survives and the provider still
+ * receives an object for its `input` / `arguments` field.
+ *
+ * Deliberately a separate function: the fail-closed branch is unit-tested, and
+ * the scan gate judges the arm that calls it.
+ */
+internal fun projectedToolInput(projected: String): org.json.JSONObject =
+    runCatching { org.json.JSONObject(projected) }.getOrElse {
+        org.json.JSONObject().put("_redactedArguments", projected)
+    }

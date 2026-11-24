@@ -23,6 +23,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -3894,25 +3895,18 @@ def test_privacy_switch_scope_gate():
     check("%s caught every dirty fixture" % script,
           "SELFTEST ARM FAILED" not in out, out[-280:])
     # The negative control that matters most: the real tree must be green with
-    # the gate's own arms covering each judged sink (see _PRIVACY_SCOPE_ARMS).
+    # the gate's own arms covering each judged sink.
     rc, out = run_scanner(script + ".py", ".")
     check("%s real tree green" % script, rc == 0, out[-280:])
-    for marker in ("DEFAULT_ENABLED", "persisted tool result", "replay gate",
-                   "offload payload", "transcriptRedactions", "privacyRedacted"):
-        check("%s selftest covers %r" % (script, marker), marker in _PRIVACY_SCOPE_ARMS)
-
-
-# Markers the selftest's negative arms target, kept next to the runner so a
-# deleted arm is visible here instead of silently shrinking the coverage.
-_PRIVACY_SCOPE_ARMS = (
-    "DEFAULT_ENABLED",
-    "persisted tool result",
-    "replay gate",
-    "offload payload",
-    "transcriptRedactions",
-    "privacyRedacted",
-    "redactForDiagnostics",
-)
+    # Read the arm names back from the GATE's own source. A hand-written list
+    # here only proved the list matched itself: deleting a real selftest arm
+    # left every one of these checks green.
+    with open(os.path.join(SCRIPT_DIR, script + ".py"), encoding="utf-8") as gate_file:
+        gate_src = gate_file.read()
+    arm_names = re.findall(r'\("(P[0-9A-Za-z]+) [^"]*",\s*mutate\(', gate_src)
+    check("%s arms are readable" % script, len(arm_names) >= 8, repr(arm_names))
+    for tag in ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"):
+        check("%s selftest arm present for %s" % (script, tag), tag in arm_names, repr(arm_names))
 
 
 TEST_ORDER = (

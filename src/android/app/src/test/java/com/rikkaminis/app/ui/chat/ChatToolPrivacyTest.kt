@@ -64,6 +64,62 @@ class ChatToolPrivacyTest {
         assertTrue(masked.contains("MINIS_REDACTED"))
         EnvVarPrivacyStore.setEnabled(true)
     }
+    @Test fun reEnablingPrivacyProjectsSavedToolArgumentsAndDropsTheReplay() {
+        // [fix/privacy-reenable-tooluse-1124] Privacy OFF persists the real
+        // arguments on purpose; turning the switch ON afterwards must re-project
+        // them at the last model-facing boundary. The tool result here is clean
+        // on purpose: without the argument arm the capsule stays eligible and
+        // the same credential travels inside the native replay too.
+        val canary = "opaque" + "Canary1124" + "Argument"
+        val input = JSONObject().put("password", canary)
+        EnvVarPrivacyStore.setEnabled(false)
+        val assistantJson = buildAssistantTurnPartsJson(
+            listOf(AgentContentPart.ToolUse("one", "read_probe", input)), emptyMap(), capsule("one"),
+        )
+        val resultJson = buildToolResultPartsJson(
+            listOf(AgentContentPart.ToolResult("one", "read_probe", "ordinary result")),
+        )
+        EnvVarPrivacyStore.setEnabled(true)
+        val rows = listOf(
+            com.rikkaminis.app.data.db.MessageEntity("a-one", "privacy", "assistant", assistantJson, 0L, sortOrder = 0),
+            com.rikkaminis.app.data.db.MessageEntity("r-one", "privacy", "user", resultJson, 0L, sortOrder = 1),
+        )
+        val messages = buildLlmMessagesFromParsed(parseRows(rows), File(".")) { _, _ -> null }
+        val use = messages[0].contentParts.single() as AgentContentPart.ToolUse
+        assertFalse(
+            "saved arguments must be re-projected once the switch is turned ON",
+            use.input.toString().contains(canary),
+        )
+        assertNull(
+            "a rewritten argument row is no longer byte-identical to the request, so its capsule must go",
+            messages[0].anthropicReplay,
+        )
+        assertEquals("one", use.id)
+        assertEquals("read_probe", use.name)
+        assertEquals("ordinary result", (messages[1].contentParts.single() as AgentContentPart.ToolResult).content)
+        assertTrue("the stored projection keeps the real bytes", assistantJson.contains(canary))
+        assertEquals("the executed argument object must not be mutated", canary, input.getString("password"))
+    }
+
+    @Test fun cleanToolArgumentsKeepTheCapsuleWhenPrivacyIsOn() {
+        val input = JSONObject().put("path", "/var/minis/workspace/report.txt")
+        val assistantJson = buildAssistantTurnPartsJson(
+            listOf(AgentContentPart.ToolUse("one", "read_probe", input)), emptyMap(), capsule("one"),
+        )
+        val row = com.rikkaminis.app.data.db.MessageEntity("a-one", "privacy", "assistant", assistantJson, 0L, sortOrder = 0)
+        val messages = buildLlmMessagesFromParsed(parseRows(listOf(row)), File(".")) { _, _ -> null }
+        val use = messages.single().contentParts.single() as AgentContentPart.ToolUse
+        assertEquals("/var/minis/workspace/report.txt", use.input.getString("path"))
+        assertNotNull(messages.single().anthropicReplay)
+    }
+
+    @Test fun unprojectableArgumentsStayValidJsonWithoutRawFallback() {
+        val parsed = projectedToolInput("""{"password":"[MINIS_REDACTED]"}""")
+        assertEquals("[MINIS_REDACTED]", parsed.getString("password"))
+        val fallback = projectedToolInput("not json [MINIS_REDACTED]")
+        assertEquals("not json [MINIS_REDACTED]", fallback.getString("_redactedArguments"))
+    }
+
     @Test fun derivedSummaryOnlyIsFilteredAndPinnedUserTextSurvives() {
         val user = "user literal password=1234"
         val pin = "<pinned-user-messages>password=2468</pinned-user-messages>"

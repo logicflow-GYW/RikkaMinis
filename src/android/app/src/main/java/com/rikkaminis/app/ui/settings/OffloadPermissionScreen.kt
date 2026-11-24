@@ -199,10 +199,11 @@ fun OffloadPermissionScreen(
 
         // [feat/privacy-mode-toggle-1124] Privacy Mode is a guard, so it lives
         // with the other guards rather than on the environment-variable page:
-        // it changes what the MODEL reads, not what is stored. Default OFF — the
-        // masking rewrites model-visible content (a masked file written back
-        // overwrites real values; secret-shaped NAMES in ordinary source get
-        // masked too), so it is an opt-in the user makes here.
+        // it governs what the MODEL reads (and, when ON, the copy persisted for
+        // the next reload), never the user's own stored env-var values. Default
+        // OFF — the masking rewrites model-visible content (a masked file
+        // written back overwrites real values; secret-shaped NAMES in ordinary
+        // source get masked too), so it is an opt-in the user makes here.
         SettingsSection(
             header = stringResource(R.string.perm_privacy_mode_header),
             footer = stringResource(R.string.perm_privacy_mode_footer),
