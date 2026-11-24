@@ -47,17 +47,31 @@ class ChatToolPrivacyEngineTest {
         AgentLoopEngine(fake, observer()).runAgentLoop(ScriptedProvider(model = LLMModel("claude-haiku-4-5", "fixture", "Anthropic")), null)
         assertNotNull(fake.updatedReplays.single().second)
     }
-    @Test fun privacyOffStillPersistsSafeCopyAndInvalidatesReplay() = runTest(dispatcher) {
+    @Test fun privacyOffKeepsTheRealCopyAndTheReplayEligible() = runTest(dispatcher) {
+        // [feat/privacy-mode-toggle-1124] With the switch OFF nothing model-facing
+        // was rewritten, so the stored copy is the real one and the capsule still
+        // matches what the provider saw. Storing a diagnostics-masked copy here
+        // used to hand the next turn a placeholder instead of the value.
         EnvVarPrivacyStore.setEnabled(false)
         val fake = FakeAgentLoopHost(agentTools = listOf(AgentToolDefinition("read_probe", "probe", emptyMap())))
-        fake.toolResults.add(ToolExecutionResult("password=1234", true, privacyRedacted = true))
+        fake.toolResults.add(ToolExecutionResult("real result bytes", true))
         fake.scripts.add(TurnScript(events("off")))
         fake.scripts.add(TurnScript(listOf(LLMStreamChunk.Text("done"), LLMStreamChunk.Finished("end_turn"))))
         AgentLoopEngine(fake, observer()).runAgentLoop(ScriptedProvider(model = LLMModel("claude-haiku-4-5", "fixture", "Anthropic")), null)
         val hot = fake.agentHistory.single { message -> message.contentParts.any { it is AgentContentPart.ToolResult } }
-        assertEquals("password=1234", (hot.contentParts.single() as AgentContentPart.ToolResult).content)
-        assertNull(fake.persistedReplays.first().second)
-        assertEquals(listOf("ToolResult"), fake.persistedToolResults.single())
+        assertEquals("real result bytes", (hot.contentParts.single() as AgentContentPart.ToolResult).content)
+        assertNotNull(fake.updatedReplays.single().second)
+        EnvVarPrivacyStore.setEnabled(true)
+    }
+    @Test fun privacyOnStillDropsTheReplayForARedactedExecution() = runTest(dispatcher) {
+        // The companion arm: the switch being ON must not weaken the existing
+        // rule that a rewritten payload invalidates its capsule.
+        EnvVarPrivacyStore.setEnabled(true)
+        val fake = FakeAgentLoopHost(agentTools = listOf(AgentToolDefinition("read_probe", "probe", emptyMap())))
+        fake.toolResults.add(ToolExecutionResult("masked result bytes", true, privacyRedacted = true))
+        fake.scripts.add(TurnScript(events("on")))
+        fake.scripts.add(TurnScript(listOf(LLMStreamChunk.Text("done"), LLMStreamChunk.Finished("end_turn"))))
+        AgentLoopEngine(fake, observer()).runAgentLoop(ScriptedProvider(model = LLMModel("claude-haiku-4-5", "fixture", "Anthropic")), null)
         assertNull(fake.updatedReplays.single().second)
     }
 }

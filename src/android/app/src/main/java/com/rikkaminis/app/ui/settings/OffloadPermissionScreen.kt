@@ -83,6 +83,10 @@ fun OffloadPermissionScreen(
     // [C7] Separate switch for the protected-zone delete guard (default ON).
     val zoneDeleteGuardEnabled by ZoneDeleteGuardStore.enabled.collectAsState()
 
+    // [feat/privacy-mode-toggle-1124] Privacy Mode (default OFF) — masks
+    // credential-shaped content in what the model reads.
+    val privacyModeEnabled by com.rikkaminis.app.data.EnvVarPrivacyStore.enabled.collectAsState()
+
     val context = LocalContext.current
 
     // [auto-approve] One-shot batch grant for the runtime permissions the
@@ -191,6 +195,26 @@ fun OffloadPermissionScreen(
                     showDivider = false,
                 )
             }
+        }
+
+        // [feat/privacy-mode-toggle-1124] Privacy Mode is a guard, so it lives
+        // with the other guards rather than on the environment-variable page:
+        // it governs what the MODEL reads (and, when ON, the copy persisted for
+        // the next reload), never the user's own stored env-var values. Default
+        // OFF — the masking rewrites model-visible content (a masked file
+        // written back overwrites real values; secret-shaped NAMES in ordinary
+        // source get masked too), so it is an opt-in the user makes here.
+        SettingsSection(
+            header = stringResource(R.string.perm_privacy_mode_header),
+            footer = stringResource(R.string.perm_privacy_mode_footer),
+        ) {
+            SettingsSwitchRow(
+                title = stringResource(R.string.perm_privacy_mode_title),
+                subtitle = stringResource(R.string.perm_privacy_mode_desc),
+                checked = privacyModeEnabled,
+                onCheckedChange = { com.rikkaminis.app.data.EnvVarPrivacyStore.setEnabled(it) },
+                showDivider = false,
+            )
         }
 
         // [C7] The protected-zone delete guard has its OWN switch, and it sits

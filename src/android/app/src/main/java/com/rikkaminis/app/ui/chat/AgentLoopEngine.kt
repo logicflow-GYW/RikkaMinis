@@ -4829,7 +4829,15 @@ internal class AgentLoopEngine(
                     errorMessage = errMsgForDetector,
                     toolCallId = id,
                 )
-                if (result.privacyRedacted) {
+                // [feat/privacy-mode-toggle-1124] Only a real model-facing
+                // redaction replaces the persisted payload. With Privacy Mode
+                // OFF the model already read the real bytes, so storing a
+                // diagnostics-redacted copy here would hand the NEXT turn a
+                // placeholder in place of the value it is about to reuse
+                // (device log 2026-11-24: `eval: line 892: [MINIS_REDACTED]:
+                // not found`). The SensitiveCommandPolicy entry above is a
+                // different rule and stays unconditional.
+                if (result.privacyRedacted && com.rikkaminis.app.data.EnvVarPrivacyStore.isEnabled) {
                     transcriptRedactions[id] = com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(result.output, pass3Snapshot, null).text
                 }
                 val outputForLLM = if (postRecord.level == Level.WARNING && postRecord.message != null) {

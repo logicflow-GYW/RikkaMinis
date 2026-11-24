@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -69,6 +70,9 @@ private const val MASKED_ENV_VAR_VALUE = "\u2022\u2022\u2022\u2022\u2022\u2022\u
 fun EnvironmentVariablesScreen(
     envVarRepository: EnvVarRepository,
     onBack: () -> Unit,
+    // [feat/privacy-mode-toggle-1124] The Privacy Mode switch now lives on the
+    // Permissions page; this screen keeps a pointer row to it.
+    onOpenPermissions: () -> Unit = {},
 ) {
     val entries by envVarRepository.entries.collectAsState()
     var showAddSheet by remember { mutableStateOf(false) }
@@ -108,8 +112,6 @@ fun EnvironmentVariablesScreen(
         }
     }
 
-    val privacyEnabled by com.rikkaminis.app.data.EnvVarPrivacyStore.enabled.collectAsState()
-
     SettingsScaffold(
         title = stringResource(R.string.env_var_title),
         onBack = null, // top-level page: rely on system back gesture / bottom nav
@@ -121,14 +123,19 @@ fun EnvironmentVariablesScreen(
             }
         },
     ) {
+        // [feat/privacy-mode-toggle-1124] The Privacy Mode switch moved to
+        // Settings → Permissions (it is a guard on what the model reads, and it
+        // is off by default). Kept as a pointer row so a user who comes here
+        // looking for it is not left guessing where it went.
         SettingsSection(
             header = stringResource(R.string.env_var_privacy_header),
-            footer = stringResource(R.string.env_var_privacy_footer),
+            footer = stringResource(R.string.env_var_privacy_moved),
         ) {
-            SettingsSwitchRow(
+            SettingsRow(
+                icon = Icons.Outlined.Shield,
                 title = stringResource(R.string.env_var_privacy_toggle),
-                checked = privacyEnabled,
-                onCheckedChange = { com.rikkaminis.app.data.EnvVarPrivacyStore.setEnabled(it) },
+                subtitle = stringResource(R.string.env_var_privacy_moved_row),
+                onClick = onOpenPermissions,
                 showDivider = false,
             )
         }

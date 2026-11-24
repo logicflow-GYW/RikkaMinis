@@ -39,6 +39,13 @@ internal fun buildAssistantTurnPartsJson(
     // replay-eligibility argument below is a SIBLING lambda, and CI caught the
     // narrower scope as `Unresolved reference 'snap'` (run 45185943724).
     val snap = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
+    // [feat/privacy-mode-toggle-1124] The persisted tool_use payload follows the
+    // same switch as the live model view: with Privacy Mode OFF the row keeps
+    // the real bytes, so a reload does not hand the model a placeholder in
+    // place of an argument it must execute.
+    val redact = com.rikkaminis.app.data.EnvVarPrivacyStore.isEnabled
+    fun view(text: String): String =
+        if (redact) com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(text, snap, null).text else text
     return appendAnthropicReplayPart(buildString {
     append("[")
     // [audit-0917] Track what was actually emitted instead of using the loop
@@ -59,10 +66,10 @@ internal fun buildAssistantTurnPartsJson(
                 val name = part.name
                 if (name.isBlank()) return@forEach
                 if (emitted++ > 0) append(",")
-                val inputStr = com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(part.input.toString(), snap, null).text
+                val inputStr = view(part.input.toString())
                 val meta = toolBlockMeta[part.id]
-                val desc = com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(meta?.toolTitle ?: "", snap, null).text
-                val pageURL = com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(meta?.browserURL ?: "", snap, null).text
+                val desc = view(meta?.toolTitle ?: "")
+                val pageURL = view(meta?.browserURL ?: "")
                 val imgPath = meta?.imageFilePath ?: ""
                 append("""{"type":"toolUse","value":{"toolUseId":${escapeJson(part.id)},"name":${escapeJson(name)},"input":${escapeJson(inputStr)},"description":${escapeJson(desc)},"pageURL":${escapeJson(pageURL)},"imageFilePath":${escapeJson(imgPath)},"thoughtSignature":null}}""")
             }
@@ -71,7 +78,11 @@ internal fun buildAssistantTurnPartsJson(
     }
     append("]")
 }, anthropicReplay?.takeIf {
-    parts.filterIsInstance<AgentContentPart.ToolUse>().all { tool ->
+    // Same switch as the payload above: with Privacy Mode OFF nothing was
+    // rewritten, so the persisted row is byte-identical to the real request and
+    // the capsule stays eligible. With it ON, any hit means the stored copy
+    // differs from what the provider actually saw, so the capsule is dropped.
+    !redact || parts.filterIsInstance<AgentContentPart.ToolUse>().all { tool ->
         com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(tool.input.toString(), snap, null).hits == 0
     }
 })
@@ -126,12 +137,25 @@ internal fun buildToolResultPartsJson(results: List<AgentContentPart.ToolResult>
     if (results.isEmpty()) return "[]"
     // [fix/replay-guard-cost-1123] One credential snapshot for the whole batch.
     // One result = one decrypt-all was fine; a 10-tool batch paid it 10 times.
+    //
+    // [feat/privacy-mode-toggle-1124] The persisted copy follows the user's
+    // Privacy Mode switch, exactly like the live model view. Storing a masked
+    // copy while the switch is OFF put the placeholder back into the context on
+    // the next reload — the model then reused `[MINIS_REDACTED]` as if it were
+    // the real value (device log 2026-11-24: `eval: line 892: [MINIS_REDACTED]:
+    // not found`). Diagnostics stay redacted either way (see EnvVarRedactor).
     val snapshot = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
+    val redact = com.rikkaminis.app.data.EnvVarPrivacyStore.isEnabled
     return buildString {
         append("[")
         results.forEachIndexed { index, result ->
             if (index > 0) append(",")
-            append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(result.content, snapshot, null).text)},"success":${!result.isError}}}""")
+            val output = if (redact) {
+                com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(result.content, snapshot, null).text
+            } else {
+                result.content
+            }
+            append("""{"type":"toolResult","value":{"toolUseId":${escapeJson(result.id)},"name":${escapeJson(result.name)},"output":${escapeJson(output)},"success":${!result.isError}}}""")
         }
         append("]")
     }

@@ -1366,6 +1366,9 @@ fun AppNavigation(
                 EnvironmentVariablesScreen(
                     envVarRepository = envVarRepository,
                     onBack = { navController.safePopBackStack() },
+                    // [feat/privacy-mode-toggle-1124] Privacy Mode now lives on
+                    // the Permissions page; the env page keeps a pointer row.
+                    onOpenPermissions = { navController.safeNavigate(Routes.PERMISSIONS) },
                 )
             }
         }

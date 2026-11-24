@@ -226,7 +226,12 @@
     <string name="env_var_add">추가</string>
     <string name="env_var_privacy_header">프라이버시</string>
     <string name="env_var_privacy_toggle">프라이버시 모드</string>
-    <string name="env_var_privacy_footer">개인정보 보호 모드는 도구 결과, 복원된 기록 및 요약을 모델로 보내기 전에 알려진 인증 정보와 명확한 민감 필드를 숨깁니다. 새 진단 기록과 도구 기록은 항상 마스킹됩니다. 원본 파일과 이미지는 변경되지 않으며 이미지 안이나 임의로 인코딩된 비밀은 검사하지 않습니다. 마스킹된 사본으로 원본을 덮어쓰지 말고 민감하지 않은 필드만 편집하세요.</string>
+    <string name="perm_privacy_mode_header">프라이버시 모드</string>
+    <string name="perm_privacy_mode_title">모델 입력의 인증 정보 마스킹</string>
+    <string name="perm_privacy_mode_desc">모델이 읽기 전에 도구 결과, 복원된 기록, 요약, 컨텍스트 오프로드 파일의 알려진 인증 정보, 비밀 이름 필드, 식별 가능한 토큰 형태를 숨깁니다. 기본값은 꺼짐입니다. 마스킹은 저장된 사본도 다시 쓰므로 마스킹된 파일을 되쓰면 실제 값이 자리 표시자로 바뀔 수 있고, 일반 소스 코드에서 이름만 비밀처럼 보이는 변수도 마스킹됩니다.</string>
+    <string name="perm_privacy_mode_footer">영구 진단(추적, 오류 블록, 재생 메타데이터)은 이 스위치 상태와 무관하게 항상 마스킹됩니다. 끈다고 해서 로그 파일이 비밀 저장소가 되지는 않습니다. 이미지와 임의로 인코딩된 비밀은 검사하지 않습니다.</string>
+    <string name="env_var_privacy_moved">이 스위치는 설정 → 권한으로 이동했습니다. 기본값은 꺼짐입니다.</string>
+    <string name="env_var_privacy_moved_row">권한에서 프라이버시 모드 관리</string>
     <string name="env_var_restart_terminal_note">어시스턴트가 실행하는 명령은 매번 이 값을 다시 읽으므로(삭제 포함) 재시작이 필요하지 않습니다. 시간대와 프록시 변경은 열려 있는 터미널에 반영되지만 다른 변수는 반영되지 않습니다. 이미 실행 중인 프로그램은 시작할 때의 환경을 그대로 유지합니다.</string>
     <string name="env_var_restart_terminal_body">변수는 터미널 세션이 시작될 때 주입됩니다. 이미 열려 있는 터미널은 이전 환경을 유지하므로 닫았다가 다시 열면 반영됩니다.</string>
     <string name="env_var_restart_terminal_title">터미널 세션</string>

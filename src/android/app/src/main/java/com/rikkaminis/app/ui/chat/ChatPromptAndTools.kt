@@ -396,7 +396,14 @@ internal suspend fun ChatViewModel.executeTool(
     val modelView = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(result.output, privacySnapshot)
     val modelResult = result.copy(
         output = modelView.text,
-        privacyRedacted = result.privacyRedacted || modelView.hits > 0 || diagView.hits > 0 || safeArgs != argsJson,
+        // [feat/privacy-mode-toggle-1124] This flag means "the MODEL-facing
+        // projection changed real tool bytes" (see ToolExecutionResult). The
+        // diagnostics projection and the args copy are redacted unconditionally
+        // — including with the switch OFF — so folding them in here made the
+        // flag true while the model had in fact read the real bytes. Any future
+        // consumer that keys replay eligibility off this flag would then drop a
+        // capsule that still matches the request the provider saw.
+        privacyRedacted = result.privacyRedacted || modelView.hits > 0,
     )
 
     // T9: record tool result event
@@ -447,7 +454,7 @@ internal suspend fun ChatViewModel.executeTool(
                 // operation, so it is never hoisted above the executor.
                 val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(hinted.output, privacySnapshot)
                 hinted.copy(output = view.text,
-                    privacyRedacted = hinted.privacyRedacted || view.hits > 0 || diagView.hits > 0 || safeArgs != argsJson)
+                    privacyRedacted = hinted.privacyRedacted || view.hits > 0)
             }
         }
     }

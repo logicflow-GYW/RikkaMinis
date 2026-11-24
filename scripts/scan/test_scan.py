@@ -23,6 +23,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -3878,6 +3879,36 @@ def test_tool_args_log_redaction_gate():
         rc, out = run_scanner(script + ".py", *real_args)
         check("%s real tree green" % script, rc == 0, out[-280:])
 
+def test_privacy_switch_scope_gate():
+    print("━━━ privacy-mode switch scope gate (selftest teeth + real tree) ━━━")
+    script = "privacy_switch_scope_check"
+    proc = subprocess.run(
+        [sys.executable, os.path.join(SCRIPT_DIR, script + ".py"), "--selftest"],
+        capture_output=True, text=True,
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    check("%s selftest has teeth" % script,
+          proc.returncode == 0 and "SELFTEST=PASS" in out, out[-280:])
+    # The gate prints `SELFTEST ARM FAILED: <arm>` for every mutation that did
+    # NOT turn the tree red — i.e. a dirty tree the gate failed to catch. A gate
+    # with no teeth reports arms here instead of PASS.
+    check("%s caught every dirty fixture" % script,
+          "SELFTEST ARM FAILED" not in out, out[-280:])
+    # The negative control that matters most: the real tree must be green with
+    # the gate's own arms covering each judged sink.
+    rc, out = run_scanner(script + ".py", ".")
+    check("%s real tree green" % script, rc == 0, out[-280:])
+    # Read the arm names back from the GATE's own source. A hand-written list
+    # here only proved the list matched itself: deleting a real selftest arm
+    # left every one of these checks green.
+    with open(os.path.join(SCRIPT_DIR, script + ".py"), encoding="utf-8") as gate_file:
+        gate_src = gate_file.read()
+    arm_names = re.findall(r'\("(P[0-9A-Za-z]+) [^"]*",\s*mutate\(', gate_src)
+    check("%s arms are readable" % script, len(arm_names) >= 8, repr(arm_names))
+    for tag in ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"):
+        check("%s selftest arm present for %s" % (script, tag), tag in arm_names, repr(arm_names))
+
+
 TEST_ORDER = (
     "test_four_way",
     "test_four_way_derived",
@@ -3934,6 +3965,7 @@ TEST_ORDER = (
     "test_scan_parallel_local_refusal",
     "test_surgery_1122_gates",
     "test_tool_args_log_redaction_gate",
+    "test_privacy_switch_scope_gate",
 )
 
 RESULT_TAG = "@@TEST_RESULT@@"

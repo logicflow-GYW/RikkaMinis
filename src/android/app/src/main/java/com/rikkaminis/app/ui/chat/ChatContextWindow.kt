@@ -341,8 +341,16 @@ internal fun ChatViewModel.offloadContextIfNeeded(
         val newPart: AgentContentPart? = when (part) {
             is AgentContentPart.ToolResult -> {
                 if (part.content.length > 500) {
+                    // [feat/privacy-mode-toggle-1124] The offloaded file is a
+                    // durable artifact the agent re-reads later, so it follows
+                    // the user's Privacy Mode switch rather than always masking.
+                    val payload = if (com.rikkaminis.app.data.EnvVarPrivacyStore.isEnabled) {
+                        com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(part.content, offloadSnapshot, null).text
+                    } else {
+                        part.content
+                    }
                     linuxPath = ContextOffload.offloadContent(
-                        context, sid, com.rikkaminis.app.data.EnvVarRedactor.redactWithSnapshot(part.content, offloadSnapshot, null).text,
+                        context, sid, payload,
                         toolId = part.id, toolName = part.name,
                     )
                 }
