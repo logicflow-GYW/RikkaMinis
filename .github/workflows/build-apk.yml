@@ -429,6 +429,20 @@ jobs:
         run: |
           cd src/android
           ./gradlew clean --stacktrace
+      # [ci/attribution 2026-11-24] Which machine class this build landed on.
+      #
+      # `:app:minifyReleaseWithR8` is 60-67% of this job's wall clock and varied
+      # 390s-731s across runs of the same tree. The first heap A/B (branch
+      # ci/r8-probe-1124) produced two runs on Xeon 6975P-C and one on AMD
+      # EPYC 7763, and the EPYC one could not be compared to the others at all.
+      # Without a CPU fingerprint a slow build cannot be told apart from a
+      # heavier one, or from a slower machine. Costs well under a second.
+      - name: Record runner CPU
+        run: |
+          nproc
+          lscpu | grep -E 'Model name|CPU\(s\):|CPU max MHz|MHz' || true
+          grep MemTotal /proc/meminfo || true
+          grep -n 'org.gradle.jvmargs' src/android/gradle.properties || true
       - name: Build APK with Gradle
         run: |
           cd src/android
