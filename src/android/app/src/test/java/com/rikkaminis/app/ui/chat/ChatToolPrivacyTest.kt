@@ -107,11 +107,18 @@ class ChatToolPrivacyTest {
             listOf(AgentContentPart.ToolUse("one", "read_probe", input)), emptyMap(),
             capsule("one", input.toString()),
         )
-        val row = com.rikkaminis.app.data.db.MessageEntity("a-one", "privacy", "assistant", assistantJson, 0L, sortOrder = 0)
-        val messages = buildLlmMessagesFromParsed(parseRows(listOf(row)), File(".")) { _, _ -> null }
-        val use = messages.single().contentParts.single() as AgentContentPart.ToolUse
+        // The replay guard pairs an assistant row with its adjacent real
+        // tool_result row, so the fixture needs both — a lone assistant row is
+        // dropped for missing pairing, not for the privacy switch.
+        val resultJson = buildToolResultPartsJson(listOf(AgentContentPart.ToolResult("one", "read_probe", "stored")))
+        val rows = listOf(
+            com.rikkaminis.app.data.db.MessageEntity("a-one", "privacy", "assistant", assistantJson, 0L, sortOrder = 0),
+            com.rikkaminis.app.data.db.MessageEntity("r-one", "privacy", "user", resultJson, 0L, sortOrder = 1),
+        )
+        val messages = buildLlmMessagesFromParsed(parseRows(rows), File(".")) { _, _ -> null }
+        val use = messages[0].contentParts.single() as AgentContentPart.ToolUse
         assertEquals("/var/minis/workspace/report.txt", use.input.getString("path"))
-        assertNotNull(messages.single().anthropicReplay)
+        assertNotNull(messages[0].anthropicReplay)
     }
 
     @Test fun unprojectableArgumentsStayValidJsonWithoutRawFallback() {
