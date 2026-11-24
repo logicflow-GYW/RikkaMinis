@@ -15,9 +15,9 @@ class ChatToolPrivacyTest {
     private var privacy = true
     @Before fun setup() { privacy = EnvVarPrivacyStore.isEnabled; EnvVarPrivacyStore.setEnabled(true) }
     @After fun cleanup() { EnvVarPrivacyStore.setEnabled(privacy) }
-    private fun capsule(id: String) = AnthropicReplayCodec.complete(AnthropicReplay.Source.fromActualRequest(
+    private fun capsule(id: String, input: String = "{}") = AnthropicReplayCodec.complete(AnthropicReplay.Source.fromActualRequest(
         "https://api.anthropic.com/v1/messages", "claude-haiku-4-5", "privacy-fixture")!!,
-        Json.parseToJsonElement("""[{"type":"thinking","thinking":"","signature":"PRIVATE-CANARY"},{"type":"tool_use","id":"$id","name":"read_probe","input":{}}]""") as JsonArray)
+        Json.parseToJsonElement("""[{"type":"thinking","thinking":"","signature":"PRIVATE-CANARY"},{"type":"tool_use","id":"$id","name":"read_probe","input":$input}]""") as JsonArray)
     private fun group(id: String, result: String) = listOf(
         LLMMessage(LLMMessage.Role.ASSISTANT, "", contentParts = listOf(AgentContentPart.ToolUse(id, "read_probe", JSONObject())), dbMessageId = "a-$id", anthropicReplay = capsule(id)),
         LLMMessage(LLMMessage.Role.USER, "", contentParts = listOf(AgentContentPart.ToolResult(id, "read_probe", result)), dbMessageId = "r-$id"))
@@ -104,7 +104,8 @@ class ChatToolPrivacyTest {
     @Test fun cleanToolArgumentsKeepTheCapsuleWhenPrivacyIsOn() {
         val input = JSONObject().put("path", "/var/minis/workspace/report.txt")
         val assistantJson = buildAssistantTurnPartsJson(
-            listOf(AgentContentPart.ToolUse("one", "read_probe", input)), emptyMap(), capsule("one"),
+            listOf(AgentContentPart.ToolUse("one", "read_probe", input)), emptyMap(),
+            capsule("one", input.toString()),
         )
         val row = com.rikkaminis.app.data.db.MessageEntity("a-one", "privacy", "assistant", assistantJson, 0L, sortOrder = 0)
         val messages = buildLlmMessagesFromParsed(parseRows(listOf(row)), File(".")) { _, _ -> null }
