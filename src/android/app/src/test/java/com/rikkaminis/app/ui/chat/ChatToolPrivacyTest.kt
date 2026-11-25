@@ -38,11 +38,16 @@ class ChatToolPrivacyTest {
         EnvVarPrivacyStore.setEnabled(true)
         assertNull(redactToolHistoryForModel(raw)[0].anthropicReplay)
     }
-    @Test fun coldReadRealParserBuilderProjectsOldRowWithoutChangingRawJson() {
+    @Test fun coldReadKeepsCanonicalBytesAndProjectsOnlyTheRequest() {
         val raw = """[{"type":"toolResult","value":{"toolUseId":"one","name":"read_probe","output":"password=1234","success":true}}]"""
         val row = com.rikkaminis.app.data.db.MessageEntity("result", "privacy", "user", raw, 0L, sortOrder = 0)
-        val messages = buildLlmMessagesFromParsed(parseRows(listOf(row)), File(".")) { _, _ -> null }
-        assertFalse((messages.single().contentParts.single() as AgentContentPart.ToolResult).content.contains("1234"))
+        val history = buildLlmMessagesFromParsed(parseRows(listOf(row)), File(".")) { _, _ -> null }
+        assertEquals("password=1234", (history.single().contentParts.single() as AgentContentPart.ToolResult).content)
+        val request = redactToolHistoryForModel(history)
+        assertFalse((request.single().contentParts.single() as AgentContentPart.ToolResult).content.contains("1234"))
+        EnvVarPrivacyStore.setEnabled(false)
+        assertSame(history, redactToolHistoryForModel(history))
+        assertEquals("password=1234", (history.single().contentParts.single() as AgentContentPart.ToolResult).content)
         assertEquals(raw, row.partsJson)
     }
     @Test fun durableWriterFollowsThePrivacySwitch() {
@@ -74,7 +79,7 @@ class ChatToolPrivacyTest {
         val input = JSONObject().put("password", canary)
         EnvVarPrivacyStore.setEnabled(false)
         val assistantJson = buildAssistantTurnPartsJson(
-            listOf(AgentContentPart.ToolUse("one", "read_probe", input)), emptyMap(), capsule("one"),
+            listOf(AgentContentPart.ToolUse("one", "read_probe", input)), emptyMap(), capsule("one", input.toString()),
         )
         val resultJson = buildToolResultPartsJson(
             listOf(AgentContentPart.ToolResult("one", "read_probe", "ordinary result")),
@@ -84,7 +89,9 @@ class ChatToolPrivacyTest {
             com.rikkaminis.app.data.db.MessageEntity("a-one", "privacy", "assistant", assistantJson, 0L, sortOrder = 0),
             com.rikkaminis.app.data.db.MessageEntity("r-one", "privacy", "user", resultJson, 0L, sortOrder = 1),
         )
-        val messages = buildLlmMessagesFromParsed(parseRows(rows), File(".")) { _, _ -> null }
+        val history = buildLlmMessagesFromParsed(parseRows(rows), File(".")) { _, _ -> null }
+        assertNotNull("canonical history retains its matching capsule", history[0].anthropicReplay)
+        val messages = redactToolHistoryForModel(history)
         val use = messages[0].contentParts.single() as AgentContentPart.ToolUse
         assertFalse(
             "saved arguments must be re-projected once the switch is turned ON",
@@ -99,6 +106,13 @@ class ChatToolPrivacyTest {
         assertEquals("ordinary result", (messages[1].contentParts.single() as AgentContentPart.ToolResult).content)
         assertTrue("the stored projection keeps the real bytes", assistantJson.contains(canary))
         assertEquals("the executed argument object must not be mutated", canary, input.getString("password"))
+        EnvVarPrivacyStore.setEnabled(false)
+        val offRequest = redactToolHistoryForModel(history)
+        assertSame(history, offRequest)
+        assertEquals(canary, (offRequest[0].contentParts.single() as AgentContentPart.ToolUse).input.getString("password"))
+        assertNotNull("switching OFF restores the eligible original capsule too", offRequest[0].anthropicReplay)
+        EnvVarPrivacyStore.setEnabled(true)
+        assertNull("switching ON again must still drop the projected capsule", redactToolHistoryForModel(history)[0].anthropicReplay)
     }
 
     @Test fun cleanToolArgumentsKeepTheCapsuleWhenPrivacyIsOn() {
@@ -119,6 +133,26 @@ class ChatToolPrivacyTest {
         val use = messages[0].contentParts.single() as AgentContentPart.ToolUse
         assertEquals("/var/minis/workspace/report.txt", use.input.getString("path"))
         assertNotNull(messages[0].anthropicReplay)
+    }
+
+    @Test fun unavailableCredentialSourceKeepsTheRequestValidAndCanonicalHistoryUntouched() {
+        val previousSource = com.rikkaminis.app.data.EnvVarRedactor.additionalSecretValues
+        val input = JSONObject().put("password", "synthetic" + "Audit1125")
+        val history = listOf(LLMMessage(LLMMessage.Role.ASSISTANT, "", contentParts = listOf(
+            AgentContentPart.ToolUse("one", "read_probe", input),
+        )))
+        com.rikkaminis.app.data.EnvVarRedactor.additionalSecretValues = { error("unavailable fixture") }
+        try {
+            val request = redactToolHistoryForModel(history)
+            val projected = (request.single().contentParts.single() as AgentContentPart.ToolUse).input
+            assertTrue(projected.has("_redactedArguments"))
+            assertFalse(projected.toString().contains(input.getString("password")))
+            assertSame(input, (history.single().contentParts.single() as AgentContentPart.ToolUse).input)
+            EnvVarPrivacyStore.setEnabled(false)
+            assertSame(history, redactToolHistoryForModel(history))
+        } finally {
+            com.rikkaminis.app.data.EnvVarRedactor.additionalSecretValues = previousSource
+        }
     }
 
     @Test fun unprojectableArgumentsStayValidJsonWithoutRawFallback() {
