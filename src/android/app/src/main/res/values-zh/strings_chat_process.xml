@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_process_tools">%1$d 个工具</string>
+    <string name="chat_process_duration">累计 %1$s 秒</string>
+    <string name="chat_process_failed">%1$d 个失败</string>
+    <string name="chat_process_cancelled">%1$d 个已取消</string>
+    <string name="chat_process_deduplicated">%1$d 个重复跳过</string>
+    <string name="chat_process_expanded">已展开</string>
+    <string name="chat_process_collapsed">已收起</string>
+    <string name="chat_process_copy_all">复制全部</string>
+    <string name="chat_process_copied">已复制完整思考原文</string>
+    <string name="chat_process_copied_file">原文较长，已将完整文本文件复制到剪贴板</string>
+    <string name="chat_process_copy_failed">复制失败，请重试</string>
+</resources>

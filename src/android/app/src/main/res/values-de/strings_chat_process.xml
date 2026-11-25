@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_process_tools">%1$d Werkzeuge</string>
+    <string name="chat_process_duration">Insgesamt %1$s s</string>
+    <string name="chat_process_failed">%1$d fehlgeschlagen</string>
+    <string name="chat_process_cancelled">%1$d abgebrochen</string>
+    <string name="chat_process_deduplicated">%1$d übersprungen</string>
+    <string name="chat_process_expanded">Ausgeklappt</string>
+    <string name="chat_process_collapsed">Eingeklappt</string>
+    <string name="chat_process_copy_all">Alles kopieren</string>
+    <string name="chat_process_copied">Vollständiger Denktext kopiert</string>
+    <string name="chat_process_copied_file">Vollständiger Denktext wegen der Größenbegrenzung als Textdatei kopiert</string>
+    <string name="chat_process_copy_failed">Kopieren fehlgeschlagen. Erneut versuchen.</string>
+</resources>
