@@ -110,6 +110,27 @@ class SecretRedactionRulesTest {
     }
 
     @Test
+    fun `groq and cloudflare shaped tokens are redacted`() {
+        // [fix/redactor-token-prefixes-1125] These two prefixes existed only in
+        // the diagnostics recorder's regex, so the model-facing rules let a real
+        // key through untouched even with Privacy Mode ON.
+        val groq = "gsk_" + "abcdefghijklmnopqrstuvwxyz"
+        val cf = "cfat_" + "AbCdEfGhIjKlMnOpQrStUvWx"
+        val r = redact("key $groq then $cf")
+        assertFalse(r.text.contains(groq))
+        assertFalse(r.text.contains(cf))
+        assertEquals(2, r.hits)
+    }
+
+    @Test
+    fun `embedded or too short prefix runs stay visible`() {
+        // The boundary rule exists so words like "task-1" survive; it must not
+        // also swallow a genuine key that merely follows a letter.
+        val text = "gsk_short xxgsk_abcdefghijklmnop task-1"
+        assertEquals(text, redact(text).text)
+    }
+
+    @Test
     fun `dotenv assignment with a secret name is redacted`() {
         val r = redact("API_KEY=abcdef123456\nTIMEOUT=30")
         assertFalse(r.text.contains("abcdef123456"))

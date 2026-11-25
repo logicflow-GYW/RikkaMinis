@@ -264,11 +264,17 @@ object EnvVarRedactor {
         "PASSWORD", "PASSWD", "SECRET", "TOKEN", "CREDENTIAL", "AUTH", "APIKEY",
     )
 
-    /** Well-known token prefixes that carry a credential with no name beside them. */    private val TOKEN_PREFIXES = listOf(
-        "sk-", "sk_", "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
-        "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-",
-        "AKIA", "ASIA", "AIza", "hf_", "rnd_", "eyJ",
-    )
+    /**
+     * Well-known token prefixes that carry a credential with no name beside them.
+     *
+     * [fix/redactor-token-prefixes-1125] Derived from
+     * [SecretRedactionRules.TOKEN_PREFIXES] instead of a second literal copy:
+     * the copies had drifted, so this degraded path was missing the same Groq
+     * (`gsk_`) and Cloudflare (`cfat_`) shapes the model-facing rules missed.
+     * `eyJ` stays local on purpose — this path has no JWT structure check, and
+     * the shape rules already handle JWTs separately.
+     */
+    private val TOKEN_PREFIXES = SecretRedactionRules.TOKEN_PREFIXES + "eyJ"
 
     /** Scheme words after which the actual credential is the next token. */
     private val AUTH_SCHEME_WORDS = setOf("BEARER", "BASIC", "TOKEN", "SSWS", "DIGEST")
