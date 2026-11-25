@@ -1,12 +1,14 @@
 package com.rikkaminis.app.ui.components
 
 import android.os.Build
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
@@ -70,6 +72,7 @@ fun rememberGlassStyle(backdrop: GlassBackdrop?, base: Color): HazeStyle =
     }
 
 /** Keep focus scrolling below the opaque toolbar, while retaining the platform spec when off. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun rememberGlassBringIntoViewSpec(topInset: Dp): BringIntoViewSpec {
     val parent = LocalBringIntoViewSpec.current
@@ -80,6 +83,20 @@ fun rememberGlassBringIntoViewSpec(topInset: Dp): BringIntoViewSpec {
                 GlassSurfacePolicy.focusScrollDistance(offset, size, containerSize, insetPx)
         }
     }
+}
+
+/**
+ * The ONE opt-in point for the experimental bring-into-view local: hosts call
+ * this instead of naming `LocalBringIntoViewSpec`, so a future API graduation
+ * (or deprecation) is a single edit rather than a per-screen opt-in.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ProvideGlassBringIntoViewSpec(topInset: Dp, content: @Composable () -> Unit) {
+    CompositionLocalProvider(
+        LocalBringIntoViewSpec provides rememberGlassBringIntoViewSpec(topInset),
+        content = content,
+    )
 }
 
 /** Must be called before the toolbar, as siblings of it, never inside its source subtree. */

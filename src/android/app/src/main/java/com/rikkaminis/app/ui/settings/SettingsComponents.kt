@@ -2,7 +2,6 @@ package com.rikkaminis.app.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,7 +56,7 @@ import com.rikkaminis.app.ui.chat.topBarTail
 import com.rikkaminis.app.ui.components.GlassTopBarLayers
 import com.rikkaminis.app.ui.components.LocalGlassBackdrop
 import com.rikkaminis.app.ui.components.rememberGlassBackdrop
-import com.rikkaminis.app.ui.components.rememberGlassBringIntoViewSpec
+import com.rikkaminis.app.ui.components.ProvideGlassBringIntoViewSpec
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 
@@ -175,7 +174,7 @@ fun SettingsScaffold(
                 if (backdrop != null) Modifier.topBarTail(topExtent).hazeSource(hazeState)
                 else Modifier,
             )
-        CompositionLocalProvider(LocalBringIntoViewSpec provides rememberGlassBringIntoViewSpec(topExtent)) {
+        ProvideGlassBringIntoViewSpec(topExtent) {
         Column(
             // The viewport reaches behind the bar; equal INNER padding keeps the first
             // row in its old resting position, then scrolls away with the content.

@@ -43,7 +43,7 @@ class GlassSurfaceWiringTest {
         assertTrue(s.contains("onBack != null -> IconButton(onClick = onBack)"))
         assertEquals(2, Regex("actions = \\{ actions\\?\\.invoke\\(\\) \\}").findAll(s).count())
         assertTrue(s.contains(".imePadding()"))
-        assertTrue(s.contains("LocalBringIntoViewSpec provides rememberGlassBringIntoViewSpec(topExtent)"))
+        assertTrue(s.contains("ProvideGlassBringIntoViewSpec(topExtent)"))
     }
 
     @Test fun `toolbar floor is separate opaque and drawn before the sampled layer`() {
