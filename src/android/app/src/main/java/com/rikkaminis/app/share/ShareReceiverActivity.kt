@@ -952,7 +952,11 @@ internal fun admitSharedUri(
     if (authority.isNullOrEmpty()) {
         return SharedUriAdmission.Refused(SharedUriRefusal.NoAuthority)
     }
-    if (authority == ownProviderAuthority) {
+    // Android resolves `<userId>@<authority>` to the same provider after
+    // removing the user-id prefix. Compare that same canonical authority;
+    // the raw string would let `0@<our-provider>` bypass the self-open guard.
+    val authorityWithoutUserId = authority.substringAfterLast('@')
+    if (authorityWithoutUserId == ownProviderAuthority) {
         // FileProvider admits a caller whose package is ours — and the caller
         // of `openInputStream` here IS our own process, so every declared
         // provider root (sessions/, global/, media/, logs/…) was readable on
