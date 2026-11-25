@@ -64,6 +64,28 @@ class CompactSplitCarryWiringTest {
         )
     }
 
+    @Test
+    fun summaryUsesTheSharedPrivacyProjectionBeforeTruncation() {
+        val code = code(ORCH_REL)
+        assertTrue(
+            "summary must share the request projection and its valid-JSON failure fallback",
+            "buildConversationTextForSummary(com.rikkaminis.app.ui.chat.redactToolHistoryForModel(messages))" in code,
+        )
+        assertTrue(
+            "a second argument projection can drift from the request path again",
+            "fun redactToolResultsForSummary(" !in code,
+        )
+    }
+
+    @Test
+    fun chatGatewayProjectsTheCanonicalHistoryAtEachRequest() {
+        val code = code("app/src/main/java/com/rikkaminis/app/ui/chat/ChatStreamTurnExt.kt")
+        assertTrue(
+            "canonical cold-loaded rows must never cross the provider gateway unprojected",
+            Regex("messages\\s*=\\s*redactToolHistoryForModel\\(messages\\)").containsMatchIn(code),
+        )
+    }
+
     // ── helpers (independent of the scan gates on purpose) ────────────
 
     private fun code(relative: String): String = stripComments(readRepoFile(relative))

@@ -4,7 +4,6 @@ import android.os.SystemClock
 import android.util.Log
 import com.rikkaminis.app.data.AgentRuntimeLimitsPrefs
 import com.rikkaminis.app.data.db.CompactMarkerEntity
-import com.rikkaminis.app.data.model.AgentContentPart
 import com.rikkaminis.app.data.model.LLMMessage
 import com.rikkaminis.app.data.model.LLMResponse
 import com.rikkaminis.app.data.model.ThinkingLevel
@@ -612,35 +611,6 @@ internal fun ChatViewModel.compactAll(
  * LLM to merge the two partial summaries into one — prioritizing Part 2
  * (more recent) when space is tight, again matching iOS behavior.
  */
-/**
- * [fix/tool-output-redaction-1123] Model-facing projection for the summarizer
- * input. Only ToolResult payloads are rewritten; user text and assistant prose
- * keep the existing compact contract.
- */
-private fun redactToolResultsForSummary(messages: List<LLMMessage>): List<LLMMessage> {
-    // [fix/session-load-redaction-cost-1123] ONE credential read for the whole
-    // summarizer input. Same shape as the session-load stall: the single-shot
-    // call decrypts every credential, so a per-message/per-part call multiplied
-    // the decrypt cost by the transcript size.
-    val snap = com.rikkaminis.app.data.EnvVarRedactor.snapshot()
-    return messages.map { msg ->
-        if (msg.contentParts.none { it is AgentContentPart.ToolResult || it is AgentContentPart.ToolUse }) msg
-        else msg.copy(contentParts = msg.contentParts.map { part ->
-            when (part) {
-                is AgentContentPart.ToolResult -> part.copy(
-                    content = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(part.content, snap).text,
-                )
-                is AgentContentPart.ToolUse -> {
-                    val raw = part.input.toString()
-                    val view = com.rikkaminis.app.data.EnvVarRedactor.redactForModel(raw, snap)
-                    if (view.hits == 0) part else part.copy(input = org.json.JSONObject(view.text))
-                }
-                else -> part
-            }
-        })
-    }
-}
-
 internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     messages: List<LLMMessage>,
     previousSummary: String? = null,
@@ -663,7 +633,9 @@ internal suspend fun ChatViewModel.generateCompactSummaryWithSplitting(
     // request: project tool results and the carried summary BEFORE the 500-char
     // truncation in buildConversationTextForSummary, so a secret crossing that
     // boundary cannot survive as a recognisable prefix/suffix.
-    val transcript = buildConversationTextForSummary(redactToolResultsForSummary(messages))
+    // Reuse the request projection, including its valid-JSON fallback when a
+    // credential source is unavailable. Keep the canonical history untouched.
+    val transcript = buildConversationTextForSummary(com.rikkaminis.app.ui.chat.redactToolHistoryForModel(messages))
     val conversationText = ContextCompactor.compactInputText(prevSummaryStripped, transcript)
     val summary = try {
         generateCompactSummary(conversationText)

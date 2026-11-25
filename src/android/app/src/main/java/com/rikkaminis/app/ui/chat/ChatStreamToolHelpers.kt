@@ -71,7 +71,11 @@ internal fun buildLlmMessagesFromParsed(
             )
         )
     }
-    return redactToolHistoryForModel(guardAnthropicReplayHistory(result))
+    // Keep the authoritative in-memory history faithful to the saved rows.
+    // Project a copy at the request/summary boundary instead: projecting here
+    // made an ON-at-load decision irreversible after the user switched OFF,
+    // even when the database still held the real arguments and results.
+    return guardAnthropicReplayHistory(result)
 }
 
 internal fun buildSingleLlmMessage(
