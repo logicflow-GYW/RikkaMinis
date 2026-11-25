@@ -75,6 +75,8 @@ import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.ui.components.MinisAlertDialog
 import com.rikkaminis.app.ui.components.MinisMenu
 import com.rikkaminis.app.ui.components.MinisMenuDivider
+import com.rikkaminis.app.ui.components.LocalGlassBackdrop
+import com.rikkaminis.app.ui.components.rememberGlassBackdrop
 import com.rikkaminis.app.data.ChatTuningPrefs
 import com.rikkaminis.app.ui.settings.rememberChatTuning
 import androidx.compose.material3.TextButton
@@ -914,6 +916,7 @@ fun ChatScreen(
     // state (≈300 lines up) put it before `tuning` exists — a compile error the
     // first CI run caught (`Unresolved reference 'tuning'`).
     val composerGlassOn = tuning.composerGlassEnabled
+    val glassBackdrop = rememberGlassBackdrop(hazeState, tuning, hasSafeSource = true)
 
     // [composer-glass-1116] One clip outline, shared by both modes and
     // remembered so `Modifier.clip` keeps its layer across recompositions.
@@ -2260,6 +2263,7 @@ fun ChatScreen(
             )
         },
     ) {
+    CompositionLocalProvider(LocalGlassBackdrop provides glassBackdrop) {
     Scaffold(
         containerColor = ChatColors.background,
         contentWindowInsets = WindowInsets(0),
@@ -5076,6 +5080,7 @@ fun ChatScreen(
         )
         }
     }
+    } // LocalGlassBackdrop: chat chrome and message/composer menus only
     }
     // [P0-0-drawer-fix] Always enabled BackHandler (registered AFTER
     // ModalNavigationDrawer so it outranks the drawer's predictive-back

@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import dev.chrisbanes.haze.hazeEffect
 
 /**
  * App-wide popup menu with a unified look: softer rounded corners, a lifted
@@ -103,8 +104,17 @@ fun MinisMenu(
     } else {
         Color.White
     }
+    val backdrop = LocalGlassBackdrop.current
+    // Haze 1.6.10 uses screen coordinates and cross-window pre-draw invalidation.
+    // No owning source (or an unplaced source) means an honest SOLID popup,
+    // not a translucent imitation or a captured whole-window bitmap.
+    val sourceReady = backdrop?.state?.areas?.any { it.contentLayer != null } == true
+    val useGlass = GlassSurfacePolicy.menuGlass(backdrop != null, sourceReady, containerColor != null)
+    val glassStyle = rememberGlassStyle(backdrop, resolvedContainerColor)
     val resolvedBorder = border ?: if (isDark) {
         BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+    } else if (useGlass) {
+        BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
     } else {
         null
     }
@@ -176,8 +186,8 @@ fun MinisMenu(
                     .width(IntrinsicSize.Max)
                     .widthIn(min = minWidth, max = 280.dp),
                 shape = shape,
-                color = resolvedContainerColor,
-                tonalElevation = tonalElevation,
+                color = if (useGlass) Color.Transparent else resolvedContainerColor,
+                tonalElevation = if (useGlass) 0.dp else tonalElevation,
                 shadowElevation = shadowElevation,
                 border = resolvedBorder,
             ) {
@@ -185,7 +195,15 @@ fun MinisMenu(
                 // Column inside the surface (scrollState preserved from the old
                 // DropdownMenu branch so long menus still scroll).
                 Column(
-                    modifier = Modifier.verticalScroll(scrollState),
+                    modifier = Modifier
+                        .then(
+                            if (useGlass && backdrop != null) {
+                                Modifier.hazeEffect(state = backdrop.state, style = glassStyle)
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .verticalScroll(scrollState),
                     content = content,
                 )
             }
