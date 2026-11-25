@@ -356,4 +356,17 @@ class EnvVarRedactorTest {
         assertFalse(view.text.contains("abcdef1234567890"))
         EnvVarRedactor.additionalSecretValues = null
     }
+
+    @Test
+    fun `degraded shape pass covers the same prefixes as the model path`() {
+        // [fix/redactor-token-prefixes-1125] The degraded pass keeps its own
+        // boundary/span code, so deriving the prefix list is what keeps the two
+        // paths agreeing on Groq (`gsk_`) and Cloudflare (`cfat_`) keys.
+        val groq = "gsk_" + "abcdefghijklmnopqrstuvwxyz"
+        val cf = "cfat_" + "AbCdEfGhIjKlMnOpQrStUvWx"
+        val (out, hits) = EnvVarRedactor.redactUnindexed("$groq $cf")
+        assertFalse(out.contains(groq))
+        assertFalse(out.contains(cf))
+        assertEquals(2, hits)
+    }
 }

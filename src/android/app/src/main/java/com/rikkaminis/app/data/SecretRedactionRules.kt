@@ -56,9 +56,18 @@ internal object SecretRedactionRules {
         "KEYCODE", "KEYSTROKE", "KEYSTROKES", "KEYS", "KEYBOARD", "KEYMAP", "SIGNATURES",
     )
 
-    /** Well-known prefixes that carry a credential with no name beside them. */
-    private val TOKEN_PREFIXES = listOf(
-        "sk-", "sk_", "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+    /**
+     * Well-known prefixes that carry a credential with no name beside them.
+     *
+     * [fix/redactor-token-prefixes-1125] This is the ONE list: [EnvVarRedactor]
+     * derives its degraded-path copy from here. The two used to be separate
+     * literals and they drifted — Groq (`gsk_`) and Cloudflare (`cfat_`) keys
+     * were known only to the diagnostics recorder's regex, so the model-facing
+     * rules handed a real key through untouched even with Privacy Mode ON.
+     * A key whose prefix is not here has no other defence when it appears bare.
+     */
+    internal val TOKEN_PREFIXES = listOf(
+        "sk-", "sk_", "gsk_", "cfat_", "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
         "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-",
         "AKIA", "ASIA", "AIza", "hf_", "rnd_", "glpat-",
     )
