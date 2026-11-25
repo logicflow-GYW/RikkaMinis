@@ -1,19 +1,12 @@
 package com.rikkaminis.app.ui.chat
 
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -35,31 +28,29 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rikkaminis.app.R
+import com.rikkaminis.app.ui.components.decorativePhase
+import com.rikkaminis.app.ui.components.decorativePingPong
+import com.rikkaminis.app.ui.components.rememberDecorativeTick
 import com.rikkaminis.app.ui.theme.ChatColors
 import kotlinx.coroutines.delay
 
-// [T-android-split-chat] Self-contained "thinking / streaming" dot indicators
-// extracted verbatim from ChatScreen.kt. `internal` so the chat package can
-// still reference them. No logic change — code moved as-is.
+// Tick reads live only in the individual dots' graphics layers. The text and
+// fixed typing band do not recompose or remeasure on decorative frames.
 
 @Composable
 internal fun BouncingDots(color: Color) {
-    val infiniteTransition = rememberInfiniteTransition(label = "bounce")
+    val tick = rememberDecorativeTick()
+    val amplitudePx = with(androidx.compose.ui.platform.LocalDensity.current) { 2.dp.toPx() }
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         repeat(3) { i ->
-            val offset by infiniteTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = -2f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(350, delayMillis = i * 120),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "dot_$i",
-            )
             Box(
                 modifier = Modifier
                     .size(4.dp)
-                    .padding(top = (-offset).dp.coerceAtLeast(0.dp))
+                    .graphicsLayer {
+                        translationY = -amplitudePx * FastOutSlowInEasing.transform(
+                            decorativePingPong(decorativePhase(tick.value, 700, i * 120)),
+                        )
+                    }
                     .background(color, CircleShape),
             )
         }
@@ -69,24 +60,20 @@ internal fun BouncingDots(color: Color) {
 // iOS-style streaming "..." after tool title — 3 dots bouncing inline with text
 @Composable
 internal fun StreamingDotsText() {
-    val infiniteTransition = rememberInfiniteTransition(label = "streamDots")
+    val tick = rememberDecorativeTick()
+    val amplitudePx = with(androidx.compose.ui.platform.LocalDensity.current) { 3.dp.toPx() }
     Row {
         repeat(3) { i ->
-            val offset by infiniteTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = -3f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(350, delayMillis = i * 120, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "sdot_$i",
-            )
             Text(
                 text = ".",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.offset(y = offset.dp),
+                modifier = Modifier.graphicsLayer {
+                    translationY = -amplitudePx * FastOutSlowInEasing.transform(
+                        decorativePingPong(decorativePhase(tick.value, 700, i * 120)),
+                    )
+                },
             )
         }
     }
@@ -103,7 +90,7 @@ internal val TYPING_BAND_HEIGHT = 36.dp
 
 @Composable
 internal fun TypingIndicator(queueWaitingAhead: Int = -1, awaitingNetworkSinceMs: Long = 0L) {
-    val infiniteTransition = rememberInfiniteTransition(label = "typing")
+    val tick = rememberDecorativeTick()
     // Live Soul name → "<custom name> is thinking…" when the user renamed
     // the assistant in Soul settings. SoulStore.cachedMetadata is a StateFlow
     // that's updated on save (SoulSettingsScreen) and at app start
@@ -167,23 +154,18 @@ internal fun TypingIndicator(queueWaitingAhead: Int = -1, awaitingNetworkSinceMs
                 color = ChatColors.tertiaryText,
             )
             // Animated bouncing dots
-            val dots = listOf(".", ".", ".")
-            dots.forEachIndexed { index, dot ->
-                val offsetY by infiniteTransition.animateFloat(
-                    initialValue = 0f,
-                    targetValue = -6f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(400, delayMillis = index * 150, easing = LinearEasing),
-                        repeatMode = RepeatMode.Reverse,
-                    ),
-                    label = "dot_bounce_$index",
-                )
+            repeat(3) { index ->
                 Text(
-                    text = dot,
+                    text = ".",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = ChatColors.tertiaryText,
-                    modifier = Modifier.graphicsLayer { translationY = offsetY },
+                    modifier = Modifier.graphicsLayer {
+                        // Keep the existing pixel amplitude; only decoration is throttled.
+                        translationY = -6f * decorativePingPong(
+                            decorativePhase(tick.value, 800, index * 150),
+                        )
+                    },
                 )
             }
         }
