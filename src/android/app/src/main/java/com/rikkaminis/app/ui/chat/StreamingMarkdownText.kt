@@ -356,7 +356,11 @@ private fun MdText(
     overflow: TextOverflow = TextOverflow.Clip,
     inlineContent: Map<String, androidx.compose.foundation.text.InlineTextContent> = emptyMap(),
 ) {
-    var layoutResult by remember { mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
+    // Keep the latest layout outside snapshot state: identical layout passes
+    // must not recompose MdText (and rebuild its selection/inline-code caches).
+    // A generation changes only when real layout inputs or geometry change.
+    val layoutResultHolder = remember { arrayOfNulls<androidx.compose.ui.text.TextLayoutResult>(1) }
+    var layoutGen by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     // MinisTextKit registration: when this MdText is inside a markdown
     // fragment that supplied a shard id (LocalShardId) AND a controller
     // (LocalMinisSelectionController), publish a TextShard so the controller
@@ -386,9 +390,9 @@ private fun MdText(
         }
     }
     val selectionController = LocalMinisSelectionController.current
-    val currentShard = remember(shardId, layoutResult, text) {
+    val currentShard = remember(shardId, layoutGen, text) {
         val sid = shardId
-        val result = layoutResult
+        val result = layoutResultHolder[0]
         if (sid == null || result == null) null else buildTextShard(
             id = sid,
             plainText = text.text,
@@ -420,11 +424,11 @@ private fun MdText(
     // aggregation is kept and what the stale-layout clamping protects.
     val inlineCodeRects = remember(
         text,
-        layoutResult,
+        layoutGen,
         inlineCodeTopInsetPx,
         inlineCodeBottomInsetPx,
     ) {
-        val result = layoutResult
+        val result = layoutResultHolder[0]
         if (result == null) {
             emptyList()
         } else {
@@ -488,7 +492,7 @@ private fun MdText(
     val tapModifier = if (hasUrlAnnotation || hasInlineCodeAnnotation) {
         Modifier.pointerInput(text) {
             detectTapGestures { pos ->
-                val result = layoutResult ?: return@detectTapGestures
+                val result = layoutResultHolder[0] ?: return@detectTapGestures
                 val offset = result.getOffsetForPosition(pos)
                 // URL wins over inline code if both annotations cover this offset.
                 val urlAnn = if (urlClickHandler != null) {
@@ -520,13 +524,24 @@ private fun MdText(
         maxLines = maxLines,
         overflow = overflow,
         inlineContent = inlineContent,
-        onTextLayout = { layoutResult = it },
+        onTextLayout = { result ->
+            val previous = layoutResultHolder[0]
+            layoutResultHolder[0] = result
+            if (uxRenderLayoutNeedsRefresh(
+                    previous?.layoutInput, result.layoutInput,
+                    previous?.multiParagraph, result.multiParagraph,
+                    previous?.size, result.size,
+                )
+            ) {
+                layoutGen++
+            }
+        },
         modifier = modifier
             .then(tapModifier)
             .onGloballyPositioned { layoutCoordinatesHolder[0] = it }
             .drawBehind {
                 // MinisTextKit selection highlight (drawn UNDER the glyphs).
-                val result0 = layoutResult
+                val result0 = layoutResultHolder[0]
                 val shardId0 = shardId
                 val sel = selectionState?.value
                 if (result0 != null && shardId0 != null && sel != null) {
