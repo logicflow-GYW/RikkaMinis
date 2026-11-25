@@ -95,6 +95,14 @@ class SharedUriAdmissionTest {
     }
 
     @Test
+    fun `a user id prefix on the app's own fileprovider authority is refused`() {
+        for (authority in listOf("0@$ownAuthority", "10@$ownAuthority")) {
+            val verdict = admit("content", authority, "/global/config.json")
+            assertEquals(SharedUriRefusal.OwnFileProvider, refusalOf(verdict))
+        }
+    }
+
+    @Test
     fun `an unknown scheme is refused`() {
         assertEquals(SharedUriRefusal.NoScheme, refusalOf(admit("javascript", path = "/x")))
         assertEquals(SharedUriRefusal.NoScheme, refusalOf(admit("", path = "/x")))
