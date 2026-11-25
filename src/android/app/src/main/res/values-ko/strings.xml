@@ -1539,15 +1539,15 @@
     <string name="chat_tuning_swipe_threshold">위로 밀어 보내기 거리(dp)</string>
     <string name="chat_tuning_swipe_threshold_desc">입력창 안에서 위로 얼마나 밀어야 보내기 제스처가 작동하는지. 기본 120.</string>
     <string name="chat_tuning_composer_footer">앱 내 입력창에만 영향을 줍니다. 전송 버튼과 Enter 키 동작은 별도 설정입니다.</string>
-    <string name="chat_tuning_section_composer_glass">입력창 유리</string>
+    <string name="chat_tuning_section_composer_glass">유리 표면</string>
     <string name="chat_tuning_glass_blur">흐림 반경</string>
     <string name="chat_tuning_glass_blur_desc">배경이 번지는 정도. rikkahub은 블러 12 dp, 글래스 16 dp를 사용합니다.</string>
     <string name="chat_tuning_glass_tint">유리 농도</string>
-    <string name="chat_tuning_glass_tint_desc">카드 색이 흐림을 덮는 정도. 0%는 순수 흐림, 100%는 카드 색만(불투명)입니다.</string>
+    <string name="chat_tuning_glass_tint_desc">표면 색이 흐림을 덮는 정도입니다. 입력창은 0%가 순수 흐림, 100%가 불투명입니다. 상단 바와 메뉴는 작은 글자를 읽기 쉽게 25%포인트를 더합니다.</string>
     <string name="chat_tuning_glass_footer">유리 효과 스위치는 설정 → 외관의 반투명 유리 섹션에 있습니다. 끄면 흐림과 색조 설정이 적용되지 않습니다.</string>    <!-- [feat/chat-tuning-panel-b] 런타임 제한 — 컨텍스트/메모리 및 미디어/도구 예산 섹션. -->
-    <string name="appearance_glass_title">입력창과 상단 제목 표시줄</string>    <string name="runtime_limits_section_context">컨텍스트와 메모리</string>
+    <string name="appearance_glass_title">떠 있는 표면의 유리 효과</string>    <string name="runtime_limits_section_context">컨텍스트와 메모리</string>
     <string name="appearance_section_glass">반투명 유리</string>
-    <string name="appearance_glass_footer">입력창과 상단 제목 표시줄에 적용됩니다. 흐림 반경과 농도는 채팅 조정에 있습니다. Android 12 미만에서는 불투명 표면으로 유지됩니다.</string>    <string name="runtime_limits_compact_tail">자동 압축 꼬리 토큰 하한</string>
+    <string name="appearance_glass_footer">채팅 입력창과 상단 바, 스크롤 가능한 설정과 기본 Markdown 미리보기의 상단 바, 같은 화면의 배경 소스가 있는 메뉴에 적용됩니다. 웹 콘텐츠, 다른 설정 화면, 소스 없는 메뉴는 불투명합니다. 반경과 농도는 채팅 조정에 있으며 Android 12 미만은 모두 불투명합니다.</string>    <string name="runtime_limits_compact_tail">자동 압축 꼬리 토큰 하한</string>
     <string name="runtime_limits_compact_tail_desc">자동 압축은 이 수치 미만으로 꼬리 토큰을 자르지 않습니다 — 최신 대화는 그대로 유지됩니다. 기본 8000.</string>
     <string name="runtime_limits_compact_interval">자동 압축 간격(분)</string>
     <string name="runtime_limits_compact_interval_desc">같은 대화에서 자동 압축 사이의 최소 분 간격. 기본 5.</string>

@@ -1567,15 +1567,15 @@
     <string name="chat_tuning_swipe_threshold">上滑发送距离（dp）</string>
     <string name="chat_tuning_swipe_threshold_desc">在输入框内上滑多远才触发发送手势。默认 120。</string>
     <string name="chat_tuning_composer_footer">仅影响应用内输入框；发送按钮与回车键行为是另外的设置项。</string>
-    <string name="chat_tuning_section_composer_glass">输入框玻璃</string>
+    <string name="chat_tuning_section_composer_glass">玻璃表面</string>
     <string name="chat_tuning_glass_blur">模糊半径</string>
     <string name="chat_tuning_glass_blur_desc">背景被抹开的程度。rikkahub 的模糊预设是 12 dp，玻璃预设 16 dp。</string>
     <string name="chat_tuning_glass_tint">玻璃浓度</string>
-    <string name="chat_tuning_glass_tint_desc">卡片底色覆盖模糊的多少。0% 是纯模糊，100% 只剩卡片底色（实心）。</string>
+    <string name="chat_tuning_glass_tint_desc">底色覆盖模糊的程度。输入栏：0% 纯模糊，100% 实色；顶栏和菜单额外增加 25 个百分点，保障小字可读。</string>
     <string name="chat_tuning_glass_footer">毛玻璃开关位于 设置 → 外观 页面中的“毛玻璃”区域。关闭时，模糊和色调设置不生效。</string>    <!-- [feat/chat-tuning-panel-b] 运行时限制 — 上下文/记忆 与 媒体/工具预算段。 -->
-    <string name="appearance_glass_title">输入栏与顶部标题栏</string>    <string name="runtime_limits_section_context">上下文与记忆</string>
+    <string name="appearance_glass_title">浮动表面毛玻璃</string>    <string name="runtime_limits_section_context">上下文与记忆</string>
     <string name="appearance_section_glass">毛玻璃</string>
-    <string name="appearance_glass_footer">对输入栏和顶部标题栏生效。模糊半径与浓度在「聊天微调」里；Android 12 以下保持实心。</string>    <string name="runtime_limits_compact_tail">自动压缩保留尾部 token</string>
+    <string name="appearance_glass_footer">适用于聊天输入栏与顶栏、可滚动设置页顶栏、原生 Markdown 预览顶栏及有本页背景源的菜单。网页内容、其他设置页及无背景源菜单保持实色。半径与浓度在「聊天微调」里；Android 12 以下均为实色。</string>    <string name="runtime_limits_compact_tail">自动压缩保留尾部 token</string>
     <string name="runtime_limits_compact_tail_desc">自动压缩不会砍掉低于此数量的尾部 token——最新对话保持原样。默认 8000。</string>
     <string name="runtime_limits_compact_interval">自动压缩间隔（分钟）</string>
     <string name="runtime_limits_compact_interval_desc">同一会话两次自动压缩之间的最小分钟数。默认 5。</string>

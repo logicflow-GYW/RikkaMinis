@@ -4,7 +4,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
-import com.rikkaminis.app.data.ChatTuningPrefs
+import com.rikkaminis.app.ui.components.GlassSurfacePolicy
 
 /**
  * [composer-glass-1115] The numbers behind the frosted-glass surfaces, converted
@@ -37,7 +37,7 @@ internal object ComposerGlass {
      * other way round, which is what the strings now match instead: the
      * percentage names how much card colour remains, not how much blur.
      */
-    fun tintAlpha(percent: Int): Float = (percent / 100f).coerceIn(0f, 1f)
+    fun tintAlpha(percent: Int): Float = GlassSurfacePolicy.tintAlpha(percent)
 
     /**
      * Same knob, for the TOP BAR.
@@ -53,13 +53,10 @@ internal object ComposerGlass {
      * the bar differs is a property of the bar (text size + no scrim), not a
      * preference.
      */
-    fun topBarTintAlpha(percent: Int): Float = (tintAlpha(percent) + 0.25f).coerceIn(0f, 1f)
+    fun topBarTintAlpha(percent: Int): Float = GlassSurfacePolicy.topBarTintAlpha(percent)
 
     /** Blur radius in dp, clamped to the range the Chat Tuning panel offers. */
-    fun blurDp(dp: Int): Int = dp.coerceIn(
-        ChatTuningPrefs.COMPOSER_GLASS_BLUR_MIN,
-        ChatTuningPrefs.COMPOSER_GLASS_BLUR_MAX,
-    )
+    fun blurDp(dp: Int): Int = GlassSurfacePolicy.blurDp(dp)
 }
 
 /**

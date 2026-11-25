@@ -2,6 +2,7 @@ package com.rikkaminis.app.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +36,10 @@ import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,6 +53,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 import com.rikkaminis.app.R
+import com.rikkaminis.app.ui.chat.topBarTail
+import com.rikkaminis.app.ui.components.GlassTopBarLayers
+import com.rikkaminis.app.ui.components.LocalGlassBackdrop
+import com.rikkaminis.app.ui.components.rememberGlassBackdrop
+import com.rikkaminis.app.ui.components.rememberGlassBringIntoViewSpec
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 
 /**
  * Shared primitives for settings pages. Grouped-card layout (iOS/ChatGPT style).
@@ -85,8 +97,15 @@ fun SettingsScaffold(
     scrollable: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val scrollState = rememberScrollState()
+    val hazeState = rememberHazeState()
+    val backdrop = rememberGlassBackdrop(hazeState, hasSafeSource = scrollable)
+    val scrolledUnder by remember { derivedStateOf { scrollState.canScrollBackward } }
+    CompositionLocalProvider(LocalGlassBackdrop provides backdrop) {
     Scaffold(
         topBar = {
+            Box {
+                GlassTopBarLayers(backdrop, scrolledUnder, MaterialTheme.colorScheme.background)
             val titleSlot: @Composable () -> Unit = {
                 Text(
                     title,
@@ -123,7 +142,7 @@ fun SettingsScaffold(
                     navigationIcon = navigationSlot,
                     actions = { actions?.invoke() },
                     colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.background,
+                        containerColor = if (backdrop != null) Color.Transparent else MaterialTheme.colorScheme.background,
                     ),
                 )
             } else {
@@ -132,9 +151,10 @@ fun SettingsScaffold(
                     navigationIcon = navigationSlot,
                     actions = { actions?.invoke() },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.background,
+                        containerColor = if (backdrop != null) Color.Transparent else MaterialTheme.colorScheme.background,
                     ),
                 )
+            }
             }
         },
         floatingActionButton = { floatingActionButton?.invoke() },
@@ -146,14 +166,24 @@ fun SettingsScaffold(
         // keyboard" rect to scroll a focused TextField into. Without it,
         // adjustResize + edge-to-edge leaves the scrollable column at
         // full height behind the IME and bringIntoView is a no-op.
+        val topExtent = if (backdrop != null) padding.calculateTopPadding() else 0.dp
         val baseMod = Modifier
             .fillMaxSize()
             .padding(padding)
             .imePadding()
+            .then(
+                if (backdrop != null) Modifier.topBarTail(topExtent).hazeSource(hazeState)
+                else Modifier,
+            )
+        CompositionLocalProvider(LocalBringIntoViewSpec provides rememberGlassBringIntoViewSpec(topExtent)) {
         Column(
-            modifier = if (scrollable) baseMod.verticalScroll(rememberScrollState()) else baseMod,
+            // The viewport reaches behind the bar; equal INNER padding keeps the first
+            // row in its old resting position, then scrolls away with the content.
+            modifier = if (scrollable) baseMod.verticalScroll(scrollState).padding(top = topExtent) else baseMod,
             content = content,
         )
+        }
+    }
     }
 }
 
