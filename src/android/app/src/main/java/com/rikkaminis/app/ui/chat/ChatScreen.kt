@@ -4428,6 +4428,7 @@ fun ChatScreen(
                                         // finished message must never show the
                                         // counter (the flag is false for it).
                                         awaitingResponseSinceMs = awaitingResponseSinceMs,
+                                        isBrowsingHistory = !followState.isFollowing || isUserDragging,
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the
                                         // flat AssistantInfo branch).

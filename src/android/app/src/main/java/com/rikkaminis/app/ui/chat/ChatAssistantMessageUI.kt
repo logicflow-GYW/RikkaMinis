@@ -11,11 +11,6 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -87,6 +82,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.drawscope.withTransform
+import com.rikkaminis.app.ui.components.DecorativeSpinner
+import com.rikkaminis.app.ui.components.animationLayer
+import com.rikkaminis.app.ui.components.decorativePhase
+import com.rikkaminis.app.ui.components.rememberDecorativeTick
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
@@ -106,7 +108,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.sp
@@ -758,24 +759,9 @@ internal fun ToolCallPill(
         else String.format("%.0fs", seconds)
     } else null
 
-    // T125: drop the spinner that used to replace the tool icon while
-    // running. iOS only animates a left→right shimmer sweep across the
-    // pill background and keeps the typed icon visible — the spinner
-    // both fought the icon for attention and looked stylistically off
-    // next to the iOS counterpart. The bottom FloatingToolStatusBar
-    // still shows a CircularProgressIndicator (that is the running-tool
-    // status surface, where a spinner reads correctly).
-    val shimmerTranslate = if (isRunning) {
-        val transition = rememberInfiniteTransition(label = "toolPillShimmer")
-        transition.animateFloat(
-            initialValue = -1f,
-            targetValue = 2f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 2800, easing = LinearEasing),
-            ),
-            label = "toolPillShimmerTranslate",
-        )
-    } else null
+    // Decorative tick is observed only by the sibling overlay's draw lambda.
+    // The typed icon, title, progress badge and actions remain in a static layer.
+    val shimmerTick = if (isRunning) rememberDecorativeTick() else null
 
     // [T-android-tool-bubble-longpress-menu] Long-press menu state, scoped
     // to this pill. The DropdownMenu is anchored to the pill via the Box
@@ -785,7 +771,7 @@ internal fun ToolCallPill(
     // Pill stretches up to the full row width so long titles can ellipsize
     // without pushing the duration out of view. Title takes the remaining
     // space via weight(1f), duration stays fixed-width (softWrap=false).
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).animateContentSize()) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
       Box(modifier = Modifier.weight(1f, fill = false)) {
         Row(
             modifier = Modifier
@@ -795,27 +781,6 @@ internal fun ToolCallPill(
                 )
                 .border(0.5.dp, ChatColors.toolBorder, CircleShape)
                 .clip(CircleShape)
-                .then(
-                    if (shimmerTranslate != null) {
-                        Modifier.drawWithContent {
-                            drawContent()
-                            val w = size.width
-                            val band = w * 0.6f
-                            val x = shimmerTranslate.value * w
-                            drawRect(
-                                brush = Brush.linearGradient(
-                                    colors = listOf(
-                                        Color.White.copy(alpha = 0f),
-                                        Color.White.copy(alpha = 0.18f),
-                                        Color.White.copy(alpha = 0f),
-                                    ),
-                                    start = Offset(x, 0f),
-                                    end = Offset(x + band, 0f),
-                                ),
-                            )
-                        }
-                    } else Modifier,
-                )
                 .combinedClickable(
                     onClick = { onOpenDetail(block.id) },
                     onLongClick = if (onRerunFromHere != null || onCopyDetails != null) {
@@ -896,6 +861,28 @@ internal fun ToolCallPill(
                 Spacer(modifier = Modifier.width(8.dp))
                 ToolStopButton(onStop = onStop)
             }
+        }
+        if (shimmerTick != null) {
+            // No pointer/semantics handlers: this sibling cannot intercept tool actions.
+            Box(
+                modifier = Modifier.matchParentSize()
+                    .animationLayer()
+                    .clip(CircleShape)
+                    .drawWithCache {
+                        val band = size.width * 0.6f
+                        val brush = Brush.linearGradient(
+                            colors = listOf(Color.Transparent, Color.White.copy(alpha = 0.18f), Color.Transparent),
+                            start = Offset.Zero,
+                            end = Offset(band, 0f),
+                        )
+                        onDrawBehind {
+                            val x = (decorativePhase(shimmerTick.value, 2800) * 3f - 1f) * size.width
+                            withTransform({ translate(left = x) }) {
+                                drawRect(brush = brush, size = Size(band, size.height))
+                            }
+                        }
+                    },
+            )
         }
         // [T-android-tool-bubble-longpress-menu] Long-press menu anchored to
         // the pill. Items mirror the user-bubble menu's style (MinisMenu +
@@ -1033,7 +1020,7 @@ internal fun ToolCallRunGroup(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (isRunning) {
-                    CircularProgressIndicator(
+                    DecorativeSpinner(
                         modifier = Modifier.size(13.dp),
                         color = groupAccent,
                         strokeWidth = 1.5.dp,
@@ -1217,7 +1204,7 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
         ) {
             if (isStreaming && block.toolStatus != ToolBlockStatus.SUCCESS) {
                 // iOS: ProgressView().controlSize(.mini) while streaming
-                CircularProgressIndicator(
+                DecorativeSpinner(
                     modifier = Modifier.size(13.dp),
                     color = thinkingBlue,
                     strokeWidth = 1.5.dp,
@@ -1450,7 +1437,7 @@ private fun ThinkingFullContentDialog(content: String, onDismiss: () -> Unit) {
                 }
                 val ranges = chunks
                 if (ranges == null) {
-                    CircularProgressIndicator(modifier = Modifier.padding(24.dp))
+                    DecorativeSpinner(color = textColor, modifier = Modifier.padding(24.dp).size(40.dp))
                 } else {
                     LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
                         items(count = ranges.size, key = { ranges[it].first }) { index ->
