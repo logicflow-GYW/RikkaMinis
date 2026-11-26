@@ -26,9 +26,12 @@ class ChatProcessFoldPlannerTest {
         assertEquals(1400L, g.durationMs)
     }
 
-    @Test fun `a trailing run without a reply stays visible`() {
-        assertTrue(plan(tool("one"), tool("two"), tool("three")).isEmpty())
-        assertTrue(plan(tool("one"), thinking("t"), tool("two")).isEmpty())
+    @Test fun `a live trailing run stays visible but folds once the turn ends`() {
+        val blocks = arrayOf(tool("one"), tool("two"), tool("three"))
+        assertTrue(plan(*blocks, live = true).isEmpty())
+        val finished = plan(*blocks, live = false).single()
+        assertEquals(0..2, finished.range)
+        assertEquals(3, finished.toolCount)
     }
 
     @Test fun `one-line remark folds along and soft-ends a run cut by a running tool`() {

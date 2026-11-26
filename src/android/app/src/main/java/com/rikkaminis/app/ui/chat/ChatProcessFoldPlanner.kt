@@ -144,7 +144,16 @@ object ChatProcessFoldPlanner {
                 }
             }
         }
-        closeAtSoftEnd()
+        // Live tail: only the part up to the latest remark may fold, so running
+        // work stays visible. Once the turn has ended there is no live work
+        // left, and a finished run must not stay expanded only because the
+        // model ended on a tool call instead of a text reply.
+        if (isStreaming) {
+            closeAtSoftEnd()
+        } else {
+            val s = start
+            if (s != null) group(blocks, s..lastMember)?.let { out += it } else closeAtSoftEnd()
+        }
         return out
     }
 
