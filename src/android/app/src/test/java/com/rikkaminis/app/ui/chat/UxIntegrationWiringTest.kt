@@ -244,6 +244,26 @@ class UxIntegrationWiringTest {
         assertTrue(anchor.contains("} else if (listState.firstVisibleItemIndex == lazyIndex)"))
     }
 
+    @Test fun `a thinking block opened by the reader always opens at the top`() {
+        // 2026-11-26 report: "点击展开思考，有时候是向下展开，有时候是向上展开" —
+        // the direction was decided by two accidents (the streaming tail-follow
+        // pins the body's scroller to the bottom; a scroller left at the bottom
+        // keeps the viewport at the END while the enter animation grows the
+        // height), so both unrolled the text upward out of the header.
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val thinking = ui.substringAfter("internal fun ThinkingBlock(")
+            .substringBefore("private fun ThinkingFullContentDialog(")
+        assertTrue(thinking.contains("val openedByReader = manualChoice == true"))
+        assertTrue(
+            thinking.contains("if (!thinkingBodyVisible.targetState || !openedByReader) return@LaunchedEffect"),
+        )
+        assertTrue(thinking.contains("scrollState.scrollTo(0)"))
+        // A frozen tail window would keep showing the end even at offset 0.
+        assertTrue(thinking.contains("readAnchor = ThinkingReadPlanner.Anchor()"))
+        // Gated, not deleted: the app-opened live block still follows the tail.
+        assertTrue(thinking.contains("if (!isStreaming || openedByReader) return@LaunchedEffect"))
+    }
+
     @Test fun `the summary row is counts only`() {        // 2026-11-26: the title (last reasoning's bold phrase, else the last
         // call's label) described the final second of a run of eighty calls;
         // the "累计 N 秒" was a SUM of per-call durations (parallel calls

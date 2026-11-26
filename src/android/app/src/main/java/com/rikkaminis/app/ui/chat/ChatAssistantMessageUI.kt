@@ -1542,6 +1542,24 @@ internal fun ThinkingBlock(
             val scrollState = rememberScrollState()
             val isDragging by scrollState.interactionSource.collectIsDraggedAsState()
             var readAnchor by remember(block.id) { mutableStateOf(ThinkingReadPlanner.Anchor()) }
+            // [T-thinking-open-at-top] A block the READER opened always opens at the
+            // top of its body and grows downward. The direction used to be decided
+            // by two accidents instead: while a block streams its body is
+            // bottom-pinned by the tail-follow below, and a scroller left at the
+            // bottom keeps the viewport at the END while the enter animation grows
+            // the height — both make the text unroll UPWARD out of the header, which
+            // reads as a flicker/jump (2026-11-26 report). A tap means "let me read
+            // this", so it starts at the beginning; only the block the app opened
+            // for you (a live one) keeps following the tail.
+            val openedByReader = manualChoice == true
+            LaunchedEffect(block.id, openedByReader, thinkingBodyVisible.targetState) {
+                if (!thinkingBodyVisible.targetState || !openedByReader) return@LaunchedEffect
+                // Reset BOTH halves: the pixel offset decides where the first
+                // visible line is, and a frozen window would otherwise keep
+                // showing the tail even after the scroller went to 0.
+                readAnchor = ThinkingReadPlanner.Anchor()
+                scrollState.scrollTo(0)
+            }
             // Keep the frozenWindowStart contract: a real drag pins the original source
             // offset, not merely the scroller's pixel position, until the reader returns.
             val frozenWindowStart = readAnchor.frozenWindowStart
@@ -1569,10 +1587,13 @@ internal fun ThinkingBlock(
             }
             // maxValue changes AFTER layout: content-length-only following races the
             // new measurement. Also keep length for a fixed-height moving tail window.
+            // Gated on `!openedByReader`: a reader who opened this block must not be
+            // dragged to the tail by the next token (that also re-pins the bottom and
+            // turns the reveal into an upward unroll).
             val currentBlock by rememberUpdatedState(block)
             val currentDragging by rememberUpdatedState(isDragging)
-            LaunchedEffect(scrollState, block.id, isStreaming) {
-                if (!isStreaming) return@LaunchedEffect
+            LaunchedEffect(scrollState, block.id, isStreaming, openedByReader) {
+                if (!isStreaming || openedByReader) return@LaunchedEffect
                 snapshotFlow {
                     Triple(currentBlock.content.length, scrollState.maxValue, currentDragging to readAnchor.isReadingHistory)
                 }.collect {
