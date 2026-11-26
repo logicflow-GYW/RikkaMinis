@@ -1,80 +1,103 @@
 package com.rikkaminis.app.ui.chat
 
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatProcessFoldPlannerTest {
     private fun tool(id: String, status: ToolBlockStatus = ToolBlockStatus.SUCCESS, name: String = "shell_execute", ms: Long = 100) =
         AssistantBlock(id = id, kind = "tool_use", toolStatus = status, toolName = name, durationMs = ms)
+    private fun text(id: String, content: String) = AssistantBlock(id = id, kind = "text", content = content)
+    private fun thinking(id: String) = AssistantBlock(id = id, kind = "thinking", content = "…")
     private fun plan(vararg blocks: AssistantBlock, live: Boolean = false) = ChatProcessFoldPlanner.plan(blocks.toList(), live)
 
-    @Test fun `no tools and a single tool stay natural`() {
+    @Test fun `reply-less, single-tool and empty transcripts stay natural`() {
         assertTrue(plan().isEmpty())
-        assertTrue(plan(AssistantBlock("text", "text", "answer")).isEmpty())
-        assertTrue(plan(tool("one")).isEmpty())
+        assertTrue(plan(text("a", "answer")).isEmpty())
+        assertTrue(plan(tool("one"), text("a", "answer")).isEmpty())
     }
-    @Test fun `completed consecutive calls use summed execution time`() {
-        val group = plan(tool("one", ms = 500), tool("two", ms = 900)).single()
-        assertEquals("one", group.key)
-        assertEquals(2, group.toolCount)
-        assertEquals(setOf(0, 1), group.memberIndices)
-        assertEquals(1400L, group.durationMs)
+
+    @Test fun `a run folds once a non-empty reply ends it`() {
+        val g = plan(tool("one", ms = 500), tool("two", ms = 900), text("reply", "Done.")).single()
+        assertEquals("one", g.key)
+        assertEquals(0..1, g.range)
+        assertEquals(2, g.toolCount)
+        assertEquals(1400L, g.durationMs)
     }
-    @Test fun `failure timeout cancel dedup are independent summary buckets`() {
-        val g = plan(tool("f", ToolBlockStatus.FAILED), tool("t", ToolBlockStatus.TIMEOUT),
-            tool("c", ToolBlockStatus.CANCELLED), tool("d", ToolBlockStatus.DEDUPLICATED)).single()
+
+    @Test fun `a trailing run without a reply stays visible`() {
+        assertTrue(plan(tool("one"), tool("two"), tool("three")).isEmpty())
+        assertTrue(plan(tool("one"), thinking("t"), tool("two")).isEmpty())
+    }
+
+    @Test fun `one-line remark folds along and soft-ends a run cut by a running tool`() {
+        val blocks = listOf(tool("one"), tool("two"), text("note", "Now checking the tests."), tool("running", ToolBlockStatus.RUNNING))
+        val g = plan(*blocks.toTypedArray(), live = true).single()
+        assertEquals(0..2, g.range)
+        assertEquals(2, g.toolCount)
+        assertTrue(g.memberIndices.contains(2))
+    }
+
+    @Test fun `multi-line text is a reply boundary, not a remark`() {
+        val blocks = listOf(
+            tool("a"), tool("b"), text("mid", "第一行\n第二行"), tool("c"), tool("d"), text("reply", "Done."),
+        )
+        val groups = plan(*blocks.toTypedArray())
+        assertEquals(listOf(0..1, 3..4), groups.map { it.range })
+    }
+
+    @Test fun `leading thinking folds with the run and middle thinking folds along`() {
+        val blocks = listOf(thinking("lead"), tool("a"), thinking("mid"), tool("b"), thinking("tail"), text("reply", "Done."))
+        val g = plan(*blocks.toTypedArray()).single()
+        assertEquals("lead", g.key)
+        assertEquals(0..3, g.range)
+        assertEquals(2, g.toolCount)
+        assertFalse(g.memberIndices.contains(4))
+    }
+
+    @Test fun `empty text is transparent and does not break a run`() {
+        val blocks = listOf(tool("a"), text("empty", ""), tool("b"), text("reply", "Done."))
+        assertEquals(0..2, plan(*blocks.toTypedArray()).single().range)
+    }
+
+    @Test fun `info subagent and user prompts are barriers`() {
+        val info = AssistantBlock("info", "info", "notice", toolName = "compact")
+        val groups = plan(tool("a"), tool("b"), info, tool("c"), tool("d"), text("reply", "Done."))
+        // The barrier cut the first run before any reply, so only the last run folds.
+        assertEquals(listOf(3..4), groups.map { it.range })
+        for (name in listOf("spawn_agent", "subagent_task", "user_ask", "ask_user")) {
+            val barrier = tool("special", name = name)
+            val gs = plan(tool("a"), tool("b"), barrier, tool("c"), tool("d"), text("reply", "Done."))
+            assertEquals(listOf(3..4), gs.map { it.range })
+        }
+    }
+
+    @Test fun `failure timeout cancel and dedup keep independent buckets`() {
+        val g = plan(
+            tool("f", ToolBlockStatus.FAILED), tool("t", ToolBlockStatus.TIMEOUT),
+            tool("c", ToolBlockStatus.CANCELLED), tool("d", ToolBlockStatus.DEDUPLICATED),
+            text("reply", "Done."),
+        ).single()
         assertEquals(4, g.toolCount)
         assertEquals(2, g.failedCount)
         assertEquals(1, g.cancelledCount)
         assertEquals(1, g.deduplicatedCount)
     }
-    @Test fun `live latest three tools remain outside the folded members`() {
-        val blocks = (0..7).map { tool("t$it") }
-        val g = ChatProcessFoldPlanner.plan(blocks, true).single()
-        assertEquals(5, g.toolCount)
-        assertEquals(setOf(0, 1, 2, 3, 4), g.memberIndices)
+
+    @Test fun `a running tool ends the run so live work is never hidden`() {
+        // Cut by an unfinished call with no remark after it: nothing folds.
+        assertTrue(plan(tool("a"), tool("b"), tool("live", ToolBlockStatus.RUNNING), text("reply", "Done."), live = true).isEmpty())
+        // With a one-line remark the completed prefix folds and the live call stays.
+        val withNote = plan(tool("a"), tool("b"), text("note", "Checking."),
+            tool("live", ToolBlockStatus.RUNNING), live = true).single()
+        assertEquals(0..2, withNote.range)
+        assertFalse(withNote.memberIndices.contains(3))
     }
-    @Test fun `all unfinished parallel calls stay visible even before latest three`() {
-        for (status in listOf(ToolBlockStatus.STREAMING, ToolBlockStatus.PENDING, ToolBlockStatus.RUNNING)) {
-            val blocks = (0..7).map { tool("t$it", if (it == 0 || it == 2) status else ToolBlockStatus.SUCCESS) }
-            val g = ChatProcessFoldPlanner.plan(blocks, true).single()
-            assertEquals(setOf(1, 3, 4), g.memberIndices)
-            assertEquals("t0", g.key)
-            val done = ChatProcessFoldPlanner.plan(blocks.map { it.copy(toolStatus = ToolBlockStatus.SUCCESS) }, false).single()
-            assertEquals(g.key, done.key)
-            assertEquals(8, done.toolCount)
-        }
-        assertTrue(plan(tool("unknown").copy(toolStatus = null), tool("one")).isEmpty())
-    }
-    @Test fun `text order boundaries and a running tool are never hidden`() {
-        val blocks = listOf(AssistantBlock("A", "text", "A"), tool("one"), tool("two", ToolBlockStatus.FAILED),
-            AssistantBlock("B", "text", "B"), tool("three", ToolBlockStatus.RUNNING), AssistantBlock("C", "text", "C"))
-        val groups = ChatProcessFoldPlanner.plan(blocks, false)
-        assertEquals(1, groups.size)
-        val hidden = groups.flatMap { it.memberIndices }.toSet()
-        assertEquals(listOf("A", "B", "three", "C"), blocks.filterIndexed { i, _ -> i !in hidden }.map { it.id })
-        assertEquals(1, groups.single().failedCount)
-    }
-    @Test fun `thinking short notes info and final answers are conservative boundaries`() {
-        for (kind in listOf("thinking", "text", "info")) {
-            val middle = AssistantBlock("middle", kind, "A short note")
-            val groups = plan(tool("one"), tool("two"), middle, tool("three"), tool("four"))
-            assertEquals(2, groups.size)
-            assertFalse(groups.any { 2 in it.memberIndices })
-        }
-    }
-    @Test fun `subagents and waiting user prompts never fold`() {
-        for (name in listOf("spawn_agent", "subagent_task", "delegate_task", "user_ask", "ask_user")) {
-            val groups = plan(tool("a"), tool("b"), tool("interaction", name = name), tool("c"), tool("d"))
-            assertEquals(2, groups.size)
-            assertFalse(groups.any { 2 in it.memberIndices })
-        }
-    }
+
     @Test fun `user can turn folding off and every tool stays visible`() {
-        val blocks = (1..6).map { tool("t$it") }
+        val blocks = (1..6).map { tool("t$it") } + text("reply", "Done.")
         assertTrue(ChatProcessFoldPlanner.plan(blocks, false, enabled = false).isEmpty())
-        assertTrue(ChatProcessFoldPlanner.plan(blocks, true, enabled = false).isEmpty())
-        // Default stays ON so existing behaviour and call sites are unchanged.
         assertEquals(1, ChatProcessFoldPlanner.plan(blocks, false).size)
     }
 
@@ -83,14 +106,11 @@ class ChatProcessFoldPlannerTest {
         assertFalse(ChatProcessFoldPlanner.isExpanded("a", emptyMap(), emptySet(), false))
         assertFalse(ChatProcessFoldPlanner.isExpanded("a", emptyMap(), setOf("a"), true))
     }
+
     @Test fun `manual choices win token growth stop and re-entry`() {
-        val blocks = (0..7).map { tool("t$it") }
-        val live = ChatProcessFoldPlanner.plan(blocks, true).single()
-        val stopped = ChatProcessFoldPlanner.plan(blocks, false).single()
-        assertEquals(live.key, stopped.key)
-        assertTrue(ChatProcessFoldPlanner.isExpanded(stopped.key, mapOf(live.key to true), setOf(live.key), false))
-        assertFalse(ChatProcessFoldPlanner.isExpanded(live.key, mapOf(live.key to false), emptySet(), true))
-        // A different message/session owns fresh collections; identical block ids do not inherit choices.
-        assertFalse(ChatProcessFoldPlanner.isExpanded(live.key, emptyMap(), emptySet(), false))
+        val live = listOf(tool("a"), tool("b"), text("reply", "Done."))
+        assertTrue(ChatProcessFoldPlanner.isExpanded("a", mapOf("a" to true), setOf("a"), false))
+        assertFalse(ChatProcessFoldPlanner.isExpanded("a", mapOf("a" to false), emptySet(), true))
+        assertFalse(ChatProcessFoldPlanner.isExpanded("a", emptyMap(), emptySet(), false))
     }
 }

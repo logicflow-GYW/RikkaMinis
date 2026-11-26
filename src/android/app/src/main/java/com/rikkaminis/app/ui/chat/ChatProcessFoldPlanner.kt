@@ -1,12 +1,30 @@
 package com.rikkaminis.app.ui.chat
 
-/** Presentation only: neither block order/identity nor tool execution is changed. */
+/**
+ * Decides which runs of an assistant message fold into one "N tools · time" row.
+ *
+ * Presentation only: neither block order/identity nor tool execution changes.
+ * Rule set is ported from the upstream public planner (`ToolFoldPlanner`,
+ * 1a71df0f) so the folding reads the same as the app the user compared against:
+ *
+ *  - A run starts at a finished tool, optionally including the thinking block
+ *    that leads directly into it.
+ *  - It continues through finished tools (counted), thinking, empty text and
+ *    one-line remarks between calls (folded along, NOT counted).
+ *  - It ends at a non-empty reply, an info row, a sub-agent / user_ask block,
+ *    or a tool that has not finished.
+ *  - Only a run of at least [MINIMUM_TOOLS] tools folds. When the run is cut by
+ *    a barrier / unfinished tool / message end, only its part up to the latest
+ *    remark folds; without such a remark nothing folds, so live work stays
+ *    visible instead of collapsing under the user.
+ */
 object ChatProcessFoldPlanner {
     const val MINIMUM_TOOLS = 2
-    const val LIVE_RECENT_TOOLS = 3
 
     data class Group(
+        /** Stable identity and placement: the first folded block. */
         val key: String,
+        /** First member through last member; everything here is replaced by the row. */
         val range: IntRange,
         val memberIndices: Set<Int>,
         val toolCount: Int,
@@ -21,52 +39,113 @@ object ChatProcessFoldPlanner {
         "spawn_agent", "subagent_task", "delegate_task", "user_ask", "ask_user",
     )
 
-    fun isFoldable(block: AssistantBlock): Boolean =
-        block.kind == "tool_use" && block.toolName !in interactiveTools && when (block.toolStatus) {
-            ToolBlockStatus.SUCCESS, ToolBlockStatus.FAILED, ToolBlockStatus.TIMEOUT,
-            ToolBlockStatus.CANCELLED, ToolBlockStatus.DEDUPLICATED -> true
-            else -> false
+    private val terminal = setOf(
+        ToolBlockStatus.SUCCESS, ToolBlockStatus.FAILED, ToolBlockStatus.TIMEOUT,
+        ToolBlockStatus.CANCELLED, ToolBlockStatus.DEDUPLICATED,
+    )
+
+    private enum class Kind { TOOL_DONE, TOOL_UNFINISHED, THINKING, TEXT_EMPTY, TEXT_REPLY, NOTE, BARRIER }
+
+    /** One line by line breaks: no newline between the first and last visible char. */
+    fun isSingleLine(text: String): Boolean {
+        val first = text.indexOfFirst { !it.isWhitespace() }
+        if (first < 0) return true
+        val last = text.indexOfLast { !it.isWhitespace() }
+        for (i in first..last) if (text[i] == '\n' || text[i] == '\r') return false
+        return true
+    }
+
+    private fun hasToolAfter(blocks: List<AssistantBlock>, index: Int): Boolean =
+        (index + 1 until blocks.size).any { blocks[it].kind == "tool_use" }
+
+    private fun kindOf(blocks: List<AssistantBlock>, index: Int): Kind {
+        val block = blocks[index]
+        return when (block.kind) {
+            "tool_use" -> when {
+                block.toolName in interactiveTools -> Kind.BARRIER
+                block.toolStatus in terminal -> Kind.TOOL_DONE
+                else -> Kind.TOOL_UNFINISHED
+            }
+            "thinking" -> Kind.THINKING
+            "info" -> Kind.BARRIER
+            "text" -> when {
+                block.content.isBlank() -> Kind.TEXT_EMPTY
+                // A one-line remark with a call after it is part of the run;
+                // everything after the last call is the reply and never is.
+                isSingleLine(block.content) && hasToolAfter(blocks, index) -> Kind.NOTE
+                else -> Kind.TEXT_REPLY
+            }
+            else -> Kind.BARRIER
+        }
+    }
+
+    /** Stats over [range]; null when it holds fewer than the minimum number of tools. */
+    private fun group(blocks: List<AssistantBlock>, range: IntRange): Group? {
+        val members = range.map { blocks[it] }
+        val tools = range.map { blocks[it] }.filter { it.kind == "tool_use" && it.toolName !in interactiveTools && it.toolStatus in terminal }
+        if (tools.size < MINIMUM_TOOLS) return null
+        return Group(
+            key = blocks[range.first].id,
+            range = range,
+            memberIndices = range.toSet(),
+            toolCount = tools.size,
+            failedCount = tools.count { it.toolStatus == ToolBlockStatus.FAILED || it.toolStatus == ToolBlockStatus.TIMEOUT },
+            cancelledCount = tools.count { it.toolStatus == ToolBlockStatus.CANCELLED },
+            deduplicatedCount = tools.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
+            durationMs = tools.sumOf { it.durationMs },
+        )
+    }
+
+    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean = true): List<Group> {
+        if (!enabled || blocks.isEmpty()) return emptyList()
+        val kinds = blocks.indices.map { kindOf(blocks, it) }
+        val out = mutableListOf<Group>()
+        var start: Int? = null
+        var leadThinking: Int? = null
+        var lastMember = 0
+        var softEnd: Group? = null
+
+        fun reset() {
+            start = null
+            softEnd = null
+        }
+        fun closeAtSoftEnd() {
+            softEnd?.let { out += it }
         }
 
-    /**
-     * Every non-tool/interactive tool is a boundary. Text (including short notes) and
-     * thinking remain in original order, so the answer is never guessed into a summary.
-     * One key per contiguous TOOL segment survives parallel completions and stream stop.
-     * Unfinished calls and the latest three remain visible, even inside that segment.
-     */
-    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean = true): List<Group> {
-        if (!enabled) return emptyList()
-        val recent = if (isStreaming) {
-            blocks.indices.filter { blocks[it].kind == "tool_use" }.takeLast(LIVE_RECENT_TOOLS).toSet()
-        } else emptySet()
-        val groups = mutableListOf<Group>()
-        var start = 0
-        while (start < blocks.size) {
-            if (blocks[start].kind != "tool_use" || blocks[start].toolName in interactiveTools) {
-                start++
-                continue
+        for (i in kinds.indices) {
+            when (kinds[i]) {
+                Kind.BARRIER, Kind.TOOL_UNFINISHED -> {
+                    closeAtSoftEnd()
+                    reset()
+                    leadThinking = null
+                }
+                Kind.TOOL_DONE -> {
+                    if (start == null) start = leadThinking ?: i
+                    leadThinking = null
+                    lastMember = i
+                }
+                Kind.NOTE -> {
+                    val s = start
+                    if (s == null) {
+                        leadThinking = null
+                    } else {
+                        lastMember = i
+                        softEnd = group(blocks, s..i)
+                    }
+                }
+                Kind.THINKING -> if (start == null && leadThinking == null) leadThinking = i
+                Kind.TEXT_EMPTY -> Unit
+                Kind.TEXT_REPLY -> {
+                    val s = start
+                    if (s != null) group(blocks, s..lastMember)?.let { out += it }
+                    reset()
+                    leadThinking = null
+                }
             }
-            var end = start + 1
-            while (end < blocks.size && blocks[end].kind == "tool_use" && blocks[end].toolName !in interactiveTools) end++
-            val indices = (start until end).filter { it !in recent && isFoldable(blocks[it]) }.toSet()
-            if (indices.size >= MINIMUM_TOOLS) {
-                val members = indices.map { blocks[it] }
-                groups += Group(
-                    key = blocks[start].id,
-                    range = start until end,
-                    memberIndices = indices,
-                    toolCount = members.size,
-                    failedCount = members.count {
-                        it.toolStatus == ToolBlockStatus.FAILED || it.toolStatus == ToolBlockStatus.TIMEOUT
-                    },
-                    cancelledCount = members.count { it.toolStatus == ToolBlockStatus.CANCELLED },
-                    deduplicatedCount = members.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
-                    durationMs = members.sumOf { it.durationMs },
-                )
-            }
-            start = end
         }
-        return groups
+        closeAtSoftEnd()
+        return out
     }
 
     /** Manual choices always win; browsing postpones only a group's FIRST automatic fold. */

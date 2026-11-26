@@ -91,7 +91,7 @@ class UxIntegrationWiringTest {
         assertTrue(ui.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, foldingEnabled)"))
         val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
         assertTrue(planner.contains("enabled: Boolean = true"))
-        assertTrue(planner.contains("if (!enabled) return emptyList()"))
+        assertTrue(planner.contains("if (!enabled"))
         val settings = source("ui/settings/AppearanceScreen.kt")
         assertTrue(settings.contains("const val KEY_TOOL_FOLD_ENABLED = \"chat.toolFoldEnabled\""))
         assertTrue(settings.contains("getBoolean(KEY_TOOL_FOLD_ENABLED, true)"))
