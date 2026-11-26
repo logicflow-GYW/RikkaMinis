@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_process_tools">도구 %1$d개</string>
+    <string name="chat_process_duration">누적 %1$s초</string>
+    <string name="chat_process_failed">실패 %1$d개</string>
+    <string name="chat_process_cancelled">취소 %1$d개</string>
+    <string name="chat_process_deduplicated">중복 건너뜀 %1$d개</string>
+    <string name="chat_process_expanded">펼쳐짐</string>
+    <string name="chat_process_collapsed">접힘</string>
+    <string name="chat_process_copy_all">전체 복사</string>
+    <string name="chat_process_copied">전체 생각 원문을 복사했습니다</string>
+    <string name="chat_process_copied_file">크기 제한을 피하기 위해 전체 생각을 텍스트 파일로 복사했습니다</string>
+    <string name="chat_process_copy_failed">복사하지 못했습니다. 다시 시도하세요.</string>
+</resources>

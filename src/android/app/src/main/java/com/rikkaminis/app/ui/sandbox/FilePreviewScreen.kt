@@ -57,6 +57,22 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.material3.TopAppBarDefaults
+import com.rikkaminis.app.ui.chat.topBarTail
+import com.rikkaminis.app.ui.components.GlassSurfacePolicy
+import com.rikkaminis.app.ui.components.GlassTopBarLayers
+import com.rikkaminis.app.ui.components.GlassDocumentLayout
+import com.rikkaminis.app.ui.components.LocalGlassDocumentLayout
+import com.rikkaminis.app.ui.components.LocalGlassBackdrop
+import com.rikkaminis.app.ui.components.rememberGlassBackdrop
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -223,8 +239,24 @@ fun FilePreviewScreen(
     // because they fought the Activity's edge-to-edge transparent-scrim
     // setup instead of cooperating with it. The "Browse Chat Files" screen
     // (FileBrowserScreen) renders correctly with zero overrides; do the same.
+    // Only the native Compose Markdown document is a safe recorded source.
+    // HTML/WebView, media and AndroidView previews remain explicitly solid.
+    val previewHazeState = key(item.file) { rememberHazeState() }
+    val backdrop = rememberGlassBackdrop(previewHazeState, hasSafeSource = item.isMarkdownFile)
+    var markdownScroll by remember(item.file) { mutableFloatStateOf(0f) }
+    val markdownScrollConnection = remember(item.file) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                markdownScroll = GlassSurfacePolicy.scrollOffset(markdownScroll, consumed.y)
+                return Offset.Zero
+            }
+        }
+    }
+    CompositionLocalProvider(LocalGlassBackdrop provides backdrop) {
     Scaffold(
         topBar = {
+            Box {
+                GlassTopBarLayers(backdrop, markdownScroll > 0f, MaterialTheme.colorScheme.surface)
             TopAppBar(
                 title = {
                     Text(
@@ -281,7 +313,11 @@ fun FilePreviewScreen(
                         Icon(Icons.Default.Download, contentDescription = stringResource(R.string.filepreview_save_as))
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = if (backdrop != null) Color.Transparent else MaterialTheme.colorScheme.surface,
+                ),
             )
+            }
         },
     ) { padding ->
         Box(
@@ -292,7 +328,17 @@ fun FilePreviewScreen(
             // Order matters: markdown / html before generic text — both are
             // technically text but warrant richer renderers.
             when {
-                item.isMarkdownFile -> MarkdownPreview(item)
+                item.isMarkdownFile -> CompositionLocalProvider(
+                    LocalGlassDocumentLayout provides GlassDocumentLayout(
+                        modifier = if (backdrop != null) {
+                            Modifier
+                                .topBarTail(padding.calculateTopPadding())
+                                .hazeSource(previewHazeState)
+                                .nestedScroll(markdownScrollConnection)
+                        } else Modifier,
+                        topInset = if (backdrop != null) padding.calculateTopPadding() else 0.dp,
+                    ),
+                ) { MarkdownPreview(item) }
                 item.isHtmlFile -> HtmlPreview(item)
                 item.isAudioFile -> AudioPreview(item)
                 item.isVideoFile -> VideoPreview(item)
@@ -306,6 +352,7 @@ fun FilePreviewScreen(
             }
         }
     }
+    } // Preview owns its backdrop; never inherit the still-mounted chat's state.
 }
 
 // ==================== Text/Code Preview ====================
@@ -416,6 +463,10 @@ private fun TextPreview(item: FileItem) {
 
 @Composable
 private fun MarkdownPreview(item: FileItem) {
+    // Host geometry arrives through a local so this function's signature (pinned
+    // by filepreview_print_bounded_check.py) stays byte-identical to the gate's
+    // contract; the glass wiring lives in the caller's provider instead.
+    val documentLayout = LocalGlassDocumentLayout.current
     // [fix/render-ui F-276] Error fallbacks below are user-visible; resolve
     // them through resources like the rest of this screen.
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -456,9 +507,9 @@ private fun MarkdownPreview(item: FileItem) {
             // first frame — transition completes before the off-screen blocks
             // are touched.
             content = content!!,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().then(documentLayout.modifier),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                horizontal = 16.dp, vertical = 12.dp,
+                start = 16.dp, end = 16.dp, top = 12.dp + documentLayout.topInset, bottom = 12.dp,
             ),
         )
         else -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

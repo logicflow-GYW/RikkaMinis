@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_process_tools">Инструментов: %1$d</string>
+    <string name="chat_process_duration">Всего %1$s с</string>
+    <string name="chat_process_failed">Ошибок: %1$d</string>
+    <string name="chat_process_cancelled">Отменено: %1$d</string>
+    <string name="chat_process_deduplicated">Пропущено: %1$d</string>
+    <string name="chat_process_expanded">Развёрнуто</string>
+    <string name="chat_process_collapsed">Свёрнуто</string>
+    <string name="chat_process_copy_all">Копировать всё</string>
+    <string name="chat_process_copied">Полный текст размышлений скопирован</string>
+    <string name="chat_process_copied_file">Полный текст скопирован как текстовый файл из-за ограничения буфера обмена</string>
+    <string name="chat_process_copy_failed">Не удалось скопировать. Повторите попытку.</string>
+</resources>

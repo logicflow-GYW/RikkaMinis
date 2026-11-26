@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_process_tools">ツール %1$d 件</string>
+    <string name="chat_process_duration">合計 %1$s 秒</string>
+    <string name="chat_process_failed">失敗 %1$d 件</string>
+    <string name="chat_process_cancelled">キャンセル %1$d 件</string>
+    <string name="chat_process_deduplicated">重複スキップ %1$d 件</string>
+    <string name="chat_process_expanded">展開済み</string>
+    <string name="chat_process_collapsed">折りたたみ済み</string>
+    <string name="chat_process_copy_all">すべてコピー</string>
+    <string name="chat_process_copied">思考の全文をコピーしました</string>
+    <string name="chat_process_copied_file">サイズ制限を避けるため、思考の全文をテキストファイルとしてコピーしました</string>
+    <string name="chat_process_copy_failed">コピーできませんでした。もう一度お試しください。</string>
+</resources>

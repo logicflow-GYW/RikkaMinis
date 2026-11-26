@@ -1310,6 +1310,9 @@
     <string name="appearance_auto_expand_thinking_footer">Wenn aktiviert, wird ein neuer Denkblock automatisch erweitert, während das Modell denkt, und beim Abschluss eingeklappt. Wenn deaktiviert, bleiben Denkblöcke eingeklappt – tippen Sie auf einen, um ihn zu lesen.</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">Denk-Header</string>
+    <string name="appearance_section_tool_steps">Prozessschritte</string>
+    <string name="appearance_tool_fold_title">Abgeschlossene Prozessabschnitte einklappen</string>
+    <string name="appearance_tool_fold_footer">Wenn ein: Ein abgeschlossener Arbeitsabschnitt – Denken zusammen mit den daraus entstandenen Werkzeugaufrufen – klappt zu einer Zusammenfassungszeile zusammen, die benennt, was passiert ist. Der laufende Abschnitt bleibt offen. Standard ist aus: dann wird jeder Block einzeln dargestellt.</string>
     <string name="appearance_thinking_show_chars_title">Denk-Länge anzeigen</string>
     <string name="appearance_thinking_show_duration_title">Denk-Dauer anzeigen</string>
     <string name="appearance_thinking_header_footer">Legt fest, was ein Denkblock neben seinem Titel zeigt. Die Länge zählt die Zeichen des Denktextes (9K ≈ neuntausend Zeichen); die Dauer wird nur gemessen, solange diese Unterhaltung geöffnet ist, und verschwindet beim erneuten Öffnen.</string>
@@ -1540,15 +1543,15 @@
     <string name="chat_tuning_swipe_threshold">Hochwisch-Sendestrecke (dp)</string>
     <string name="chat_tuning_swipe_threshold_desc">Wie weit man im Eingabefeld nach oben wischen muss, um die Sendegeste auszulösen. Standard 120.</string>
     <string name="chat_tuning_composer_footer">Betrifft nur das Eingabefeld der App. Sende-Knopf und Enter-Verhalten sind eigene Einstellungen.</string>
-    <string name="chat_tuning_section_composer_glass">EINGABEFELD-GLAS</string>
+    <string name="chat_tuning_section_composer_glass">GLASOBERFLÄCHEN</string>
     <string name="chat_tuning_glass_blur">Unschärferadius</string>
     <string name="chat_tuning_glass_blur_desc">Wie stark der Hintergrund verschwimmt. Rikkahub nutzt 12 dp (Blur) und 16 dp (Glas).</string>
     <string name="chat_tuning_glass_tint">Glasdichte</string>
-    <string name="chat_tuning_glass_tint_desc">Wie viel Kartenfarbe die Unschärfe überdeckt. 0 % ist reine Unschärfe, 100 % nur die Kartenfarbe (deckend).</string>
+    <string name="chat_tuning_glass_tint_desc">Wie stark die Oberflächenfarbe die Unschärfe überdeckt. Eingabe: 0 % reine Unschärfe, 100 % deckend. Titelleisten und Menüs erhalten 25 Prozentpunkte mehr für lesbare Beschriftungen.</string>
     <string name="chat_tuning_glass_footer">Den Glass-Schalter findest du unter Einstellungen → Darstellung im Abschnitt „Milchglas“. Ist er aus, haben Unschärfe und Tönung keine Wirkung.</string>    <!-- [feat/chat-tuning-panel-b] Runtime-Limits — Kontext/Speicher- und Medien/Werkzeug-Budgets. -->
-    <string name="appearance_glass_title">Eingabefeld und obere Titelleiste</string>    <string name="runtime_limits_section_context">Kontext &amp; Speicher</string>
+    <string name="appearance_glass_title">Glas für schwebende Oberflächen</string>    <string name="runtime_limits_section_context">Kontext &amp; Speicher</string>
     <string name="appearance_section_glass">Milchglas</string>
-    <string name="appearance_glass_footer">Gilt für das Eingabefeld und die obere Titelleiste. Unschärferadius und Dichte stehen unter Chat-Feintuning; unter Android 12 bleiben die Oberflächen deckend.</string>    <string name="runtime_limits_compact_tail">Auto-Kompaktierung: Token-Untergrenze</string>
+    <string name="appearance_glass_footer">Gilt für Chat-Eingabe und Titelleiste, Titelleisten in scrollbaren Einstellungen und nativen Markdown-Vorschauen sowie Menüs mit lokalem Hintergrund. Webinhalte, andere Einstellungen und Menüs ohne Quelle bleiben deckend. Radius und Dichte: Chat-Feintuning. Unter Android 12 bleibt alles deckend.</string>    <string name="runtime_limits_compact_tail">Auto-Kompaktierung: Token-Untergrenze</string>
     <string name="runtime_limits_compact_tail_desc">Die Auto-Kompaktierung kürzt nie unter so viele Tail-Token — die neueste Unterhaltung bleibt wörtlich erhalten. Standard 8000.</string>
     <string name="runtime_limits_compact_interval">Auto-Kompaktierung: Intervall (Min.)</string>
     <string name="runtime_limits_compact_interval_desc">Mindestabstand in Minuten zwischen Auto-Kompaktierungen derselben Unterhaltung. Standard 5.</string>

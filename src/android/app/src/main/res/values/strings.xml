@@ -524,6 +524,9 @@
     <string name="appearance_auto_expand_thinking_footer">When on, a new thinking block expands automatically while the model is reasoning and collapses when it finishes. When off, thinking blocks stay collapsed — tap one to read it.</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">Thinking Header</string>
+    <string name="appearance_section_tool_steps">Process Steps</string>
+    <string name="appearance_tool_fold_title">Fold finished process steps</string>
+    <string name="appearance_tool_fold_footer">When on, a finished stretch of work — its reasoning together with the tool calls it produced — collapses into one summary row, and the row names what happened. The segment that is still running stays open. Default is off: every block then renders separately.</string>
     <string name="appearance_thinking_show_chars_title">Show Thinking Length</string>
     <string name="appearance_thinking_show_duration_title">Show Thinking Time</string>
     <string name="appearance_thinking_header_footer">Choose what a thinking block shows next to its title. Length is the reasoning text measured in characters (9K = about nine thousand); time is measured while this conversation is open and disappears once you reopen it.</string>
@@ -1654,15 +1657,15 @@
     <string name="chat_tuning_swipe_threshold">Swipe-up-to-send distance (dp)</string>
     <string name="chat_tuning_swipe_threshold_desc">How far you must swipe up inside the input to arm the send gesture. Default 120.</string>
     <string name="chat_tuning_composer_footer">Only the in-app composer is affected. The send button and the return-key behaviour are separate settings.</string>
-    <string name="chat_tuning_section_composer_glass">COMPOSER GLASS</string>
+    <string name="chat_tuning_section_composer_glass">GLASS SURFACES</string>
     <string name="chat_tuning_glass_blur">Blur radius</string>
     <string name="chat_tuning_glass_blur_desc">How far the backdrop smears. Rikkahub uses 12 dp for its blur preset and 16 dp for glass.</string>
     <string name="chat_tuning_glass_tint">Glass density</string>
-    <string name="chat_tuning_glass_tint_desc">How much of the card colour covers the blur. 0% is pure blur, 100% is the card colour alone (a solid card).</string>
+    <string name="chat_tuning_glass_tint_desc">How much surface colour covers the blur. Input: 0% pure blur, 100% solid. Top bars and menus add 25 points for readable labels.</string>
     <string name="chat_tuning_glass_footer">The Glass switch is in Settings → Appearance, in the Glass section. When off, the blur and tint settings have no effect.</string>    <!-- [feat/chat-tuning-panel-b] Runtime Limits — context/memory & media/tool budget sections. -->
-    <string name="appearance_glass_title">Input bar and top bar</string>    <string name="runtime_limits_section_context">Context &amp; memory</string>
+    <string name="appearance_glass_title">Floating surface glass</string>    <string name="runtime_limits_section_context">Context &amp; memory</string>
     <string name="appearance_section_glass">Glass</string>
-    <string name="appearance_glass_footer">Applies to the input bar and the top bar. Blur radius and density are in Chat Tuning; below Android 12 the surfaces stay solid.</string>    <string name="runtime_limits_compact_tail">Auto-compact tail floor (tokens)</string>
+    <string name="appearance_glass_footer">Applies to chat input/top bar, scrollable settings top bars, native Markdown preview top bars and menus with a local backdrop. Web content, other settings and menus without a source stay solid. Blur and density are in Chat Tuning; below Android 12 all surfaces stay solid.</string>    <string name="runtime_limits_compact_tail">Auto-compact tail floor (tokens)</string>
     <string name="runtime_limits_compact_tail_desc">Auto-compaction never cuts below this many tail tokens — the newest conversation stays verbatim. Default 8000.</string>
     <string name="runtime_limits_compact_interval">Auto-compact interval (min)</string>
     <string name="runtime_limits_compact_interval_desc">Minimum minutes between auto-compactions of the same conversation. Default 5.</string>

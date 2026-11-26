@@ -1317,6 +1317,9 @@
     <string name="appearance_auto_expand_thinking_footer">オンにすると、モデルが推論している間、新しい思考ブロックが自動的に展開され、完了すると折りたたまれます。オフの間は、思考ブロックは折りたたまれたままになります。タップして読んでください。</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">思考ヘッダー</string>
+    <string name="appearance_section_tool_steps">プロセス手順</string>
+    <string name="appearance_tool_fold_title">完了したプロセス区間を折りたたむ</string>
+    <string name="appearance_tool_fold_footer">オンにすると、完了した一連の作業（思考と、それが引き起こしたツール呼び出し）が 1 行の要約にまとまり、要約には何をしたかが表示されます。実行中の区間は開いたままです。既定はオフで、各ブロックが個別に表示されます。</string>
     <string name="appearance_thinking_show_chars_title">思考の文字数を表示</string>
     <string name="appearance_thinking_show_duration_title">思考の所要時間を表示</string>
     <string name="appearance_thinking_header_footer">思考ブロックの見出しの横に表示する項目を選びます。文字数は推論テキストの文字数（9K ≒ 9千文字）です。所要時間はこの会話を開いている間だけ計測され、開き直すと表示されません。</string>
@@ -1539,15 +1542,15 @@
     <string name="chat_tuning_swipe_threshold">上スワイプ送信の距離（dp）</string>
     <string name="chat_tuning_swipe_threshold_desc">入力欄内でどれだけ上にスワイプすると送信ジェスチャが有効になるか。既定 120。</string>
     <string name="chat_tuning_composer_footer">アプリ内の入力欄のみに影響します。送信ボタンと Enter キーの動作は別の設定です。</string>
-    <string name="chat_tuning_section_composer_glass">入力欄ガラス</string>
+    <string name="chat_tuning_section_composer_glass">ガラス表面</string>
     <string name="chat_tuning_glass_blur">ぼかし半径</string>
     <string name="chat_tuning_glass_blur_desc">背景をどれだけぼかすか。rikkahub は 12 dp（ブラー）と 16 dp（グラス）を使っています。</string>
     <string name="chat_tuning_glass_tint">ガラスの濃さ</string>
-    <string name="chat_tuning_glass_tint_desc">カードの色でぼかしをどれだけ覆うか。0% はぼかしのみ、100% はカード色だけ（不透明）。</string>
+    <string name="chat_tuning_glass_tint_desc">背景色でぼかしを覆う程度。入力欄は 0% がぼかしのみ、100% が不透明。上部バーとメニューは文字を読みやすくするため 25 ポイント加算します。</string>
     <string name="chat_tuning_glass_footer">「設定 → 外観」ページの「すりガラス」セクションにあるスイッチで切り替えます。オフの間はぼかしと色合いの設定は反映されません。</string>    <!-- [feat/chat-tuning-panel-b] 実行時リミット — コンテキスト/メモリ・メディア/ツール予算セクション。 -->
-    <string name="appearance_glass_title">入力欄と上部タイトルバー</string>    <string name="runtime_limits_section_context">コンテキストとメモリ</string>
+    <string name="appearance_glass_title">フローティング面のすりガラス</string>    <string name="runtime_limits_section_context">コンテキストとメモリ</string>
     <string name="appearance_section_glass">すりガラス</string>
-    <string name="appearance_glass_footer">入力欄と上部タイトルバーに適用されます。ぼかし半径と濃さは「チャット調整」にあります。Android 12 未満では塗りつぶしのままです。</string>    <string name="runtime_limits_compact_tail">自動圧縮の末尾トークン下限</string>
+    <string name="appearance_glass_footer">チャットの入力欄と上部バー、スクロール可能な設定画面とネイティブ Markdown プレビューの上部バー、同じ画面の背景ソースがあるメニューに適用。Web コンテンツ、その他の設定画面、ソースのないメニューは不透明です。半径と濃さは「チャット調整」にあります。Android 12 未満はすべて不透明です。</string>    <string name="runtime_limits_compact_tail">自動圧縮の末尾トークン下限</string>
     <string name="runtime_limits_compact_tail_desc">自動圧縮はこの数の末尾トークンを下回って切り詰めません — 直近の会話はそのまま残ります。既定 8000。</string>
     <string name="runtime_limits_compact_interval">自動圧縮の間隔（分）</string>
     <string name="runtime_limits_compact_interval_desc">同じ会話で自動圧縮を繰り返す最小間隔（分）。既定 5。</string>

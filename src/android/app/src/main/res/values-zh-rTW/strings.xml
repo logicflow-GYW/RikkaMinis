@@ -1112,6 +1112,9 @@
     <string name="appearance_auto_expand_thinking_footer">開啟後，模型思考時新的思考塊會自動展開，思考結束後自動摺疊。關閉後，思考塊保持摺疊狀態——點選即可檢視。</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">思考標題列</string>
+    <string name="appearance_section_tool_steps">過程步驟</string>
+    <string name="appearance_tool_fold_title">折疊已完成的過程段</string>
+    <string name="appearance_tool_fold_footer">開啟後，一段已完成的工作（思考與它引發的工具呼叫）會一起收成一行摘要，摘要寫明做了什麼；仍在進行的那一段保持展開。預設關閉，此時每個區塊都單獨顯示。</string>
     <string name="appearance_thinking_show_chars_title">顯示思考字數</string>
     <string name="appearance_thinking_show_duration_title">顯示思考耗時</string>
     <string name="appearance_thinking_header_footer">選擇思考區塊標題旁顯示的內容。字數是推理文字的字元數（9K 約九千字元）；耗時僅在本次工作階段內有效，重新開啟對話後即不顯示。</string>
@@ -1545,15 +1548,15 @@
     <string name="chat_tuning_swipe_threshold">上滑傳送距離（dp）</string>
     <string name="chat_tuning_swipe_threshold_desc">在輸入框內上滑多遠才觸發傳送手勢。預設 120。</string>
     <string name="chat_tuning_composer_footer">僅影響應用內輸入框；傳送按鈕與 Enter 鍵行為是另外的設定項。</string>
-    <string name="chat_tuning_section_composer_glass">輸入框玻璃</string>
+    <string name="chat_tuning_section_composer_glass">玻璃表面</string>
     <string name="chat_tuning_glass_blur">模糊半徑</string>
     <string name="chat_tuning_glass_blur_desc">背景被抹開的程度。rikkahub 的模糊預設是 12 dp，玻璃預設 16 dp。</string>
     <string name="chat_tuning_glass_tint">玻璃濃度</string>
-    <string name="chat_tuning_glass_tint_desc">卡片底色覆蓋模糊的程度。0% 是純模糊，100% 只剩卡片底色（實心）。</string>
+    <string name="chat_tuning_glass_tint_desc">底色覆蓋模糊的程度。輸入列：0% 純模糊，100% 實色；頂列與選單額外增加 25 個百分點，確保小字可讀。</string>
     <string name="chat_tuning_glass_footer">毛玻璃開關位於「設定 → 外觀」頁面的「毛玻璃」區塊。關閉時，模糊與色調設定不會生效。</string>    <!-- [feat/chat-tuning-panel-b] 執行時限制 — 上下文/記憶 與 媒體/工具預算段。 -->
-    <string name="appearance_glass_title">輸入列與頂部標題列</string>    <string name="runtime_limits_section_context">上下文與記憶</string>
+    <string name="appearance_glass_title">浮動表面毛玻璃</string>    <string name="runtime_limits_section_context">上下文與記憶</string>
     <string name="appearance_section_glass">毛玻璃</string>
-    <string name="appearance_glass_footer">對輸入列和頂部標題列生效。模糊半徑與濃度在「聊天微調」裡；Android 12 以下維持實心。</string>    <string name="runtime_limits_compact_tail">自動壓縮保留尾部 token</string>
+    <string name="appearance_glass_footer">適用於聊天輸入列與頂列、可捲動設定頁頂列、原生 Markdown 預覽頂列及有本頁背景來源的選單。網頁內容、其他設定頁及無背景來源選單維持實色。半徑與濃度在「聊天微調」裡；Android 12 以下均為實色。</string>    <string name="runtime_limits_compact_tail">自動壓縮保留尾部 token</string>
     <string name="runtime_limits_compact_tail_desc">自動壓縮不會砍掉低於此數量的尾部 token——最新對話保持原樣。預設 8000。</string>
     <string name="runtime_limits_compact_interval">自動壓縮間隔（分鐘）</string>
     <string name="runtime_limits_compact_interval_desc">同一會話兩次自動壓縮之間的最小分鐘數。預設 5。</string>

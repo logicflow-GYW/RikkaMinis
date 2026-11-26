@@ -1174,6 +1174,20 @@ internal object ConfigBuiltins {
                 defaultValue = false,
             )
         )
+        // [ux-1125] Process-segment folding is an opt-in experiment, not a fixed
+        // presentation: registered so it round-trips through minis-config and
+        // every backup, with the shipped OFF default (folding changes how the
+        // transcript reads, so it must be asked for).
+        r.register(
+            PrefsBoolField(
+                path = "chat.toolFoldEnabled",
+                displayName = "Fold process segments",
+                description = "When ON, a finished stretch of work (its reasoning plus the tool calls it produced) collapses into one summary row; the running segment stays open. OFF renders every block separately, which is the default.",
+                prefs = appearancePrefs,
+                key = com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED,
+                defaultValue = false,
+            )
+        )
         // Chat action customization (Settings → Appearance → Chat Menu).
         // The action pool spans the top-right "..." menu AND the history-drawer
         // footer. Each stable key contributes two independent bool fields:
@@ -1389,10 +1403,11 @@ internal object ConfigBuiltins {
         r.register(
             PrefsBoolField(
                 path = "chat.composerGlassEnabled",
-                displayName = "Chat: frosted-glass composer card",
-                description = "Blur the message rows that scroll behind the composer card " +
-                    "(the rikkahub input-bar effect). Off by default: the blur records the " +
-                    "message list every frame. Needs Android 12+; older devices keep a solid card.",
+                displayName = "Glass surfaces: enabled",
+                description = "Blur the chat input/top bar, scrollable SettingsScaffold top bars, " +
+                    "native Markdown preview top bars and menus with a local recorded backdrop. " +
+                    "Off by default. WebView, non-scrollable settings and menus without a safe source " +
+                    "stay solid; Android 12+ is required for blur.",
                 prefs = chatTuningPrefs,
                 key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_ENABLED,
                 defaultValue = com.rikkaminis.app.data.ChatTuningPrefs.COMPOSER_GLASS_ENABLED_DEFAULT,
@@ -1401,8 +1416,8 @@ internal object ConfigBuiltins {
         r.register(
             PrefsIntField(
                 path = "chat.composerGlassBlurDp",
-                displayName = "Chat: composer glass blur radius (dp)",
-                description = "How far the backdrop smears behind the input card and the top bar. " +
+                displayName = "Glass surfaces: blur radius (dp)",
+                description = "Shared backdrop blur for supported input, toolbar and popup surfaces. " +
                     "Default 12 (rikkahub's Blur preset).",
                 prefs = chatTuningPrefs,
                 key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_BLUR_DP,
@@ -1414,9 +1429,9 @@ internal object ConfigBuiltins {
         r.register(
             PrefsIntField(
                 path = "chat.composerGlassTintPct",
-                displayName = "Chat: composer glass density (%)",
-                description = "How much of the card colour covers the blur. 0 = pure blur " +
-                    "(message text fights the draft), 100 = the card colour alone (effect invisible). " +
+                displayName = "Glass surfaces: density (%)",
+                description = "How much of the surface colour covers the blur. Input: 0 = pure blur, " +
+                    "100 = solid. Toolbars and menus add 25 points for small-label contrast. " +
                     "Default 30 (rikkahub's Glass tint).",
                 prefs = chatTuningPrefs,
                 key = com.rikkaminis.app.data.ChatTuningPrefs.KEY_COMPOSER_GLASS_TINT_PCT,

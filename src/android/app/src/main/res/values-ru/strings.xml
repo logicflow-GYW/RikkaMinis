@@ -385,6 +385,9 @@
     <string name="appearance_auto_expand_thinking_footer">Когда включено, новый блок размышлений автоматически разворачивается, пока модель рассуждает, и сворачивается по завершении. Когда выключено, блоки размышлений остаются свёрнутыми — коснитесь блока, чтобы прочитать его.</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">Заголовок размышлений</string>
+    <string name="appearance_section_tool_steps">Шаги процесса</string>
+    <string name="appearance_tool_fold_title">Сворачивать завершённые участки процесса</string>
+    <string name="appearance_tool_fold_footer">Если включено, завершённый участок работы — рассуждение вместе с вызванными им инструментами — сворачивается в одну строку-сводку, в которой сказано, что было сделано. Текущий участок остаётся раскрытым. По умолчанию выключено: тогда каждый блок отображается отдельно.</string>
     <string name="appearance_thinking_show_chars_title">Показывать длину</string>
     <string name="appearance_thinking_show_duration_title">Показывать время</string>
     <string name="appearance_thinking_header_footer">Что показывать рядом с заголовком блока размышлений. Длина — число символов текста рассуждений (9K ≈ девять тысяч); время измеряется, пока беседа открыта, и исчезает после её повторного открытия.</string>
@@ -1493,15 +1496,15 @@
     <string name="chat_tuning_swipe_threshold">Дистанция свайпа вверх для отправки (dp)</string>
     <string name="chat_tuning_swipe_threshold_desc">Как далеко нужно свайпнуть вверх в поле ввода, чтобы сработал жест отправки. По умолчанию 120.</string>
     <string name="chat_tuning_composer_footer">Влияет только на поле ввода в приложении. Кнопка отправки и поведение Enter — отдельные настройки.</string>
-    <string name="chat_tuning_section_composer_glass">СТЕКЛО ПОЛЯ ВВОДА</string>
+    <string name="chat_tuning_section_composer_glass">СТЕКЛЯННЫЕ ПОВЕРХНОСТИ</string>
     <string name="chat_tuning_glass_blur">Радиус размытия</string>
     <string name="chat_tuning_glass_blur_desc">Насколько сильно размывается фон. В rikkahub — 12 dp для размытия и 16 dp для стекла.</string>
     <string name="chat_tuning_glass_tint">Плотность стекла</string>
-    <string name="chat_tuning_glass_tint_desc">Насколько цвет карточки перекрывает размытие. 0 % — чистое размытие, 100 % — только цвет карточки (непрозрачно).</string>
+    <string name="chat_tuning_glass_tint_desc">Насколько цвет поверхности перекрывает размытие. Ввод: 0 % — чистое размытие, 100 % — сплошной цвет. Для читаемости панелей и меню добавляются 25 процентных пунктов.</string>
     <string name="chat_tuning_glass_footer">Переключатель эффекта стекла находится в разделе «Настройки → Внешний вид» в блоке «Матовое стекло». Если он выключен, параметры размытия и тонировки не действуют.</string>    <!-- [feat/chat-tuning-panel-b] Лимиты рантайма — бюджеты контекста/памяти и медиа/инструментов. -->
-    <string name="appearance_glass_title">Поле ввода и верхняя панель</string>    <string name="runtime_limits_section_context">Контекст и память</string>
+    <string name="appearance_glass_title">Стекло плавающих поверхностей</string>    <string name="runtime_limits_section_context">Контекст и память</string>
     <string name="appearance_section_glass">Матовое стекло</string>
-    <string name="appearance_glass_footer">Действует для поля ввода и верхней панели. Радиус и плотность — в «Настройке чата»; ниже Android 12 поверхности остаются непрозрачными.</string>    <string name="runtime_limits_compact_tail">Нижний порог хвостовых токенов</string>
+    <string name="appearance_glass_footer">Для поля ввода и панели чата, панелей прокручиваемых настроек и нативного просмотра Markdown, а также меню с локальным источником фона. Веб-контент, другие настройки и меню без источника остаются непрозрачными. Радиус и плотность — в «Настройке чата»; до Android 12 всё непрозрачно.</string>    <string name="runtime_limits_compact_tail">Нижний порог хвостовых токенов</string>
     <string name="runtime_limits_compact_tail_desc">Автосжатие никогда не урезает ниже этого числа хвостовых токенов — свежий диалог остаётся дословным. По умолчанию 8000.</string>
     <string name="runtime_limits_compact_interval">Интервал автосжатия (мин)</string>
     <string name="runtime_limits_compact_interval_desc">Минимум минут между автосжатиями одного диалога. По умолчанию 5.</string>
