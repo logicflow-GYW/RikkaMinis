@@ -195,8 +195,11 @@ object ChatProcessFoldPlanner {
             // settled and collapsed to its row. During a turn the last call is
             // usually RUNNING, which made the whole process disappear behind one
             // row at exactly the moment the user wanted to watch it.
-            val live = isStreaming &&
-                (range.last + 1..blocks.lastIndex).all { kinds[it] == Kind.TOOL_UNFINISHED }
+            // (`none { BARRIER || TEXT_REPLY }` is the same test: a run can only be
+            // followed by TOOL_UNFINISHED, TEXT_REPLY or BARRIER.)
+            val live = isStreaming && (range.last + 1..blocks.lastIndex).none {
+                kinds[it] == Kind.BARRIER || kinds[it] == Kind.TEXT_REPLY
+            }
             val tailStart = if (live) tailStartOf(range, kinds) else -1
             // Nothing absorbed yet: emit no segment at all, so a running turn that
             // still fits on screen renders exactly like the plain transcript.
@@ -235,5 +238,20 @@ object ChatProcessFoldPlanner {
         true -> Mode.FULL
         false -> Mode.COLLAPSED
         null -> if (liveTail) Mode.TAIL else Mode.COLLAPSED
+    }
+
+    /**
+     * Choice a tap on the summary row records, or null to clear the explicit
+     * choice and fall back to [mode]'s default.
+     *
+     * Closing a RUNNING segment must land on its tail, not on the collapsed
+     * row: writing `false` there made the explicit choice outrank the live
+     * default, so one open-then-close during a turn removed the tail for the
+     * rest of that turn (and for every later one, since the choice sticks).
+     * Only a settled segment has a collapsed state worth remembering.
+     */
+    fun nextChoice(current: Mode, liveTail: Boolean): Boolean? = when (current) {
+        Mode.COLLAPSED, Mode.TAIL -> true
+        Mode.FULL -> if (liveTail) null else false
     }
 }

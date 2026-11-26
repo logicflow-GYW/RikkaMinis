@@ -314,14 +314,13 @@ internal fun AssistantMessageView(
                 if (segment.range.first == index) {
                     key("process:${message.id}:${segment.key}") {
                         ChatProcessSummary(segment, mode) {
-                            // A tap flips the CURRENT visual state, so tapping a
-                            // tail closes the segment and tapping it again opens
-                            // every member — never a no-op.
-                            val next = when (mode) {
-                                ChatProcessFoldPlanner.Mode.COLLAPSED -> true
-                                else -> false
+                            // A tap flips the CURRENT visual state. Closing a
+                            // running segment clears the explicit choice so the
+                            // tail comes back instead of freezing the row shut.
+                            val next = ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)
+                            foldChoices = HashMap(foldChoices).apply {
+                                if (next == null) remove(segment.key) else put(segment.key, next)
                             }
-                            foldChoices = HashMap(foldChoices).apply { put(segment.key, next) }
                         }
                     }
                 }
@@ -350,7 +349,6 @@ internal fun AssistantMessageView(
                             block,
                             isStreaming = isTrailingThinking && message.isStreaming,
                             isLast = block.id == lastThinkingId,
-                            inProcessSegment = segment != null,
                         )
                     }
                 }
@@ -1186,11 +1184,6 @@ internal fun ThinkingBlock(
     block: AssistantBlock,
     isStreaming: Boolean,
     isLast: Boolean = true,
-    // Inside an opened process segment the reasoning is a MEMBER of the run, not
-    // a card of its own: it keeps the text and the reading controls but drops
-    // the rounded card + border, so a segment reads as one block of work instead
-    // of a stack of separate cards.
-    inProcessSegment: Boolean = false,
 ) {
     // Per-block expand state, keyed by block.id so the user's manual toggle on
     // an earlier (finished) thinking block survives recomposition while a
@@ -1242,18 +1235,11 @@ internal fun ThinkingBlock(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = if (inProcessSegment) 2.dp else 4.dp)
-            .then(
-                if (inProcessSegment) {
-                    Modifier.padding(horizontal = 2.dp)
-                } else {
-                    Modifier
-                        .background(thinkingBlue.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
-                        .border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
-                        .clip(RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                },
-            ),
+            .padding(vertical = 4.dp)
+            .background(thinkingBlue.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
+            .border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         // Header row — only the header reacts to taps. Mirrors iOS, where
         // .onTapGesture is on the header HStack, not the whole VStack. With

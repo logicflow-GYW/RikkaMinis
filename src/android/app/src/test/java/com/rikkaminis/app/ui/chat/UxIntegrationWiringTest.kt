@@ -140,12 +140,33 @@ class UxIntegrationWiringTest {
         assertTrue(aggregate.contains("key(message.id, block.id)"))
     }
 
-    @Test fun `reasoning inside an opened segment drops its own card`() {
+    @Test fun `reasoning keeps its card whether or not it sits inside a segment`() {
+        // Regression (2026-11-26 user report: "启动那个折叠的，思考胶囊就变回原版
+        // 没有背景了"). The segment renderer used to pass inProcessSegment=true and
+        // strip the card, so turning folding ON silently changed the look of
+        // every reasoning block. The reasoning is a member of the run for
+        // ORDERING purposes only — its card is presentation the user already had.
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val thinking = ui.substringAfter("internal fun ThinkingBlock(")
-        assertTrue(thinking.contains("inProcessSegment: Boolean = false"))
-        assertTrue(thinking.contains("if (inProcessSegment) {"))
+        assertFalse(ui.contains("inProcessSegment"))
+        val thinking = ui.substringAfter("internal fun ThinkingBlock(").substringBefore("private fun ChatProcessSummary(")
+        assertTrue(thinking.contains(".background(thinkingBlue.copy(alpha = 0.06f), RoundedCornerShape(12.dp))"))
+        assertTrue(thinking.contains(".border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), RoundedCornerShape(12.dp))"))
+        // The card must not be behind a condition that a fold mode can flip.
+        assertFalse(thinking.contains("if (segment"))
+    }
+
+    @Test fun `closing a running segment returns to its tail instead of freezing shut`() {
+        // Regression (2026-11-26 user report: "点开折叠再收回去，留下的尾巴就不见
+        // 了"). The tap handler wrote an explicit `false`, which outranks the live
+        // default forever; only a settled segment has a collapsed state worth
+        // remembering, so the running one must clear its choice instead.
+        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
+        assertTrue(planner.contains("fun nextChoice(current: Mode, liveTail: Boolean): Boolean?"))
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         val aggregate = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
-        assertTrue(aggregate.contains("inProcessSegment = segment != null"))
+        assertTrue(aggregate.contains("ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)"))
+        assertTrue(aggregate.contains("if (next == null) remove(segment.key) else put(segment.key, next)"))
+        // The old shape hard-wrote the choice and lost the tail.
+        assertFalse(aggregate.contains("Mode.COLLAPSED -> true"))
     }
 }

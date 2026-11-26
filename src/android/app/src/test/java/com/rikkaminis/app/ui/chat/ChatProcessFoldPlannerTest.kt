@@ -235,4 +235,67 @@ class ChatProcessFoldPlannerTest {
         assertEquals(first, second)
         assertEquals(listOf(ChatProcessFoldPlanner.Mode.COLLAPSED), first)
     }
+
+    // ── tap decisions (2026-11-26 regression) ───────────────────────────────
+
+    @Test fun `closing a running segment clears the choice so the tail returns`() {
+        // The defect: closing wrote an explicit `false`, which outranks the live
+        // default for the rest of the turn AND every later turn (the choice is
+        // saved). Opening then closing once made the tail disappear for good.
+        assertNull(ChatProcessFoldPlanner.nextChoice(ChatProcessFoldPlanner.Mode.FULL, liveTail = true))
+        // ...and with the choice cleared, the running segment defaults back to TAIL.
+        assertEquals(
+            ChatProcessFoldPlanner.Mode.TAIL,
+            ChatProcessFoldPlanner.mode("a", emptyMap(), liveTail = true),
+        )
+        // Tapping a tail opens the whole segment; tapping an opened one closes it.
+        assertEquals(true, ChatProcessFoldPlanner.nextChoice(ChatProcessFoldPlanner.Mode.TAIL, liveTail = true))
+        assertEquals(true, ChatProcessFoldPlanner.nextChoice(ChatProcessFoldPlanner.Mode.COLLAPSED, liveTail = true))
+    }
+
+    @Test fun `a settled segment still remembers being closed`() {
+        assertEquals(true, ChatProcessFoldPlanner.nextChoice(ChatProcessFoldPlanner.Mode.COLLAPSED, liveTail = false))
+        assertEquals(false, ChatProcessFoldPlanner.nextChoice(ChatProcessFoldPlanner.Mode.FULL, liveTail = false))
+        // And the remembered `false` keeps it closed once the turn settles.
+        assertEquals(
+            ChatProcessFoldPlanner.Mode.COLLAPSED,
+            ChatProcessFoldPlanner.mode("a", mapOf("a" to false), liveTail = false),
+        )
+    }
+
+    @Test fun `a note or empty text between the run and a running call keeps the tail`() {
+        // A turn routinely emits an empty text block or a one-line note between
+        // the finished run and the call that is still running. Those are members,
+        // not boundaries, so the segment is still live and keeps its tail.
+        val withEmptyText = plan(
+            thinking("t1"), tool("a"), thinking("t2"), tool("b"), thinking("t3"), tool("c"),
+            text("gap", "   "),
+            tool("running", status = ToolBlockStatus.RUNNING),
+            live = true,
+        ).single()
+        assertTrue(withEmptyText.liveTail)
+        assertEquals(2, withEmptyText.tailStart)
+
+        val withNote = plan(
+            thinking("t1"), tool("a"), thinking("t2"), tool("b"), thinking("t3"), tool("c"),
+            text("note", "Checking the parser now."),
+            tool("running", status = ToolBlockStatus.RUNNING),
+            live = true,
+        ).single()
+        assertTrue(withNote.liveTail)
+        assertEquals(2, withNote.tailStart)
+    }
+
+    @Test fun `a barrier after the run still settles it mid-turn`() {
+        // An info row or a sub-agent card always renders something, so the
+        // segment in front of it is finished work — no tail.
+        val g = plan(
+            thinking("t1"), tool("a"), thinking("t2"), tool("b"),
+            info("i"),
+            tool("running", status = ToolBlockStatus.RUNNING),
+            live = true,
+        ).single()
+        assertFalse(g.liveTail)
+        assertEquals(-1, g.tailStart)
+    }
 }
