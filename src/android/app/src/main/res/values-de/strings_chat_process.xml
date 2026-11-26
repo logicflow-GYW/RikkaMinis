@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="chat_process_tools">%1$d Werkzeuge</string>
-    <string name="chat_process_duration">Insgesamt %1$s s</string>
+    <string name="chat_process_tools">%1$d Tools ausgeführt</string>
+    <string name="chat_process_tool_calls">%1$d Werkzeugaufrufe</string>
     <string name="chat_process_failed">%1$d fehlgeschlagen</string>
     <string name="chat_process_cancelled">%1$d abgebrochen</string>
     <string name="chat_process_deduplicated">%1$d übersprungen</string>

@@ -251,9 +251,13 @@ internal fun AssistantMessageView(
     // meant scrolling through an unfolded transcript opened every segment —
     // the opposite of what it was meant to protect. Fold state now comes from
     // the block list plus explicit taps only.
-    // Settings → Appearance → Tool Steps, supplied by the live ChatScreen
-    // prefs listener. Default OFF = the shipped behaviour: nothing folds.
-    processFoldEnabled: Boolean = false,
+    // The live preference is required: callers must not silently bypass OFF.
+    processFoldEnabled: Boolean,
+    // Bumped by the "back to newest" FAB. Closing the open segments is part of
+    // WHAT THAT BUTTON MEANS ("show me the newest thing"), not a second feature
+    // hung on it: the tap already moves the viewport by a screen or more, so the
+    // collapse costs nothing the reader can see.
+    collapseAllEpoch: Int = 0,
 ) {
     // Fold state = the plan plus explicit taps, nothing else. The previous
     // version also tracked "already auto-folded once" and wrote it only while
@@ -261,14 +265,48 @@ internal fun AssistantMessageView(
     // been folded re-opened every segment — the message blew open exactly when
     // the user was trying to read it. That bookkeeping is gone.
     var foldChoices by rememberSaveable(message.id) { mutableStateOf(hashMapOf<String, Boolean>()) }
+    // The epoch `foldChoices` was recorded under. Saved with the choices so a
+    // restored row cannot resurrect a choice that a later "close everything"
+    // has already retired (both halves survive together or neither does).
+    var foldChoicesEpoch by rememberSaveable(message.id) { mutableStateOf(0) }
+    // Choices in force right now. A "close everything" (the back-to-newest FAB)
+    // bumps [collapseAllEpoch]; every choice recorded under an older epoch is
+    // retired — including rows that are not composed at that moment, which is
+    // the case this is here for: an effect inside a row never runs for the rows
+    // scrolled off screen, and those are exactly the ones the reader left open
+    // further up.
+    val activeChoices = ChatProcessFoldPlanner.liveChoices(foldChoices, foldChoicesEpoch, collapseAllEpoch)
+    // Record a tap under the CURRENT epoch, so it survives later composition
+    // and is retired only by a later "close everything".
+    fun writeChoices(next: Map<String, Boolean>) {
+        foldChoices = HashMap(next)
+        foldChoicesEpoch = collapseAllEpoch
+    }
     val foldSegments = remember(message.toolBlocks, message.isStreaming, processFoldEnabled) {
         ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, processFoldEnabled)
     }
     fun segmentMode(segment: ChatProcessFoldPlanner.Segment): ChatProcessFoldPlanner.Mode =
-        ChatProcessFoldPlanner.mode(segment.key, foldChoices, segment.liveTail)
+        ChatProcessFoldPlanner.mode(segment.key, activeChoices, segment.liveTail)
     val segmentByIndex = buildMap {
         foldSegments.forEach { segment -> segment.memberIndices.forEach { put(it, segment) } }
     }
+
+    // ── [auto-fold] an OPEN segment is never closed by a scroll ──────────────
+    // There used to be a "fold it once it leaves the top of the viewport" rule
+    // here, driven by a zero-height probe. Two reasons it is gone:
+    //  1. It measured with `boundsInWindow()`, which returns Rect.Zero for a
+    //     zero-height node (AndroidX LayoutCoordinates.kt), so the segment's
+    //     bottom read as 0 and "has left the top" was true at all times. A
+    //     segment the reader opened folded itself one frame later — a manual
+    //     expand was impossible to keep, on every message but the live one.
+    //  2. Its only possible target was a FULL segment, i.e. exactly the one the
+    //     reader had just opened (a settled segment is COLLAPSED by default and
+    //     a running one shows TAIL). So the rule could only ever undo intent.
+    // Folding stays what the user asked for: a settled segment arrives
+    // collapsed, a tap opens or closes it, and the back-to-newest button closes
+    // what was left open — see `activeChoices` above for why that comparison,
+    // and not an effect, is what makes the button reach rows off screen.
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -313,15 +351,21 @@ internal fun AssistantMessageView(
                 val mode = segmentMode(segment)
                 if (segment.range.first == index) {
                     key("process:${message.id}:${segment.key}") {
-                        ChatProcessSummary(segment, mode) {
-                            // A tap flips the CURRENT visual state. Closing a
-                            // running segment clears the explicit choice so the
-                            // tail comes back instead of freezing the row shut.
-                            val next = ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)
-                            foldChoices = HashMap(foldChoices).apply {
-                                if (next == null) remove(segment.key) else put(segment.key, next)
-                            }
-                        }
+                        ChatProcessSummary(
+                            segment = segment,
+                            mode = mode,
+                            onToggle = {
+                                // A tap flips the CURRENT visual state. Closing a
+                                // running segment clears the explicit choice so the
+                                // tail comes back instead of freezing the row shut.
+                                val next = ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)
+                                writeChoices(
+                                    HashMap(activeChoices).apply {
+                                        if (next == null) remove(segment.key) else put(segment.key, next)
+                                    },
+                                )
+                            },
+                        )
                     }
                 }
                 // COLLAPSED replaces the whole span with the row above; TAIL keeps
@@ -466,22 +510,35 @@ private fun ChatProcessSummary(
             R.string.chat_process_expanded
         },
     )
-    val meta = buildList {
-        add(stringResource(R.string.chat_process_tools, segment.toolCount))
-        if (segment.durationMs > 0) add(
-            stringResource(
-                R.string.chat_process_duration,
-                String.format(java.util.Locale.getDefault(), "%.1f", segment.durationMs / 1000.0),
-            ),
-        )
-        if (segment.failedCount > 0) add(stringResource(R.string.chat_process_failed, segment.failedCount))
-        if (segment.cancelledCount > 0) add(stringResource(R.string.chat_process_cancelled, segment.cancelledCount))
-        if (segment.deduplicatedCount > 0) {
-            add(stringResource(R.string.chat_process_deduplicated, segment.deduplicatedCount))
-        }
+    // Counts only: no title, no duration.
+    //  - The title came from the segment's own last reasoning (else the last
+    //    call's label) — the final second of a run that may hold eighty calls,
+    //    and usually a headless fragment ("按真实diff行号修正…"). It described
+    //    nothing the row's reader wanted.
+    //  - The duration was the SUM of per-call durations (parallel calls counted
+    //    twice, not wall time) and is not persisted with the tool_use part, so
+    //    it vanished on reload and the same segment changed shape across a
+    //    restart.
+    val toolsText = stringResource(
+        if (segment.allCallsSucceeded) R.string.chat_process_tools else R.string.chat_process_tool_calls,
+        segment.toolCount,
+    )
+    val failedText = if (segment.failedCount > 0) {
+        stringResource(R.string.chat_process_failed, segment.failedCount)
+    } else {
+        null
     }
-    val metaText = meta.joinToString(" · ")
-    val metaColor = if (segment.failedCount > 0) ToolErrorColor else MaterialTheme.colorScheme.onSurfaceVariant
+    val cancelledText = if (segment.cancelledCount > 0) {
+        stringResource(R.string.chat_process_cancelled, segment.cancelledCount)
+    } else {
+        null
+    }
+    val deduplicatedText = if (segment.deduplicatedCount > 0) {
+        stringResource(R.string.chat_process_deduplicated, segment.deduplicatedCount)
+    } else {
+        null
+    }
+    val neutral = MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
@@ -502,20 +559,30 @@ private fun ChatProcessSummary(
         Spacer(Modifier.width(4.dp))
         Text(
             text = buildAnnotatedString {
-                val title = segment.title
-                if (title != null) {
-                    withStyle(SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f))) {
-                        append(title)
-                    }
-                    append(" · ")
-                }
-                withStyle(SpanStyle(color = metaColor)) { append(metaText) }
+                withStyle(SpanStyle(color = neutral)) { append(toolsText) }
+                // Failures are the one detail worth colouring: a collapsed
+                // segment holding them must say so from the row alone. The rest
+                // stays neutral — a whole red line shouted for one bad call.
+                appendMetaPart(failedText, ToolErrorColor, neutral)
+                appendMetaPart(cancelledText, neutral, neutral)
+                appendMetaPart(deduplicatedText, neutral, neutral)
             },
             fontSize = 12.5.sp,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/** Appends " · <text>" to a summary row, or nothing when [text] is null. */
+private fun androidx.compose.ui.text.AnnotatedString.Builder.appendMetaPart(
+    text: String?,
+    color: Color,
+    neutral: Color,
+) {
+    if (text == null) return
+    withStyle(SpanStyle(color = neutral.copy(alpha = 0.7f))) { append(" · ") }
+    withStyle(SpanStyle(color = color)) { append(text) }
 }
 
 /**
@@ -1205,8 +1272,11 @@ internal fun ThinkingBlock(
     // a settings change lands on the next mounted row, not mid-stream.
     val showThinkingDuration = remember { thinkingDurationVisibleEnabled(context) }
     val showThinkingCharCount = remember { thinkingCharCountVisibleEnabled(context) }
-    // Null = automatic; an explicit true/false is never overwritten by stream end.
+    // Null = automatic. A header tap or a drag away from the live tail can keep the body open.
     var manualChoice by rememberSaveable(block.id) { mutableStateOf<Boolean?>(null) }
+    // Only a header OPEN starts a new reading position. A drag that keeps the body
+    // open must preserve the current position and be able to resume tail-follow.
+    var headerOpenGeneration by rememberSaveable(block.id) { mutableStateOf(0) }
     val expanded = ThinkingReadPlanner.expanded(manualChoice, autoExpandThinking, isStreaming, isLast)
     val thinkingBlue = ChatColors.thinking
     val charCount = block.content.length
@@ -1254,7 +1324,10 @@ internal fun ThinkingBlock(
                     if (overHardCap) {
                         fullContentSnapshot = block.content
                         showFullContent = true
-                    } else manualChoice = !expanded
+                    } else {
+                        if (!expanded) headerOpenGeneration++
+                        manualChoice = !expanded
+                    }
                 },
         ) {
             if (isStreaming && block.toolStatus != ToolBlockStatus.SUCCESS) {
@@ -1362,14 +1435,19 @@ internal fun ThinkingBlock(
             // yanking the viewport (the "content suddenly jumps" feel).
             enter = expandVertically(
                 animationSpec = tween(durationMillis = ThinkingReadPlanner.EXPAND_MS),
+                expandFrom = Alignment.Top,
             ) + fadeIn(animationSpec = tween(durationMillis = ThinkingReadPlanner.FADE_MS)),
             exit = shrinkVertically(
                 animationSpec = tween(durationMillis = ThinkingReadPlanner.EXPAND_MS),
+                shrinkTowards = Alignment.Top,
             ) + fadeOut(animationSpec = tween(durationMillis = ThinkingReadPlanner.FADE_MS)),
         ) {
-            val scrollState = rememberScrollState()
+            // Compose otherwise reveals the bottom edge first, even at scroll offset 0.
+            // A new header-open key starts at 0 without a post-layout scroll. Reusing the
+            // key during drag/recomposition/restoration keeps the reader's scroll state.
+            val scrollState = key(headerOpenGeneration) { rememberScrollState() }
             val isDragging by scrollState.interactionSource.collectIsDraggedAsState()
-            var readAnchor by remember(block.id) { mutableStateOf(ThinkingReadPlanner.Anchor()) }
+            var readAnchor by remember(block.id, headerOpenGeneration) { mutableStateOf(ThinkingReadPlanner.Anchor()) }
             // Keep the frozenWindowStart contract: a real drag pins the original source
             // offset, not merely the scroller's pixel position, until the reader returns.
             val frozenWindowStart = readAnchor.frozenWindowStart
@@ -1392,15 +1470,18 @@ internal fun ThinkingBlock(
                         readAnchor, value, max, isDragging, currentTailStart,
                     )
                     readAnchor = nextAnchor
-                    if (nextAnchor.isReadingHistory) manualChoice = true
+                    if (manualChoice == null && nextAnchor.isReadingHistory) manualChoice = true
                 }
             }
-            // maxValue changes AFTER layout: content-length-only following races the
-            // new measurement. Also keep length for a fixed-height moving tail window.
+            // maxValue changes AFTER layout. Observe it as well as text length so an
+            // automatic live body follows a growing tail, pauses on drag and resumes
+            // when the reader returns to the bottom. An explicit reopen starts a read
+            // at the top and must not be pulled back down by the next token.
+            val followThinkingTail = isStreaming && expanded && headerOpenGeneration == 0
             val currentBlock by rememberUpdatedState(block)
             val currentDragging by rememberUpdatedState(isDragging)
-            LaunchedEffect(scrollState, block.id, isStreaming) {
-                if (!isStreaming) return@LaunchedEffect
+            LaunchedEffect(scrollState, block.id, followThinkingTail) {
+                if (!followThinkingTail) return@LaunchedEffect
                 snapshotFlow {
                     Triple(currentBlock.content.length, scrollState.maxValue, currentDragging to readAnchor.isReadingHistory)
                 }.collect {

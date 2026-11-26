@@ -1174,18 +1174,16 @@ internal object ConfigBuiltins {
                 defaultValue = false,
             )
         )
-        // [ux-1125] Process-segment folding is an opt-in experiment, not a fixed
-        // presentation: registered so it round-trips through minis-config and
-        // every backup, with the shipped OFF default (folding changes how the
-        // transcript reads, so it must be asked for).
+        // [ux-1125] Process folding round-trips through minis-config and backups.
+        // Use the same default as the two live SharedPreferences readers.
         r.register(
             PrefsBoolField(
                 path = "chat.toolFoldEnabled",
                 displayName = "Fold process segments",
-                description = "When ON, a finished stretch of work (its reasoning plus the tool calls it produced) collapses into one summary row; the running segment stays open. OFF renders every block separately, which is the default.",
+                description = "ON by default: related reasoning and tool calls collapse into a summary while recent steps stay visible during a run. OFF renders each block separately.",
                 prefs = appearancePrefs,
                 key = com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED,
-                defaultValue = false,
+                defaultValue = com.rikkaminis.app.ui.settings.DEFAULT_TOOL_FOLD_ENABLED,
             )
         )
         // Chat action customization (Settings → Appearance → Chat Menu).

@@ -1114,7 +1114,7 @@
     <string name="appearance_section_thinking_header">思考標題列</string>
     <string name="appearance_section_tool_steps">過程步驟</string>
     <string name="appearance_tool_fold_title">折疊已完成的過程段</string>
-    <string name="appearance_tool_fold_footer">開啟後，一段已完成的工作（思考與它引發的工具呼叫）會一起收成一行摘要，摘要寫明做了什麼；仍在進行的那一段保持展開。預設關閉，此時每個區塊都單獨顯示。</string>
+    <string name="appearance_tool_fold_footer">預設開啟。相關思考與工具呼叫會收成一行摘要，執行中保留最近步驟。關閉後，每個區塊單獨顯示。</string>
     <string name="appearance_thinking_show_chars_title">顯示思考字數</string>
     <string name="appearance_thinking_show_duration_title">顯示思考耗時</string>
     <string name="appearance_thinking_header_footer">選擇思考區塊標題旁顯示的內容。字數是推理文字的字元數（9K 約九千字元）；耗時僅在本次工作階段內有效，重新開啟對話後即不顯示。</string>

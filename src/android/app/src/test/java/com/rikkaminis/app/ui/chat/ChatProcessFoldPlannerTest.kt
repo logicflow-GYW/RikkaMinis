@@ -1,5 +1,8 @@
 package com.rikkaminis.app.ui.chat
 
+import com.rikkaminis.app.config.FakeSharedPreferences
+import com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED
+import com.rikkaminis.app.ui.settings.readToolFoldEnabled
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -12,8 +15,7 @@ class ChatProcessFoldPlannerTest {
         status: ToolBlockStatus = ToolBlockStatus.SUCCESS,
         name: String = "shell_execute",
         ms: Long = 100,
-        title: String = "",
-    ) = AssistantBlock(id = id, kind = "tool_use", toolStatus = status, toolName = name, durationMs = ms, toolTitle = title)
+    ) = AssistantBlock(id = id, kind = "tool_use", toolStatus = status, toolName = name, durationMs = ms)
 
     private fun text(id: String, content: String) = AssistantBlock(id = id, kind = "text", content = content)
     private fun thinking(id: String, content: String = "…") = AssistantBlock(id = id, kind = "thinking", content = content)
@@ -26,6 +28,23 @@ class ChatProcessFoldPlannerTest {
         ChatProcessFoldPlanner.plan(blocks.toList(), isStreaming = false, enabled = false)
 
     // ── switch off = the pre-feature rendering ──────────────────────────────
+
+    @Test fun `missing preference folds while an explicit off choice survives reload`() {
+        val prefs = FakeSharedPreferences()
+        val blocks = listOf(tool("a"), tool("b"), text("r", "Done."))
+        fun renderedSegments() = ChatProcessFoldPlanner.plan(
+            blocks, isStreaming = false, enabled = readToolFoldEnabled(prefs.cloneHandle()),
+        )
+        assertFalse(prefs.contains(KEY_TOOL_FOLD_ENABLED))
+        assertEquals(listOf("a"), renderedSegments().map { it.key })
+        assertFalse(prefs.contains(KEY_TOOL_FOLD_ENABLED)) // fallback does not write a preference
+        prefs.edit().putBoolean(KEY_TOOL_FOLD_ENABLED, false).apply()
+        assertTrue(renderedSegments().isEmpty())
+        prefs.edit().putBoolean(KEY_TOOL_FOLD_ENABLED, true).apply()
+        assertEquals(listOf("a"), renderedSegments().map { it.key })
+        prefs.edit().remove(KEY_TOOL_FOLD_ENABLED).apply()
+        assertEquals(listOf("a"), renderedSegments().map { it.key })
+    }
 
     @Test fun `switch off folds nothing at all`() {
         assertTrue(off(tool("a"), tool("b"), tool("c"), text("r", "Done.")).isEmpty())
@@ -193,27 +212,20 @@ class ChatProcessFoldPlannerTest {
         ).single()
         assertEquals(2, g.failedCount)
         assertEquals(1, g.cancelledCount)
+        assertFalse(g.allCallsSucceeded)
     }
 
-    // ── title ──────────────────────────────────────────────────────────────
-
-    @Test fun `the title comes from the segment's own reasoning`() {
-        val g = plan(
-            thinking("t", "**Inspecting the fold rules**\nThen read the planner."),
-            tool("a"),
-            text("r", "Done."),
-        ).single()
-        assertEquals("Inspecting the fold rules", g.title)
-    }
-
-    @Test fun `the title falls back to the last call label`() {
-        val g = plan(tool("a", title = "Read file"), tool("b", title = "Run tests"), text("r", "Done.")).single()
-        assertEquals("Run tests", g.title)
-    }
-
-    @Test fun `a segment with neither reasoning nor label has no title`() {
-        val g = plan(tool("a", name = ""), tool("b", name = ""), text("r", "Done.")).single()
-        assertNull(g.title)
+    @Test fun `only wholly successful batches use an executed total`() {
+        assertTrue(plan(tool("a"), tool("b")).single().allCallsSucceeded)
+        for (status in listOf(ToolBlockStatus.DEDUPLICATED, ToolBlockStatus.CANCELLED, ToolBlockStatus.FAILED, ToolBlockStatus.TIMEOUT)) {
+            val mixed = plan(tool("a"), tool("b", status = status)).single()
+            assertEquals(2, mixed.toolCount)
+            assertFalse("status=$status", mixed.allCallsSucceeded)
+        }
+        val skipped = plan(tool("a"), tool("b", status = ToolBlockStatus.DEDUPLICATED)).single()
+        assertEquals(1, skipped.deduplicatedCount)
+        assertEquals(0, skipped.cancelledCount)
+        assertEquals(0, skipped.failedCount)
     }
 
     // ── render mode ────────────────────────────────────────────────────────
@@ -260,6 +272,30 @@ class ChatProcessFoldPlannerTest {
         assertEquals(
             ChatProcessFoldPlanner.Mode.COLLAPSED,
             ChatProcessFoldPlanner.mode("a", mapOf("a" to false), liveTail = false),
+        )
+    }
+
+    // ── "close everything" must reach rows that are not composed ────────────
+
+    @Test fun `a close-everything retires choices recorded before it`() {
+        // 2026-11-26 device report: the back-to-newest button closed the rows on
+        // screen but left the ones further up open. The retire used to be an
+        // effect INSIDE the row, and a row scrolled out of the list is not
+        // composed at all — so it never ran for exactly the rows that needed it.
+        val opened = mapOf("a" to true, "b" to true)
+        // Recorded under epoch 3, still epoch 3 → in force.
+        assertEquals(opened, ChatProcessFoldPlanner.liveChoices(opened, 3, 3))
+        // Recorded under epoch 3, the button has since bumped to 4 → retired.
+        assertEquals(emptyMap<String, Boolean>(), ChatProcessFoldPlanner.liveChoices(opened, 3, 4))
+        // A row that never recorded anything is unaffected either way.
+        assertEquals(emptyMap<String, Boolean>(), ChatProcessFoldPlanner.liveChoices(emptyMap(), 0, 7))
+        // A choice recorded AFTER the bump survives it — this is what makes a
+        // tap following the button work at all.
+        assertEquals(opened, ChatProcessFoldPlanner.liveChoices(opened, 5, 5))
+        // Retired means the settled default: collapsed, not "stuck open".
+        assertEquals(
+            ChatProcessFoldPlanner.Mode.COLLAPSED,
+            ChatProcessFoldPlanner.mode("a", ChatProcessFoldPlanner.liveChoices(opened, 3, 4), liveTail = false),
         )
     }
 

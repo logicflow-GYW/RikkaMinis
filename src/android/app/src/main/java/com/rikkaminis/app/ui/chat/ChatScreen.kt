@@ -78,6 +78,7 @@ import com.rikkaminis.app.ui.components.MinisMenuDivider
 import com.rikkaminis.app.ui.components.LocalGlassBackdrop
 import com.rikkaminis.app.ui.components.rememberGlassBackdrop
 import com.rikkaminis.app.data.ChatTuningPrefs
+import com.rikkaminis.app.ui.settings.readToolFoldEnabled
 import com.rikkaminis.app.ui.settings.rememberChatTuning
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
@@ -1689,13 +1690,9 @@ fun ChatScreen(
     // T-chat-title-pill: live-toggled by Settings → Appearance and by
     // `minis-config set appearance.show_chat_title …`. Default ON.
     var showChatTitlePill by remember { mutableStateOf(appearancePrefs.getBoolean(com.rikkaminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)) }
-    // [ux-1125] Process-segment folding. Lives here rather than inside the
-    // message row so flipping the switch re-renders every mounted message
-    // immediately; reading it at message-mount time left old rows stale until
-    // they scrolled out of composition. Default OFF = nothing folds.
-    var processFoldEnabled by remember {
-        mutableStateOf(appearancePrefs.getBoolean(com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED, false))
-    }
+    // [ux-1125] Keep the live preference at screen scope so a switch flip or
+    // config restore also reaches messages that are already composed.
+    var processFoldEnabled by remember { mutableStateOf(readToolFoldEnabled(appearancePrefs)) }
     // T-chat-title-pill-edit: state for the in-chat edit-title sheet (the
     // exact same SessionEditSheet hosted by the session list home screen,
     // reused via `internal` visibility — no duplicate UI). Populated by an
@@ -1710,7 +1707,7 @@ fun ChatScreen(
                 com.rikkaminis.app.ui.settings.KEY_TOOL_STATUS_BAR -> toolStatusBarEnabled = sp.getBoolean(key, true)
                 com.rikkaminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
                 com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED ->
-                    processFoldEnabled = sp.getBoolean(key, false)
+                    processFoldEnabled = readToolFoldEnabled(sp)
             }
         }
         appearancePrefs.registerOnSharedPreferenceChangeListener(listener)
@@ -3786,6 +3783,15 @@ fun ChatScreen(
                     block()
                 }
                 // (selectionController declared above, before markdownToolbar.)
+                // [auto-fold] Bumped by the "back to newest" FAB. Rows compare
+                // it against the epoch their choices were recorded under, so
+                // the retire reaches rows that are NOT composed (scrolled off
+                // screen) — an effect inside a row never runs for those.
+                // Saveable so it survives process death together with the
+                // per-row choice epochs; a plain `remember` would restore to 0
+                // while the rows restore to N and silently retire every
+                // expansion.
+                var collapseAllEpoch by rememberSaveable { mutableStateOf(0) }
                 androidx.compose.runtime.CompositionLocalProvider(
                     LocalMessageBoundsRegistry provides messageBounds,
                     androidx.compose.ui.platform.LocalTextToolbar provides markdownToolbar,
@@ -4438,6 +4444,9 @@ fun ChatScreen(
                                         // counter (the flag is false for it).
                                         awaitingResponseSinceMs = awaitingResponseSinceMs,
                                         processFoldEnabled = processFoldEnabled,
+                                        // The back-to-newest button closes what the
+                                        // reader left open (see the param doc).
+                                        collapseAllEpoch = collapseAllEpoch,
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the
                                         // flat AssistantInfo branch).
@@ -4831,6 +4840,13 @@ fun ChatScreen(
                             // gesture. [forward-stable] Exactly one pending
                             // bottom request — no settle second call.
                             followState = dispatchFollow(sessionId, followState, FollowEvent.FabDown, listState, isUserDragging, isStreaming)
+                            // [auto-fold] "Show me the newest" also closes the
+                            // segments the reader left open. Not a second
+                            // feature on the same button: the jump already moves
+                            // the viewport by a screen or more, so the collapse
+                            // costs nothing visible — and it is what makes a
+                            // long process impossible to leave open behind you.
+                            collapseAllEpoch++
                         },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)

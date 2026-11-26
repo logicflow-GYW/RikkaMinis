@@ -30,6 +30,18 @@ package com.rikkaminis.app.ui.chat
  *
  * When the turn settles (reply, interruption, cancellation) the tail goes away
  * and the whole segment collapses to its row.
+ *
+ * The summary row carries NO description of the work: its title used to come
+ * from the segment's own last reasoning (else the last call's label), which
+ * describes the final second of a run that may hold eighty calls. It now reads
+ * "已执行 N 个工具" for a successful batch; if any call failed, was
+ * cancelled or was skipped, the total is worded as tool calls, not runs.
+ *
+ * Scrolling never changes a fold decision, in EITHER direction: it may not open
+ * a segment (that rule blew the transcript open on every scroll) and it may not
+ * close one either (a rule that only ever closed what the reader had just
+ * opened — see the note on `AssistantMessageView`). Folding is the user's
+ * choice plus the default.
  */
 object ChatProcessFoldPlanner {
     /** Newest steps kept visible in the running segment's tail. */
@@ -65,8 +77,6 @@ object ChatProcessFoldPlanner {
         val deduplicatedCount: Int,
         /** Sum of recorded execution durations, NOT wall time (parallel calls overlap). */
         val durationMs: Long,
-        /** Action phrase from the segment's last reasoning, else the last call's title. */
-        val title: String?,
         /** True while the turn runs and this is the trailing segment with a tail. */
         val liveTail: Boolean = false,
         /**
@@ -74,7 +84,10 @@ object ChatProcessFoldPlanner {
          * summary row. -1 when the segment has no tail.
          */
         val tailStart: Int = -1,
-    )
+    ) {
+        // A call can fail validation or be cancelled before dispatch; dedupe skips it.
+        val allCallsSucceeded: Boolean get() = failedCount == 0 && cancelledCount == 0 && deduplicatedCount == 0
+    }
 
     private val interactiveTools = setOf(
         "spawn_agent", "subagent_task", "delegate_task", "user_ask", "ask_user",
@@ -120,25 +133,6 @@ object ChatProcessFoldPlanner {
         }
     }
 
-    /** Action phrase for a segment: its last reasoning, else the last call's label. */
-    private fun titleOf(blocks: List<AssistantBlock>, range: IntRange, kinds: List<Kind>): String? {
-        for (i in range.reversed()) {
-            if (kinds[i] == Kind.THINKING) {
-                extractThinkingTitle(blocks[i].content)?.let { return it }
-                break
-            }
-        }
-        for (i in range.reversed()) {
-            if (kinds[i] == Kind.TOOL_DONE) {
-                val tool = blocks[i]
-                if (tool.toolTitle.isNotBlank()) return tool.toolTitle
-                if (tool.toolName.isNotBlank()) return tool.toolName
-                break
-            }
-        }
-        return null
-    }
-
     /**
      * First index of the live tail inside [range], or [range].first when the
      * whole segment fits. A step starts at the leading block and at every
@@ -156,9 +150,7 @@ object ChatProcessFoldPlanner {
         return maxOf(bySteps, byBlocks, range.first)
     }
 
-    // The default is OFF, matching the shipped setting: a caller that forgets
-    // to pass the user's choice gets the pre-feature transcript, not folding.
-    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean = false): List<Segment> {
+    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean): List<Segment> {
         if (!enabled || blocks.isEmpty()) return emptyList()
         val kinds = blocks.indices.map { kindOf(blocks, it) }
 
@@ -216,7 +208,6 @@ object ChatProcessFoldPlanner {
                 cancelledCount = tools.count { it.toolStatus == ToolBlockStatus.CANCELLED },
                 deduplicatedCount = tools.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
                 durationMs = tools.sumOf { it.durationMs },
-                title = titleOf(blocks, range, kinds),
                 liveTail = live,
                 tailStart = tailStart,
             )
@@ -254,4 +245,21 @@ object ChatProcessFoldPlanner {
         Mode.COLLAPSED, Mode.TAIL -> true
         Mode.FULL -> if (liveTail) null else false
     }
+
+    /**
+     * The fold choices in force right now: a "close everything" request retires
+     * every choice recorded BEFORE it.
+     *
+     * This is a comparison, not an action, and that is the whole point. A row
+     * scrolled out of the list is not composed at all, so an effect inside the
+     * row never runs for exactly the rows the reader wants closed — the ones
+     * above the viewport. Comparing the epoch a choice was recorded under with
+     * the current one answers the question whenever the row is next composed,
+     * on screen or not, and needs nothing remembered about having already run.
+     */
+    fun liveChoices(
+        stored: Map<String, Boolean>,
+        storedEpoch: Int,
+        currentEpoch: Int,
+    ): Map<String, Boolean> = if (storedEpoch == currentEpoch) stored else emptyMap()
 }
