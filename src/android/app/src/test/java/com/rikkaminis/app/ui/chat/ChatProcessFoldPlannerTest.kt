@@ -276,36 +276,4 @@ class ChatProcessFoldPlannerTest {
         assertFalse(g.liveTail)
         assertEquals(-1, g.tailStart)
     }
-
-    // ── leaving the top of the viewport ─────────────────────────────────────
-
-    @Test fun `a segment folds itself once its last block ends above the viewport`() {
-        // Same edge counts as outside: the block is fully gone, so folding it
-        // cannot change anything the reader can see.
-        assertTrue(ChatProcessFoldPlanner.fullyAboveViewport(220f, 220f))
-        assertTrue(ChatProcessFoldPlanner.fullyAboveViewport(219f, 220f))
-        // Still on screen by one pixel → not folded.
-        assertFalse(ChatProcessFoldPlanner.fullyAboveViewport(221f, 220f))
-        // Below the viewport = the reader scrolled UP past it, i.e. has not
-        // read it yet. This direction must never fold.
-        assertFalse(ChatProcessFoldPlanner.fullyAboveViewport(900f, 220f))
-    }
-
-    @Test fun `unmeasured geometry never folds`() {
-        assertFalse(ChatProcessFoldPlanner.fullyAboveViewport(null, 220f))
-        assertFalse(ChatProcessFoldPlanner.fullyAboveViewport(100f, null))
-        assertFalse(ChatProcessFoldPlanner.fullyAboveViewport(null, null))
-    }
-
-    @Test fun `the anchor offset removes exactly the collapsed body`() {
-        // 4000px into the item, the collapsed body was 1800px → the reader's
-        // content is still 2200px from the item's top.
-        assertEquals(2200, ChatProcessFoldPlanner.anchoredOffset(4000, 1800f))
-        // Nothing removed (no body measured) → offset untouched.
-        assertEquals(4000, ChatProcessFoldPlanner.anchoredOffset(4000, 0f))
-        // Clamped: a negative offset is not a scroll position.
-        assertEquals(0, ChatProcessFoldPlanner.anchoredOffset(500, 1800f))
-        // Sub-pixel bodies round rather than truncate.
-        assertEquals(2100, ChatProcessFoldPlanner.anchoredOffset(4000, 1899.6f))
-    }
 }

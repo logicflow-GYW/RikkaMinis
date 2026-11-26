@@ -67,7 +67,6 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
@@ -255,16 +254,10 @@ internal fun AssistantMessageView(
     // Settings → Appearance → Tool Steps, supplied by the live ChatScreen
     // prefs listener. Default OFF = the shipped behaviour: nothing folds.
     processFoldEnabled: Boolean = false,
-    // [auto-fold] The list this row lives in, plus the re-anchor hook the list
-    // gives back. ChatScreen owns BOTH anchors — the item offset (a history
-    // reader) and the bottom (a follower) — because only it knows which one the
-    // user is on; the row only measures how much is about to disappear.
-    foldListState: LazyListState? = null,
-    onFoldAnchor: ((removedPx: Float) -> Unit)? = null,
-    // [auto-fold] Bumped by the "back to newest" FAB. Closing the open segments
-    // is part of WHAT THAT BUTTON MEANS ("show me the newest thing"), not a
-    // second feature hung on it: the tap already moves the viewport by a screen
-    // or more, so the collapse costs nothing the reader can see.
+    // Bumped by the "back to newest" FAB. Closing the open segments is part of
+    // WHAT THAT BUTTON MEANS ("show me the newest thing"), not a second feature
+    // hung on it: the tap already moves the viewport by a screen or more, so the
+    // collapse costs nothing the reader can see.
     collapseAllEpoch: Int = 0,
 ) {
     // Fold state = the plan plus explicit taps, nothing else. The previous
@@ -282,64 +275,33 @@ internal fun AssistantMessageView(
         foldSegments.forEach { segment -> segment.memberIndices.forEach { put(it, segment) } }
     }
 
-    // ── [auto-fold] an OPEN segment folds itself once it leaves the top ──────
-    // Geometry is kept in plain fields, never in MutableState: these callbacks
-    // fire on every scrolled frame, and a state write per frame would recompose
-    // this whole message (an assistant message is ONE LazyColumn item) sixty
-    // times a second. The only state here is the "is it out?" CROSSING, and it
-    // is read by the effect below, not by composition.
-    val foldGeometry = remember(message.id) { HashMap<String, FoldGeometry>() }
-    var outOfViewKeys by remember(message.id) { mutableStateOf(emptySet<String>()) }
-    val foldViewport = LocalChatViewportTracker.current
-    val latestSegments by rememberUpdatedState(foldSegments)
-    val latestChoices by rememberUpdatedState(foldChoices)
-
-    fun noteSegmentOut(key: String) {
-        val geometry = foldGeometry[key] ?: return
-        val out = geometry.endSeen &&
-            ChatProcessFoldPlanner.fullyAboveViewport(geometry.endBottomPx, foldViewport?.bounds?.top)
-        if ((key in outOfViewKeys) != out) {
-            outOfViewKeys = if (out) outOfViewKeys + key else outOfViewKeys - key
-        }
-    }
-
-    LaunchedEffect(message.id, foldListState) {
-        val state = foldListState ?: return@LaunchedEffect
-        // A fling is not folded mid-flight: the re-anchor below has to land in
-        // the SAME measure as the collapse, and a scroll delta arriving in the
-        // middle of one makes that a coin toss. Settled only.
-        snapshotFlow { outOfViewKeys to state.isScrollInProgress }.collect { (keys, scrolling) ->
-            if (scrolling || keys.isEmpty()) return@collect
-            val key = keys.first()
-            val segment = latestSegments.firstOrNull { it.key == key } ?: return@collect
-            val mode = ChatProcessFoldPlanner.mode(segment.key, latestChoices, segment.liveTail)
-            // Scroll may only ever CLOSE what the user opened; COLLAPSED/TAIL
-            // are not scroll's business.
-            if (mode != ChatProcessFoldPlanner.Mode.FULL) return@collect
-            val geometry = foldGeometry[key] ?: return@collect
-            val viewportTop = foldViewport?.bounds?.top ?: return@collect
-            if (!ChatProcessFoldPlanner.fullyAboveViewport(geometry.endBottomPx, viewportTop)) return@collect
-            // Everything between the summary row and the last block is above the
-            // viewport and is about to disappear. How to keep the reader still
-            // depends on WHICH edge they are anchored to, and only the list knows
-            // that: a history reader must have their item offset reduced by the
-            // removed height, a follower must be re-pinned to the bottom. Doing
-            // the item-offset correction for a follower pulled them off the tail
-            // and the follower yanked them straight back — that double move was
-            // the visible bounce when folding during auto-follow.
-            if (geometry.rowSeen && geometry.removedPx > 0f) {
-                onFoldAnchor?.invoke(geometry.removedPx)
-            }
-            foldChoices = HashMap(foldChoices).apply {
-                val next = ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)
-                if (next == null) remove(key) else put(key, next)
-            }
-        }
-    }
+    // ── [auto-fold] an OPEN segment is never closed by a scroll ──────────────
+    // There used to be a "fold it once it leaves the top of the viewport" rule
+    // here, driven by a zero-height probe. Two reasons it is gone:
+    //  1. It measured with `boundsInWindow()`, which returns Rect.Zero for a
+    //     zero-height node (AndroidX LayoutCoordinates.kt), so the segment's
+    //     bottom read as 0 and "has left the top" was true at all times. A
+    //     segment the reader opened folded itself one frame later — a manual
+    //     expand was impossible to keep, on every message but the live one.
+    //  2. Its only possible target was a FULL segment, i.e. exactly the one the
+    //     reader had just opened (a settled segment is COLLAPSED by default and
+    //     a running one shows TAIL). So the rule could only ever undo intent.
+    // Folding stays what the user asked for: a settled segment arrives
+    // collapsed, a tap opens or closes it, and the back-to-newest button closes
+    // what was left open.
 
     // "Back to newest" also closes what the reader left open (see the param doc).
+    // [re-entry] This marker is deliberately NOT saveable: `collapseAllEpoch`
+    // lives in a plain `remember` in ChatScreen, so a restored marker could
+    // disagree with a reset parent and read as a fresh "close everything". With
+    // a plain remember, a row that leaves the composition and comes back
+    // (LazyColumn recycling) initialises it to the CURRENT epoch — equal, so its
+    // own re-entry never counts as a bump. Without it, every recycled row would
+    // silently fold itself the moment the reader scrolled it back into view.
+    var appliedCollapseEpoch by remember(message.id) { mutableStateOf(collapseAllEpoch) }
     LaunchedEffect(collapseAllEpoch) {
-        if (collapseAllEpoch == 0) return@LaunchedEffect
+        if (collapseAllEpoch == appliedCollapseEpoch) return@LaunchedEffect
+        appliedCollapseEpoch = collapseAllEpoch
         if (foldChoices.isNotEmpty()) foldChoices = HashMap()
     }
     Column(
@@ -397,13 +359,6 @@ internal fun AssistantMessageView(
                                 foldChoices = HashMap(foldChoices).apply {
                                     if (next == null) remove(segment.key) else put(segment.key, next)
                                 }
-                            },
-                            onRowBottom = { bottom ->
-                                val geometry = foldGeometry.getOrPut(segment.key) { FoldGeometry() }
-                                geometry.rowBottomPx = bottom
-                                geometry.rowSeen = true
-                                geometry.refreshRemoved()
-                                noteSegmentOut(segment.key)
                             },
                         )
                     }
@@ -489,26 +444,6 @@ internal fun AssistantMessageView(
                     }
                 }
             }
-            // [auto-fold] Zero-height probe after the segment's LAST block: its
-            // bottom edge IS the segment's bottom edge (no spacing between a
-            // block and this probe), which is what "has it left the top?" is
-            // measured against. One node per segment, not per block.
-            if (segment != null && index == segment.range.last) {
-                FoldEndProbe(
-                    segmentKey = segment.key,
-                    onBottom = { bottom ->
-                        val geometry = foldGeometry.getOrPut(segment.key) { FoldGeometry() }
-                        geometry.endBottomPx = bottom
-                        geometry.endSeen = true
-                        geometry.refreshRemoved()
-                        noteSegmentOut(segment.key)
-                    },
-                    onGone = {
-                        foldGeometry[segment.key]?.endSeen = false
-                        if (segment.key in outOfViewKeys) outOfViewKeys = outOfViewKeys - segment.key
-                    },
-                )
-            }
             }
         }
 
@@ -562,7 +497,6 @@ private fun ChatProcessSummary(
     segment: ChatProcessFoldPlanner.Segment,
     mode: ChatProcessFoldPlanner.Mode,
     onToggle: () -> Unit,
-    onRowBottom: (Float) -> Unit = {},
 ) {
     val expansionLabel = stringResource(
         if (mode == ChatProcessFoldPlanner.Mode.COLLAPSED) {
@@ -602,9 +536,6 @@ private fun ChatProcessSummary(
         modifier = Modifier.fillMaxWidth()
             .semantics { stateDescription = expansionLabel }
             .clickable(role = Role.Button, onClick = onToggle)
-            // Before .padding(): this reports the row's FULL height, so
-            // "segment bottom − row bottom" is the exact body the fold removes.
-            .onGloballyPositioned { onRowBottom(it.boundsInWindow().bottom) }
             .padding(vertical = 6.dp),
     ) {
         Icon(
@@ -645,50 +576,6 @@ private fun androidx.compose.ui.text.AnnotatedString.Builder.appendMetaPart(
     withStyle(SpanStyle(color = neutral.copy(alpha = 0.7f))) { append(" · ") }
     withStyle(SpanStyle(color = color)) { append(text) }
 }
-
-/**
- * Measured geometry of one folded segment, in window coordinates.
- *
- * Plain fields on purpose: the writers are `onGloballyPositioned` callbacks that
- * run on every scrolled frame, and putting them in MutableState would recompose
- * the whole message (one LazyColumn item) per frame.
- */
-private class FoldGeometry {
-    var rowBottomPx = 0f
-    var rowSeen = false
-    var endBottomPx = 0f
-    var endSeen = false
-
-    /** Height the COLLAPSED render removes: the body between row and last block. */
-    var removedPx = 0f
-
-    fun refreshRemoved() {
-        removedPx = if (rowSeen && endSeen) (endBottomPx - rowBottomPx).coerceAtLeast(0f) else 0f
-    }
-}
-
-/**
- * Zero-height, zero-draw marker placed after a segment's last block. Its
- * position IS the segment's bottom edge; [onGone] fires when the segment stops
- * rendering (collapsed), so a stale measurement can never fold a closed row.
- */
-@Composable
-private fun FoldEndProbe(
-    segmentKey: String,
-    onBottom: (Float) -> Unit,
-    onGone: () -> Unit,
-) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .height(0.dp)
-            .onGloballyPositioned { onBottom(it.boundsInWindow().bottom) },
-    )
-    DisposableEffect(segmentKey) {
-        onDispose { onGone() }
-    }
-}
-
 
 /**
  * Wraps a per-message LazyColumn item, registering its bounds (in window

@@ -1,7 +1,5 @@
 package com.rikkaminis.app.ui.chat
 
-import kotlin.math.roundToInt
-
 /**
  * Decides which stretches of an assistant message collapse into one "process" row.
  *
@@ -38,12 +36,11 @@ import kotlin.math.roundToInt
  * describes the final second of a run that may hold eighty calls. It now reads
  * "已执行 N 个工具 · M 个失败" — counts only, failures coloured.
  *
- * An OPEN segment (the user tapped it) also folds itself back once it has left
- * the TOP of the viewport, so a long process cannot stay opened forever above a
- * reader who has moved on. Scroll may only ever CLOSE a segment, never open one
- * (the inverse rule blew the transcript open on every scroll — see
- * UxIntegrationWiringTest). Geometry lives in [fullyAboveViewport] and
- * [anchoredOffset] so the decision and the re-anchor are JVM-testable.
+ * Scrolling never changes a fold decision, in EITHER direction: it may not open
+ * a segment (that rule blew the transcript open on every scroll) and it may not
+ * close one either (a rule that only ever closed what the reader had just
+ * opened — see the note on `AssistantMessageView`). Folding is the user's
+ * choice plus the default.
  */
 object ChatProcessFoldPlanner {
     /** Newest steps kept visible in the running segment's tail. */
@@ -245,36 +242,5 @@ object ChatProcessFoldPlanner {
     fun nextChoice(current: Mode, liveTail: Boolean): Boolean? = when (current) {
         Mode.COLLAPSED, Mode.TAIL -> true
         Mode.FULL -> if (liveTail) null else false
-    }
-
-    /**
-     * True when a segment has left the TOP of the visible area: its last
-     * rendered block ended at or above the viewport's top edge.
-     *
-     * Only the upward exit counts. A segment that went off the BOTTOM has not
-     * been read yet — the reader scrolled up above it — so folding it there
-     * would answer a question nobody asked. Null geometry (not measured yet, or
-     * no viewport) is never "outside": an unmeasured segment must not fold.
-     */
-    fun fullyAboveViewport(segmentEndBottomPx: Float?, viewportTopPx: Float?): Boolean {
-        if (segmentEndBottomPx == null || viewportTopPx == null) return false
-        return segmentEndBottomPx <= viewportTopPx
-    }
-
-    /**
-     * Scroll offset that keeps the reader's place after [removedPx] of content
-     * collapsed ABOVE the viewport.
-     *
-     * The transcript's messages are LazyColumn items and one assistant message
-     * is ONE item, so the list anchors on (item, offset-into-item) — there is no
-     * anchoring inside an item. Dropping [removedPx] inside the item therefore
-     * swaps the visible content for whatever sat that far below it; subtracting
-     * the same amount from the item offset puts that content back. Clamped at 0
-     * because the removed span can never exceed the offset (it lies entirely
-     * above the viewport).
-     */
-    fun anchoredOffset(firstVisibleItemOffsetPx: Int, removedPx: Float): Int {
-        if (removedPx <= 0f) return firstVisibleItemOffsetPx
-        return (firstVisibleItemOffsetPx - removedPx).roundToInt().coerceAtLeast(0)
     }
 }

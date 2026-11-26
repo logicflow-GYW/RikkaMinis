@@ -187,61 +187,41 @@ class UxIntegrationWiringTest {
         assertFalse(aggregate.contains("Mode.COLLAPSED -> true"))
     }
 
-    // ── auto-fold: the row settles itself once it leaves the top ────────────
+    // ── auto-fold: scroll may never change a fold decision ──────────────────
 
-    @Test fun `an open segment folds itself only after the scroll settles`() {
+    @Test fun `a scroll never closes what the reader opened`() {
+        // 2026-11-26: a "fold it once it leaves the top of the viewport" rule
+        // shipped and made every manual expand impossible to keep. It measured
+        // with `boundsInWindow()` on a zero-height probe, which returns
+        // Rect.Zero for a zero-height node — so "has left the top" was true at
+        // all times, and the only state it could ever change was the FULL one a
+        // tap had just written. The rule is gone; nothing here may come back.
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         val aggregate = ui.substringAfter("internal fun AssistantMessageView(")
             .substringBefore("private fun ChatProcessSummary(")
-        // Geometry is measured, never guessed.
-        assertTrue(aggregate.contains("ChatProcessFoldPlanner.fullyAboveViewport("))
-        // The fold waits for a settled list: a fling is not folded mid-flight.
-        assertTrue(aggregate.contains("snapshotFlow { outOfViewKeys to state.isScrollInProgress }"))
-        assertTrue(aggregate.contains("if (scrolling || keys.isEmpty()) return@collect"))
-        // Only the segment the READER opened is closed again.
-        assertTrue(aggregate.contains("if (mode != ChatProcessFoldPlanner.Mode.FULL) return@collect"))
-        // The row measures, it does not decide: the anchor is handed back to the
-        // list, which knows whether the reader is on the tail or in history.
-        assertTrue(aggregate.contains("onFoldAnchor?.invoke(geometry.removedPx)"))
-        assertFalse(aggregate.contains("requestScrollToItem("))
-        // Scroll may CLOSE a segment, never OPEN one: the exact inverse of the
-        // rule that once blew the transcript open on every scroll.
-        assertFalse(aggregate.contains("put(segment.key, true)"))
-        assertFalse(aggregate.contains("put(key, true)"))
+        assertFalse(aggregate.contains("fullyAboveViewport("))
+        assertFalse(aggregate.contains("outOfViewKeys"))
+        assertFalse(aggregate.contains("height(0.dp)"))
+        assertFalse(aggregate.contains("onFoldAnchor"))
+        assertFalse(aggregate.contains("foldListState"))
+        // The fold choice is still written by the tap only.
+        assertTrue(aggregate.contains("ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)"))
+        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
+        assertFalse(planner.contains("fun fullyAboveViewport("))
+        assertFalse(planner.contains("fun anchoredOffset("))
+        // No viewport plumbing left in the list either.
+        val screen = source("ui/chat/ChatScreen.kt")
+        assertFalse(screen.contains("LocalChatViewportTracker"))
+        assertFalse(screen.contains("ChatViewportTracker()"))
     }
 
-    @Test fun `the back-to-newest button also closes what the reader left open`() {
+    @Test fun `the back-to-newest button closes what the reader left open`() {
         val screen = source("ui/chat/ChatScreen.kt")
         val fab = screen.substringAfter("FollowEvent.FabDown")
         assertTrue(fab.contains("collapseAllEpoch++"))
-        // The rows it reaches must be indexed now: the re-anchor needs this
-        // item's position in the list.
-        assertTrue(screen.contains("items(") || screen.contains("itemsIndexed("))
-        assertTrue(screen.contains("onFoldAnchor = { removed ->"))
-        assertTrue(screen.contains("LocalChatViewportTracker provides chatViewport"))
-        assertTrue(screen.contains("chatViewport.bounds = it.boundsInWindow()"))
+        assertTrue(screen.contains("collapseAllEpoch = collapseAllEpoch"))
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         assertTrue(ui.contains("LaunchedEffect(collapseAllEpoch)"))
-    }
-
-    @Test fun `folding under auto-follow re-pins the bottom instead of shifting it`() {
-        // 2026-11-26 user report: the fold "jumps" ONLY while auto-follow is
-        // engaged. Root cause: the re-anchor was always the item-offset one, so
-        // a follower was pulled `removedPx` off the tail and the follower
-        // dragged them back — two moves, seen as one bounce. The anchor now
-        // depends on which edge the reader is on.
-        val screen = source("ui/chat/ChatScreen.kt")
-        val anchor = screen.substringAfter("onFoldAnchor = { removed ->")
-            .substringBefore("collapseAllEpoch = collapseAllEpoch")
-        assertTrue(anchor.contains("if (followState.isFollowing)"))
-        assertTrue(anchor.contains("safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)"))
-        assertTrue(anchor.contains("requestScrollToItem(idx, 0)"))
-        // History reader: compensate exactly what disappeared above them.
-        assertTrue(anchor.contains("ChatProcessFoldPlanner.anchoredOffset("))
-        assertTrue(anchor.contains("firstVisibleItemScrollOffset"))
-        // And the two branches must stay mutually exclusive — running both is
-        // the bug, not a detail.
-        assertTrue(anchor.contains("} else if (listState.firstVisibleItemIndex == lazyIndex)"))
     }
 
     @Test fun `a thinking block opened by the reader always opens at the top`() {
