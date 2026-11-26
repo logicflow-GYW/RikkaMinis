@@ -243,4 +243,21 @@ object ChatProcessFoldPlanner {
         Mode.COLLAPSED, Mode.TAIL -> true
         Mode.FULL -> if (liveTail) null else false
     }
+
+    /**
+     * The fold choices in force right now: a "close everything" request retires
+     * every choice recorded BEFORE it.
+     *
+     * This is a comparison, not an action, and that is the whole point. A row
+     * scrolled out of the list is not composed at all, so an effect inside the
+     * row never runs for exactly the rows the reader wants closed — the ones
+     * above the viewport. Comparing the epoch a choice was recorded under with
+     * the current one answers the question whenever the row is next composed,
+     * on screen or not, and needs nothing remembered about having already run.
+     */
+    fun liveChoices(
+        stored: Map<String, Boolean>,
+        storedEpoch: Int,
+        currentEpoch: Int,
+    ): Map<String, Boolean> = if (storedEpoch == currentEpoch) stored else emptyMap()
 }

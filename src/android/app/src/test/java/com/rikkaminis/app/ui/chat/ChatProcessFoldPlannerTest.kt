@@ -241,6 +241,30 @@ class ChatProcessFoldPlannerTest {
         )
     }
 
+    // ── "close everything" must reach rows that are not composed ────────────
+
+    @Test fun `a close-everything retires choices recorded before it`() {
+        // 2026-11-26 device report: the back-to-newest button closed the rows on
+        // screen but left the ones further up open. The retire used to be an
+        // effect INSIDE the row, and a row scrolled out of the list is not
+        // composed at all — so it never ran for exactly the rows that needed it.
+        val opened = mapOf("a" to true, "b" to true)
+        // Recorded under epoch 3, still epoch 3 → in force.
+        assertEquals(opened, ChatProcessFoldPlanner.liveChoices(opened, 3, 3))
+        // Recorded under epoch 3, the button has since bumped to 4 → retired.
+        assertEquals(emptyMap<String, Boolean>(), ChatProcessFoldPlanner.liveChoices(opened, 3, 4))
+        // A row that never recorded anything is unaffected either way.
+        assertEquals(emptyMap<String, Boolean>(), ChatProcessFoldPlanner.liveChoices(emptyMap(), 0, 7))
+        // A choice recorded AFTER the bump survives it — this is what makes a
+        // tap following the button work at all.
+        assertEquals(opened, ChatProcessFoldPlanner.liveChoices(opened, 5, 5))
+        // Retired means the settled default: collapsed, not "stuck open".
+        assertEquals(
+            ChatProcessFoldPlanner.Mode.COLLAPSED,
+            ChatProcessFoldPlanner.mode("a", ChatProcessFoldPlanner.liveChoices(opened, 3, 4), liveTail = false),
+        )
+    }
+
     @Test fun `a note or empty text between the run and a running call keeps the tail`() {
         // A turn routinely emits an empty text block or a one-line note between
         // the finished run and the call that is still running. Those are members,

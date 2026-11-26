@@ -220,8 +220,21 @@ class UxIntegrationWiringTest {
         val fab = screen.substringAfter("FollowEvent.FabDown")
         assertTrue(fab.contains("collapseAllEpoch++"))
         assertTrue(screen.contains("collapseAllEpoch = collapseAllEpoch"))
+        // The epoch must share the rows' lifetime: a plain `remember` restores to
+        // 0 while the rows restore to N, which silently retires every expansion.
+        assertTrue(screen.contains("var collapseAllEpoch by rememberSaveable"))
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        assertTrue(ui.contains("LaunchedEffect(collapseAllEpoch)"))
+        val aggregate = ui.substringAfter("internal fun AssistantMessageView(")
+            .substringBefore("private fun ChatProcessSummary(")
+        // Reaching off-screen rows is a COMPARISON, not an effect: a row scrolled
+        // out of the list is not composed, so an effect inside it never runs for
+        // exactly the rows the button is supposed to close (2026-11-26 device
+        // report: the visible ones closed, the ones further up stayed open).
+        assertTrue(aggregate.contains("ChatProcessFoldPlanner.liveChoices(foldChoices, foldChoicesEpoch, collapseAllEpoch)"))
+        assertFalse(aggregate.contains("LaunchedEffect(collapseAllEpoch)"))
+        assertFalse(aggregate.contains("appliedCollapseEpoch"))
+        // A tap records under the current epoch, or the next bump retires it.
+        assertTrue(aggregate.contains("foldChoicesEpoch = collapseAllEpoch"))
     }
 
     @Test fun `a thinking block opened by the reader always opens at the top`() {

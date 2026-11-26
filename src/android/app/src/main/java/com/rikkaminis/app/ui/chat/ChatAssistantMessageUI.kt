@@ -266,11 +266,28 @@ internal fun AssistantMessageView(
     // been folded re-opened every segment — the message blew open exactly when
     // the user was trying to read it. That bookkeeping is gone.
     var foldChoices by rememberSaveable(message.id) { mutableStateOf(hashMapOf<String, Boolean>()) }
+    // The epoch `foldChoices` was recorded under. Saved with the choices so a
+    // restored row cannot resurrect a choice that a later "close everything"
+    // has already retired (both halves survive together or neither does).
+    var foldChoicesEpoch by rememberSaveable(message.id) { mutableStateOf(0) }
+    // Choices in force right now. A "close everything" (the back-to-newest FAB)
+    // bumps [collapseAllEpoch]; every choice recorded under an older epoch is
+    // retired — including rows that are not composed at that moment, which is
+    // the case this is here for: an effect inside a row never runs for the rows
+    // scrolled off screen, and those are exactly the ones the reader left open
+    // further up.
+    val activeChoices = ChatProcessFoldPlanner.liveChoices(foldChoices, foldChoicesEpoch, collapseAllEpoch)
+    // Record a tap under the CURRENT epoch, so it survives later composition
+    // and is retired only by a later "close everything".
+    fun writeChoices(next: Map<String, Boolean>) {
+        foldChoices = HashMap(next)
+        foldChoicesEpoch = collapseAllEpoch
+    }
     val foldSegments = remember(message.toolBlocks, message.isStreaming, processFoldEnabled) {
         ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, processFoldEnabled)
     }
     fun segmentMode(segment: ChatProcessFoldPlanner.Segment): ChatProcessFoldPlanner.Mode =
-        ChatProcessFoldPlanner.mode(segment.key, foldChoices, segment.liveTail)
+        ChatProcessFoldPlanner.mode(segment.key, activeChoices, segment.liveTail)
     val segmentByIndex = buildMap {
         foldSegments.forEach { segment -> segment.memberIndices.forEach { put(it, segment) } }
     }
@@ -288,22 +305,9 @@ internal fun AssistantMessageView(
     //     a running one shows TAIL). So the rule could only ever undo intent.
     // Folding stays what the user asked for: a settled segment arrives
     // collapsed, a tap opens or closes it, and the back-to-newest button closes
-    // what was left open.
+    // what was left open — see `activeChoices` above for why that comparison,
+    // and not an effect, is what makes the button reach rows off screen.
 
-    // "Back to newest" also closes what the reader left open (see the param doc).
-    // [re-entry] This marker is deliberately NOT saveable: `collapseAllEpoch`
-    // lives in a plain `remember` in ChatScreen, so a restored marker could
-    // disagree with a reset parent and read as a fresh "close everything". With
-    // a plain remember, a row that leaves the composition and comes back
-    // (LazyColumn recycling) initialises it to the CURRENT epoch — equal, so its
-    // own re-entry never counts as a bump. Without it, every recycled row would
-    // silently fold itself the moment the reader scrolled it back into view.
-    var appliedCollapseEpoch by remember(message.id) { mutableStateOf(collapseAllEpoch) }
-    LaunchedEffect(collapseAllEpoch) {
-        if (collapseAllEpoch == appliedCollapseEpoch) return@LaunchedEffect
-        appliedCollapseEpoch = collapseAllEpoch
-        if (foldChoices.isNotEmpty()) foldChoices = HashMap()
-    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -356,9 +360,11 @@ internal fun AssistantMessageView(
                                 // running segment clears the explicit choice so the
                                 // tail comes back instead of freezing the row shut.
                                 val next = ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)
-                                foldChoices = HashMap(foldChoices).apply {
-                                    if (next == null) remove(segment.key) else put(segment.key, next)
-                                }
+                                writeChoices(
+                                    HashMap(activeChoices).apply {
+                                        if (next == null) remove(segment.key) else put(segment.key, next)
+                                    },
+                                )
                             },
                         )
                     }

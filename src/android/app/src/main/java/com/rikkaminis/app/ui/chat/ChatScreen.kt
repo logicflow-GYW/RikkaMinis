@@ -3786,9 +3786,15 @@ fun ChatScreen(
                     block()
                 }
                 // (selectionController declared above, before markdownToolbar.)
-                // [auto-fold] Bumped by the "back to newest" FAB; every message
-                // clears its explicit open/closed choices when it changes.
-                var collapseAllEpoch by remember { mutableStateOf(0) }
+                // [auto-fold] Bumped by the "back to newest" FAB. Rows compare
+                // it against the epoch their choices were recorded under, so
+                // the retire reaches rows that are NOT composed (scrolled off
+                // screen) — an effect inside a row never runs for those.
+                // Saveable so it survives process death together with the
+                // per-row choice epochs; a plain `remember` would restore to 0
+                // while the rows restore to N and silently retire every
+                // expansion.
+                var collapseAllEpoch by rememberSaveable { mutableStateOf(0) }
                 androidx.compose.runtime.CompositionLocalProvider(
                     LocalMessageBoundsRegistry provides messageBounds,
                     androidx.compose.ui.platform.LocalTextToolbar provides markdownToolbar,
