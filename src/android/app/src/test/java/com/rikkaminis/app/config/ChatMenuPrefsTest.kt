@@ -442,6 +442,25 @@ class ChatMenuPrefsTest {
     }
 
     @Test
+    fun `model conditional toggles are ordinary pool members`() {
+        // Both keys must be visible AND pinnable pool members: that is what
+        // gives the user the same two independent controls (menu visibility,
+        // footer pin) every other entry already has. Leaving them outside the
+        // pool is exactly the defect this fix answers — with them excluded, no
+        // setting could hide the ⚡ button the screen force-rendered.
+        for (key in ChatMenuPrefs.MODEL_CONDITIONAL_ENTRIES) {
+            assertTrue("$key must be in ALL_ENTRIES", key in ChatMenuPrefs.ALL_ENTRIES)
+            assertTrue("$key must be in DEFAULT_ORDER", key in ChatMenuPrefs.DEFAULT_ORDER)
+            assertTrue("$key must default to visible", ChatMenuPrefs.defaultVisible(key))
+            assertFalse("$key must default to unpinned", ChatMenuPrefs.defaultPinned(key))
+            // A pin must round-trip through the shared order helpers.
+            val prefs = FakePrefs()
+            ChatMenuPrefs.setPinned(prefs, key, true)
+            assertTrue(key in ChatMenuPrefs.resolvePinnedOrder(prefs))
+        }
+    }
+
+    @Test
     fun `hiding a model conditional toggle persists and is not reverted by adoption`() {
         val prefs = FakePrefs()
         ChatMenuPrefs.setVisible(prefs, ChatMenuPrefs.FAST_MODE, false)
