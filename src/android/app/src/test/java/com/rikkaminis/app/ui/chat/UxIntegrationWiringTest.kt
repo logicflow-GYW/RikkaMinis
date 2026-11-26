@@ -70,10 +70,41 @@ class UxIntegrationWiringTest {
         assertTrue(decorative.substringAfter("fun DecorativeSpinner(").contains(".progressSemantics()"))
     }
 
+    @Test fun `full-content entry exists only after the thinking body is expanded`() {
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val start = ui.indexOf("internal fun ThinkingBlock(")
+        val block = ui.substring(start, ui.indexOf("private fun ThinkingFullContentDialog(", start))
+        val occurrences = Regex("R\\.string\\.thinking_view_full").findAll(block).toList()
+        // 1) >100K header entry (inline body can never render), 2) expanded-body link.
+        assertEquals(2, occurrences.size)
+        val expand = block.indexOf("visible = expanded && !overHardCap")
+        assertTrue(expand > 0)
+        assertTrue(occurrences[1].range.first > expand)
+        assertTrue(block.substring(expand).contains("if (!isStreaming && isTruncated)"))
+        // The collapsed path must not add a row after the header.
+        assertFalse(block.substring(0, expand).contains("MinisTextButton("))
+    }
+
+    @Test fun `tool folding is a user choice wired to the appearance preference`() {
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        assertTrue(ui.contains("toolFoldEnabled(LocalContext.current)"))
+        assertTrue(ui.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, foldingEnabled)"))
+        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
+        assertTrue(planner.contains("enabled: Boolean = true"))
+        assertTrue(planner.contains("if (!enabled) return emptyList()"))
+        val settings = source("ui/settings/AppearanceScreen.kt")
+        assertTrue(settings.contains("const val KEY_TOOL_FOLD_ENABLED = \"chat.toolFoldEnabled\""))
+        assertTrue(settings.contains("getBoolean(KEY_TOOL_FOLD_ENABLED, true)"))
+        assertTrue(settings.contains("putBoolean(KEY_TOOL_FOLD_ENABLED, it)"))
+        val config = source("config/ConfigBuiltins.kt")
+        assertTrue(config.contains("path = \"chat.toolFoldEnabled\""))
+        assertTrue(config.contains("key = com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED"))
+    }
+
     @Test fun `aggregate still consumes exact folded members and original tool callbacks`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         val aggregate = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
-        assertTrue(aggregate.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming)"))
+        assertTrue(aggregate.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming"))
         assertTrue(aggregate.contains("group.memberIndices.forEach { put(it, group) }"))
         assertTrue(aggregate.contains("val foldedGroup = groupByIndex[index]"))
         assertTrue(aggregate.contains("return@forEachIndexed"))

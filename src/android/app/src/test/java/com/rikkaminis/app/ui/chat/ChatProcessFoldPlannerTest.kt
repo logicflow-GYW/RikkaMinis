@@ -70,6 +70,14 @@ class ChatProcessFoldPlannerTest {
             assertFalse(groups.any { 2 in it.memberIndices })
         }
     }
+    @Test fun `user can turn folding off and every tool stays visible`() {
+        val blocks = (1..6).map { tool("t$it") }
+        assertTrue(ChatProcessFoldPlanner.plan(blocks, false, enabled = false).isEmpty())
+        assertTrue(ChatProcessFoldPlanner.plan(blocks, true, enabled = false).isEmpty())
+        // Default stays ON so existing behaviour and call sites are unchanged.
+        assertEquals(1, ChatProcessFoldPlanner.plan(blocks, false).size)
+    }
+
     @Test fun `browsing holds back the first fold until following resumes`() {
         assertTrue(ChatProcessFoldPlanner.isExpanded("a", emptyMap(), emptySet(), true))
         assertFalse(ChatProcessFoldPlanner.isExpanded("a", emptyMap(), emptySet(), false))

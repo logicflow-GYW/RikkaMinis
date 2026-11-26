@@ -5,6 +5,13 @@ object ThinkingReadPlanner {
     const val WINDOW_CHARS = 8_000
     const val INLINE_HARD_CAP = 100_000
     const val CHUNK_CHARS = 4_000
+    // Expand/collapse of the bounded body. Kept short and front-loaded because
+    // our assistant message is ONE LazyColumn item: every frame of a height
+    // animation re-measures the whole row (this text + all reply text + every
+    // tool pill). Upstream can afford a longer default spring because its
+    // thinking block is its own row. See reports/INTEGRATION.md §expand.
+    const val EXPAND_MS = 110
+    const val FADE_MS = 90
     // Conservative UTF-16 budget (200KB) leaves ample room under Binder's shared 1MB limit.
     const val CLIPBOARD_TEXT_CHARS = 100_000
 

@@ -79,4 +79,10 @@ class ThinkingReadPlannerTest {
         assertEquals(8000, ThinkingReadPlanner.WINDOW_CHARS)
         assertEquals(100000, ThinkingReadPlanner.INLINE_HARD_CAP)
     }
+
+    @Test fun `expand animation stays short because the whole message row is remeasured`() {
+        assertEquals(110, ThinkingReadPlanner.EXPAND_MS)
+        assertEquals(90, ThinkingReadPlanner.FADE_MS)
+        assertTrue(ThinkingReadPlanner.EXPAND_MS < 160)
+    }
 }

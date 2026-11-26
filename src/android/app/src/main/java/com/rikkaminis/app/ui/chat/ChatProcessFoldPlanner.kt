@@ -34,7 +34,8 @@ object ChatProcessFoldPlanner {
      * One key per contiguous TOOL segment survives parallel completions and stream stop.
      * Unfinished calls and the latest three remain visible, even inside that segment.
      */
-    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean): List<Group> {
+    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean = true): List<Group> {
+        if (!enabled) return emptyList()
         val recent = if (isStreaming) {
             blocks.indices.filter { blocks[it].kind == "tool_use" }.takeLast(LIVE_RECENT_TOOLS).toSet()
         } else emptySet()

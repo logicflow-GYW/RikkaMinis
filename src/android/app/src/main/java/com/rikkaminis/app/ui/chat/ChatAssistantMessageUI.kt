@@ -48,6 +48,7 @@ import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.settings.autoExpandThinkingEnabled
 import com.rikkaminis.app.ui.settings.thinkingCharCountVisibleEnabled
 import com.rikkaminis.app.ui.settings.thinkingDurationVisibleEnabled
+import com.rikkaminis.app.ui.settings.toolFoldEnabled
 import com.rikkaminis.app.ui.components.MinisMenu
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -246,10 +247,13 @@ internal fun AssistantMessageView(
     // The compatibility default is NOT proof that history-browsing protection is wired.
     isBrowsingHistory: Boolean = false,
 ) {
+    // Settings → Appearance → Tool Steps. Read at mount, same convention as the
+    // thinking toggles: a change lands on the next mounted message row.
+    val foldingEnabled = remember { toolFoldEnabled(LocalContext.current) }
     var foldChoices by rememberSaveable(message.id) { mutableStateOf(hashMapOf<String, Boolean>()) }
     var foldedOnce by rememberSaveable(message.id) { mutableStateOf(arrayListOf<String>()) }
-    val foldGroups = remember(message.toolBlocks, message.isStreaming) {
-        ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming)
+    val foldGroups = remember(message.toolBlocks, message.isStreaming, foldingEnabled) {
+        ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, foldingEnabled)
     }
     val foldedKeys = foldedOnce.toSet()
     val groupAtStart = foldGroups.associateBy { it.range.first }
@@ -1296,11 +1300,11 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             // the block's height snaps to zero the instant streaming ends,
             // yanking the viewport (the "content suddenly jumps" feel).
             enter = expandVertically(
-                animationSpec = tween(durationMillis = 220),
-            ) + fadeIn(animationSpec = tween(durationMillis = 160)),
+                animationSpec = tween(durationMillis = ThinkingReadPlanner.EXPAND_MS),
+            ) + fadeIn(animationSpec = tween(durationMillis = ThinkingReadPlanner.FADE_MS)),
             exit = shrinkVertically(
-                animationSpec = tween(durationMillis = 220),
-            ) + fadeOut(animationSpec = tween(durationMillis = 160)),
+                animationSpec = tween(durationMillis = ThinkingReadPlanner.EXPAND_MS),
+            ) + fadeOut(animationSpec = tween(durationMillis = ThinkingReadPlanner.FADE_MS)),
         ) {
             val scrollState = rememberScrollState()
             val isDragging by scrollState.interactionSource.collectIsDraggedAsState()
@@ -1368,15 +1372,28 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                     lineHeight = 19.sp,
                 )
             }
+            // Only inside the expanded body: a collapsed chip stays a single
+            // line, so the entry cannot widen or add a row to the idle block.
+            if (!isStreaming && isTruncated) {
+                Box(Modifier.fillMaxWidth()) {
+                Text(
+                    text = stringResource(R.string.thinking_view_full),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = thinkingBlue,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(role = Role.Button) {
+                            fullContentSnapshot = block.content
+                            showFullContent = true
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+                }
+            }
         }
 
-        // Once stopped, ANY truncated window has a full-content entry, not just >100K.
-        if (!isStreaming && charCount > thinkingWindowSize && !overHardCap) {
-            MinisTextButton(onClick = {
-                fullContentSnapshot = block.content
-                showFullContent = true
-            }) { Text(stringResource(R.string.thinking_view_full), color = thinkingBlue) }
-        }
         if (showFullContent) {
             ThinkingFullContentDialog(
                 content = fullContentSnapshot,

@@ -1174,6 +1174,19 @@ internal object ConfigBuiltins {
                 defaultValue = false,
             )
         )
+        // [ux-1125] Tool-step folding is a user choice, not a fixed presentation:
+        // registered so it round-trips through minis-config and every backup,
+        // with the shipped ON default (the behaviour the feature introduced).
+        r.register(
+            PrefsBoolField(
+                path = "chat.toolFoldEnabled",
+                displayName = "Fold finished tool steps",
+                description = "When ON, consecutive finished tool calls collapse into one summary row; the latest three and any running call stay visible. OFF renders every tool call separately.",
+                prefs = appearancePrefs,
+                key = com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED,
+                defaultValue = true,
+            )
+        )
         // Chat action customization (Settings → Appearance → Chat Menu).
         // The action pool spans the top-right "..." menu AND the history-drawer
         // footer. Each stable key contributes two independent bool fields:
