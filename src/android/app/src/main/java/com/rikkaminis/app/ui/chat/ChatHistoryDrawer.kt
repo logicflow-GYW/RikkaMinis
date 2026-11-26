@@ -381,7 +381,14 @@ fun ChatHistoryDrawer(
                         } else {
                             null
                         }
-                        IconButton(onClick = { onAction(spec.key) }) {
+                        IconButton(
+                            onClick = { onAction(spec.key) },
+                            modifier = if (stateLabel != null) {
+                                Modifier.semantics { stateDescription = stateLabel }
+                            } else {
+                                Modifier
+                            },
+                        ) {
                             Icon(
                                 imageVector = spec.icon,
                                 contentDescription = stringResource(spec.titleRes),
@@ -390,13 +397,7 @@ fun ChatHistoryDrawer(
                                 } else {
                                     MaterialTheme.colorScheme.onSurfaceVariant
                                 },
-                                modifier = if (stateLabel != null) {
-                                    Modifier
-                                        .size(22.dp)
-                                        .semantics { stateDescription = stateLabel }
-                                } else {
-                                    Modifier.size(22.dp)
-                                },
+                                modifier = Modifier.size(22.dp),
                             )
                         }
                     }
