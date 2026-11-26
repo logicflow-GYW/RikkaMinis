@@ -26,6 +26,30 @@ class ChatProcessFoldPlannerTest {
         assertEquals(1400L, g.durationMs)
     }
 
+    @Test fun `a running turn collapses completed steps but keeps the latest three`() {
+        val blocks = (1..5).map { tool("t$it") }
+        val live = plan(*blocks.toTypedArray(), live = true).single()
+        assertEquals(0..1, live.range)
+        assertEquals(2, live.toolCount)
+        assertFalse(live.memberIndices.contains(2))
+        // Thinking interleaved with the calls is folded along, only the last three show.
+        val mixed = plan(tool("a"), thinking("t1"), tool("b"), tool("c"), thinking("t2"),
+            tool("d"), tool("e"), tool("f"), live = true)
+        val g = mixed.first { it.range.first == 0 }
+        // Six calls, the latest three (d,e,f) stay visible; a,b,c fold with the thinking between them.
+        assertEquals(3, g.toolCount)
+        assertTrue(g.memberIndices == setOf(0, 2, 3))
+    }
+
+    @Test fun `an interrupted settled turn still folds through a barrier`() {
+        val info = AssistantBlock("i", "info", "cancelled", toolName = "cancel")
+        val g = plan(tool("a"), tool("b"), tool("c"), info, live = false).single()
+        assertEquals(0..2, g.range)
+        assertEquals(3, g.toolCount)
+        // While it is still running, the same shape stays visible.
+        assertTrue(plan(tool("a"), tool("b"), tool("c"), info, live = true).none { it.toolCount > 0 })
+    }
+
     @Test fun `a live trailing run stays visible but folds once the turn ends`() {
         val blocks = arrayOf(tool("one"), tool("two"), tool("three"))
         assertTrue(plan(*blocks, live = true).isEmpty())
@@ -67,12 +91,12 @@ class ChatProcessFoldPlannerTest {
     @Test fun `info subagent and user prompts are barriers`() {
         val info = AssistantBlock("info", "info", "notice", toolName = "compact")
         val groups = plan(tool("a"), tool("b"), info, tool("c"), tool("d"), text("reply", "Done."))
-        // The barrier cut the first run before any reply, so only the last run folds.
-        assertEquals(listOf(3..4), groups.map { it.range })
+        // A settled turn folds both runs; the barrier only ends the first one.
+        assertEquals(listOf(0..1, 3..4), groups.map { it.range })
         for (name in listOf("spawn_agent", "subagent_task", "user_ask", "ask_user")) {
             val barrier = tool("special", name = name)
             val gs = plan(tool("a"), tool("b"), barrier, tool("c"), tool("d"), text("reply", "Done."))
-            assertEquals(listOf(3..4), gs.map { it.range })
+            assertEquals(listOf(0..1, 3..4), gs.map { it.range })
         }
     }
 

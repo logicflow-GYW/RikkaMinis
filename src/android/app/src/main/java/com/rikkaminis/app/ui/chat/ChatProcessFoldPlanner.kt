@@ -21,6 +21,9 @@ package com.rikkaminis.app.ui.chat
 object ChatProcessFoldPlanner {
     const val MINIMUM_TOOLS = 2
 
+    /** While a turn runs, this many latest calls stay visible as pills. */
+    const val LIVE_RECENT_TOOLS = 3
+
     data class Group(
         /** Stable identity and placement: the first folded block. */
         val key: String,
@@ -79,6 +82,22 @@ object ChatProcessFoldPlanner {
         }
     }
 
+    /** Stats over an explicit hidden set; null below the minimum. */
+    private fun groupOfIndices(blocks: List<AssistantBlock>, hidden: List<Int>): Group? {
+        if (hidden.size < MINIMUM_TOOLS) return null
+        val tools = hidden.map { blocks[it] }
+        return Group(
+            key = blocks[hidden.first()].id,
+            range = hidden.first()..hidden.last(),
+            memberIndices = hidden.toSet(),
+            toolCount = tools.size,
+            failedCount = tools.count { it.toolStatus == ToolBlockStatus.FAILED || it.toolStatus == ToolBlockStatus.TIMEOUT },
+            cancelledCount = tools.count { it.toolStatus == ToolBlockStatus.CANCELLED },
+            deduplicatedCount = tools.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
+            durationMs = tools.sumOf { it.durationMs },
+        )
+    }
+
     /** Stats over [range]; null when it holds fewer than the minimum number of tools. */
     private fun group(blocks: List<AssistantBlock>, range: IntRange): Group? {
         val members = range.map { blocks[it] }
@@ -116,7 +135,16 @@ object ChatProcessFoldPlanner {
         for (i in kinds.indices) {
             when (kinds[i]) {
                 Kind.BARRIER, Kind.TOOL_UNFINISHED -> {
-                    closeAtSoftEnd()
+                    // Settled turns (including one the user interrupted) have no
+                    // live work left: a run cut by an info row, an interactive
+                    // card or a cancelled call must still collapse. While the
+                    // turn runs, only the part before the last remark folds.
+                    val s = start
+                    if (!isStreaming && s != null) {
+                        group(blocks, s..lastMember)?.let { out += it }
+                    } else {
+                        closeAtSoftEnd()
+                    }
                     reset()
                     leadThinking = null
                 }
@@ -149,7 +177,20 @@ object ChatProcessFoldPlanner {
         // left, and a finished run must not stay expanded only because the
         // model ended on a tool call instead of a text reply.
         if (isStreaming) {
-            closeAtSoftEnd()
+            // Running turn: completed steps collapse as soon as they are no
+            // longer among the last [LIVE_RECENT_TOOLS] calls, so the transcript
+            // shrinks while the model keeps working instead of only at the end.
+            val s = start
+            if (s == null) {
+                closeAtSoftEnd()
+            } else {
+                val toolPositions = (s..lastMember).filter {
+                    kinds[it] == Kind.TOOL_DONE || kinds[it] == Kind.TOOL_UNFINISHED
+                }
+                val recent = toolPositions.takeLast(LIVE_RECENT_TOOLS).toSet()
+                val hidden = (s..lastMember).filter { kinds[it] == Kind.TOOL_DONE && it !in recent }
+                groupOfIndices(blocks, hidden)?.let { out += it }
+            }
         } else {
             val s = start
             if (s != null) group(blocks, s..lastMember)?.let { out += it } else closeAtSoftEnd()
