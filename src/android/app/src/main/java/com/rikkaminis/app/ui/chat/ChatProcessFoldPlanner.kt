@@ -17,27 +17,46 @@ package com.rikkaminis.app.ui.chat
  *    card, or an unfinished call. Those boundaries always render something, so
  *    two folded summaries can never sit next to each other.
  *  - It folds when it holds at least two finished calls, or at least one call
- *    together with thinking. Reasoning with no calls never folds.
- *  - Folding is deterministic from block state alone: NOTHING expands itself
- *    because of scrolling, history browsing or an interruption. A segment that
- *    holds a cancelled call folds like any other and simply reports the
- *    cancellation in its summary line — the user's own next message explains why
- *    the run stopped, so an extra banner would only repeat it.
- *  - The ONE exception is the segment that is still running: it stays open so
- *    live work is visible, and only its last [LIVE_RECENT_TOOLS] calls render;
- *    older finished ones collapse behind a count line.
+ *    together with thinking. Reasoning with no calls never folds, and a segment
+ *    short enough to fit on screen is not worth a row of its own.
+ *
+ * While the turn runs, the trailing segment keeps a **tail**: the newest
+ * [TAIL_STEPS] steps (a step = one thinking block plus the calls it produced)
+ * stay rendered, capped at [MAX_TAIL_BLOCKS] blocks. A model may follow one
+ * thought with two calls or with thirty, so counting steps — not blocks, and not
+ * calls — is what keeps the shape honest in both directions. The tail exists
+ * only while something has actually been absorbed; until then the segment is not
+ * emitted at all and the transcript looks exactly like the plain renderer.
+ *
+ * When the turn settles (reply, interruption, cancellation) the tail goes away
+ * and the whole segment collapses to its row.
  */
 object ChatProcessFoldPlanner {
-    /** Calls kept visible in the running turn's trailing segment. */
-    const val LIVE_RECENT_TOOLS = 3
+    /** Newest steps kept visible in the running segment's tail. */
+    const val TAIL_STEPS = 2
+
+    /** Hard cap on tail blocks, so one thought followed by thirty calls stays short. */
+    const val MAX_TAIL_BLOCKS = 6
 
     /** Minimum finished calls for a segment that carries no reasoning. */
     const val MINIMUM_TOOLS = 2
 
+    /** How a segment renders right now. */
+    enum class Mode {
+        /** Only the summary row; every member is hidden. */
+        COLLAPSED,
+
+        /** Summary row plus the live tail; the absorbed prefix is hidden. */
+        TAIL,
+
+        /** Summary row plus every member (the user opened it). */
+        FULL,
+    }
+
     data class Segment(
         /** Stable identity: the id of the first block in the segment. */
         val key: String,
-        /** First member through last member; the whole span is replaced by the row. */
+        /** First member through last member. */
         val range: IntRange,
         val memberIndices: Set<Int>,
         val toolCount: Int,
@@ -48,16 +67,13 @@ object ChatProcessFoldPlanner {
         val durationMs: Long,
         /** Action phrase from the segment's last reasoning, else the last call's title. */
         val title: String?,
-        /** The only reason to be open without a user tap: the segment is running. */
-        val openByDefault: Boolean,
+        /** True while the turn runs and this is the trailing segment with a tail. */
+        val liveTail: Boolean = false,
         /**
-         * Leading members collapsed even while the segment is open: the running
-         * turn keeps only its last [LIVE_RECENT_TOOLS] calls visible and hides
-         * the finished prefix behind a count line. Always a prefix of [range].
+         * First member of the live tail. Members before it are absorbed into the
+         * summary row. -1 when the segment has no tail.
          */
-        val hiddenPrefixEnd: Int = -1,
-        /** Calls inside [hiddenPrefixEnd] — what the count line reports. */
-        val hiddenToolCount: Int = 0,
+        val tailStart: Int = -1,
     )
 
     private val interactiveTools = setOf(
@@ -123,6 +139,23 @@ object ChatProcessFoldPlanner {
         return null
     }
 
+    /**
+     * First index of the live tail inside [range], or [range].first when the
+     * whole segment fits. A step starts at the leading block and at every
+     * thinking block after it, so `thought → 5 calls → thought → 3 calls` keeps
+     * the last two steps; a single thought followed by thirty calls is capped by
+     * [MAX_TAIL_BLOCKS] instead.
+     */
+    private fun tailStartOf(range: IntRange, kinds: List<Kind>): Int {
+        val stepStarts = ArrayList<Int>()
+        for (i in range) {
+            if (i == range.first || kinds[i] == Kind.THINKING) stepStarts += i
+        }
+        val bySteps = stepStarts.takeLast(TAIL_STEPS).first()
+        val byBlocks = range.last - MAX_TAIL_BLOCKS + 1
+        return maxOf(bySteps, byBlocks, range.first)
+    }
+
     // The default is OFF, matching the shipped setting: a caller that forgets
     // to pass the user's choice gets the pre-feature transcript, not folding.
     fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean = false): List<Segment> {
@@ -156,16 +189,12 @@ object ChatProcessFoldPlanner {
             // still need two of them, and reasoning alone never folds.
             val folds = finished.size >= MINIMUM_TOOLS || (finished.size == 1 && hasThinking)
             if (!folds) continue
+            val live = isStreaming && range.last == blocks.lastIndex
+            val tailStart = if (live) tailStartOf(range, kinds) else -1
+            // Nothing absorbed yet: emit no segment at all, so a running turn that
+            // still fits on screen renders exactly like the plain transcript.
+            if (live && tailStart <= range.first) continue
             val tools = finished.map { blocks[it] }
-            val trailing = range.last == blocks.lastIndex
-            val live = isStreaming && trailing
-            // Running work is the only thing that opens itself. A cancelled run
-            // is settled: it folds and says so in the summary (cancelledCount).
-            val openByDefault = live
-            // A live segment shows only its newest calls; the finished prefix
-            // collapses behind a count line so the transcript keeps shrinking
-            // while the model works instead of growing until the turn ends.
-            val keepFrom = if (live && finished.size > LIVE_RECENT_TOOLS) finished.size - LIVE_RECENT_TOOLS else 0
             out += Segment(
                 key = blocks[range.first].id,
                 range = range,
@@ -178,24 +207,26 @@ object ChatProcessFoldPlanner {
                 deduplicatedCount = tools.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
                 durationMs = tools.sumOf { it.durationMs },
                 title = titleOf(blocks, range, kinds),
-                openByDefault = openByDefault,
-                hiddenPrefixEnd = if (keepFrom > 0) finished[keepFrom] - 1 else -1,
-                hiddenToolCount = keepFrom,
+                liveTail = live,
+                tailStart = tailStart,
             )
         }
         return out
     }
 
     /**
-     * A segment is open only when the user opened it or when it is still
-     * running. Scrolling never changes this: the previous rule expanded every
-     * segment that had not been folded yet while the list was being scrolled,
-     * which read as "the whole transcript blew open" exactly when the user was
-     * trying to read it.
+     * Render mode for [segment]. A tap always wins; otherwise the running
+     * segment shows its tail and a settled one is collapsed. Scrolling is not an
+     * input: the previous rule expanded every not-yet-folded segment while the
+     * list was being scrolled, which read as the transcript blowing open.
      */
-    fun isExpanded(
+    fun mode(
         key: String,
         choices: Map<String, Boolean>,
-        openByDefault: Boolean,
-    ): Boolean = choices[key] ?: openByDefault
+        liveTail: Boolean,
+    ): Mode = when (choices[key]) {
+        true -> Mode.FULL
+        false -> Mode.COLLAPSED
+        null -> if (liveTail) Mode.TAIL else Mode.COLLAPSED
+    }
 }

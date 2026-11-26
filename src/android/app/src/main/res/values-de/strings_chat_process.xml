@@ -11,5 +11,4 @@
     <string name="chat_process_copied">Vollständiger Denktext kopiert</string>
     <string name="chat_process_copied_file">Vollständiger Denktext wegen der Größenbegrenzung als Textdatei kopiert</string>
     <string name="chat_process_copy_failed">Kopieren fehlgeschlagen. Erneut versuchen.</string>
-    <string name="chat_process_hidden_prefix">%1$d frühere Aufrufe ausgeblendet</string>
 </resources>

@@ -41,14 +41,25 @@ class UxIntegrationWiringTest {
         val view = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
         assertFalse(view.contains("isBrowsingHistory"))
         val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        val expanded = planner.substringAfter("fun isExpanded(")
-        assertFalse(expanded.contains("browsing"))
+        val mode = planner.substringAfter("fun mode(")
+        assertFalse(mode.contains("browsing"))
+        assertFalse(mode.contains("scroll"))
     }
 
-    @Test fun `the running segment is the only automatic open`() {
+    @Test fun `only a live segment keeps its tail open`() {
         val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        assertTrue(planner.contains("val openByDefault = live"))
-        assertFalse(planner.contains("openByDefault = cancelled || live"))
+        assertTrue(planner.contains("null -> if (liveTail) Mode.TAIL else Mode.COLLAPSED"))
+        assertFalse(planner.contains("openByDefault"))
+    }
+
+    @Test fun `the summary row is plain text with no filled container`() {
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val row = ui.substringAfter("private fun ChatProcessSummary(").substringBefore("internal fun BoundsTrackedBlock(")
+        assertFalse(row.contains(".background("))
+        assertFalse(row.contains("RoundedCornerShape"))
+        assertTrue(row.contains("buildAnnotatedString"))
+        // No second "hidden prefix" row: the summary line IS that line.
+        assertFalse(ui.contains("ChatProcessHiddenPrefix"))
     }
 
     @Test fun `tool shimmer is an isolated sibling and never rerecords static content`() {

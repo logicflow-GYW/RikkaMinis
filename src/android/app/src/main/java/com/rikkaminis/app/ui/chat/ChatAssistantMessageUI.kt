@@ -111,6 +111,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.sp
 import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.ui.theme.ChatColors
@@ -261,8 +264,8 @@ internal fun AssistantMessageView(
     val foldSegments = remember(message.toolBlocks, message.isStreaming, processFoldEnabled) {
         ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, processFoldEnabled)
     }
-    fun isSegmentExpanded(segment: ChatProcessFoldPlanner.Segment): Boolean =
-        ChatProcessFoldPlanner.isExpanded(segment.key, foldChoices, segment.openByDefault)
+    fun segmentMode(segment: ChatProcessFoldPlanner.Segment): ChatProcessFoldPlanner.Mode =
+        ChatProcessFoldPlanner.mode(segment.key, foldChoices, segment.liveTail)
     val segmentByIndex = buildMap {
         foldSegments.forEach { segment -> segment.memberIndices.forEach { put(it, segment) } }
     }
@@ -306,27 +309,28 @@ internal fun AssistantMessageView(
         val lastTextBlockIndex = message.toolBlocks.indexOfLast { it.kind == "text" }
         message.toolBlocks.forEachIndexed { index, block ->
             val segment = segmentByIndex[index]
-            if (segment != null && segment.range.first == index) {
-                key("process:${message.id}:${segment.key}") {
-                    val expanded = isSegmentExpanded(segment)
-                    ChatProcessSummary(segment, expanded) {
-                        foldChoices = HashMap(foldChoices).apply { put(segment.key, !expanded) }
-                    }
-                }
-            }
-            // Collapsed segment: the whole span is replaced by the row above.
-            // Open segment: the finished prefix of a still-running span collapses
-            // behind a count line, so the newest calls stay on screen.
             if (segment != null) {
-                if (!isSegmentExpanded(segment)) return@forEachIndexed
-                if (index == segment.hiddenPrefixEnd + 1 && segment.hiddenToolCount > 0) {
-                    // Sits between the summary row and the first call still on
-                    // screen — never stacked directly under the summary.
-                    key("process-hidden:${message.id}:${segment.key}") {
-                        ChatProcessHiddenPrefix(segment.hiddenToolCount)
+                val mode = segmentMode(segment)
+                if (segment.range.first == index) {
+                    key("process:${message.id}:${segment.key}") {
+                        ChatProcessSummary(segment, mode) {
+                            // A tap flips the CURRENT visual state, so tapping a
+                            // tail closes the segment and tapping it again opens
+                            // every member — never a no-op.
+                            val next = when (mode) {
+                                ChatProcessFoldPlanner.Mode.COLLAPSED -> true
+                                else -> false
+                            }
+                            foldChoices = HashMap(foldChoices).apply { put(segment.key, next) }
+                        }
                     }
                 }
-                if (index <= segment.hiddenPrefixEnd) return@forEachIndexed
+                // COLLAPSED replaces the whole span with the row above; TAIL keeps
+                // only the newest steps; FULL keeps everything (the user opened it).
+                if (mode == ChatProcessFoldPlanner.Mode.COLLAPSED) return@forEachIndexed
+                if (mode == ChatProcessFoldPlanner.Mode.TAIL && index < segment.tailStart) {
+                    return@forEachIndexed
+                }
             }
             // Stable block scope, independent of added summaries and appended tokens.
             key(message.id, block.id) {
@@ -442,80 +446,76 @@ internal fun AssistantMessageView(
 }
 
 /**
- * One collapsed process segment: the reasoning that led into a run of calls and
- * the calls themselves are hidden together. The row carries an action phrase so
- * it answers "what happened here" without being opened — a bare "3 tools · 12s"
- * is what made the old row feel like noise.
+ * The process row. Plain text on one line — no card, no pill, no background: a
+ * filled container around a line of meta text was itself part of what made the
+ * old row read as a placeholder instead of a record of what happened.
+ *
+ * The row is also the live progress line while a turn runs: its counts grow as
+ * calls finish, which is what keeps the transcript feeling active without any
+ * height animation (an assistant message is ONE LazyColumn item, so a height
+ * animation re-measures the whole row every frame — see ThinkingReadPlanner).
  */
 @Composable
 private fun ChatProcessSummary(
     segment: ChatProcessFoldPlanner.Segment,
-    expanded: Boolean,
+    mode: ChatProcessFoldPlanner.Mode,
     onToggle: () -> Unit,
 ) {
     val expansionLabel = stringResource(
-        if (expanded) R.string.chat_process_expanded else R.string.chat_process_collapsed,
+        if (mode == ChatProcessFoldPlanner.Mode.COLLAPSED) {
+            R.string.chat_process_collapsed
+        } else {
+            R.string.chat_process_expanded
+        },
     )
-    val parts = mutableListOf(stringResource(R.string.chat_process_tools, segment.toolCount))
-    if (segment.durationMs > 0) parts += stringResource(
-        R.string.chat_process_duration, String.format(java.util.Locale.getDefault(), "%.1f", segment.durationMs / 1000.0),
-    )
-    if (segment.failedCount > 0) parts += stringResource(R.string.chat_process_failed, segment.failedCount)
-    if (segment.cancelledCount > 0) parts += stringResource(R.string.chat_process_cancelled, segment.cancelledCount)
-    if (segment.deduplicatedCount > 0) parts += stringResource(R.string.chat_process_deduplicated, segment.deduplicatedCount)
+    val meta = buildList {
+        add(stringResource(R.string.chat_process_tools, segment.toolCount))
+        if (segment.durationMs > 0) add(
+            stringResource(
+                R.string.chat_process_duration,
+                String.format(java.util.Locale.getDefault(), "%.1f", segment.durationMs / 1000.0),
+            ),
+        )
+        if (segment.failedCount > 0) add(stringResource(R.string.chat_process_failed, segment.failedCount))
+        if (segment.cancelledCount > 0) add(stringResource(R.string.chat_process_cancelled, segment.cancelledCount))
+        if (segment.deduplicatedCount > 0) {
+            add(stringResource(R.string.chat_process_deduplicated, segment.deduplicatedCount))
+        }
+    }
+    val metaText = meta.joinToString(" · ")
+    val metaColor = if (segment.failedCount > 0) ToolErrorColor else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
             .semantics { stateDescription = expansionLabel }
-            .clip(RoundedCornerShape(9.dp))
-            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f))
             .clickable(role = Role.Button, onClick = onToggle)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(vertical = 6.dp),
     ) {
         Icon(
-            if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
+            if (mode == ChatProcessFoldPlanner.Mode.COLLAPSED) {
+                Icons.Default.KeyboardArrowRight
+            } else {
+                Icons.Default.KeyboardArrowDown
+            },
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            modifier = Modifier.size(14.dp),
         )
-        Spacer(Modifier.width(6.dp))
-        val title = segment.title
-        if (title != null) {
-            Text(
-                text = title,
-                fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            Spacer(Modifier.width(6.dp))
-        }
+        Spacer(Modifier.width(4.dp))
         Text(
-            text = parts.joinToString(" · "),
-            fontSize = 12.sp,
-            color = if (segment.failedCount > 0) ToolErrorColor else MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
+            text = buildAnnotatedString {
+                val title = segment.title
+                if (title != null) {
+                    withStyle(SpanStyle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f))) {
+                        append(title)
+                    }
+                    append(" · ")
+                }
+                withStyle(SpanStyle(color = metaColor)) { append(metaText) }
+            },
+            fontSize = 12.5.sp,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-/**
- * Count line for the finished prefix of a still-running segment. The calls stay
- * out of the layout on purpose: a running turn must not keep growing the row
- * with work the user already watched.
- */
-@Composable
-private fun ChatProcessHiddenPrefix(hiddenToolCount: Int) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().padding(start = 12.dp, top = 2.dp, bottom = 2.dp),
-    ) {
-        Text(
-            text = stringResource(R.string.chat_process_hidden_prefix, hiddenToolCount),
-            fontSize = 11.5.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
         )
     }
 }

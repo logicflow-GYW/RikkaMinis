@@ -36,7 +36,6 @@ class ChatProcessFoldPlannerTest {
     // ── the segment model ──────────────────────────────────────────────────
 
     @Test fun `reasoning folds together with the call it produced`() {
-        // One call plus its reasoning is enough: the pair is the unit of work.
         val g = plan(thinking("t"), tool("a", ms = 300), text("r", "Done.")).single()
         assertEquals("t", g.key)
         assertEquals(0..1, g.range)
@@ -63,9 +62,7 @@ class ChatProcessFoldPlannerTest {
     }
 
     @Test fun `thinking between calls is a member of the same segment`() {
-        val g = plan(
-            thinking("t1"), tool("a"), thinking("t2"), tool("b"), text("r", "Done."),
-        ).single()
+        val g = plan(thinking("t1"), tool("a"), thinking("t2"), tool("b"), text("r", "Done.")).single()
         assertEquals(0..3, g.range)
         assertEquals(setOf(0, 1, 2, 3), g.memberIndices)
         assertEquals(2, g.toolCount)
@@ -91,103 +88,83 @@ class ChatProcessFoldPlannerTest {
     // ── boundaries ─────────────────────────────────────────────────────────
 
     @Test fun `info rows and interactive cards cut the segment`() {
-        val info = info("i")
-        val g = plan(tool("a"), tool("b"), info, tool("c"), tool("d"), text("r", "Done.")).map { it.range }
-        assertEquals(listOf(0..1, 3..4), g)
+        val ranges = plan(tool("a"), tool("b"), info("i"), tool("c"), tool("d"), text("r", "Done.")).map { it.range }
+        assertEquals(listOf(0..1, 3..4), ranges)
         for (name in listOf("spawn_agent", "subagent_task", "delegate_task", "user_ask", "ask_user")) {
             val barrier = tool("special", name = name)
-            val ranges = plan(tool("a"), tool("b"), barrier, tool("c"), tool("d"), text("r", "Done.")).map { it.range }
-            assertEquals(listOf(0..1, 3..4), ranges)
+            val cut = plan(tool("a"), tool("b"), barrier, tool("c"), tool("d"), text("r", "Done.")).map { it.range }
+            assertEquals(listOf(0..1, 3..4), cut)
         }
     }
 
-    @Test fun `two adjacent segments can never render back to back`() {
-        // Every boundary kind renders something visible, so the invariant holds
-        // by construction; this pins it against a future "merge" refactor.
-        val segments = plan(tool("a"), tool("b"), info("i"), tool("c"), tool("d"), text("r", "Done."))
-        assertEquals(2, segments.size)
-        // Exactly one block (the info row) sits between the two segments.
-        assertEquals(1, segments[1].range.first - segments[0].range.last - 1)
-        assertFalse(segments[1].range.first in segments[0].memberIndices)
+    @Test fun `an unfinished call ends the segment instead of joining it`() {
+        val ranges = plan(
+            tool("a"), tool("b"), tool("live", status = ToolBlockStatus.RUNNING), tool("c"), tool("d"),
+            text("r", "Done."),
+        ).map { it.range }
+        assertEquals(listOf(0..1, 3..4), ranges)
     }
 
-    // ── interruption ───────────────────────────────────────────────────────
+    // ── the live tail ──────────────────────────────────────────────────────
 
-    @Test fun `an interrupted segment folds and reports the cancellation`() {
-        val cancelled = tool("c", status = ToolBlockStatus.CANCELLED)
-        val g = plan(tool("a"), tool("b"), cancelled, text("r", "Stopped.")).single()
-        // Interruption is NOT a reason to open: it folds like any settled run and
-        // the summary carries the count. Nothing expands itself but live work.
-        assertFalse(g.openByDefault)
+    @Test fun `a running segment that still fits on screen is not folded at all`() {
+        // Nothing absorbed yet => no row, no hiding: the transcript renders like
+        // the plain renderer until there is something to absorb.
+        assertTrue(plan(thinking("t"), tool("a"), live = true).isEmpty())
+        assertTrue(plan(tool("a"), tool("b"), live = true).isEmpty())
+        assertTrue(plan(thinking("t"), tool("a"), tool("b"), live = true).isEmpty())
+    }
+
+    @Test fun `the tail keeps the newest two steps`() {
+        // thought → 1 call → thought → 1 call → thought → 1 call
+        val g = plan(
+            thinking("t1"), tool("a"), thinking("t2"), tool("b"), thinking("t3"), tool("c"),
+            live = true,
+        ).single()
+        assertEquals(0..5, g.range)
+        assertTrue(g.liveTail)
+        // Last two steps start at t2 (index 2): the third step starts at 4, so the
+        // tail is t2..c.
+        assertEquals(2, g.tailStart)
+    }
+
+    @Test fun `one thought followed by many calls keeps only the newest blocks`() {
+        val blocks = listOf(thinking("t")) + (1..30).map { tool("t$it") }
+        val g = plan(*blocks.toTypedArray(), live = true).single()
+        assertEquals(30, g.toolCount)
+        assertTrue(g.liveTail)
+        // Two steps would be the whole segment, so the block cap decides instead:
+        // the tail is the last MAX_TAIL_BLOCKS of the 31 blocks.
+        assertEquals(31 - ChatProcessFoldPlanner.MAX_TAIL_BLOCKS, g.tailStart)
+    }
+
+    @Test fun `a settled segment has no tail`() {
+        val g = plan(
+            thinking("t1"), tool("a"), thinking("t2"), tool("b"), thinking("t3"), tool("c"),
+            text("r", "Done."),
+        ).single()
+        assertFalse(g.liveTail)
+        assertEquals(-1, g.tailStart)
+    }
+
+    @Test fun `an interrupted segment is settled, not live`() {
+        val g = plan(
+            tool("a"), tool("b", status = ToolBlockStatus.CANCELLED), text("r", "Stopped."),
+        ).single()
+        assertFalse(g.liveTail)
         assertEquals(1, g.cancelledCount)
         assertEquals(0, g.failedCount)
     }
 
-    @Test fun `only the running segment ever opens without a tap`() {
-        // Settled, interrupted and failed segments all stay closed.
-        val settled = plan(tool("a"), tool("b"), text("r", "Done.")).single()
-        assertFalse(settled.openByDefault)
-        val interrupted = plan(tool("a"), tool("b", status = ToolBlockStatus.CANCELLED), text("r", "Stop.")).single()
-        assertFalse(interrupted.openByDefault)
-        val failed = plan(tool("a", status = ToolBlockStatus.FAILED), tool("b"), text("r", "Done.")).single()
-        assertFalse(failed.openByDefault)
-        val running = plan(tool("a"), tool("b"), live = true).single()
-        assertTrue(running.openByDefault)
-    }
-
-    @Test fun `a settled segment folds and does not open by default`() {
-        val g = plan(tool("a"), tool("b"), text("r", "Done.")).single()
-        assertFalse(g.openByDefault)
-    }
-
-    @Test fun `a cancelled call never counts as a failure`() {
-        val g = plan(tool("a"), tool("b", status = ToolBlockStatus.CANCELLED), text("r", "Stopped.")).single()
-        assertEquals(0, g.failedCount)
-        assertEquals(1, g.cancelledCount)
-    }
-
-    @Test fun `failed and timed out calls count as failures`() {
+    @Test fun `failed and timed out calls count as failures, cancelled does not`() {
         val g = plan(
             tool("a", status = ToolBlockStatus.FAILED),
             tool("b", status = ToolBlockStatus.TIMEOUT),
+            tool("c", status = ToolBlockStatus.CANCELLED),
             text("r", "Done."),
         ).single()
         assertEquals(2, g.failedCount)
-    }
-
-    // ── running turn ───────────────────────────────────────────────────────
-
-    @Test fun `the running segment stays open`() {
-        val g = plan(tool("a"), tool("b"), live = true).single()
-        assertTrue(g.openByDefault)
-        assertEquals(-1, g.hiddenPrefixEnd)
-        assertEquals(0, g.hiddenToolCount)
-    }
-
-    @Test fun `a long running segment hides its finished prefix`() {
-        val blocks = (1..5).map { tool("t$it") }
-        val g = plan(*blocks.toTypedArray(), live = true).single()
-        assertEquals(5, g.toolCount)
-        // Newest three stay visible: the prefix ends right before t3 (index 2).
-        assertEquals(1, g.hiddenPrefixEnd)
-        assertEquals(2, g.hiddenToolCount)
-    }
-
-    @Test fun `a running segment keeps the reasoning it started with`() {
-        val g = plan(thinking("t"), tool("a"), tool("b"), live = true).single()
-        assertEquals("t", g.key)
-        assertEquals(0..2, g.range)
-        assertEquals(-1, g.hiddenPrefixEnd)
-    }
-
-    @Test fun `the live prefix counts only calls, never the reasoning before them`() {
-        val blocks = listOf(thinking("t")) +
-            (1..5).map { tool("t$it") }
-        val g = plan(*blocks.toTypedArray(), live = true).single()
-        assertEquals(2, g.hiddenToolCount)
-        // t1 and t2 are hidden; the leading reasoning sits before the cut too.
-        assertTrue(g.hiddenPrefixEnd >= 0)
-        assertTrue(g.hiddenPrefixEnd < g.range.last)
+        assertEquals(1, g.cancelledCount)
     }
 
     // ── title ──────────────────────────────────────────────────────────────
@@ -211,25 +188,23 @@ class ChatProcessFoldPlannerTest {
         assertNull(g.title)
     }
 
-    // ── expansion policy ───────────────────────────────────────────────────
+    // ── render mode ────────────────────────────────────────────────────────
 
-    @Test fun `manual choices beat the segment default`() {
-        assertTrue(ChatProcessFoldPlanner.isExpanded("a", mapOf("a" to true), false))
-        assertFalse(ChatProcessFoldPlanner.isExpanded("a", mapOf("a" to false), true))
+    @Test fun `a tap always wins over the segment default`() {
+        assertEquals(ChatProcessFoldPlanner.Mode.FULL, ChatProcessFoldPlanner.mode("a", mapOf("a" to true), false))
+        assertEquals(ChatProcessFoldPlanner.Mode.COLLAPSED, ChatProcessFoldPlanner.mode("a", mapOf("a" to false), true))
     }
 
-    @Test fun `the segment default decides when the user has not chosen`() {
-        assertTrue(ChatProcessFoldPlanner.isExpanded("a", emptyMap(), true))
-        assertFalse(ChatProcessFoldPlanner.isExpanded("a", emptyMap(), false))
+    @Test fun `the default follows whether the segment is live`() {
+        assertEquals(ChatProcessFoldPlanner.Mode.TAIL, ChatProcessFoldPlanner.mode("a", emptyMap(), true))
+        assertEquals(ChatProcessFoldPlanner.Mode.COLLAPSED, ChatProcessFoldPlanner.mode("a", emptyMap(), false))
     }
 
-    @Test fun `folding depends on blocks and taps only`() {
-        // The signature is the contract: no browsing/scroll input can flip a
-        // segment open. A second identical call returns the identical state.
+    @Test fun `render mode depends on blocks and taps only`() {
         val segments = plan(tool("a"), tool("b"), text("r", "Done."))
-        val first = segments.map { ChatProcessFoldPlanner.isExpanded(it.key, emptyMap(), it.openByDefault) }
-        val second = segments.map { ChatProcessFoldPlanner.isExpanded(it.key, emptyMap(), it.openByDefault) }
+        val first = segments.map { ChatProcessFoldPlanner.mode(it.key, emptyMap(), it.liveTail) }
+        val second = segments.map { ChatProcessFoldPlanner.mode(it.key, emptyMap(), it.liveTail) }
         assertEquals(first, second)
-        assertFalse(first.any { it })
+        assertEquals(listOf(ChatProcessFoldPlanner.Mode.COLLAPSED), first)
     }
 }
