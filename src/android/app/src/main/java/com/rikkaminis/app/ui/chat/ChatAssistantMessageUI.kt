@@ -11,6 +11,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -1295,8 +1296,18 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
         // block is streaming, manual drag at any time, and pause-on-user-scroll
         // so a user reading earlier reasoning isn't yanked back to the tail by
         // the next token.
+        // A fresh AnimatedVisibility node created with visible=true does NOT
+        // animate; with the node kept in composition and driven through a
+        // transition state, every tap runs the enter/exit animation instead of
+        // snapping open (the "sometimes it just jumps" report).
+        val thinkingBodyVisible = remember(block.id) {
+            MutableTransitionState(expanded && !overHardCap)
+        }
+        LaunchedEffect(expanded, overHardCap) {
+            thinkingBodyVisible.targetState = expanded && !overHardCap
+        }
         AnimatedVisibility(
-            visible = expanded && !overHardCap,
+            visibleState = thinkingBodyVisible,
             // Smooth height + fade on collapse/expand: without the animation
             // the block's height snaps to zero the instant streaming ends,
             // yanking the viewport (the "content suddenly jumps" feel).

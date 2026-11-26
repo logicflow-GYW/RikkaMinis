@@ -77,7 +77,10 @@ class UxIntegrationWiringTest {
         val occurrences = Regex("R\\.string\\.thinking_view_full").findAll(block).toList()
         // 1) >100K header entry (inline body can never render), 2) expanded-body link.
         assertEquals(2, occurrences.size)
-        val expand = block.indexOf("visible = expanded && !overHardCap")
+        val expand = block.indexOf("visibleState = thinkingBodyVisible")
+        assertTrue(block.contains("MutableTransitionState(expanded && !overHardCap)"))
+        assertTrue(block.contains("thinkingBodyVisible.targetState = expanded && !overHardCap"))
+        assertFalse(block.contains("visible = expanded && !overHardCap"))
         assertTrue(expand > 0)
         assertTrue(occurrences[1].range.first > expand)
         assertTrue(block.substring(expand).contains("if (!isStreaming && isTruncated)"))
