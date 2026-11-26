@@ -47,12 +47,12 @@ import kotlin.math.roundToInt
  * Settings → Appearance → Chat Menu.
  *
  * Two independent sections:
- *   (A) Top-right menu — the eight menu-renderable actions each have a
+ *   (A) Top-right menu — the twelve menu-renderable actions each have a
  *       visibility Switch; the order defines the "..." menu rendering. The
  *       two footer-only actions (Token Usage, Settings) are intentionally
  *       absent: the menu's rendering loop has no branch for them, so a
  *       switch would be a dead control.
- *   (B) History drawer footer — all ten actions have a pin Switch; the order
+ *   (B) History drawer footer — all twelve pool entries have a pin Switch; the order
  *       defines the footer FlowRow rendering. SETTINGS, when pinned, is
  *       always anchored last (its row is non-draggable + shows a "fixed
  *       right" hint; it is also a *wall* for the other rows' drags, so no
@@ -73,7 +73,7 @@ fun ChatMenuSettingsScreen(
     val rowHeight = 56.dp
     val rowHeightPx = with(LocalDensity.current) { rowHeight.toPx() }
 
-    // Section A: top-right menu order — only the eight menu-renderable
+    // Section A: top-right menu order — only the twelve menu-renderable
     // actions. TOKEN_USAGE / SETTINGS are footer-only: the "..." menu's
     // rendering loop (ChatScreen) has no branch for them, so a visibility
     // switch would be a dead control that silently does nothing AND could

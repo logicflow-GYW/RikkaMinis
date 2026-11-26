@@ -1,6 +1,7 @@
 package com.rikkaminis.app.config
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.DataUsage
 import androidx.compose.material.icons.outlined.Compress
@@ -13,6 +14,7 @@ import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.rikkaminis.app.R
 
@@ -37,7 +39,7 @@ data class ChatActionSpec(
 /**
  * Catalog of every action in the customizable chat action pool. Runtime
  * availability is NOT part of the spec — it is computed separately by
- * [isChatActionAvailable] so a conditionally-unavailable repository never
+ * [ChatActionAvailability.isAvailable] so a conditionally-unavailable entry never
  * accidentally deletes the user's persisted pin/visibility choice.
  */
 object ChatActionCatalog {
@@ -47,6 +49,13 @@ object ChatActionCatalog {
         ChatActionSpec(ChatMenuPrefs.CHAT_FILES, R.string.chat_menu_browse_chat_files, Icons.Outlined.Description, true, false),
         ChatActionSpec(ChatMenuPrefs.COMPACT, R.string.chat_menu_compact, Icons.Outlined.Compress, true, false),
         ChatActionSpec(ChatMenuPrefs.THINKING, R.string.chat_menu_thinking, Icons.Outlined.Lightbulb, true, false),
+        // [chat-menu-model-toggles-1126] The two model-conditional toggles are
+        // pool members like any other: the user decides whether they belong on
+        // the "..." menu / drawer footer, and `ChatActionAvailability` decides
+        // whether the ACTIVE model can use them. Bolt matches the nav-bar ⚡
+        // status badge; Timer reads as the 1-hour cache TTL.
+        ChatActionSpec(ChatMenuPrefs.FAST_MODE, R.string.chat_menu_fast_mode, Icons.Outlined.Bolt, true, false),
+        ChatActionSpec(ChatMenuPrefs.ENHANCED_CACHE, R.string.chat_menu_enhanced_cache, Icons.Outlined.Timer, true, false),
         ChatActionSpec(ChatMenuPrefs.SESSION_SKILLS, R.string.session_skills_title, Icons.Outlined.Build, true, false),
         ChatActionSpec(ChatMenuPrefs.SESSION_MCPS, R.string.session_mcps_title, Icons.Outlined.Extension, true, false),
         ChatActionSpec(ChatMenuPrefs.SESSION_MEMORY, R.string.session_memory_title, Icons.Outlined.Psychology, true, false),
@@ -57,25 +66,4 @@ object ChatActionCatalog {
     )
 
     fun spec(key: String): ChatActionSpec? = ALL.firstOrNull { it.key == key }
-}
-
-/**
- * Runtime availability of a chat action — mirrors the gates the "..." menu
- * applies while rendering. Conditional actions (Skills / MCPs / Memory) only
- * render when their backing repository is present (Memory additionally needs
- * the session's live [menuMemoryEnabled]); every other action is always
- * available. Availability only filters the RENDER — it never mutates the
- * user's persisted visibility / pin config, so a temporarily-unavailable
- * action reappears automatically once its condition returns.
- */
-fun isChatActionAvailable(
-    key: String,
-    skillsAvailable: Boolean,
-    mcpsAvailable: Boolean,
-    memoryAvailable: Boolean,
-): Boolean = when (key) {
-    ChatMenuPrefs.SESSION_SKILLS -> skillsAvailable
-    ChatMenuPrefs.SESSION_MCPS -> mcpsAvailable
-    ChatMenuPrefs.SESSION_MEMORY -> memoryAvailable
-    else -> true
 }
