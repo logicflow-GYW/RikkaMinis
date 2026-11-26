@@ -11,4 +11,5 @@
     <string name="chat_process_copied">전체 생각 원문을 복사했습니다</string>
     <string name="chat_process_copied_file">크기 제한을 피하기 위해 전체 생각을 텍스트 파일로 복사했습니다</string>
     <string name="chat_process_copy_failed">복사하지 못했습니다. 다시 시도하세요.</string>
+    <string name="chat_process_hidden_prefix">이전 호출 %1$d개 숨김</string>
 </resources>

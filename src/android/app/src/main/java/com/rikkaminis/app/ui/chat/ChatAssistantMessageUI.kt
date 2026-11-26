@@ -49,7 +49,6 @@ import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.settings.autoExpandThinkingEnabled
 import com.rikkaminis.app.ui.settings.thinkingCharCountVisibleEnabled
 import com.rikkaminis.app.ui.settings.thinkingDurationVisibleEnabled
-import com.rikkaminis.app.ui.settings.toolFoldEnabled
 import com.rikkaminis.app.ui.components.MinisMenu
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -244,31 +243,28 @@ internal fun AssistantMessageView(
     // yet; drives the TypingIndicator elapsed counter. Default 0 keeps every
     // other caller (previews, legacy paths) rendering the plain indicator.
     awaitingResponseSinceMs: Long = 0L,
-    // Integration seam: ChatScreen supplies !followState.isFollowing || isUserDragging.
-    // The compatibility default is NOT proof that history-browsing protection is wired.
-    isBrowsingHistory: Boolean = false,
+    // NOTE: there is deliberately no "is the user scrolling / browsing history"
+    // input here any more. It used to postpone the first automatic fold, which
+    // meant scrolling through an unfolded transcript opened every segment —
+    // the opposite of what it was meant to protect. Fold state now comes from
+    // the block list plus explicit taps only.
+    // Settings → Appearance → Tool Steps, supplied by the live ChatScreen
+    // prefs listener. Default OFF = the shipped behaviour: nothing folds.
+    processFoldEnabled: Boolean = false,
 ) {
-    // Settings → Appearance → Tool Steps. Read at mount, same convention as the
-    // thinking toggles: a change lands on the next mounted message row.
-    val foldingContext = LocalContext.current
-    val foldingEnabled = remember(foldingContext) { toolFoldEnabled(foldingContext) }
+    // Fold state = the plan plus explicit taps, nothing else. The previous
+    // version also tracked "already auto-folded once" and wrote it only while
+    // the list was NOT being scrolled, so scrolling a transcript that had never
+    // been folded re-opened every segment — the message blew open exactly when
+    // the user was trying to read it. That bookkeeping is gone.
     var foldChoices by rememberSaveable(message.id) { mutableStateOf(hashMapOf<String, Boolean>()) }
-    var foldedOnce by rememberSaveable(message.id) { mutableStateOf(arrayListOf<String>()) }
-    val foldGroups = remember(message.toolBlocks, message.isStreaming, foldingEnabled) {
-        ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, foldingEnabled)
+    val foldSegments = remember(message.toolBlocks, message.isStreaming, processFoldEnabled) {
+        ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, processFoldEnabled)
     }
-    val foldedKeys = foldedOnce.toSet()
-    val groupAtStart = foldGroups.associateBy { it.range.first }
-    val groupByIndex = buildMap {
-        foldGroups.forEach { group -> group.memberIndices.forEach { put(it, group) } }
-    }
-    LaunchedEffect(message.id, foldGroups, isBrowsingHistory, foldChoices) {
-        val firstFolds = foldGroups.filter {
-            !ChatProcessFoldPlanner.isExpanded(it.key, foldChoices, foldedKeys, isBrowsingHistory)
-        }.map { it.key }
-        if (firstFolds.any { it !in foldedOnce }) {
-            foldedOnce = ArrayList((foldedOnce + firstFolds).distinct())
-        }
+    fun isSegmentExpanded(segment: ChatProcessFoldPlanner.Segment): Boolean =
+        ChatProcessFoldPlanner.isExpanded(segment.key, foldChoices, segment.openByDefault)
+    val segmentByIndex = buildMap {
+        foldSegments.forEach { segment -> segment.memberIndices.forEach { put(it, segment) } }
     }
     Column(
         modifier = Modifier
@@ -309,20 +305,29 @@ internal fun AssistantMessageView(
         val hasAnyTextBlock = message.toolBlocks.any { it.kind == "text" }
         val lastTextBlockIndex = message.toolBlocks.indexOfLast { it.kind == "text" }
         message.toolBlocks.forEachIndexed { index, block ->
-            groupAtStart[index]?.let { group ->
-                key("process:${message.id}:${group.key}") {
-                    val isExpanded = ChatProcessFoldPlanner.isExpanded(
-                        group.key, foldChoices, foldedKeys, isBrowsingHistory,
-                    )
-                    ChatProcessSummary(group, isExpanded) {
-                        foldChoices = HashMap(foldChoices).apply { put(group.key, !isExpanded) }
+            val segment = segmentByIndex[index]
+            if (segment != null && segment.range.first == index) {
+                key("process:${message.id}:${segment.key}") {
+                    val expanded = isSegmentExpanded(segment)
+                    ChatProcessSummary(segment, expanded) {
+                        foldChoices = HashMap(foldChoices).apply { put(segment.key, !expanded) }
                     }
                 }
             }
-            val foldedGroup = groupByIndex[index]
-            if (foldedGroup != null && !ChatProcessFoldPlanner.isExpanded(
-                    foldedGroup.key, foldChoices, foldedKeys, isBrowsingHistory,
-                )) return@forEachIndexed
+            // Collapsed segment: the whole span is replaced by the row above.
+            // Open segment: the finished prefix of a still-running span collapses
+            // behind a count line, so the newest calls stay on screen.
+            if (segment != null) {
+                if (!isSegmentExpanded(segment)) return@forEachIndexed
+                if (index == segment.hiddenPrefixEnd + 1 && segment.hiddenToolCount > 0) {
+                    // Sits between the summary row and the first call still on
+                    // screen — never stacked directly under the summary.
+                    key("process-hidden:${message.id}:${segment.key}") {
+                        ChatProcessHiddenPrefix(segment.hiddenToolCount)
+                    }
+                }
+                if (index <= segment.hiddenPrefixEnd) return@forEachIndexed
+            }
             // Stable block scope, independent of added summaries and appended tokens.
             key(message.id, block.id) {
             when (block.kind) {
@@ -341,6 +346,7 @@ internal fun AssistantMessageView(
                             block,
                             isStreaming = isTrailingThinking && message.isStreaming,
                             isLast = block.id == lastThinkingId,
+                            inProcessSegment = segment != null,
                         )
                     }
                 }
@@ -435,28 +441,36 @@ internal fun AssistantMessageView(
     }
 }
 
+/**
+ * One collapsed process segment: the reasoning that led into a run of calls and
+ * the calls themselves are hidden together. The row carries an action phrase so
+ * it answers "what happened here" without being opened — a bare "3 tools · 12s"
+ * is what made the old row feel like noise.
+ */
 @Composable
 private fun ChatProcessSummary(
-    group: ChatProcessFoldPlanner.Group,
+    segment: ChatProcessFoldPlanner.Segment,
     expanded: Boolean,
     onToggle: () -> Unit,
 ) {
     val expansionLabel = stringResource(
         if (expanded) R.string.chat_process_expanded else R.string.chat_process_collapsed,
     )
-    val parts = mutableListOf(stringResource(R.string.chat_process_tools, group.toolCount))
-    if (group.durationMs > 0) parts += stringResource(
-        R.string.chat_process_duration, String.format(java.util.Locale.getDefault(), "%.1f", group.durationMs / 1000.0),
+    val parts = mutableListOf(stringResource(R.string.chat_process_tools, segment.toolCount))
+    if (segment.durationMs > 0) parts += stringResource(
+        R.string.chat_process_duration, String.format(java.util.Locale.getDefault(), "%.1f", segment.durationMs / 1000.0),
     )
-    if (group.failedCount > 0) parts += stringResource(R.string.chat_process_failed, group.failedCount)
-    if (group.cancelledCount > 0) parts += stringResource(R.string.chat_process_cancelled, group.cancelledCount)
-    if (group.deduplicatedCount > 0) parts += stringResource(R.string.chat_process_deduplicated, group.deduplicatedCount)
+    if (segment.failedCount > 0) parts += stringResource(R.string.chat_process_failed, segment.failedCount)
+    if (segment.cancelledCount > 0) parts += stringResource(R.string.chat_process_cancelled, segment.cancelledCount)
+    if (segment.deduplicatedCount > 0) parts += stringResource(R.string.chat_process_deduplicated, segment.deduplicatedCount)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
             .semantics { stateDescription = expansionLabel }
+            .clip(RoundedCornerShape(9.dp))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f))
             .clickable(role = Role.Button, onClick = onToggle)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         Icon(
             if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
@@ -465,10 +479,43 @@ private fun ChatProcessSummary(
             modifier = Modifier.size(16.dp),
         )
         Spacer(Modifier.width(6.dp))
+        val title = segment.title
+        if (title != null) {
+            Text(
+                text = title,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Spacer(Modifier.width(6.dp))
+        }
         Text(
             text = parts.joinToString(" · "),
             fontSize = 12.sp,
-            color = if (group.failedCount > 0) ToolErrorColor else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (segment.failedCount > 0) ToolErrorColor else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * Count line for the finished prefix of a still-running segment. The calls stay
+ * out of the layout on purpose: a running turn must not keep growing the row
+ * with work the user already watched.
+ */
+@Composable
+private fun ChatProcessHiddenPrefix(hiddenToolCount: Int) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(start = 12.dp, top = 2.dp, bottom = 2.dp),
+    ) {
+        Text(
+            text = stringResource(R.string.chat_process_hidden_prefix, hiddenToolCount),
+            fontSize = 11.5.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
         )
     }
 }
@@ -1135,7 +1182,16 @@ internal fun ToolCallRunGroup(
 // ─── Thinking Block (iOS: collapsible "Deep Thinking" section, blue tint) ────
 
 @Composable
-internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: Boolean = true) {
+internal fun ThinkingBlock(
+    block: AssistantBlock,
+    isStreaming: Boolean,
+    isLast: Boolean = true,
+    // Inside an opened process segment the reasoning is a MEMBER of the run, not
+    // a card of its own: it keeps the text and the reading controls but drops
+    // the rounded card + border, so a segment reads as one block of work instead
+    // of a stack of separate cards.
+    inProcessSegment: Boolean = false,
+) {
     // Per-block expand state, keyed by block.id so the user's manual toggle on
     // an earlier (finished) thinking block survives recomposition while a
     // later block is still streaming. The previous LaunchedEffect snapped
@@ -1186,11 +1242,18 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .background(thinkingBlue.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
-            .border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
-            .clip(RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(vertical = if (inProcessSegment) 2.dp else 4.dp)
+            .then(
+                if (inProcessSegment) {
+                    Modifier.padding(horizontal = 2.dp)
+                } else {
+                    Modifier
+                        .background(thinkingBlue.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
+                        .border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                },
+            ),
     ) {
         // Header row — only the header reacts to taps. Mirrors iOS, where
         // .onTapGesture is on the header HStack, not the whole VStack. With

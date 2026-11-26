@@ -11,4 +11,5 @@
     <string name="chat_process_copied">已复制完整思考原文</string>
     <string name="chat_process_copied_file">原文较长，已将完整文本文件复制到剪贴板</string>
     <string name="chat_process_copy_failed">复制失败，请重试</string>
+    <string name="chat_process_hidden_prefix">已收起前面 %1$d 个调用</string>
 </resources>

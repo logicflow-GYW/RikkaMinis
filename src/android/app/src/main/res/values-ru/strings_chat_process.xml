@@ -11,4 +11,5 @@
     <string name="chat_process_copied">Полный текст размышлений скопирован</string>
     <string name="chat_process_copied_file">Полный текст скопирован как текстовый файл из-за ограничения буфера обмена</string>
     <string name="chat_process_copy_failed">Не удалось скопировать. Повторите попытку.</string>
+    <string name="chat_process_hidden_prefix">Скрыто предыдущих вызовов: %1$d</string>
 </resources>

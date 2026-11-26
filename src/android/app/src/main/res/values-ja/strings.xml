@@ -1317,9 +1317,9 @@
     <string name="appearance_auto_expand_thinking_footer">オンにすると、モデルが推論している間、新しい思考ブロックが自動的に展開され、完了すると折りたたまれます。オフの間は、思考ブロックは折りたたまれたままになります。タップして読んでください。</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">思考ヘッダー</string>
-    <string name="appearance_section_tool_steps">ツールの手順</string>
-    <string name="appearance_tool_fold_title">完了したツール手順を折りたたむ</string>
-    <string name="appearance_tool_fold_footer">オンにすると、連続して完了したツール呼び出しが 1 行の概要にまとまります（直近 3 件と実行中のツールは表示されたまま）。概要をタップすると展開します。オフの場合は各ツール呼び出しが個別に表示されます。</string>
+    <string name="appearance_section_tool_steps">プロセス手順</string>
+    <string name="appearance_tool_fold_title">完了したプロセス区間を折りたたむ</string>
+    <string name="appearance_tool_fold_footer">オンにすると、完了した一連の作業（思考と、それが引き起こしたツール呼び出し）が 1 行の要約にまとまり、要約には何をしたかが表示されます。実行中の区間は開いたままです。既定はオフで、各ブロックが個別に表示されます。</string>
     <string name="appearance_thinking_show_chars_title">思考の文字数を表示</string>
     <string name="appearance_thinking_show_duration_title">思考の所要時間を表示</string>
     <string name="appearance_thinking_header_footer">思考ブロックの見出しの横に表示する項目を選びます。文字数は推論テキストの文字数（9K ≒ 9千文字）です。所要時間はこの会話を開いている間だけ計測され、開き直すと表示されません。</string>

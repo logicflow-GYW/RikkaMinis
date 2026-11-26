@@ -11,4 +11,5 @@
     <string name="chat_process_copied">Full thinking text copied</string>
     <string name="chat_process_copied_file">Full thinking copied as a text file to avoid the clipboard size limit</string>
     <string name="chat_process_copy_failed">Could not copy. Try again.</string>
+    <string name="chat_process_hidden_prefix">%1$d earlier calls hidden</string>
 </resources>

@@ -1,33 +1,43 @@
 package com.rikkaminis.app.ui.chat
 
 /**
- * Decides which runs of an assistant message fold into one "N tools · time" row.
+ * Decides which stretches of an assistant message collapse into one "process" row.
  *
  * Presentation only: neither block order/identity nor tool execution changes.
- * Rule set is ported from the upstream public planner (`ToolFoldPlanner`,
- * 1a71df0f) so the folding reads the same as the app the user compared against:
  *
- *  - A run starts at a finished tool, optionally including the thinking block
- *    that leads directly into it.
- *  - It continues through finished tools (counted), thinking, empty text and
- *    one-line remarks between calls (folded along, NOT counted).
- *  - It ends at a non-empty reply, an info row, a sub-agent / user_ask block,
- *    or a tool that has not finished.
- *  - Only a run of at least [MINIMUM_TOOLS] tools folds. When the run is cut by
- *    a barrier / unfinished tool / message end, only its part up to the latest
- *    remark folds; without such a remark nothing folds, so live work stays
- *    visible instead of collapsing under the user.
+ * The fold unit is a **process segment**, not a set of tools:
+ *
+ *  - A segment is `[leading thinking] + [finished tool calls, with thinking,
+ *    empty text and one-line remarks between them] + [trailing remark]`.
+ *  - Thinking that led into the calls is a MEMBER of the segment, so a collapsed
+ *    segment hides the reasoning together with the calls it produced. Folding
+ *    the calls alone left the reasoning behind as a row of orphan bars that
+ *    pointed at nothing — that is the defect this model replaces.
+ *  - A segment ends at a non-empty reply, an info row, a sub-agent / user_ask
+ *    card, or an unfinished call. Those boundaries always render something, so
+ *    two folded summaries can never sit next to each other.
+ *  - It folds when it holds at least two finished calls, or at least one call
+ *    together with thinking. Reasoning with no calls never folds.
+ *  - Folding is deterministic from block state alone: NOTHING expands itself
+ *    because of scrolling, history browsing or an interruption. A segment that
+ *    holds a cancelled call folds like any other and simply reports the
+ *    cancellation in its summary line — the user's own next message explains why
+ *    the run stopped, so an extra banner would only repeat it.
+ *  - The ONE exception is the segment that is still running: it stays open so
+ *    live work is visible, and only its last [LIVE_RECENT_TOOLS] calls render;
+ *    older finished ones collapse behind a count line.
  */
 object ChatProcessFoldPlanner {
-    const val MINIMUM_TOOLS = 2
-
-    /** While a turn runs, this many latest calls stay visible as pills. */
+    /** Calls kept visible in the running turn's trailing segment. */
     const val LIVE_RECENT_TOOLS = 3
 
-    data class Group(
-        /** Stable identity and placement: the first folded block. */
+    /** Minimum finished calls for a segment that carries no reasoning. */
+    const val MINIMUM_TOOLS = 2
+
+    data class Segment(
+        /** Stable identity: the id of the first block in the segment. */
         val key: String,
-        /** First member through last member; everything here is replaced by the row. */
+        /** First member through last member; the whole span is replaced by the row. */
         val range: IntRange,
         val memberIndices: Set<Int>,
         val toolCount: Int,
@@ -36,6 +46,18 @@ object ChatProcessFoldPlanner {
         val deduplicatedCount: Int,
         /** Sum of recorded execution durations, NOT wall time (parallel calls overlap). */
         val durationMs: Long,
+        /** Action phrase from the segment's last reasoning, else the last call's title. */
+        val title: String?,
+        /** The only reason to be open without a user tap: the segment is running. */
+        val openByDefault: Boolean,
+        /**
+         * Leading members collapsed even while the segment is open: the running
+         * turn keeps only its last [LIVE_RECENT_TOOLS] calls visible and hides
+         * the finished prefix behind a count line. Always a prefix of [range].
+         */
+        val hiddenPrefixEnd: Int = -1,
+        /** Calls inside [hiddenPrefixEnd] — what the count line reports. */
+        val hiddenToolCount: Int = 0,
     )
 
     private val interactiveTools = setOf(
@@ -73,8 +95,8 @@ object ChatProcessFoldPlanner {
             "info" -> Kind.BARRIER
             "text" -> when {
                 block.content.isBlank() -> Kind.TEXT_EMPTY
-                // A one-line remark with a call after it is part of the run;
-                // everything after the last call is the reply and never is.
+                // A one-line remark with a call after it belongs to the segment;
+                // everything after the last call is the reply and never does.
                 isSingleLine(block.content) && hasToolAfter(blocks, index) -> Kind.NOTE
                 else -> Kind.TEXT_REPLY
             }
@@ -82,123 +104,98 @@ object ChatProcessFoldPlanner {
         }
     }
 
-    /** Stats over an explicit hidden set; null below the minimum. */
-    private fun groupOfIndices(blocks: List<AssistantBlock>, hidden: List<Int>): Group? {
-        if (hidden.size < MINIMUM_TOOLS) return null
-        val tools = hidden.map { blocks[it] }
-        return Group(
-            key = blocks[hidden.first()].id,
-            range = hidden.first()..hidden.last(),
-            memberIndices = hidden.toSet(),
-            toolCount = tools.size,
-            failedCount = tools.count { it.toolStatus == ToolBlockStatus.FAILED || it.toolStatus == ToolBlockStatus.TIMEOUT },
-            cancelledCount = tools.count { it.toolStatus == ToolBlockStatus.CANCELLED },
-            deduplicatedCount = tools.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
-            durationMs = tools.sumOf { it.durationMs },
-        )
+    /** Action phrase for a segment: its last reasoning, else the last call's label. */
+    private fun titleOf(blocks: List<AssistantBlock>, range: IntRange, kinds: List<Kind>): String? {
+        for (i in range.reversed()) {
+            if (kinds[i] == Kind.THINKING) {
+                extractThinkingTitle(blocks[i].content)?.let { return it }
+                break
+            }
+        }
+        for (i in range.reversed()) {
+            if (kinds[i] == Kind.TOOL_DONE) {
+                val tool = blocks[i]
+                if (tool.toolTitle.isNotBlank()) return tool.toolTitle
+                if (tool.toolName.isNotBlank()) return tool.toolName
+                break
+            }
+        }
+        return null
     }
 
-    /** Stats over [range]; null when it holds fewer than the minimum number of tools. */
-    private fun group(blocks: List<AssistantBlock>, range: IntRange): Group? {
-        val members = range.map { blocks[it] }
-        val tools = range.map { blocks[it] }.filter { it.kind == "tool_use" && it.toolName !in interactiveTools && it.toolStatus in terminal }
-        if (tools.size < MINIMUM_TOOLS) return null
-        return Group(
-            key = blocks[range.first].id,
-            range = range,
-            memberIndices = range.toSet(),
-            toolCount = tools.size,
-            failedCount = tools.count { it.toolStatus == ToolBlockStatus.FAILED || it.toolStatus == ToolBlockStatus.TIMEOUT },
-            cancelledCount = tools.count { it.toolStatus == ToolBlockStatus.CANCELLED },
-            deduplicatedCount = tools.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
-            durationMs = tools.sumOf { it.durationMs },
-        )
-    }
-
-    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean = true): List<Group> {
+    // The default is OFF, matching the shipped setting: a caller that forgets
+    // to pass the user's choice gets the pre-feature transcript, not folding.
+    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean = false): List<Segment> {
         if (!enabled || blocks.isEmpty()) return emptyList()
         val kinds = blocks.indices.map { kindOf(blocks, it) }
-        val out = mutableListOf<Group>()
-        var start: Int? = null
-        var leadThinking: Int? = null
-        var lastMember = 0
-        var softEnd: Group? = null
 
-        fun reset() {
-            start = null
-            softEnd = null
-        }
-        fun closeAtSoftEnd() {
-            softEnd?.let { out += it }
-        }
-
+        // Maximal member runs: everything between two visible boundaries.
+        val runs = ArrayList<IntRange>()
+        var start = -1
+        var last = -1
         for (i in kinds.indices) {
             when (kinds[i]) {
-                Kind.BARRIER, Kind.TOOL_UNFINISHED -> {
-                    // Settled turns (including one the user interrupted) have no
-                    // live work left: a run cut by an info row, an interactive
-                    // card or a cancelled call must still collapse. While the
-                    // turn runs, only the part before the last remark folds.
-                    val s = start
-                    if (!isStreaming && s != null) {
-                        group(blocks, s..lastMember)?.let { out += it }
-                    } else {
-                        closeAtSoftEnd()
-                    }
-                    reset()
-                    leadThinking = null
+                Kind.BARRIER, Kind.TOOL_UNFINISHED, Kind.TEXT_REPLY -> {
+                    if (start >= 0 && last >= start) runs += start..last
+                    start = -1
+                    last = -1
                 }
-                Kind.TOOL_DONE -> {
-                    if (start == null) start = leadThinking ?: i
-                    leadThinking = null
-                    lastMember = i
-                }
-                Kind.NOTE -> {
-                    val s = start
-                    if (s == null) {
-                        leadThinking = null
-                    } else {
-                        lastMember = i
-                        softEnd = group(blocks, s..i)
-                    }
-                }
-                Kind.THINKING -> if (start == null && leadThinking == null) leadThinking = i
-                Kind.TEXT_EMPTY -> Unit
-                Kind.TEXT_REPLY -> {
-                    val s = start
-                    if (s != null) group(blocks, s..lastMember)?.let { out += it }
-                    reset()
-                    leadThinking = null
+                Kind.TOOL_DONE, Kind.THINKING, Kind.TEXT_EMPTY, Kind.NOTE -> {
+                    if (start < 0) start = i
+                    last = i
                 }
             }
         }
-        // Live tail: only the part up to the latest remark may fold, so running
-        // work stays visible. Once the turn has ended there is no live work
-        // left, and a finished run must not stay expanded only because the
-        // model ended on a tool call instead of a text reply.
-        if (isStreaming) {
-            // Running turn: completed steps collapse as soon as they are no
-            // longer among the last [LIVE_RECENT_TOOLS] calls, so the transcript
-            // shrinks while the model keeps working instead of only at the end.
-            val s = start
-            if (s == null) {
-                closeAtSoftEnd()
-            } else {
-                val toolPositions = (s..lastMember).filter {
-                    kinds[it] == Kind.TOOL_DONE || kinds[it] == Kind.TOOL_UNFINISHED
-                }
-                val recent = toolPositions.takeLast(LIVE_RECENT_TOOLS).toSet()
-                val hidden = (s..lastMember).filter { kinds[it] == Kind.TOOL_DONE && it !in recent }
-                groupOfIndices(blocks, hidden)?.let { out += it }
-            }
-        } else {
-            val s = start
-            if (s != null) group(blocks, s..lastMember)?.let { out += it } else closeAtSoftEnd()
+        if (start >= 0 && last >= start) runs += start..last
+
+        val out = ArrayList<Segment>(runs.size)
+        for (range in runs) {
+            val finished = range.filter { kinds[it] == Kind.TOOL_DONE }
+            val hasThinking = range.any { kinds[it] == Kind.THINKING }
+            // Reasoning folds together with the calls it produced; calls alone
+            // still need two of them, and reasoning alone never folds.
+            val folds = finished.size >= MINIMUM_TOOLS || (finished.size == 1 && hasThinking)
+            if (!folds) continue
+            val tools = finished.map { blocks[it] }
+            val trailing = range.last == blocks.lastIndex
+            val live = isStreaming && trailing
+            // Running work is the only thing that opens itself. A cancelled run
+            // is settled: it folds and says so in the summary (cancelledCount).
+            val openByDefault = live
+            // A live segment shows only its newest calls; the finished prefix
+            // collapses behind a count line so the transcript keeps shrinking
+            // while the model works instead of growing until the turn ends.
+            val keepFrom = if (live && finished.size > LIVE_RECENT_TOOLS) finished.size - LIVE_RECENT_TOOLS else 0
+            out += Segment(
+                key = blocks[range.first].id,
+                range = range,
+                memberIndices = range.toSet(),
+                toolCount = tools.size,
+                failedCount = tools.count {
+                    it.toolStatus == ToolBlockStatus.FAILED || it.toolStatus == ToolBlockStatus.TIMEOUT
+                },
+                cancelledCount = tools.count { it.toolStatus == ToolBlockStatus.CANCELLED },
+                deduplicatedCount = tools.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
+                durationMs = tools.sumOf { it.durationMs },
+                title = titleOf(blocks, range, kinds),
+                openByDefault = openByDefault,
+                hiddenPrefixEnd = if (keepFrom > 0) finished[keepFrom] - 1 else -1,
+                hiddenToolCount = keepFrom,
+            )
         }
         return out
     }
 
-    /** Manual choices always win; browsing postpones only a group's FIRST automatic fold. */
-    fun isExpanded(key: String, choices: Map<String, Boolean>, foldedOnce: Set<String>, browsing: Boolean): Boolean =
-        choices[key] ?: (browsing && key !in foldedOnce)
+    /**
+     * A segment is open only when the user opened it or when it is still
+     * running. Scrolling never changes this: the previous rule expanded every
+     * segment that had not been folded yet while the list was being scrolled,
+     * which read as "the whole transcript blew open" exactly when the user was
+     * trying to read it.
+     */
+    fun isExpanded(
+        key: String,
+        choices: Map<String, Boolean>,
+        openByDefault: Boolean,
+    ): Boolean = choices[key] ?: openByDefault
 }

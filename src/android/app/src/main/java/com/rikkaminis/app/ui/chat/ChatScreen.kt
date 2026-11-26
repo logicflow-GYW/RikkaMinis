@@ -1689,6 +1689,13 @@ fun ChatScreen(
     // T-chat-title-pill: live-toggled by Settings → Appearance and by
     // `minis-config set appearance.show_chat_title …`. Default ON.
     var showChatTitlePill by remember { mutableStateOf(appearancePrefs.getBoolean(com.rikkaminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)) }
+    // [ux-1125] Process-segment folding. Lives here rather than inside the
+    // message row so flipping the switch re-renders every mounted message
+    // immediately; reading it at message-mount time left old rows stale until
+    // they scrolled out of composition. Default OFF = nothing folds.
+    var processFoldEnabled by remember {
+        mutableStateOf(appearancePrefs.getBoolean(com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED, false))
+    }
     // T-chat-title-pill-edit: state for the in-chat edit-title sheet (the
     // exact same SessionEditSheet hosted by the session list home screen,
     // reused via `internal` visibility — no duplicate UI). Populated by an
@@ -1702,6 +1709,8 @@ fun ChatScreen(
                 com.rikkaminis.app.ui.settings.KEY_TOOL_PREVIEW -> toolPreviewEnabled = sp.getBoolean(key, false)
                 com.rikkaminis.app.ui.settings.KEY_TOOL_STATUS_BAR -> toolStatusBarEnabled = sp.getBoolean(key, true)
                 com.rikkaminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
+                com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED ->
+                    processFoldEnabled = sp.getBoolean(key, false)
             }
         }
         appearancePrefs.registerOnSharedPreferenceChangeListener(listener)
@@ -4428,7 +4437,7 @@ fun ChatScreen(
                                         // finished message must never show the
                                         // counter (the flag is false for it).
                                         awaitingResponseSinceMs = awaitingResponseSinceMs,
-                                        isBrowsingHistory = !followState.isFollowing || isUserDragging,
+                                        processFoldEnabled = processFoldEnabled,
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the
                                         // flat AssistantInfo branch).

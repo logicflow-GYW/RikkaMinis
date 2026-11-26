@@ -30,16 +30,25 @@ class UxIntegrationWiringTest {
         .replace(Regex("(?ms)^\\h*/\\*.*?\\*/"), "")
         .replace(Regex("(?m)^\\h*//[^\\n]*"), "")
 
-    @Test fun `active aggregate call passes actual user browsing and drag state`() {
+    @Test fun `scroll position never reaches the fold decision`() {
         val screen = source("ui/chat/ChatScreen.kt")
         val aggregate = screen.substringAfter("is FlatChatItem.AssistantMessageItem -> {")
         assertTrue(aggregate.contains("AssistantMessageView("))
-        assertEquals(1, Regex("isBrowsingHistory = !followState\\.isFollowing \\|\\| isUserDragging,")
-            .findAll(aggregate).count())
-        assertTrue(screen.contains("listState.interactionSource.interactions.collect { interaction ->"))
-        assertTrue(screen.contains("is androidx.compose.foundation.interaction.DragInteraction.Start -> {"))
-        assertTrue(screen.contains("isUserDragging = true"))
-        assertFalse(aggregate.contains("isBrowsingHistory = listState.isScrollInProgress"))
+        // The browsing/drag signal used to be passed in and expanded every
+        // not-yet-folded segment while the user scrolled. It must not come back.
+        assertFalse(aggregate.contains("isBrowsingHistory"))
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val view = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
+        assertFalse(view.contains("isBrowsingHistory"))
+        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
+        val expanded = planner.substringAfter("fun isExpanded(")
+        assertFalse(expanded.contains("browsing"))
+    }
+
+    @Test fun `the running segment is the only automatic open`() {
+        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
+        assertTrue(planner.contains("val openByDefault = live"))
+        assertFalse(planner.contains("openByDefault = cancelled || live"))
     }
 
     @Test fun `tool shimmer is an isolated sibling and never rerecords static content`() {
@@ -88,30 +97,44 @@ class UxIntegrationWiringTest {
         assertFalse(block.substring(0, expand).contains("MinisTextButton("))
     }
 
-    @Test fun `tool folding is a user choice wired to the appearance preference`() {
+    @Test fun `process folding is an opt-in switch that defaults to off`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        assertTrue(ui.contains("val foldingEnabled = remember(foldingContext) { toolFoldEnabled(foldingContext) }"))
-        assertTrue(ui.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, foldingEnabled)"))
+        assertTrue(ui.contains("processFoldEnabled: Boolean = false"))
+        assertTrue(ui.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, processFoldEnabled)"))
         val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        assertTrue(planner.contains("enabled: Boolean = true"))
+        assertTrue(planner.contains("enabled: Boolean"))
         assertTrue(planner.contains("if (!enabled"))
         val settings = source("ui/settings/AppearanceScreen.kt")
         assertTrue(settings.contains("const val KEY_TOOL_FOLD_ENABLED = \"chat.toolFoldEnabled\""))
-        assertTrue(settings.contains("getBoolean(KEY_TOOL_FOLD_ENABLED, true)"))
+        assertTrue(settings.contains("getBoolean(KEY_TOOL_FOLD_ENABLED, false)"))
         assertTrue(settings.contains("putBoolean(KEY_TOOL_FOLD_ENABLED, it)"))
         val config = source("config/ConfigBuiltins.kt")
         assertTrue(config.contains("path = \"chat.toolFoldEnabled\""))
         assertTrue(config.contains("key = com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED"))
+        assertTrue(config.contains("defaultValue = false"))
+        // The screen must own the live value so a switch flip updates mounted rows.
+        val screen = source("ui/chat/ChatScreen.kt")
+        assertTrue(screen.contains("KEY_TOOL_FOLD_ENABLED ->"))
+        assertTrue(screen.contains("processFoldEnabled = processFoldEnabled,"))
     }
 
-    @Test fun `aggregate still consumes exact folded members and original tool callbacks`() {
+    @Test fun `aggregate still consumes exact segment members and original tool callbacks`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         val aggregate = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
         assertTrue(aggregate.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming"))
-        assertTrue(aggregate.contains("group.memberIndices.forEach { put(it, group) }"))
-        assertTrue(aggregate.contains("val foldedGroup = groupByIndex[index]"))
+        assertTrue(aggregate.contains("segment.memberIndices.forEach { put(it, segment) }"))
+        assertTrue(aggregate.contains("if (segment != null)"))
         assertTrue(aggregate.contains("return@forEachIndexed"))
         assertTrue(aggregate.contains("val actions = toolPillActions(block)"))
         assertTrue(aggregate.contains("key(message.id, block.id)"))
+    }
+
+    @Test fun `reasoning inside an opened segment drops its own card`() {
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val thinking = ui.substringAfter("internal fun ThinkingBlock(")
+        assertTrue(thinking.contains("inProcessSegment: Boolean = false"))
+        assertTrue(thinking.contains("if (inProcessSegment) {"))
+        val aggregate = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
+        assertTrue(aggregate.contains("inProcessSegment = segment != null"))
     }
 }
