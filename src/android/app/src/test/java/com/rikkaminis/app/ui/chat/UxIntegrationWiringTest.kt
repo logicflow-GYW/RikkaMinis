@@ -32,20 +32,18 @@ class UxIntegrationWiringTest {
 
     /** Same walk-up contract as [source], for a file under `src/main/res`. */
     private fun resource(relative: String): String {
-        val roots = mutableListOf<File>()
-        System.getProperty("minis.test.sourceRoot")?.let { roots += File(it) }
-        var dir: File? = File(System.getProperty("user.dir") ?: ".")
-        while (dir != null) {
-            roots += dir
-            dir = dir.parentFile
+        System.getProperty("minis.test.sourceRoot")?.let { root ->
+            return File(root, "src/android/app/src/main/res/$relative").readText()
         }
-        for (root in roots) {
+        var dir: File? = File(System.getProperty("user.dir") ?: error("user.dir unset"))
+        while (dir != null) {
             for (prefix in listOf("src/android/app", "app")) {
-                val file = File(root, "$prefix/src/main/res/$relative")
+                val file = File(dir, "$prefix/src/main/res/$relative")
                 if (file.isFile) return file.readText()
             }
+            dir = dir.parentFile
         }
-        return ""
+        error("production resource not found: $relative")
     }
 
     @Test fun `scroll position never reaches the fold decision`() {
@@ -64,7 +62,8 @@ class UxIntegrationWiringTest {
         assertFalse(mode.contains("scroll"))
     }
 
-    @Test fun `only a live segment keeps its tail open`() {        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
+    @Test fun `only a live segment keeps its tail open`() {
+        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
         assertTrue(planner.contains("null -> if (liveTail) Mode.TAIL else Mode.COLLAPSED"))
         assertFalse(planner.contains("openByDefault"))
     }
@@ -125,24 +124,28 @@ class UxIntegrationWiringTest {
         assertFalse(block.substring(0, expand).contains("MinisTextButton("))
     }
 
-    @Test fun `process folding is an opt-in switch that defaults to off`() {
+    @Test fun `process folding defaults to on without overriding a saved choice`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        assertTrue(ui.contains("processFoldEnabled: Boolean = false"))
+        assertTrue(ui.contains("processFoldEnabled: Boolean,"))
         assertTrue(ui.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, processFoldEnabled)"))
         val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        assertTrue(planner.contains("enabled: Boolean"))
+        assertTrue(planner.contains("enabled: Boolean): List<Segment>"))
         assertTrue(planner.contains("if (!enabled"))
         val settings = source("ui/settings/AppearanceScreen.kt")
         assertTrue(settings.contains("const val KEY_TOOL_FOLD_ENABLED = \"chat.toolFoldEnabled\""))
-        assertTrue(settings.contains("getBoolean(KEY_TOOL_FOLD_ENABLED, false)"))
+        assertTrue(settings.contains("const val DEFAULT_TOOL_FOLD_ENABLED = true"))
+        assertTrue(settings.contains("prefs.getBoolean(KEY_TOOL_FOLD_ENABLED, DEFAULT_TOOL_FOLD_ENABLED)"))
+        assertTrue(settings.contains("mutableStateOf(readToolFoldEnabled(prefs))"))
+        assertTrue(settings.contains("KEY_TOOL_FOLD_ENABLED -> toolFoldEnabled = readToolFoldEnabled(prefs)"))
         assertTrue(settings.contains("putBoolean(KEY_TOOL_FOLD_ENABLED, it)"))
-        val config = source("config/ConfigBuiltins.kt")
-        assertTrue(config.contains("path = \"chat.toolFoldEnabled\""))
+        val config = source("config/ConfigBuiltins.kt").substringAfter("path = \"chat.toolFoldEnabled\"")
+            .substringBefore("\n            )")
         assertTrue(config.contains("key = com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED"))
-        assertTrue(config.contains("defaultValue = false"))
+        assertTrue(config.contains("defaultValue = com.rikkaminis.app.ui.settings.DEFAULT_TOOL_FOLD_ENABLED"))
         // The screen must own the live value so a switch flip updates mounted rows.
         val screen = source("ui/chat/ChatScreen.kt")
-        assertTrue(screen.contains("KEY_TOOL_FOLD_ENABLED ->"))
+        assertTrue(screen.contains("mutableStateOf(readToolFoldEnabled(appearancePrefs))"))
+        assertTrue(Regex("KEY_TOOL_FOLD_ENABLED ->\\s*processFoldEnabled = readToolFoldEnabled\\(sp\\)").containsMatchIn(screen))
         assertTrue(screen.contains("processFoldEnabled = processFoldEnabled,"))
     }
 
@@ -237,27 +240,28 @@ class UxIntegrationWiringTest {
         assertTrue(aggregate.contains("foldChoicesEpoch = collapseAllEpoch"))
     }
 
-    @Test fun `a thinking block opened by the reader always opens at the top`() {
-        // 2026-11-26 report: "点击展开思考，有时候是向下展开，有时候是向上展开" —
-        // the direction was decided by two accidents (the streaming tail-follow
-        // pins the body's scroller to the bottom; a scroller left at the bottom
-        // keeps the viewport at the END while the enter animation grows the
-        // height), so both unrolled the text upward out of the header.
+    @Test fun `a header reopen starts at the top but drag does not restart the scroller`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         val thinking = ui.substringAfter("internal fun ThinkingBlock(")
             .substringBefore("private fun ThinkingFullContentDialog(")
-        assertTrue(thinking.contains("val openedByReader = manualChoice == true"))
-        assertTrue(
-            thinking.contains("if (!thinkingBodyVisible.targetState || !openedByReader) return@LaunchedEffect"),
-        )
-        assertTrue(thinking.contains("scrollState.scrollTo(0)"))
-        // A frozen tail window would keep showing the end even at offset 0.
-        assertTrue(thinking.contains("readAnchor = ThinkingReadPlanner.Anchor()"))
-        // Gated, not deleted: the app-opened live block still follows the tail.
-        assertTrue(thinking.contains("if (!isStreaming || openedByReader) return@LaunchedEffect"))
+        val header = thinking.substringAfter(".clickable(role = Role.Button) {")
+            .substringBefore("if (isStreaming && block.toolStatus")
+        val body = thinking.substringAfter("visibleState = thinkingBodyVisible,")
+        assertTrue(header.contains("if (!expanded) headerOpenGeneration++"))
+        assertFalse(body.contains("headerOpenGeneration++"))
+        assertTrue(body.contains("expandFrom = Alignment.Top"))
+        assertTrue(body.contains("shrinkTowards = Alignment.Top"))
+        assertTrue(body.contains("key(headerOpenGeneration) { rememberScrollState() }"))
+        assertTrue(body.contains("remember(block.id, headerOpenGeneration)"))
+        assertFalse(body.contains("scrollState.scrollTo(0)"))
+        // A drag can keep an automatic block open without making it a manual reopen.
+        assertTrue(body.contains("if (manualChoice == null && nextAnchor.isReadingHistory) manualChoice = true"))
+        assertTrue(body.contains("val followThinkingTail = isStreaming && expanded && headerOpenGeneration == 0"))
+        assertTrue(body.contains("if (readAnchor.isReadingHistory || currentDragging) return@collect"))
     }
 
-    @Test fun `the summary row is counts only`() {        // 2026-11-26: the title (last reasoning's bold phrase, else the last
+    @Test fun `the summary row is counts only`() {
+        // 2026-11-26: the title (last reasoning's bold phrase, else the last
         // call's label) described the final second of a run of eighty calls;
         // the "累计 N 秒" was a SUM of per-call durations (parallel calls
         // double-counted, not wall time) and is not persisted with the tool_use
@@ -267,17 +271,17 @@ class UxIntegrationWiringTest {
             .substringBefore("internal fun BoundsTrackedBlock(")
         assertFalse(row.contains("segment.title"))
         assertFalse(row.contains("chat_process_duration"))
-        assertTrue(row.contains("R.string.chat_process_tools"))
+        assertTrue(row.contains("if (segment.allCallsSucceeded) R.string.chat_process_tools else R.string.chat_process_tool_calls"))
         // Failures are the only coloured token; a whole red line shouted for one
         // bad call.
         assertTrue(row.contains("appendMetaPart(failedText, ToolErrorColor, neutral)"))
         val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
         assertFalse(planner.contains("val title: String?"))
         assertFalse(planner.contains("titleOf("))
-        val strings = resource("values-zh/strings_chat_process.xml")
-        if (strings.isNotEmpty()) {
-            assertTrue(strings.contains("已执行 %1\$d 个工具"))
-            assertFalse(strings.contains("chat_process_duration"))
+        for (locale in listOf("values", "values-de", "values-ja", "values-ko", "values-ru", "values-zh", "values-zh-rTW")) {
+            val strings = resource("$locale/strings_chat_process.xml")
+            assertTrue(locale, strings.contains("name=\"chat_process_tool_calls\""))
+            assertFalse(locale, strings.contains("chat_process_duration"))
         }
     }
 }

@@ -1,5 +1,8 @@
 package com.rikkaminis.app.ui.chat
 
+import com.rikkaminis.app.config.FakeSharedPreferences
+import com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED
+import com.rikkaminis.app.ui.settings.readToolFoldEnabled
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -25,6 +28,23 @@ class ChatProcessFoldPlannerTest {
         ChatProcessFoldPlanner.plan(blocks.toList(), isStreaming = false, enabled = false)
 
     // ── switch off = the pre-feature rendering ──────────────────────────────
+
+    @Test fun `missing preference folds while an explicit off choice survives reload`() {
+        val prefs = FakeSharedPreferences()
+        val blocks = listOf(tool("a"), tool("b"), text("r", "Done."))
+        fun renderedSegments() = ChatProcessFoldPlanner.plan(
+            blocks, isStreaming = false, enabled = readToolFoldEnabled(prefs.cloneHandle()),
+        )
+        assertFalse(prefs.contains(KEY_TOOL_FOLD_ENABLED))
+        assertEquals(listOf("a"), renderedSegments().map { it.key })
+        assertFalse(prefs.contains(KEY_TOOL_FOLD_ENABLED)) // fallback does not write a preference
+        prefs.edit().putBoolean(KEY_TOOL_FOLD_ENABLED, false).apply()
+        assertTrue(renderedSegments().isEmpty())
+        prefs.edit().putBoolean(KEY_TOOL_FOLD_ENABLED, true).apply()
+        assertEquals(listOf("a"), renderedSegments().map { it.key })
+        prefs.edit().remove(KEY_TOOL_FOLD_ENABLED).apply()
+        assertEquals(listOf("a"), renderedSegments().map { it.key })
+    }
 
     @Test fun `switch off folds nothing at all`() {
         assertTrue(off(tool("a"), tool("b"), tool("c"), text("r", "Done.")).isEmpty())
@@ -192,6 +212,20 @@ class ChatProcessFoldPlannerTest {
         ).single()
         assertEquals(2, g.failedCount)
         assertEquals(1, g.cancelledCount)
+        assertFalse(g.allCallsSucceeded)
+    }
+
+    @Test fun `only wholly successful batches use an executed total`() {
+        assertTrue(plan(tool("a"), tool("b")).single().allCallsSucceeded)
+        for (status in listOf(ToolBlockStatus.DEDUPLICATED, ToolBlockStatus.CANCELLED, ToolBlockStatus.FAILED, ToolBlockStatus.TIMEOUT)) {
+            val mixed = plan(tool("a"), tool("b", status = status)).single()
+            assertEquals(2, mixed.toolCount)
+            assertFalse("status=$status", mixed.allCallsSucceeded)
+        }
+        val skipped = plan(tool("a"), tool("b", status = ToolBlockStatus.DEDUPLICATED)).single()
+        assertEquals(1, skipped.deduplicatedCount)
+        assertEquals(0, skipped.cancelledCount)
+        assertEquals(0, skipped.failedCount)
     }
 
     // ── render mode ────────────────────────────────────────────────────────

@@ -116,13 +116,12 @@ fun keepScreenAwakeEnabled(context: Context): Boolean =
 fun showChatTitleEnabled(context: Context): Boolean =
     getAppearancePrefs(context).getBoolean(KEY_SHOW_CHAT_TITLE, true)
 
-const val KEY_TOOL_FOLD_ENABLED = "chat.toolFoldEnabled"  // Boolean, default false
+const val KEY_TOOL_FOLD_ENABLED = "chat.toolFoldEnabled"
+const val DEFAULT_TOOL_FOLD_ENABLED = true
 
-/** True when the user wants finished process segments folded into one row.
- *  Default OFF: folding is opt-in, and OFF renders every block exactly as the
- *  app did before the feature existed (no summary rows at all). */
-fun toolFoldEnabled(context: Context): Boolean =
-    getAppearancePrefs(context).getBoolean(KEY_TOOL_FOLD_ENABLED, false)
+/** False only when explicitly disabled. Keep the fallback shared with minis-config. */
+fun readToolFoldEnabled(prefs: SharedPreferences): Boolean =
+    prefs.getBoolean(KEY_TOOL_FOLD_ENABLED, DEFAULT_TOOL_FOLD_ENABLED)
 
 /** [T-thinking-auto-expand-toggle] Default OFF = collapsed by default: a new
  *  streaming thinking block starts collapsed. ON = it opens expanded while the
@@ -245,7 +244,7 @@ fun AppearanceScreen(
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, false)) }
     var thinkingShowCharCount by remember { mutableStateOf(prefs.getBoolean(KEY_THINKING_SHOW_CHAR_COUNT, true)) }
     var thinkingShowDuration by remember { mutableStateOf(prefs.getBoolean(KEY_THINKING_SHOW_DURATION, false)) }
-    var toolFoldEnabled by remember { mutableStateOf(prefs.getBoolean(KEY_TOOL_FOLD_ENABLED, false)) }
+    var toolFoldEnabled by remember { mutableStateOf(readToolFoldEnabled(prefs)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }
     var chatInputLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_CHAT_INPUT, 0)) }
     var messageLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_MESSAGE, 0)) }
@@ -276,7 +275,7 @@ fun AppearanceScreen(
                 KEY_AUTO_EXPAND_THINKING -> autoExpandThinking = prefs.getBoolean(key, false)
                 KEY_THINKING_SHOW_CHAR_COUNT -> thinkingShowCharCount = prefs.getBoolean(key, true)
                 KEY_THINKING_SHOW_DURATION -> thinkingShowDuration = prefs.getBoolean(key, false)
-                KEY_TOOL_FOLD_ENABLED -> toolFoldEnabled = prefs.getBoolean(key, false)
+                KEY_TOOL_FOLD_ENABLED -> toolFoldEnabled = readToolFoldEnabled(prefs)
                 KEY_SHOW_CHAT_TITLE -> showChatTitle = prefs.getBoolean(key, true)
                 KEY_FONT_CHAT_INPUT -> chatInputLevel = prefs.getInt(key, 0)
                 KEY_FONT_MESSAGE -> messageLevel = prefs.getInt(key, 0)
@@ -542,10 +541,8 @@ fun AppearanceScreen(
             )
         }
 
-        // [ux-1125] -- Tool Steps --
-        // Whether a finished process segment (its reasoning plus the calls it
-        // produced) collapses into one summary row. Default OFF: the folding is
-        // experimental, and OFF renders the transcript exactly as before.
+        // [ux-1125] Tool Steps folds related reasoning and calls by default.
+        // Switching OFF preserves the flat transcript with one row per block.
         SettingsSection(
             header = stringResource(R.string.appearance_section_tool_steps),
             footer = stringResource(R.string.appearance_tool_fold_footer),

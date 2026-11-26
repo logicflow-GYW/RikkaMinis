@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="chat_process_tools">%1$d 件のツールを実行</string>
+    <string name="chat_process_tool_calls">ツール呼び出し %1$d 件</string>
     <string name="chat_process_failed">失敗 %1$d 件</string>
     <string name="chat_process_cancelled">キャンセル %1$d 件</string>
     <string name="chat_process_deduplicated">重複スキップ %1$d 件</string>

@@ -251,9 +251,8 @@ internal fun AssistantMessageView(
     // meant scrolling through an unfolded transcript opened every segment —
     // the opposite of what it was meant to protect. Fold state now comes from
     // the block list plus explicit taps only.
-    // Settings → Appearance → Tool Steps, supplied by the live ChatScreen
-    // prefs listener. Default OFF = the shipped behaviour: nothing folds.
-    processFoldEnabled: Boolean = false,
+    // The live preference is required: callers must not silently bypass OFF.
+    processFoldEnabled: Boolean,
     // Bumped by the "back to newest" FAB. Closing the open segments is part of
     // WHAT THAT BUTTON MEANS ("show me the newest thing"), not a second feature
     // hung on it: the tap already moves the viewport by a screen or more, so the
@@ -520,7 +519,10 @@ private fun ChatProcessSummary(
     //    twice, not wall time) and is not persisted with the tool_use part, so
     //    it vanished on reload and the same segment changed shape across a
     //    restart.
-    val toolsText = stringResource(R.string.chat_process_tools, segment.toolCount)
+    val toolsText = stringResource(
+        if (segment.allCallsSucceeded) R.string.chat_process_tools else R.string.chat_process_tool_calls,
+        segment.toolCount,
+    )
     val failedText = if (segment.failedCount > 0) {
         stringResource(R.string.chat_process_failed, segment.failedCount)
     } else {
@@ -1270,8 +1272,11 @@ internal fun ThinkingBlock(
     // a settings change lands on the next mounted row, not mid-stream.
     val showThinkingDuration = remember { thinkingDurationVisibleEnabled(context) }
     val showThinkingCharCount = remember { thinkingCharCountVisibleEnabled(context) }
-    // Null = automatic; an explicit true/false is never overwritten by stream end.
+    // Null = automatic. A header tap or a drag away from the live tail can keep the body open.
     var manualChoice by rememberSaveable(block.id) { mutableStateOf<Boolean?>(null) }
+    // Only a header OPEN starts a new reading position. A drag that keeps the body
+    // open must preserve the current position and be able to resume tail-follow.
+    var headerOpenGeneration by rememberSaveable(block.id) { mutableStateOf(0) }
     val expanded = ThinkingReadPlanner.expanded(manualChoice, autoExpandThinking, isStreaming, isLast)
     val thinkingBlue = ChatColors.thinking
     val charCount = block.content.length
@@ -1319,7 +1324,10 @@ internal fun ThinkingBlock(
                     if (overHardCap) {
                         fullContentSnapshot = block.content
                         showFullContent = true
-                    } else manualChoice = !expanded
+                    } else {
+                        if (!expanded) headerOpenGeneration++
+                        manualChoice = !expanded
+                    }
                 },
         ) {
             if (isStreaming && block.toolStatus != ToolBlockStatus.SUCCESS) {
@@ -1427,32 +1435,19 @@ internal fun ThinkingBlock(
             // yanking the viewport (the "content suddenly jumps" feel).
             enter = expandVertically(
                 animationSpec = tween(durationMillis = ThinkingReadPlanner.EXPAND_MS),
+                expandFrom = Alignment.Top,
             ) + fadeIn(animationSpec = tween(durationMillis = ThinkingReadPlanner.FADE_MS)),
             exit = shrinkVertically(
                 animationSpec = tween(durationMillis = ThinkingReadPlanner.EXPAND_MS),
+                shrinkTowards = Alignment.Top,
             ) + fadeOut(animationSpec = tween(durationMillis = ThinkingReadPlanner.FADE_MS)),
         ) {
-            val scrollState = rememberScrollState()
+            // Compose otherwise reveals the bottom edge first, even at scroll offset 0.
+            // A new header-open key starts at 0 without a post-layout scroll. Reusing the
+            // key during drag/recomposition/restoration keeps the reader's scroll state.
+            val scrollState = key(headerOpenGeneration) { rememberScrollState() }
             val isDragging by scrollState.interactionSource.collectIsDraggedAsState()
-            var readAnchor by remember(block.id) { mutableStateOf(ThinkingReadPlanner.Anchor()) }
-            // [T-thinking-open-at-top] A block the READER opened always opens at the
-            // top of its body and grows downward. The direction used to be decided
-            // by two accidents instead: while a block streams its body is
-            // bottom-pinned by the tail-follow below, and a scroller left at the
-            // bottom keeps the viewport at the END while the enter animation grows
-            // the height — both make the text unroll UPWARD out of the header, which
-            // reads as a flicker/jump (2026-11-26 report). A tap means "let me read
-            // this", so it starts at the beginning; only the block the app opened
-            // for you (a live one) keeps following the tail.
-            val openedByReader = manualChoice == true
-            LaunchedEffect(block.id, openedByReader, thinkingBodyVisible.targetState) {
-                if (!thinkingBodyVisible.targetState || !openedByReader) return@LaunchedEffect
-                // Reset BOTH halves: the pixel offset decides where the first
-                // visible line is, and a frozen window would otherwise keep
-                // showing the tail even after the scroller went to 0.
-                readAnchor = ThinkingReadPlanner.Anchor()
-                scrollState.scrollTo(0)
-            }
+            var readAnchor by remember(block.id, headerOpenGeneration) { mutableStateOf(ThinkingReadPlanner.Anchor()) }
             // Keep the frozenWindowStart contract: a real drag pins the original source
             // offset, not merely the scroller's pixel position, until the reader returns.
             val frozenWindowStart = readAnchor.frozenWindowStart
@@ -1475,18 +1470,18 @@ internal fun ThinkingBlock(
                         readAnchor, value, max, isDragging, currentTailStart,
                     )
                     readAnchor = nextAnchor
-                    if (nextAnchor.isReadingHistory) manualChoice = true
+                    if (manualChoice == null && nextAnchor.isReadingHistory) manualChoice = true
                 }
             }
-            // maxValue changes AFTER layout: content-length-only following races the
-            // new measurement. Also keep length for a fixed-height moving tail window.
-            // Gated on `!openedByReader`: a reader who opened this block must not be
-            // dragged to the tail by the next token (that also re-pins the bottom and
-            // turns the reveal into an upward unroll).
+            // maxValue changes AFTER layout. Observe it as well as text length so an
+            // automatic live body follows a growing tail, pauses on drag and resumes
+            // when the reader returns to the bottom. An explicit reopen starts a read
+            // at the top and must not be pulled back down by the next token.
+            val followThinkingTail = isStreaming && expanded && headerOpenGeneration == 0
             val currentBlock by rememberUpdatedState(block)
             val currentDragging by rememberUpdatedState(isDragging)
-            LaunchedEffect(scrollState, block.id, isStreaming, openedByReader) {
-                if (!isStreaming || openedByReader) return@LaunchedEffect
+            LaunchedEffect(scrollState, block.id, followThinkingTail) {
+                if (!followThinkingTail) return@LaunchedEffect
                 snapshotFlow {
                     Triple(currentBlock.content.length, scrollState.maxValue, currentDragging to readAnchor.isReadingHistory)
                 }.collect {

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="chat_process_tools">已执行 %1$d 个工具</string>
+    <string name="chat_process_tool_calls">%1$d 次工具调用</string>
     <string name="chat_process_failed">%1$d 个失败</string>
     <string name="chat_process_cancelled">%1$d 个已取消</string>
     <string name="chat_process_deduplicated">%1$d 个重复跳过</string>

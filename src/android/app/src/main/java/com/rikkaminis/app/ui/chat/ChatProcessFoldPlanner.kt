@@ -34,7 +34,8 @@ package com.rikkaminis.app.ui.chat
  * The summary row carries NO description of the work: its title used to come
  * from the segment's own last reasoning (else the last call's label), which
  * describes the final second of a run that may hold eighty calls. It now reads
- * "已执行 N 个工具 · M 个失败" — counts only, failures coloured.
+ * "已执行 N 个工具" for a successful batch; if any call failed, was
+ * cancelled or was skipped, the total is worded as tool calls, not runs.
  *
  * Scrolling never changes a fold decision, in EITHER direction: it may not open
  * a segment (that rule blew the transcript open on every scroll) and it may not
@@ -83,7 +84,10 @@ object ChatProcessFoldPlanner {
          * summary row. -1 when the segment has no tail.
          */
         val tailStart: Int = -1,
-    )
+    ) {
+        // A call can fail validation or be cancelled before dispatch; dedupe skips it.
+        val allCallsSucceeded: Boolean get() = failedCount == 0 && cancelledCount == 0 && deduplicatedCount == 0
+    }
 
     private val interactiveTools = setOf(
         "spawn_agent", "subagent_task", "delegate_task", "user_ask", "ask_user",
@@ -146,9 +150,7 @@ object ChatProcessFoldPlanner {
         return maxOf(bySteps, byBlocks, range.first)
     }
 
-    // The default is OFF, matching the shipped setting: a caller that forgets
-    // to pass the user's choice gets the pre-feature transcript, not folding.
-    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean = false): List<Segment> {
+    fun plan(blocks: List<AssistantBlock>, isStreaming: Boolean, enabled: Boolean): List<Segment> {
         if (!enabled || blocks.isEmpty()) return emptyList()
         val kinds = blocks.indices.map { kindOf(blocks, it) }
 

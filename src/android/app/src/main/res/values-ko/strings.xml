@@ -1311,7 +1311,7 @@
     <string name="appearance_section_thinking_header">사고 헤더</string>
     <string name="appearance_section_tool_steps">프로세스 단계</string>
     <string name="appearance_tool_fold_title">완료된 프로세스 구간 접기</string>
-    <string name="appearance_tool_fold_footer">켜면 완료된 작업 구간(사고와 그로 인해 실행된 도구 호출)이 한 줄 요약으로 접히고, 요약에 무엇을 했는지 표시됩니다. 진행 중인 구간은 펼쳐진 상태로 유지됩니다. 기본값은 꺼짐이며, 이때 모든 블록이 개별로 표시됩니다.</string>
+    <string name="appearance_tool_fold_footer">기본적으로 켜져 있습니다. 관련된 사고와 도구 호출을 한 줄 요약으로 접고, 실행 중에는 최근 단계를 표시합니다. 끄면 각 블록을 개별로 표시합니다.</string>
     <string name="appearance_thinking_show_chars_title">사고 글자 수 표시</string>
     <string name="appearance_thinking_show_duration_title">사고 소요 시간 표시</string>
     <string name="appearance_thinking_header_footer">사고 블록 제목 옆에 표시할 항목을 선택합니다. 글자 수는 추론 텍스트의 문자 수(9K ≒ 9천 자)입니다. 소요 시간은 이 대화를 열어 둔 동안에만 측정되며 다시 열면 표시되지 않습니다.</string>
