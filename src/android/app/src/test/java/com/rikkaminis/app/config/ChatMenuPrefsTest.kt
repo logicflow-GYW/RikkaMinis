@@ -151,14 +151,53 @@ class ChatMenuPrefsTest {
     }
 
     @Test
-    fun `legacy ten-item order resolves to twelve by appending missing entries`() {
-        val legacy = ChatMenuPrefs.DEFAULT_ORDER.joinToString(",")
+    fun `legacy ten-item order resolves to fourteen by appending missing entries`() {
+        // A pre-existing install persisted only the ORIGINAL ten keys. The two
+        // model-conditional toggles and the two footer-only actions are appended
+        // in their default relative positions, so a stale order string can never
+        // hide a brand-new entry.
+        val legacy = listOf(
+            "menu_terminal",
+            "menu_browser",
+            "menu_chat_files",
+            "menu_compact",
+            "menu_thinking",
+            "menu_session_skills",
+            "menu_session_mcps",
+            "menu_session_memory",
+            "menu_slash_commands",
+            "menu_export",
+        ).joinToString(",")
         val result = ChatMenuPrefs.normalizeOrder(legacy, ChatMenuPrefs.ALL_ENTRIES)
-        assertEquals(12, result.size)
+        assertEquals(14, result.size)
         assertTrue(ChatMenuPrefs.TOKEN_USAGE in result)
         assertTrue(ChatMenuPrefs.SETTINGS in result)
-        // Original ten retain their order at the front
-        assertEquals(ChatMenuPrefs.DEFAULT_ORDER.subList(0, 10), result.subList(0, 10))
+        // The written prefix is preserved verbatim (no reordering of what the
+        // user already had), and the four missing keys follow.
+        assertEquals(
+            listOf(
+                "menu_terminal",
+                "menu_browser",
+                "menu_chat_files",
+                "menu_compact",
+                "menu_thinking",
+                "menu_session_skills",
+                "menu_session_mcps",
+                "menu_session_memory",
+                "menu_slash_commands",
+                "menu_export",
+            ),
+            result.subList(0, 10),
+        )
+        assertEquals(
+            listOf(
+                "menu_fast_mode",
+                "menu_enhanced_cache",
+                "footer_token_usage",
+                "footer_settings",
+            ),
+            result.subList(10, 14),
+        )
     }
 
     @Test
@@ -182,21 +221,21 @@ class ChatMenuPrefsTest {
     fun `normalizeOrder appends missing known keys in known order`() {
         val raw = "menu_export,menu_terminal"
         val result = ChatMenuPrefs.normalizeOrder(raw, ChatMenuPrefs.ALL_ENTRIES)
-        assertEquals(12, result.size)
+        assertEquals(14, result.size)
         assertEquals(ChatMenuPrefs.EXPORT, result[0])
         assertEquals(ChatMenuPrefs.TERMINAL, result[1])
         // The twelve missing entries follow in their DEFAULT_ORDER relative positions
     }
 
     @Test
-    fun `resolveOrder on empty prefs yields all twelve entries in default order`() {
+    fun `resolveOrder on empty prefs yields all fourteen entries in default order`() {
         val prefs = FakePrefs()
         val result = ChatMenuPrefs.resolveOrder(prefs)
         assertEquals(ChatMenuPrefs.ALL_ENTRIES, result)
     }
 
     @Test
-    fun `resolvePinOrder on empty prefs yields all twelve entries in default order`() {
+    fun `resolvePinOrder on empty prefs yields all fourteen entries in default order`() {
         val prefs = FakePrefs()
         val result = ChatMenuPrefs.resolvePinOrder(prefs)
         assertEquals(ChatMenuPrefs.ALL_ENTRIES, result)
@@ -219,10 +258,10 @@ class ChatMenuPrefsTest {
     }
 
     @Test
-    fun `settingsPinOrder always lists all twelve entries with SETTINGS last`() {
+    fun `settingsPinOrder always lists all fourteen entries with SETTINGS last`() {
         val prefs = FakePrefs()
         // Even with everything unpinned and a scrambled persisted pin order,
-        // the settings list keeps all twelve rows and anchors SETTINGS at the end.
+        // the settings list keeps all fourteen rows and anchors SETTINGS at the end.
         ChatMenuPrefs.setPinned(prefs, ChatMenuPrefs.TOKEN_USAGE, false)
         ChatMenuPrefs.setPinned(prefs, ChatMenuPrefs.SETTINGS, false)
         ChatMenuPrefs.writePinOrder(prefs, listOf(ChatMenuPrefs.SETTINGS, ChatMenuPrefs.TERMINAL))
@@ -250,7 +289,7 @@ class ChatMenuPrefsTest {
 
     @Test
     fun `settingsPinOrder does not depend on pin flags`() {
-        // The settings list shows all twelve rows regardless of which entries are
+        // The settings list shows all fourteen rows regardless of which entries are
         // currently pinned — pin state only drives the Switch checked value.
         val prefs = FakePrefs()
         ChatMenuPrefs.setPinned(prefs, ChatMenuPrefs.TERMINAL, true)
@@ -307,22 +346,153 @@ class ChatMenuPrefsTest {
     }
 
     @Test
-    fun `isChatActionAvailable gates conditional actions correctly`() {
-        assertFalse(isChatActionAvailable(ChatMenuPrefs.SESSION_SKILLS, skillsAvailable = false, mcpsAvailable = true, memoryAvailable = true))
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.SESSION_SKILLS, skillsAvailable = true, mcpsAvailable = true, memoryAvailable = true))
-        assertFalse(isChatActionAvailable(ChatMenuPrefs.SESSION_MCPS, skillsAvailable = true, mcpsAvailable = false, memoryAvailable = true))
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.SESSION_MCPS, skillsAvailable = true, mcpsAvailable = true, memoryAvailable = true))
-        assertFalse(isChatActionAvailable(ChatMenuPrefs.SESSION_MEMORY, skillsAvailable = true, mcpsAvailable = true, memoryAvailable = false))
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.SESSION_MEMORY, skillsAvailable = true, mcpsAvailable = true, memoryAvailable = true))
-        // All other actions are always available
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.TERMINAL, skillsAvailable = false, mcpsAvailable = false, memoryAvailable = false))
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.EXPORT, skillsAvailable = false, mcpsAvailable = false, memoryAvailable = false))
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.TOKEN_USAGE, skillsAvailable = false, mcpsAvailable = false, memoryAvailable = false))
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.SETTINGS, skillsAvailable = false, mcpsAvailable = false, memoryAvailable = false))
-        // COMPACT and THINKING are unconditional — always available regardless
-        // of backing repos, so the persisted user choice survives.
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.COMPACT, skillsAvailable = false, mcpsAvailable = false, memoryAvailable = false))
-        assertTrue(isChatActionAvailable(ChatMenuPrefs.THINKING, skillsAvailable = false, mcpsAvailable = false, memoryAvailable = false))
+    fun `availability gates conditional actions correctly`() {
+        val all = ChatActionAvailability(
+            fastMode = true,
+            enhancedCache = true,
+            skills = true,
+            mcps = true,
+            memory = true,
+        )
+        assertTrue(all.isAvailable(ChatMenuPrefs.TERMINAL))
+        assertTrue(all.isAvailable(ChatMenuPrefs.COMPACT))
+        assertTrue(all.isAvailable(ChatMenuPrefs.THINKING))
+        assertTrue(all.isAvailable(ChatMenuPrefs.EXPORT))
+        assertTrue(all.isAvailable(ChatMenuPrefs.TOKEN_USAGE))
+        assertTrue(all.isAvailable(ChatMenuPrefs.SETTINGS))
+
+        val none = ChatActionAvailability(
+            fastMode = false,
+            enhancedCache = false,
+            skills = false,
+            mcps = false,
+            memory = false,
+        )
+        assertFalse(none.isAvailable(ChatMenuPrefs.SESSION_SKILLS))
+        assertFalse(none.isAvailable(ChatMenuPrefs.SESSION_MCPS))
+        assertFalse(none.isAvailable(ChatMenuPrefs.SESSION_MEMORY))
+        assertFalse(none.isAvailable(ChatMenuPrefs.FAST_MODE))
+        assertFalse(none.isAvailable(ChatMenuPrefs.ENHANCED_CACHE))
+        // Unconditional entries survive an unsupported model with no repos.
+        assertTrue(none.isAvailable(ChatMenuPrefs.TERMINAL))
+        assertTrue(none.isAvailable(ChatMenuPrefs.COMPACT))
+        assertTrue(none.isAvailable(ChatMenuPrefs.THINKING))
+    }
+
+    @Test
+    fun `each conditional entry is gated by its own condition only`() {
+        val onlyFast = ChatActionAvailability(
+            fastMode = true, enhancedCache = false, skills = false, mcps = false, memory = false,
+        )
+        assertTrue(onlyFast.isAvailable(ChatMenuPrefs.FAST_MODE))
+        assertFalse(onlyFast.isAvailable(ChatMenuPrefs.ENHANCED_CACHE))
+        assertFalse(onlyFast.isAvailable(ChatMenuPrefs.SESSION_SKILLS))
+
+        val onlyCache = ChatActionAvailability(
+            fastMode = false, enhancedCache = true, skills = false, mcps = false, memory = false,
+        )
+        assertFalse(onlyCache.isAvailable(ChatMenuPrefs.FAST_MODE))
+        assertTrue(onlyCache.isAvailable(ChatMenuPrefs.ENHANCED_CACHE))
+
+        val onlySkills = ChatActionAvailability(
+            fastMode = false, enhancedCache = false, skills = true, mcps = false, memory = false,
+        )
+        assertTrue(onlySkills.isAvailable(ChatMenuPrefs.SESSION_SKILLS))
+        assertFalse(onlySkills.isAvailable(ChatMenuPrefs.SESSION_MCPS))
+        assertFalse(onlySkills.isAvailable(ChatMenuPrefs.SESSION_MEMORY))
+    }
+
+    @Test
+    fun `menu projection applies the user's choice and availability together`() {
+        val order = listOf(
+            ChatMenuPrefs.TERMINAL,
+            ChatMenuPrefs.FAST_MODE,
+            ChatMenuPrefs.ENHANCED_CACHE,
+        )
+        val hidden = setOf(ChatMenuPrefs.TERMINAL)
+        val availability = ChatActionAvailability(
+            fastMode = true, enhancedCache = false, skills = false, mcps = false, memory = false,
+        )
+        assertEquals(
+            listOf(ChatMenuPrefs.FAST_MODE),
+            resolveVisibleMenuEntries(order, { it !in hidden }, availability),
+        )
+        // Hiding the last visible entry empties the menu instead of falling
+        // back to the old force-rendered toggle.
+        assertEquals(
+            emptyList<String>(),
+            resolveVisibleMenuEntries(order, { false }, availability),
+        )
+    }
+
+    @Test
+    fun `footer projection keeps pinned order and drops unavailable entries`() {
+        val pinned = listOf(ChatMenuPrefs.FAST_MODE, ChatMenuPrefs.SETTINGS)
+        val availability = ChatActionAvailability(
+            fastMode = false, enhancedCache = true, skills = false, mcps = false, memory = false,
+        )
+        assertEquals(
+            listOf(ChatMenuPrefs.SETTINGS),
+            resolveVisibleFooterEntries(pinned, availability),
+        )
+        assertEquals(
+            emptyList<String>(),
+            resolveVisibleFooterEntries(emptyList(), availability),
+        )
+    }
+
+    @Test
+    fun `hiding a model conditional toggle persists and is not reverted by adoption`() {
+        val prefs = FakePrefs()
+        ChatMenuPrefs.setVisible(prefs, ChatMenuPrefs.FAST_MODE, false)
+        ChatMenuPrefs.adoptModelConditionalEntries(prefs)
+        assertFalse(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.FAST_MODE))
+        // The stored value is what the renderer reads, so a hidden entry stays
+        // hidden across a cold start.
+        assertTrue(ChatMenuPrefs.resolveOrder(prefs).contains(ChatMenuPrefs.FAST_MODE))
+    }
+
+    @Test
+    fun `adoption inherits an emptied menu instead of re-injecting the toggles`() {
+        // The reported symptom: a user hid every entry and still got a ⚡
+        // button. Adoption must not resurrect the two toggles in that case.
+        val prefs = FakePrefs()
+        for (key in listOf(
+            ChatMenuPrefs.TERMINAL,
+            ChatMenuPrefs.BROWSER,
+            ChatMenuPrefs.CHAT_FILES,
+            ChatMenuPrefs.COMPACT,
+            ChatMenuPrefs.THINKING,
+            ChatMenuPrefs.SESSION_SKILLS,
+            ChatMenuPrefs.SESSION_MCPS,
+            ChatMenuPrefs.SESSION_MEMORY,
+            ChatMenuPrefs.SLASH_COMMANDS,
+            ChatMenuPrefs.EXPORT,
+        )) {
+            ChatMenuPrefs.setVisible(prefs, key, false)
+        }
+        ChatMenuPrefs.adoptModelConditionalEntries(prefs)
+        assertFalse(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.FAST_MODE))
+        assertFalse(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.ENHANCED_CACHE))
+    }
+
+    @Test
+    fun `adoption keeps the toggles visible for a menu the user never emptied`() {
+        val prefs = FakePrefs()
+        ChatMenuPrefs.setVisible(prefs, ChatMenuPrefs.TERMINAL, false)
+        ChatMenuPrefs.adoptModelConditionalEntries(prefs)
+        assertTrue(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.FAST_MODE))
+        assertTrue(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.ENHANCED_CACHE))
+    }
+
+    @Test
+    fun `adoption is idempotent and never overwrites an explicit choice`() {
+        val prefs = FakePrefs()
+        ChatMenuPrefs.setVisible(prefs, ChatMenuPrefs.FAST_MODE, false)
+        ChatMenuPrefs.adoptModelConditionalEntries(prefs)
+        ChatMenuPrefs.adoptModelConditionalEntries(prefs)
+        assertFalse(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.FAST_MODE))
+        assertTrue(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.ENHANCED_CACHE))
     }
 
     @Test
@@ -337,7 +507,7 @@ class ChatMenuPrefsTest {
     fun `sanitizeForWrite appends missing known keys`() {
         val partial = listOf(ChatMenuPrefs.TERMINAL)
         val result = ChatMenuPrefs.sanitizeForWrite(partial, ChatMenuPrefs.ALL_ENTRIES)
-        assertEquals(12, result.size)
+        assertEquals(14, result.size)
         assertEquals(ChatMenuPrefs.TERMINAL, result[0])
     }
 

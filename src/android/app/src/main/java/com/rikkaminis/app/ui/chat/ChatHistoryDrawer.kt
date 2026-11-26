@@ -45,6 +45,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -106,6 +108,13 @@ fun ChatHistoryDrawer(
     onNewChat: () -> Unit,
     footerActions: List<ChatActionSpec> = emptyList(),
     onAction: (String) -> Unit = {},
+    // [chat-menu-model-toggles-1126] Persistent ON/OFF actions (Fast Mode,
+    // Enhanced Cache) → their current state. A key present in this map IS a
+    // toggle: its footer icon is tinted with the primary colour while ON and
+    // announces on/off to TalkBack (the "..." menu shows a trailing Switch,
+    // which has nowhere to live on a 22dp footer icon). Keys absent from the
+    // map are plain one-shot actions and render exactly as before.
+    actionStates: Map<String, Boolean> = emptyMap(),
     onPinSession: (String) -> Unit = {},
     // [feat/drawer-context-menu] Manual title regeneration. Only wire it for
     // the CURRENT session — the ChatViewModel has no per-session regeneration
@@ -365,12 +374,29 @@ fun ChatHistoryDrawer(
                     verticalArrangement = Arrangement.Center,
                 ) {
                     footerActions.forEach { spec ->
+                        val isToggle = spec.key in actionStates
+                        val active = actionStates[spec.key] == true
+                        val stateLabel = if (isToggle) {
+                            stringResource(if (active) R.string.common_on else R.string.common_off)
+                        } else {
+                            null
+                        }
                         IconButton(onClick = { onAction(spec.key) }) {
                             Icon(
                                 imageVector = spec.icon,
                                 contentDescription = stringResource(spec.titleRes),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(22.dp),
+                                tint = if (active) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = if (stateLabel != null) {
+                                    Modifier
+                                        .size(22.dp)
+                                        .semantics { stateDescription = stateLabel }
+                                } else {
+                                    Modifier.size(22.dp)
+                                },
                             )
                         }
                     }

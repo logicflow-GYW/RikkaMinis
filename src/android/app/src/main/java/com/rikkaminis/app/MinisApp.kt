@@ -317,6 +317,19 @@ class MinisApp : Application(), ImageLoaderFactory {
         // never pass through a ViewModel.
         com.rikkaminis.app.data.FastModePrefs.prime(this)
 
+        // [chat-menu-model-toggles-1126] One-time adoption of the two
+        // model-conditional toggles into the customizable chat action pool.
+        // Runs before any chat screen composes, so an install whose menu was
+        // deliberately emptied never sees Fast Mode / Enhanced Cache
+        // re-injected; the decision is persisted once and then behaves like any
+        // other pool entry. Main process only (the worker branches above
+        // returned) — it touches appearance_prefs, not request state.
+        runCatching {
+            com.rikkaminis.app.config.ChatMenuPrefs.adoptModelConditionalEntries(
+                com.rikkaminis.app.config.ChatMenuPrefs.prefs(this),
+            )
+        }
+
         // [surgery-1120 A-01 review] Cold-start recovery's frontier: the run
         // dirs that exist NOW predate every stream this process can start.
         // Recorded here (main process only — the :modelservice / :toolservice

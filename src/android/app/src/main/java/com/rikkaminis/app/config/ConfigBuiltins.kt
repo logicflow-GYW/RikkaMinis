@@ -1194,8 +1194,10 @@ internal object ConfigBuiltins {
         // plus two comma-separated order fields. All live in appearance_prefs so
         // they round-trip through minis-config AND every local backup
         // automatically (ConfigBackup walks the registry). Defaults keep the
-        // eight original menu entries visible and pin Token Usage + Settings to
-        // the footer — identical to the pre-customization UI.
+        // original menu entries visible and pin Token Usage + Settings to the
+        // footer — identical to the pre-customization UI. The two
+        // model-conditional toggles are pool members too (default visible), so
+        // hiding them is a normal entry choice, not a special case.
         for (entryKey in ChatMenuPrefs.ALL_ENTRIES) {
             r.register(
                 PrefsBoolField(

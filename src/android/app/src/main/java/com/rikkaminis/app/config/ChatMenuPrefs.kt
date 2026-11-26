@@ -16,18 +16,27 @@ import android.content.SharedPreferences
  *  - ChatScreen reads them to filter + order the rendered menu and footer.
  *  - ChatMenuSettingsScreen writes them from the settings UI.
  *
- * The action pool has twelve stable keys: the ten "action / session"
- * menu entries plus two footer-only actions (Token Usage, Settings). Each key
- * carries TWO independent flags:
+ * The action pool has fourteen stable keys: the ten original "action /
+ * session" menu entries, the two model-conditional toggles (Fast Mode,
+ * Enhanced Cache) and two footer-only actions (Token Usage, Settings). Each
+ * key carries TWO independent flags:
  *  - `visible` — appears in the top-right "..." menu;
  *  - `pinned`  — appears in the history-drawer footer.
  * Neither flag is derived from the other, and the two order strings
  * (`chatMenu.order` / `chatMenu.pinOrder`) are resolved independently.
  *
- * The model-conditional toggles (Enhanced Cache, Fast Mode) are intentionally
- * NOT in the pool: they already appear only when the active model supports
- * them and carry their own inline Switch, so a second "hide from settings"
- * layer would be redundant. The DEBUG crash trigger is a developer tool, also
+ * [chat-menu-model-toggles-1126] The model-conditional toggles USED to sit
+ * outside the pool: they rendered whenever the active model supported them,
+ * with their own inline Switch, and the "second hide layer" was judged
+ * redundant. That conflated two different switches — "is the feature usable
+ * on this model" (a runtime gate, still applied by
+ * [ChatActionAvailability.isAvailable]) and "does the user want this entry on
+ * their bar" (an entry preference). A user who turned every entry off still got
+ * the Fast Mode ⚡ promoted to a lone top-bar button, and could not hide it
+ * anywhere.
+ * Both toggles are now ordinary pool members whose visibility / pin the user
+ * controls; hiding one never disables the feature and never hides the nav-bar
+ * ⚡ status badge. The DEBUG crash trigger is a developer tool, still
  * excluded.
  */
 object ChatMenuPrefs {
@@ -45,8 +54,20 @@ object ChatMenuPrefs {
     const val SESSION_MEMORY = "menu_session_memory"
     const val COMPACT = "menu_compact"
     const val THINKING = "menu_thinking"
+    const val FAST_MODE = "menu_fast_mode"
+    const val ENHANCED_CACHE = "menu_enhanced_cache"
     const val TOKEN_USAGE = "footer_token_usage"
     const val SETTINGS = "footer_settings"
+
+    /**
+     * Keys whose availability depends on the ACTIVE MODEL rather than on a
+     * repository being present. They are ordinary pool members (the user can
+     * hide / pin / reorder them) but their runtime gate lives in
+     * [ChatActionAvailability.isAvailable], so an unsupported model never
+     * leaves a dead
+     * toggle on the bar.
+     */
+    val MODEL_CONDITIONAL_ENTRIES: List<String> = listOf(FAST_MODE, ENHANCED_CACHE)
 
     /** Original customizable entries, in their default menu order. */
     val DEFAULT_ORDER: List<String> = listOf(
@@ -55,6 +76,8 @@ object ChatMenuPrefs {
         CHAT_FILES,
         COMPACT,
         THINKING,
+        FAST_MODE,
+        ENHANCED_CACHE,
         SESSION_SKILLS,
         SESSION_MCPS,
         SESSION_MEMORY,
@@ -113,6 +136,52 @@ object ChatMenuPrefs {
      */
     fun defaultVisible(entryKey: String): Boolean =
         entryKey != TOKEN_USAGE && entryKey != SETTINGS
+
+    /**
+     * [chat-menu-model-toggles-1126] One-time adoption of the two
+     * model-conditional toggles into the pool.
+     *
+     * Before this change Fast Mode / Enhanced Cache were not pool members: they
+     * rendered unconditionally (when the active model supported them) and no
+     * setting could hide them. Their visibility keys therefore do not exist on
+     * any install that predates the change, and a plain "default true" would
+     * re-inject two entries into a menu the user had deliberately emptied — the
+     * exact complaint this fix answers ("I hide everything and ⚡ is still
+     * there").
+     *
+     * Rule: for an install that has NO stored choice for a toggle key, the
+     * toggle inherits the user's existing intent — hidden when every
+     * pre-existing menu entry is explicitly hidden, visible otherwise. The
+     * decision is persisted once, so afterwards the keys behave like any other
+     * pool entry (and a backup restore of an explicit value wins, because the
+     * write only happens while the key is absent).
+     *
+     * Idempotent and safe to call on every cold start.
+     */
+    fun adoptModelConditionalEntries(prefs: SharedPreferences) {
+        val editor = prefs.edit()
+        var dirty = false
+        for (key in MODEL_CONDITIONAL_ENTRIES) {
+            if (prefs.contains(visibilityKey(key))) continue
+            editor.putBoolean(visibilityKey(key), !legacyMenuFullyHidden(prefs))
+            dirty = true
+        }
+        if (dirty) editor.apply()
+    }
+
+    /** Entries that existed in the pool BEFORE the model toggles were adopted. */
+    private val LEGACY_MENU_ENTRIES: List<String> =
+        DEFAULT_ORDER.filterNot { it in MODEL_CONDITIONAL_ENTRIES }
+
+    /**
+     * True when the user has explicitly hidden every pre-existing menu entry.
+     * A single entry left at its default (no stored value) means the user never
+     * emptied the menu, so the toggles keep the visible default.
+     */
+    private fun legacyMenuFullyHidden(prefs: SharedPreferences): Boolean =
+        LEGACY_MENU_ENTRIES.all { key ->
+            prefs.contains(visibilityKey(key)) && !prefs.getBoolean(visibilityKey(key), true)
+        }
 
     /**
      * Default pinning: Token Usage and Settings start in the footer; the
@@ -200,12 +269,12 @@ object ChatMenuPrefs {
         return ordered
     }
 
-    /** Resolve the persisted "..." menu order (all twelve entries). */
+    /** Resolve the persisted "..." menu order (all fourteen entries). */
     fun resolveOrder(prefs: SharedPreferences): List<String> =
         normalizeOrder(prefs.getString(ORDER_KEY, null), ALL_ENTRIES)
 
     /**
-     * Resolve the persisted footer pin order over all twelve entries — unpinned
+     * Resolve the persisted footer pin order over all fourteen entries — unpinned
      * entries are INCLUDED so the settings UI can show the full editable
      * list. Render-time filtering happens in [resolvePinnedOrder].
      */
@@ -224,7 +293,7 @@ object ChatMenuPrefs {
 
     /**
      * The order shown in the Chat Menu settings screen's footer section: all
-     * twelve entries with SETTINGS anchored last regardless of its pin state.
+     * fourteen entries with SETTINGS anchored last regardless of its pin state.
      * Unlike [anchorSettingsLast] (render semantics — an unpinned SETTINGS is
      * dropped), the settings list must always keep the SETTINGS row visible so
      * an unpinned settings button can always be re-pinned from the UI; a row
@@ -248,7 +317,7 @@ object ChatMenuPrefs {
 
     /**
      * Key for the "Input History" top-bar icon (the always-visible list-bullet
-     * button alongside New Chat). Unlike the twelve [ALL_ENTRIES] items it does
+     * button alongside New Chat). Unlike the fourteen [ALL_ENTRIES] items it does
      * NOT participate in the overflow menu or footer — it has a fixed top-bar
      * slot. The preference only controls whether the icon is rendered at all.
      * Default: true (visible).

@@ -18,6 +18,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import kotlinx.coroutines.Dispatchers
@@ -69,7 +70,9 @@ import com.rikkaminis.app.BuildConfig
 import com.rikkaminis.app.R
 import com.rikkaminis.app.config.ChatActionCatalog
 import com.rikkaminis.app.config.ChatMenuPrefs
-import com.rikkaminis.app.config.isChatActionAvailable
+import com.rikkaminis.app.config.ChatActionAvailability
+import com.rikkaminis.app.config.resolveVisibleFooterEntries
+import com.rikkaminis.app.config.resolveVisibleMenuEntries
 import com.rikkaminis.app.logging.AppLogger
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.ui.components.MinisAlertDialog
@@ -551,6 +554,15 @@ fun ChatScreen(
     val menuCompactSummary by viewModel.compactSummary.collectAsState()
     val menuCompacting by viewModel.isCompacting.collectAsState()
 
+    // [chat-menu-model-toggles-1126] The two model-conditional toggles are now
+    // ordinary pool members, so both the "..." menu and the drawer footer need
+    // their live state. It is deliberately NOT collected here at ChatScreen
+    // scope: these flows re-emit on every provider-config change, and a read in
+    // this function body would recompose the whole message list on each one
+    // (the same reason the top-bar state is collected inside `actions`). Each
+    // consumer reads it in its own lambda, and the dispatcher below asks the
+    // ViewModel to toggle instead of computing the next value from a snapshot.
+
     // [bottom-toolbar-customizable] Single dispatch point shared by the "..."
     // menu and the history-drawer footer. Each action resolves to exactly one
     // side effect here, so the same feature can never open a different sheet
@@ -563,6 +575,24 @@ fun ChatScreen(
             ChatMenuPrefs.CHAT_FILES -> onBrowseChatFiles()
             ChatMenuPrefs.COMPACT -> viewModel.runCompactNow()
             ChatMenuPrefs.THINKING -> viewModel.toggleThinking()
+            // [chat-menu-model-toggles-1126] Both model-conditional toggles now
+            // funnel through the same dispatcher as every other pool action, so
+            // the "..." menu and the drawer footer behave identically. The
+            // current value is read from the flow's `value` (not collected
+            // here) so the toggle direction costs no recomposition of this
+            // scope. The Enhanced Cache first-enable keeps its one-time
+            // extra-billing confirmation: an unconfirmed first enable opens the
+            // dialog instead of flipping the flag silently.
+            ChatMenuPrefs.FAST_MODE -> viewModel.setFastModeEnabled(!viewModel.fastModeEnabled.value)
+            ChatMenuPrefs.ENHANCED_CACHE -> {
+                if (viewModel.enhancedCacheEnabled.value) {
+                    viewModel.setEnhancedCacheEnabled(false)
+                } else if (viewModel.isEnhancedCacheConfirmed()) {
+                    viewModel.setEnhancedCacheEnabled(true)
+                } else {
+                    showEnhancedCacheDialog = true
+                }
+            }
             ChatMenuPrefs.SESSION_SKILLS -> showSkillsSheet = true
             ChatMenuPrefs.SESSION_MCPS -> showMcpsSheet = true
             ChatMenuPrefs.SESSION_MEMORY -> viewModel.toggleMemorySheet()
@@ -2094,25 +2124,6 @@ fun ChatScreen(
     // subscriptions snap to the same StateFlow the in-drawer popups read.
     val slashMenuOpen by viewModel.showSlashMenu.collectAsState()
     val mentionMenuOpenForSpy by viewModel.showMentionMenu.collectAsState()
-    // [bottom-toolbar-customizable] Footer actions resolved from the pin order,
-    // filtered by runtime availability so a hidden Skills/MCPs/Memory
-    // repository never leaves a dead button in the footer.
-    val footerSpecs = remember(chatActions.footerOrder, skillRepository, mcpRepository, memoryRepository, menuMemoryEnabled) {
-        chatActions.footerOrder.mapNotNull { key ->
-            if (!isChatActionAvailable(
-                    key,
-                    skillsAvailable = skillRepository != null,
-                    mcpsAvailable = mcpRepository != null,
-                    memoryAvailable = memoryRepository != null && menuMemoryEnabled,
-                )
-            ) {
-                null
-            } else {
-                ChatActionCatalog.spec(key)
-            }
-        }
-    }
-
     // [bottom-toolbar-customizable] Footer taps dispatch directly via
     // historyDrawerScope. We deliberately do NOT drive them through a keyed
     // LaunchedEffect: a footer tap that sets a state key and then suspends on
@@ -2132,6 +2143,43 @@ fun ChatScreen(
             val draftSnapshot by com.rikkaminis.app.data.ComposerDraftStore
                 .observeDraftSnapshot(context)
                 .collectAsState()
+            // [bottom-toolbar-customizable] Footer actions resolved from the pin
+            // order, filtered by runtime availability so a hidden
+            // Skills/MCPs/Memory repository — or an active model that does not
+            // support Fast Mode / Enhanced Cache — never leaves a dead button in
+            // the footer.
+            //
+            // [chat-menu-model-toggles-1126] The two model gates are collected
+            // HERE, inside the drawer lambda, not at ChatScreen scope: these
+            // flows re-emit on every provider-config change, and a read in the
+            // screen body would recompose the whole message list each time.
+            // `actionStates` gives each toggle icon its ON state (presence = "a
+            // toggle", value = current state) — the "..." menu shows a trailing
+            // Switch, which a 22dp footer icon has no room for.
+            val fastModeEligible by viewModel.showFastModeToggle.collectAsState()
+            val fastModeActive by viewModel.fastModeEnabled.collectAsState()
+            val enhancedCacheEligible by viewModel.showEnhancedCacheToggle.collectAsState()
+            val enhancedCacheActive by viewModel.enhancedCacheEnabled.collectAsState()
+            val footerSpecs = remember(
+                chatActions.footerOrder,
+                skillRepository,
+                mcpRepository,
+                memoryRepository,
+                menuMemoryEnabled,
+                fastModeEligible,
+                enhancedCacheEligible,
+            ) {
+                resolveVisibleFooterEntries(
+                    chatActions.footerOrder,
+                    ChatActionAvailability(
+                        fastMode = fastModeEligible,
+                        enhancedCache = enhancedCacheEligible,
+                        skills = skillRepository != null,
+                        mcps = mcpRepository != null,
+                        memory = memoryRepository != null && menuMemoryEnabled,
+                    ),
+                ).mapNotNull { ChatActionCatalog.spec(it) }
+            }
             ChatHistoryDrawer(
                 chatRepository = chatRepository,
                 currentSessionId = viewModel.currentSessionId,
@@ -2223,10 +2271,12 @@ fun ChatScreen(
                         }
                     }
                 },
-                // [bottom-toolbar-customizable] Footer: resolved action list +
-                // single dispatcher. The drawer no longer owns Settings/Token
-                // Usage semantics — the caller (dispatchChatAction) does, so
-                // footer taps behave exactly like their "..." menu twins.
+                // [chat-menu-model-toggles-1126] Footer taps dispatch directly
+                // via historyDrawerScope. The drawer no longer owns Settings /
+                // Token Usage / Fast Mode / Enhanced Cache semantics — the
+                // caller (dispatchChatAction) does, so footer taps behave
+                // exactly like their "..." menu twins, including the Enhanced
+                // Cache first-enable confirmation.
                 //
                 // dispatch order mirrors the pre-refactor drawer (onSettings /
                 // onTokenUsage): fire the action immediately and let the drawer
@@ -2237,6 +2287,10 @@ fun ChatScreen(
                 // runs (footer buttons "did nothing"). Only SLASH_COMMANDS
                 // genuinely needs the drawer closed first (it re-focuses the
                 // composer underneath), so it alone waits on close().
+                actionStates = mapOf(
+                    ChatMenuPrefs.FAST_MODE to fastModeActive,
+                    ChatMenuPrefs.ENHANCED_CACHE to enhancedCacheActive,
+                ),
                 footerActions = footerSpecs,
                 onAction = { key ->
                     if (key == ChatMenuPrefs.SLASH_COMMANDS) {
@@ -2649,78 +2703,61 @@ fun ChatScreen(
                     // The gates below mirror the ones applied while rendering
                     // the items, so button visibility and menu content can
                     // never disagree.
-                    val visibleCustomEntries = chatActions.menuOrder.filter { key ->
-                        chatActions.isVisible(key) && isChatActionAvailable(
-                            key,
-                            skillsAvailable = skillRepository != null,
-                            mcpsAvailable = mcpRepository != null,
-                            memoryAvailable = memoryRepository != null && menuMemoryEnabled,
-                        )
-                    }
+                    // [chat-menu-model-toggles-1126] Fast Mode / Enhanced Cache
+                    // are ordinary pool members now: the user's visibility choice
+                    // AND the runtime gate (does the active model support it)
+                    // must BOTH hold — both live in resolveVisibleMenuEntries.
+                    // They used to be counted separately and force-rendered,
+                    // which is why a user who hid every entry still got a ⚡
+                    // button on this bar.
+                    //
+                    // These four flows are collected HERE (inside `actions`)
+                    // rather than at ChatScreen scope: they re-emit on every
+                    // provider-config change, and a read in the screen body
+                    // would recompose the entire message list each time.
                     val showEnhancedCache by viewModel.showEnhancedCacheToggle.collectAsState()
                     val enhancedCacheOn by viewModel.enhancedCacheEnabled.collectAsState()
                     val showFastMode by viewModel.showFastModeToggle.collectAsState()
                     val fastModeOn by viewModel.fastModeEnabled.collectAsState()
+                    val menuAvailability = ChatActionAvailability(
+                        fastMode = showFastMode,
+                        enhancedCache = showEnhancedCache,
+                        skills = skillRepository != null,
+                        mcps = mcpRepository != null,
+                        memory = memoryRepository != null && menuMemoryEnabled,
+                    )
+                    val visibleCustomEntries = resolveVisibleMenuEntries(
+                        chatActions.menuOrder,
+                        chatActions::isVisible,
+                        menuAvailability,
+                    )
                     val visibleMenuCount =
                         visibleCustomEntries.size +
-                            (if (showEnhancedCache) 1 else 0) +
-                            (if (showFastMode) 1 else 0) +
                             (if (BuildConfig.DEBUG) 1 else 0)
-                    // Lone customizable entry (Terminal / Browser / Export / …)
+                    // Lone customizable entry (Terminal / Browser / Fast Mode / …)
                     // → direct button. Icon + label come from the same
                     // ChatActionCatalog the settings screen uses, so the
-                    // promoted button always matches the entry it replaces.
+                    // promoted button always matches the entry it replaces, and
+                    // the toggle keys carry their ON state as the tint.
                     val soloCustomKey =
                         if (visibleMenuCount == 1 && visibleCustomEntries.size == 1) visibleCustomEntries.first() else null
-                    // Lone model-invocation toggle → direct button whose tint
-                    // carries the on/off state (the trailing Switch would have
-                    // nowhere to live).
-                    val soloCacheToggle = visibleMenuCount == 1 && visibleCustomEntries.isEmpty() && showEnhancedCache
-                    val soloFastToggle = visibleMenuCount == 1 && visibleCustomEntries.isEmpty() && showFastMode
-                    val hasAnyMenuItems =
-                        visibleMenuCount >= 1 && soloCustomKey == null && !soloCacheToggle && !soloFastToggle
+                    val hasAnyMenuItems = visibleMenuCount >= 1 && soloCustomKey == null
                     // iOS: "..." circle button → dropdown menu
                     if (soloCustomKey != null) {
                         val spec = ChatActionCatalog.spec(soloCustomKey)
+                        val soloToggleOn = when (soloCustomKey) {
+                            ChatMenuPrefs.FAST_MODE -> fastModeOn
+                            ChatMenuPrefs.ENHANCED_CACHE -> enhancedCacheOn
+                            else -> null
+                        }
                         IconButton(onClick = { dispatchChatAction(soloCustomKey) }) {
                             Icon(
                                 spec?.icon ?: Icons.Default.MoreVert,
                                 contentDescription = spec?.let { stringResource(it.titleRes) } ?: "More",
-                            )
-                        }
-                    } else if (soloCacheToggle) {
-                        // Enhanced Cache as a lone top-bar toggle — same
-                        // first-enable confirmation flow as the menu entry.
-                        IconButton(
-                            onClick = {
-                                if (enhancedCacheOn) {
-                                    viewModel.setEnhancedCacheEnabled(false)
-                                } else if (viewModel.isEnhancedCacheConfirmed()) {
-                                    viewModel.setEnhancedCacheEnabled(true)
-                                } else {
-                                    showEnhancedCacheDialog = true
-                                }
-                            },
-                        ) {
-                            Icon(
-                                Icons.Default.Bolt,
-                                contentDescription = stringResource(R.string.chat_menu_enhanced_cache),
-                                tint = if (enhancedCacheOn) {
+                                tint = if (soloToggleOn == true) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        }
-                    } else if (soloFastToggle) {
-                        IconButton(onClick = { viewModel.setFastModeEnabled(!fastModeOn) }) {
-                            Icon(
-                                Icons.Default.Bolt,
-                                contentDescription = stringResource(R.string.chat_menu_fast_mode),
-                                tint = if (fastModeOn) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                    androidx.compose.material3.LocalContentColor.current
                                 },
                             )
                         }
@@ -2742,21 +2779,25 @@ fun ChatScreen(
                             // collected at the top of ChatScreen, next to
                             // chatActions, so the menu and the drawer footer
                             // stay in sync.)
-                            // [T-customizable-chat-menu] The eight action /
-                            // session entries below are driven by
-                            // ChatMenuPrefs (Settings → Appearance → Chat
-                            // Menu): the user can hide entries and reorder
-                            // them. Rendering follows chatActions.menuOrder
-                            // (missing keys appended in default order, unknown
-                            // keys dropped) and skips entries whose visibility
-                            // switch is OFF. Conditional entries (Skills /
-                            // MCPs / Memory) additionally keep their runtime
-                            // gate: an entry only shows when BOTH the user
-                            // toggle AND the runtime condition are true, so
-                            // hiding it never resurrects a dead repository.
-                            // Model-invocation toggles (Enhanced Cache, Fast
-                            // Mode) and the DEBUG crash trigger are NOT part
-                            // of this list — they stay pinned at the bottom.
+                            // [T-customizable-chat-menu] The pool entries below
+                            // are driven by ChatMenuPrefs (Settings →
+                            // Appearance → Chat Menu): the user can hide entries
+                            // and reorder them. Rendering follows
+                            // chatActions.menuOrder (missing keys appended in
+                            // default order, unknown keys dropped) and skips
+                            // entries whose visibility switch is OFF.
+                            // Conditional entries (Skills / MCPs / Memory, plus
+                            // the model-conditional Fast Mode / Enhanced Cache)
+                            // keep their runtime gate as well: an entry shows
+                            // only when BOTH the user choice AND the runtime
+                            // condition are true, so hiding one never
+                            // resurrects a dead repository or a toggle the
+                            // active model cannot use.
+                            // [chat-menu-model-toggles-1126] Fast Mode and
+                            // Enhanced Cache used to be rendered outside this
+                            // loop and forced onto the bar; they are ordinary
+                            // entries now. Only the DEBUG crash trigger stays
+                            // pinned at the bottom.
                             // Taps funnel through dispatchChatAction() (hoisted
                             // near the top of ChatScreen) so the "..." menu and
                             // the history-drawer footer share one implementation
@@ -2929,6 +2970,72 @@ fun ChatScreen(
                                                 },
                                             )
                                         }
+                                        ChatMenuPrefs.FAST_MODE -> {
+                                            // [chat-menu-model-toggles-1126] Fast
+                                            // Mode is a pool member now: the loop
+                                            // applied the user's visibility
+                                            // choice, and this branch keeps the
+                                            // active-model gate — the same one
+                                            // `visibleCustomEntries` counts with,
+                                            // so the button and its content can
+                                            // never disagree. While ON, the
+                                            // Responses body carries
+                                            // service_tier="priority".
+                                            if (showFastMode) {
+                                                DropdownMenuItem(
+                                                    text = { Text(stringResource(R.string.chat_menu_fast_mode)) },
+                                                    onClick = {
+                                                        showChatMenu = false
+                                                        dispatchChatAction(ChatMenuPrefs.FAST_MODE)
+                                                    },
+                                                    leadingIcon = {
+                                                        Icon(Icons.Default.Bolt, contentDescription = null)
+                                                    },
+                                                    trailingIcon = {
+                                                        Switch(
+                                                            checked = fastModeOn,
+                                                            onCheckedChange = { viewModel.setFastModeEnabled(it) },
+                                                        )
+                                                    },
+                                                )
+                                            }
+                                        }
+                                        ChatMenuPrefs.ENHANCED_CACHE -> {
+                                            // [chat-menu-model-toggles-1126]
+                                            // Enhanced Cache (1-hour Anthropic
+                                            // cache TTL) — same pool treatment and
+                                            // the same active-model gate; the first
+                                            // enable still routes through the
+                                            // extra-billing confirmation in
+                                            // dispatchChatAction.
+                                            if (showEnhancedCache) {
+                                                DropdownMenuItem(
+                                                    text = { Text(stringResource(R.string.chat_menu_enhanced_cache)) },
+                                                    onClick = {
+                                                        showChatMenu = false
+                                                        dispatchChatAction(ChatMenuPrefs.ENHANCED_CACHE)
+                                                    },
+                                                    leadingIcon = {
+                                                        Icon(Icons.Outlined.Timer, contentDescription = null)
+                                                    },
+                                                    trailingIcon = {
+                                                        Switch(
+                                                            checked = enhancedCacheOn,
+                                                            onCheckedChange = {
+                                                                if (enhancedCacheOn) {
+                                                                    viewModel.setEnhancedCacheEnabled(false)
+                                                                } else if (viewModel.isEnhancedCacheConfirmed()) {
+                                                                    viewModel.setEnhancedCacheEnabled(true)
+                                                                } else {
+                                                                    showChatMenu = false
+                                                                    showEnhancedCacheDialog = true
+                                                                }
+                                                            },
+                                                        )
+                                                    },
+                                                )
+                                            }
+                                        }
                                         ChatMenuPrefs.SESSION_SKILLS -> {
                                             // Session Skills (iOS parity)
                                             if (skillRepository != null) {
@@ -2976,72 +3083,6 @@ fun ChatScreen(
                                         }
                                     }
                                 }
-                            }
-                            // Enhanced Cache (iOS parity, commit 57aaf122):
-                            // 1-hour Anthropic cache TTL. Only shown for the
-                            // official Anthropic API (not relays / other
-                            // providers) — showEnhancedCacheToggle recomputes on
-                            // model/provider switch. First enable prompts a
-                            // one-time extra-billing confirmation. (These
-                            // flags are collected above, next to the "..."
-                            // visibility check.)
-                            if (showEnhancedCache) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.chat_menu_enhanced_cache)) },
-                                    onClick = {
-                                        if (enhancedCacheOn) {
-                                            viewModel.setEnhancedCacheEnabled(false)
-                                        } else if (viewModel.isEnhancedCacheConfirmed()) {
-                                            viewModel.setEnhancedCacheEnabled(true)
-                                        } else {
-                                            showChatMenu = false
-                                            showEnhancedCacheDialog = true
-                                        }
-                                    },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.Bolt, contentDescription = null)
-                                    },
-                                    trailingIcon = {
-                                        Switch(
-                                            checked = enhancedCacheOn,
-                                            onCheckedChange = {
-                                                if (enhancedCacheOn) {
-                                                    viewModel.setEnhancedCacheEnabled(false)
-                                                } else if (viewModel.isEnhancedCacheConfirmed()) {
-                                                    viewModel.setEnhancedCacheEnabled(true)
-                                                } else {
-                                                    showChatMenu = false
-                                                    showEnhancedCacheDialog = true
-                                                }
-                                            },
-                                        )
-                                    },
-                                )
-                            }
-                            // [T-codex-fast-mode] Fast Mode (iOS parity,
-                            // fb671083 + 838ba929): shown when the active model
-                            // is a gpt-family model served through the
-                            // Responses path (useResponsesAPI instance or Codex
-                            // OAuth). App-level persisted toggle; while on, the
-                            // Responses body carries service_tier="priority"
-                            // (≈1.5x faster at 2x credit burn on the ChatGPT
-                            // subscription) and the nav model row shows a ⚡
-                            // badge. Sits next to Enhanced Cache — both are
-                            // model-invocation controls (iOS 09944220 grouping).
-                            if (showFastMode) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.chat_menu_fast_mode)) },
-                                    onClick = { viewModel.setFastModeEnabled(!fastModeOn) },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.Bolt, contentDescription = null)
-                                    },
-                                    trailingIcon = {
-                                        Switch(
-                                            checked = fastModeOn,
-                                            onCheckedChange = { viewModel.setFastModeEnabled(it) },
-                                        )
-                                    },
-                                )
                             }
                             // [fix/silent-auto-compact] "Revert Compact" moved
                             // here from the divider card, which auto-compact no
