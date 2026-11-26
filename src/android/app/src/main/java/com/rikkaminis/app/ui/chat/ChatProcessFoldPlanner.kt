@@ -189,7 +189,14 @@ object ChatProcessFoldPlanner {
             // still need two of them, and reasoning alone never folds.
             val folds = finished.size >= MINIMUM_TOOLS || (finished.size == 1 && hasThinking)
             if (!folds) continue
-            val live = isStreaming && range.last == blocks.lastIndex
+            // A run is LIVE while the turn streams and nothing settled came after
+            // it. Testing `range.last == blocks.lastIndex` was wrong: an unfinished
+            // call is a BOUNDARY, so the run in front of a running call looked
+            // settled and collapsed to its row. During a turn the last call is
+            // usually RUNNING, which made the whole process disappear behind one
+            // row at exactly the moment the user wanted to watch it.
+            val live = isStreaming &&
+                (range.last + 1..blocks.lastIndex).all { kinds[it] == Kind.TOOL_UNFINISHED }
             val tailStart = if (live) tailStartOf(range, kinds) else -1
             // Nothing absorbed yet: emit no segment at all, so a running turn that
             // still fits on screen renders exactly like the plain transcript.

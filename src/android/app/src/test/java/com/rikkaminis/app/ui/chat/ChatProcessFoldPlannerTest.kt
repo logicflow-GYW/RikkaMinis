@@ -138,6 +138,34 @@ class ChatProcessFoldPlannerTest {
         assertEquals(31 - ChatProcessFoldPlanner.MAX_TAIL_BLOCKS, g.tailStart)
     }
 
+    @Test fun `a run followed by a still-running call keeps its tail`() {
+        // The common shape during a turn: finished work, then the call that is
+        // running right now. The unfinished call is a boundary, so the run before
+        // it must NOT be treated as settled — otherwise the whole process
+        // collapses to one row exactly while the user is watching it.
+        val g = plan(
+            thinking("t1"), tool("a"), thinking("t2"), tool("b"), thinking("t3"), tool("c"),
+            tool("running", status = ToolBlockStatus.RUNNING),
+            live = true,
+        ).single()
+        assertEquals(0..5, g.range)
+        assertTrue(g.liveTail)
+        assertEquals(2, g.tailStart)
+    }
+
+    @Test fun `a run followed by a reply is settled even while the turn streams`() {
+        // A reply after the run means the model has moved on: collapse it.
+        val segments = plan(
+            thinking("t1"), tool("a"), thinking("t2"), tool("b"),
+            text("r", "Done.\nSecond line."),
+            thinking("t3"), tool("c"), tool("d"),
+            live = true,
+        )
+        val first = segments.first { it.range.first == 0 }
+        assertFalse(first.liveTail)
+        assertEquals(-1, first.tailStart)
+    }
+
     @Test fun `a settled segment has no tail`() {
         val g = plan(
             thinking("t1"), tool("a"), thinking("t2"), tool("b"), thinking("t3"), tool("c"),
