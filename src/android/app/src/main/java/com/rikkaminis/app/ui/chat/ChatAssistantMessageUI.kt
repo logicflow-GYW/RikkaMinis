@@ -249,7 +249,8 @@ internal fun AssistantMessageView(
 ) {
     // Settings → Appearance → Tool Steps. Read at mount, same convention as the
     // thinking toggles: a change lands on the next mounted message row.
-    val foldingEnabled = remember { toolFoldEnabled(LocalContext.current) }
+    val foldingContext = LocalContext.current
+    val foldingEnabled = remember(foldingContext) { toolFoldEnabled(foldingContext) }
     var foldChoices by rememberSaveable(message.id) { mutableStateOf(hashMapOf<String, Boolean>()) }
     var foldedOnce by rememberSaveable(message.id) { mutableStateOf(arrayListOf<String>()) }
     val foldGroups = remember(message.toolBlocks, message.isStreaming, foldingEnabled) {

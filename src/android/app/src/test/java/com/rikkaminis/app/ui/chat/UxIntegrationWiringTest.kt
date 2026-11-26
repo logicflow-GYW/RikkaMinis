@@ -87,7 +87,7 @@ class UxIntegrationWiringTest {
 
     @Test fun `tool folding is a user choice wired to the appearance preference`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        assertTrue(ui.contains("toolFoldEnabled(LocalContext.current)"))
+        assertTrue(ui.contains("val foldingEnabled = remember(foldingContext) { toolFoldEnabled(foldingContext) }"))
         assertTrue(ui.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, foldingEnabled)"))
         val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
         assertTrue(planner.contains("enabled: Boolean = true"))
