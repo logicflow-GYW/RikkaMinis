@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.chat
 
+import kotlin.math.roundToInt
+
 /**
  * Decides which stretches of an assistant message collapse into one "process" row.
  *
@@ -30,6 +32,18 @@ package com.rikkaminis.app.ui.chat
  *
  * When the turn settles (reply, interruption, cancellation) the tail goes away
  * and the whole segment collapses to its row.
+ *
+ * The summary row carries NO description of the work: its title used to come
+ * from the segment's own last reasoning (else the last call's label), which
+ * describes the final second of a run that may hold eighty calls. It now reads
+ * "已执行 N 个工具 · M 个失败" — counts only, failures coloured.
+ *
+ * An OPEN segment (the user tapped it) also folds itself back once it has left
+ * the TOP of the viewport, so a long process cannot stay opened forever above a
+ * reader who has moved on. Scroll may only ever CLOSE a segment, never open one
+ * (the inverse rule blew the transcript open on every scroll — see
+ * UxIntegrationWiringTest). Geometry lives in [fullyAboveViewport] and
+ * [anchoredOffset] so the decision and the re-anchor are JVM-testable.
  */
 object ChatProcessFoldPlanner {
     /** Newest steps kept visible in the running segment's tail. */
@@ -65,8 +79,6 @@ object ChatProcessFoldPlanner {
         val deduplicatedCount: Int,
         /** Sum of recorded execution durations, NOT wall time (parallel calls overlap). */
         val durationMs: Long,
-        /** Action phrase from the segment's last reasoning, else the last call's title. */
-        val title: String?,
         /** True while the turn runs and this is the trailing segment with a tail. */
         val liveTail: Boolean = false,
         /**
@@ -118,25 +130,6 @@ object ChatProcessFoldPlanner {
             }
             else -> Kind.BARRIER
         }
-    }
-
-    /** Action phrase for a segment: its last reasoning, else the last call's label. */
-    private fun titleOf(blocks: List<AssistantBlock>, range: IntRange, kinds: List<Kind>): String? {
-        for (i in range.reversed()) {
-            if (kinds[i] == Kind.THINKING) {
-                extractThinkingTitle(blocks[i].content)?.let { return it }
-                break
-            }
-        }
-        for (i in range.reversed()) {
-            if (kinds[i] == Kind.TOOL_DONE) {
-                val tool = blocks[i]
-                if (tool.toolTitle.isNotBlank()) return tool.toolTitle
-                if (tool.toolName.isNotBlank()) return tool.toolName
-                break
-            }
-        }
-        return null
     }
 
     /**
@@ -216,7 +209,6 @@ object ChatProcessFoldPlanner {
                 cancelledCount = tools.count { it.toolStatus == ToolBlockStatus.CANCELLED },
                 deduplicatedCount = tools.count { it.toolStatus == ToolBlockStatus.DEDUPLICATED },
                 durationMs = tools.sumOf { it.durationMs },
-                title = titleOf(blocks, range, kinds),
                 liveTail = live,
                 tailStart = tailStart,
             )
@@ -253,5 +245,36 @@ object ChatProcessFoldPlanner {
     fun nextChoice(current: Mode, liveTail: Boolean): Boolean? = when (current) {
         Mode.COLLAPSED, Mode.TAIL -> true
         Mode.FULL -> if (liveTail) null else false
+    }
+
+    /**
+     * True when a segment has left the TOP of the visible area: its last
+     * rendered block ended at or above the viewport's top edge.
+     *
+     * Only the upward exit counts. A segment that went off the BOTTOM has not
+     * been read yet — the reader scrolled up above it — so folding it there
+     * would answer a question nobody asked. Null geometry (not measured yet, or
+     * no viewport) is never "outside": an unmeasured segment must not fold.
+     */
+    fun fullyAboveViewport(segmentEndBottomPx: Float?, viewportTopPx: Float?): Boolean {
+        if (segmentEndBottomPx == null || viewportTopPx == null) return false
+        return segmentEndBottomPx <= viewportTopPx
+    }
+
+    /**
+     * Scroll offset that keeps the reader's place after [removedPx] of content
+     * collapsed ABOVE the viewport.
+     *
+     * The transcript's messages are LazyColumn items and one assistant message
+     * is ONE item, so the list anchors on (item, offset-into-item) — there is no
+     * anchoring inside an item. Dropping [removedPx] inside the item therefore
+     * swaps the visible content for whatever sat that far below it; subtracting
+     * the same amount from the item offset puts that content back. Clamped at 0
+     * because the removed span can never exceed the offset (it lies entirely
+     * above the viewport).
+     */
+    fun anchoredOffset(firstVisibleItemOffsetPx: Int, removedPx: Float): Int {
+        if (removedPx <= 0f) return firstVisibleItemOffsetPx
+        return (firstVisibleItemOffsetPx - removedPx).roundToInt().coerceAtLeast(0)
     }
 }

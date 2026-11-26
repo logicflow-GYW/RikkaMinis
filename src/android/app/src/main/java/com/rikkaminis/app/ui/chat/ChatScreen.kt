@@ -45,7 +45,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -116,6 +116,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.layout.positionInWindow
@@ -3786,10 +3787,19 @@ fun ChatScreen(
                     block()
                 }
                 // (selectionController declared above, before markdownToolbar.)
+                // [auto-fold] Window-space bounds of the visible list area, read
+                // by each assistant row's fold geometry (layout → layout, never
+                // composition: a state-backed value would invalidate every row
+                // when the keyboard or an inset moves the list).
+                val chatViewport = remember { ChatViewportTracker() }
+                // [auto-fold] Bumped by the "back to newest" FAB; every message
+                // clears its explicit open/closed choices when it changes.
+                var collapseAllEpoch by remember { mutableStateOf(0) }
                 androidx.compose.runtime.CompositionLocalProvider(
                     LocalMessageBoundsRegistry provides messageBounds,
                     androidx.compose.ui.platform.LocalTextToolbar provides markdownToolbar,
                     LocalMinisSelectionController provides selectionController,
+                    LocalChatViewportTracker provides chatViewport,
                 ) {
                 // Hoisted out of AlwaysStretchOverscrollBox lambda so
                 // SelectionDragTracker (which lives outside the lambda) can
@@ -3918,6 +3928,10 @@ fun ChatScreen(
                         .then(if (composerGlassOn) Modifier.hazeSource(hazeState) else Modifier)
                         .onGloballyPositioned {
                             listRootCoords = it
+                            // [auto-fold] See ChatViewportTracker: plain field,
+                            // written here and read from the rows' own layout
+                            // callbacks.
+                            chatViewport.bounds = it.boundsInWindow()
                             if (perfFirstLayoutFired.compareAndSet(false, true)) {
                                 val info = listState.layoutInfo
                                 com.rikkaminis.app.diagnostics.PerfLongCtx.step(
@@ -4000,11 +4014,14 @@ fun ChatScreen(
                             }
                         }
                     }
-                    items(
+                    // [auto-fold] itemsIndexed (key/contentType unchanged): the
+                    // row needs its own index to re-anchor the viewport when a
+                    // collapsed segment above it shrinks this very item.
+                    itemsIndexed(
                         items = flatItems,
-                        key = { it.key },
-                        contentType = { it.contentType },
-                    ) { item ->
+                        key = { _, item -> item.key },
+                        contentType = { _, item -> item.contentType },
+                    ) { lazyIndex, item ->
                         // [Perf][LongCtx] T-android-long-ctx-reentry-perf:
                         // the newest message (index 0 in reverseLayout) is
                         // the first row painted in the viewport — its
@@ -4438,6 +4455,36 @@ fun ChatScreen(
                                         // counter (the flag is false for it).
                                         awaitingResponseSinceMs = awaitingResponseSinceMs,
                                         processFoldEnabled = processFoldEnabled,
+                                        // [auto-fold] Only the list view can
+                                        // answer "has this row left the top?"
+                                        // and "put the reader back".
+                                        foldListState = listState,
+                                        // [auto-fold] The re-anchor is edge-
+                                        // specific, and the edge is only known
+                                        // here: a FOLLOWER is pinned to the
+                                        // bottom — shifting their item offset
+                                        // pulls them off the tail and the
+                                        // follower drags them back, which is the
+                                        // bounce users see while folding during
+                                        // auto-follow. Re-pin instead.
+                                        onFoldAnchor = { removed ->
+                                            if (followState.isFollowing) {
+                                                safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
+                                                    runCatching { listState.requestScrollToItem(idx, 0) }
+                                                }
+                                            } else if (listState.firstVisibleItemIndex == lazyIndex) {
+                                                runCatching {
+                                                    listState.requestScrollToItem(
+                                                        lazyIndex,
+                                                        ChatProcessFoldPlanner.anchoredOffset(
+                                                            listState.firstVisibleItemScrollOffset,
+                                                            removed,
+                                                        ),
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        collapseAllEpoch = collapseAllEpoch,
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the
                                         // flat AssistantInfo branch).
@@ -4831,6 +4878,13 @@ fun ChatScreen(
                             // gesture. [forward-stable] Exactly one pending
                             // bottom request — no settle second call.
                             followState = dispatchFollow(sessionId, followState, FollowEvent.FabDown, listState, isUserDragging, isStreaming)
+                            // [auto-fold] "Show me the newest" also closes the
+                            // segments the reader left open. Not a second
+                            // feature on the same button: the jump already moves
+                            // the viewport by a screen or more, so the collapse
+                            // costs nothing visible — and it is what makes a
+                            // long process impossible to leave open behind you.
+                            collapseAllEpoch++
                         },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)

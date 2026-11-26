@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="chat_process_tools">%1$d 個工具</string>
-    <string name="chat_process_duration">累計 %1$s 秒</string>
+    <string name="chat_process_tools">已執行 %1$d 個工具</string>
     <string name="chat_process_failed">%1$d 個失敗</string>
     <string name="chat_process_cancelled">%1$d 個已取消</string>
     <string name="chat_process_deduplicated">%1$d 個重複略過</string>

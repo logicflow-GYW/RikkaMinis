@@ -30,6 +30,24 @@ class UxIntegrationWiringTest {
         .replace(Regex("(?ms)^\\h*/\\*.*?\\*/"), "")
         .replace(Regex("(?m)^\\h*//[^\\n]*"), "")
 
+    /** Same walk-up contract as [source], for a file under `src/main/res`. */
+    private fun resource(relative: String): String {
+        val roots = mutableListOf<File>()
+        System.getProperty("minis.test.sourceRoot")?.let { roots += File(it) }
+        var dir: File? = File(System.getProperty("user.dir") ?: ".")
+        while (dir != null) {
+            roots += dir
+            dir = dir.parentFile
+        }
+        for (root in roots) {
+            for (prefix in listOf("src/android/app", "app")) {
+                val file = File(root, "$prefix/src/main/res/$relative")
+                if (file.isFile) return file.readText()
+            }
+        }
+        return ""
+    }
+
     @Test fun `scroll position never reaches the fold decision`() {
         val screen = source("ui/chat/ChatScreen.kt")
         val aggregate = screen.substringAfter("is FlatChatItem.AssistantMessageItem -> {")
@@ -46,8 +64,7 @@ class UxIntegrationWiringTest {
         assertFalse(mode.contains("scroll"))
     }
 
-    @Test fun `only a live segment keeps its tail open`() {
-        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
+    @Test fun `only a live segment keeps its tail open`() {        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
         assertTrue(planner.contains("null -> if (liveTail) Mode.TAIL else Mode.COLLAPSED"))
         assertFalse(planner.contains("openByDefault"))
     }
@@ -168,5 +185,86 @@ class UxIntegrationWiringTest {
         assertTrue(aggregate.contains("if (next == null) remove(segment.key) else put(segment.key, next)"))
         // The old shape hard-wrote the choice and lost the tail.
         assertFalse(aggregate.contains("Mode.COLLAPSED -> true"))
+    }
+
+    // ── auto-fold: the row settles itself once it leaves the top ────────────
+
+    @Test fun `an open segment folds itself only after the scroll settles`() {
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val aggregate = ui.substringAfter("internal fun AssistantMessageView(")
+            .substringBefore("private fun ChatProcessSummary(")
+        // Geometry is measured, never guessed.
+        assertTrue(aggregate.contains("ChatProcessFoldPlanner.fullyAboveViewport("))
+        // The fold waits for a settled list: a fling is not folded mid-flight.
+        assertTrue(aggregate.contains("snapshotFlow { outOfViewKeys to state.isScrollInProgress }"))
+        assertTrue(aggregate.contains("if (scrolling || keys.isEmpty()) return@collect"))
+        // Only the segment the READER opened is closed again.
+        assertTrue(aggregate.contains("if (mode != ChatProcessFoldPlanner.Mode.FULL) return@collect"))
+        // The row measures, it does not decide: the anchor is handed back to the
+        // list, which knows whether the reader is on the tail or in history.
+        assertTrue(aggregate.contains("onFoldAnchor?.invoke(geometry.removedPx)"))
+        assertFalse(aggregate.contains("requestScrollToItem("))
+        // Scroll may CLOSE a segment, never OPEN one: the exact inverse of the
+        // rule that once blew the transcript open on every scroll.
+        assertFalse(aggregate.contains("put(segment.key, true)"))
+        assertFalse(aggregate.contains("put(key, true)"))
+    }
+
+    @Test fun `the back-to-newest button also closes what the reader left open`() {
+        val screen = source("ui/chat/ChatScreen.kt")
+        val fab = screen.substringAfter("FollowEvent.FabDown")
+        assertTrue(fab.contains("collapseAllEpoch++"))
+        // The rows it reaches must be indexed now: the re-anchor needs this
+        // item's position in the list.
+        assertTrue(screen.contains("items(") || screen.contains("itemsIndexed("))
+        assertTrue(screen.contains("onFoldAnchor = { removed ->"))
+        assertTrue(screen.contains("LocalChatViewportTracker provides chatViewport"))
+        assertTrue(screen.contains("chatViewport.bounds = it.boundsInWindow()"))
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        assertTrue(ui.contains("LaunchedEffect(collapseAllEpoch)"))
+    }
+
+    @Test fun `folding under auto-follow re-pins the bottom instead of shifting it`() {
+        // 2026-11-26 user report: the fold "jumps" ONLY while auto-follow is
+        // engaged. Root cause: the re-anchor was always the item-offset one, so
+        // a follower was pulled `removedPx` off the tail and the follower
+        // dragged them back — two moves, seen as one bounce. The anchor now
+        // depends on which edge the reader is on.
+        val screen = source("ui/chat/ChatScreen.kt")
+        val anchor = screen.substringAfter("onFoldAnchor = { removed ->")
+            .substringBefore("collapseAllEpoch = collapseAllEpoch")
+        assertTrue(anchor.contains("if (followState.isFollowing)"))
+        assertTrue(anchor.contains("safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)"))
+        assertTrue(anchor.contains("requestScrollToItem(idx, 0)"))
+        // History reader: compensate exactly what disappeared above them.
+        assertTrue(anchor.contains("ChatProcessFoldPlanner.anchoredOffset("))
+        assertTrue(anchor.contains("firstVisibleItemScrollOffset"))
+        // And the two branches must stay mutually exclusive — running both is
+        // the bug, not a detail.
+        assertTrue(anchor.contains("} else if (listState.firstVisibleItemIndex == lazyIndex)"))
+    }
+
+    @Test fun `the summary row is counts only`() {        // 2026-11-26: the title (last reasoning's bold phrase, else the last
+        // call's label) described the final second of a run of eighty calls;
+        // the "累计 N 秒" was a SUM of per-call durations (parallel calls
+        // double-counted, not wall time) and is not persisted with the tool_use
+        // part, so it vanished on reload.
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val row = ui.substringAfter("private fun ChatProcessSummary(")
+            .substringBefore("internal fun BoundsTrackedBlock(")
+        assertFalse(row.contains("segment.title"))
+        assertFalse(row.contains("chat_process_duration"))
+        assertTrue(row.contains("R.string.chat_process_tools"))
+        // Failures are the only coloured token; a whole red line shouted for one
+        // bad call.
+        assertTrue(row.contains("appendMetaPart(failedText, ToolErrorColor, neutral)"))
+        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
+        assertFalse(planner.contains("val title: String?"))
+        assertFalse(planner.contains("titleOf("))
+        val strings = resource("values-zh/strings_chat_process.xml")
+        if (strings.isNotEmpty()) {
+            assertTrue(strings.contains("已执行 %1\$d 个工具"))
+            assertFalse(strings.contains("chat_process_duration"))
+        }
     }
 }

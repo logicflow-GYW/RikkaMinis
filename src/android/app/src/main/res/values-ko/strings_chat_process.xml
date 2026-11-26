@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="chat_process_tools">도구 %1$d개</string>
-    <string name="chat_process_duration">누적 %1$s초</string>
+    <string name="chat_process_tools">도구 %1$d개 실행</string>
     <string name="chat_process_failed">실패 %1$d개</string>
     <string name="chat_process_cancelled">취소 %1$d개</string>
     <string name="chat_process_deduplicated">중복 건너뜀 %1$d개</string>
