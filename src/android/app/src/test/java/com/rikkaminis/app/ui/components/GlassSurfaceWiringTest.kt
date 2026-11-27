@@ -36,11 +36,15 @@ class GlassSurfaceWiringTest {
         assertTrue(s.contains("baseMod.verticalScroll(scrollState).padding(top = topExtent) else baseMod"))
     }
 
-    @Test fun `settings retains both title alignments slots IME and focus safety`() {
+    @Test fun `settings retains both title alignments cancel slot system back IME and focus safety`() {
         val s = source("ui/settings/SettingsComponents.kt")
         assertTrue(s.contains("CenterAlignedTopAppBar("))
-        assertTrue(s.contains("navigation != null -> navigation()"))
-        assertTrue(s.contains("onBack != null -> IconButton(onClick = onBack)"))
+        // Navigation simplification: the slot carries only an explicit Cancel
+        // action and back is handled by the system dispatcher. Asserting the
+        // removed arrow here would pin the old contract this change retired.
+        assertTrue(s.contains("navigation?.invoke()"))
+        assertTrue(s.contains("BackHandler(enabled = onBack != null) { onBack?.invoke() }"))
+        assertFalse(s.contains("ArrowBack"))
         assertEquals(2, Regex("actions = \\{ actions\\?\\.invoke\\(\\) \\}").findAll(s).count())
         assertTrue(s.contains(".imePadding()"))
         assertTrue(s.contains("ProvideGlassBringIntoViewSpec(topExtent)"))
