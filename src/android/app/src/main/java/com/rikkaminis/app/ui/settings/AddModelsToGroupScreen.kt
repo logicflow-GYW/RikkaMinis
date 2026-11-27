@@ -1,13 +1,11 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -41,6 +39,7 @@ fun AddModelsToGroupScreen(
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val config by providerRepository.config.collectAsState()
     val group = config.modelGroups.find { it.id == groupId }
 
@@ -98,11 +97,6 @@ fun AddModelsToGroupScreen(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.model_group_detail_add_models), fontWeight = FontWeight.SemiBold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.model_group_detail_back))
-                    }
-                },
                 actions = {
                     MinisTextButton(onClick = onBack) { Text(stringResource(R.string.common_cancel)) }
                     MinisButton(

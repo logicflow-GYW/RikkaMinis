@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
@@ -20,14 +22,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.BatteryFull
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.NotificationsActive
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -79,6 +79,7 @@ import com.rikkaminis.app.ui.theme.ChatColors
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BackgroundSettingsScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
     val context = LocalContext.current
     val activity = context as? Activity
 
@@ -126,11 +127,6 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.bg_section_header)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                    }
-                },
             )
         },
     ) { padding ->

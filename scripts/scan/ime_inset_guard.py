@@ -69,9 +69,9 @@ the spelling of a fix — the wide4 adversarial round falsified the previous
     changes nothing;
   * a hoisted `val x = Modifier…imePadding()` counts only when `x` is READ BY
     one of those `modifier =` slots — a second lexical mention is not a read;
-  * `onBack = <value>` counts only when the value keeps the in-scope handler
-    (`onBack`, or `{ onBack() }`). `null`, `{}` and discarding chains
-    (`onBack.takeIf { false } ?: {}`) render a back arrow that does nothing;
+  * `onBack = <value>` counts only when the value forwards the in-scope
+    handler (`onBack`, or `{ onBack() }`); inert callbacks lose the system
+    route. Custom Cancel remains a real executed slot, not a token mention;
   * literal-decided guards are dead, not protection: `if (false && g)`,
     `while (false)`, `when (false)`, `1 == 2`, `x == x`.
 
@@ -606,61 +606,16 @@ def scan_file(text, rel):
     return findings
 
 
-# ─── [deep-audit-1040 B-01] SettingsScaffold must render a back affordance ───
-#
-# `SettingsScaffold` is the shared host this gate already owns (it is in the host
-# table in the module KDoc above). Its `navigationSlot` used to honour ONLY the
-# `navigation` parameter, so the ten call sites that passed just `onBack`
-# (provider detail / connection, storage session, runtime limits, Shizuku and
-# offload permissions, provider add, custom model add, chat tuning) rendered an
-# EMPTY navigation slot — no back arrow at all, even though the parameter KDoc
-# had always promised "the slot falls back to the back arrow iff onBack is set".
-# The system back gesture still worked, which is exactly why it survived review:
-# a user who does not know the gesture had no visible way out of the screen.
-#
-# Same family as the IME class above — a shared host whose contract and whose
-# rendering disagreed, silently — so it is graded at the shared layer instead of
-# one screen at a time.
-#
-# Graded:
-#   B01-SLOT   inside the slot body: BOTH arms exist (`navigation != null` AND
-#              `onBack != null`) and the onBack ARM renders a LIVE IconButton
-#              wired to `onBack`. Overall-slot substring matching was not
-#              enough: `onBack != null -> if (false) IconButton(onClick =
-#              onBack)` keeps both spellings and renders nothing (external
-#              witness B01-SLOT), so the render is looked for inside that arm
-#              and must not sit under a literal-decided guard.
-#   B01-CALLS  every production `SettingsScaffold(...)` call site is judged on
-#              its ARGUMENT VALUE, not on the parameter's presence: a site that
-#              passes `onBack = null` while its own screen received an `onBack`
-#              handler (and supplies no `navigation` slot) drops the only way
-#              out of a drill-down screen (external witness B01-CALLS). Sites
-#              that legitimately pass null are top-level pages — they have no
-#              `onBack` parameter of their own — so the value test stays quiet
-#              there. The recorded floor is kept as a ROT guard: if the anchor
-#              stops matching, the count collapses and the gate fails closed.
-#
-# Deliberately NOT graded: a top-level screen passing NEITHER parameter keeps an
-# empty slot. That is the documented design (rely on the system back gesture /
-# bottom navigation); flagging it would force a back arrow onto screens that are
-# not drill-downs.
+# ─── SettingsScaffold system-back / explicit-cancel contract ────────────────
+# 2026-11-27: user-approved navigation simplification replaces the old automatic
+# arrow contract. B01-SLOT now requires an arrow-free slot that still executes
+# custom Cancel actions, both app bars consuming that slot, and a LIVE system
+# BackHandler calling the supplied handler. B01-CALLS still refuses dropped or
+# inert handlers on drill-downs; known root pages / explicit edit slots can use
+# the existing parent navigator. The IME criteria above are unchanged.
 SCAFFOLD_REL = "com/rikkaminis/app/ui/settings/SettingsComponents.kt"
 NAV_SLOT_DECL_RE = re.compile(r"\bval\s+navigationSlot\s*:")
-NAV_ARM_RE = re.compile(r"\bnavigation\s*!=\s*null\s*->")
-ONBACK_ARM_RE = re.compile(r"\bonBack\s*!=\s*null\s*->")
-# The `onClick = …` VALUE is parsed with `_onclick_values` instead of this
-# substring anchor: `onClick = onBack.takeIf { false } ?: {}` satisfies a
-# `onBack\b` match while discarding the handler (external witness, wide4).
 SCAFFOLD_CALL_RE = re.compile(r"(?<![\w.])SettingsScaffold\s*\(")
-# Argument VALUES are parsed bracket-aware by `arg_value_by_key` — the old
-# `[^,\n)]+` capture truncated any lambda containing a `)` and had to be paired
-# with a separate `null|false` blacklist, which is exactly the spelling-not-value
-# hole the wide4 witnesses walked through.
-NAV_ARG_RE = re.compile(r"\bnavigation\s*=")
-ARM_BOUNDARY_RE = re.compile(r"\b(?:navigation|onBack)\s*!=\s*null\s*->|\belse\s*->")
-# 11 call sites pass a non-null `onBack` on 2026-10-25; the floor is two below
-# that so a legitimate merge of screens does not false-alarm while regex rot
-# (which would collapse the count) still does.
 MIN_ONBACK_CALLSITES = 9
 
 
@@ -695,69 +650,57 @@ def _function_params(text, decl_off):
     return text[op + 1:cl]
 
 
-ONBACK_ONCLICK_OK = re.compile(r"^(?:onBack|\{\s*onBack\s*\(\s*\)\s*\})$")
-
-
-def _onclick_values(text, open_idx, close_idx):
-    """Raw `onClick = <value>` argument texts inside the call at `open_idx`."""
-    out = []
-    for a, b in _split_args(text, open_idx + 1, close_idx):
-        named = _named_arg(text, a, b)
-        if named is not None and named[0] == "onClick":
-            out.append(text[named[1]:named[2]].strip())
-    return out
-
-
 def check_scaffold_navigation(text):
-    """B01-* — see the block comment above. Returns [(criterion, ok, detail)]."""
-    results = []
-    m = NAV_SLOT_DECL_RE.search(text)
-    if m is None:
-        results.append(("B01-SLOT", False,
-                        "no `val navigationSlot` in SettingsComponents.kt (fail-closed: the host "
-                        "was reworked — re-derive this criterion)"))
-        return results
-    brace = text.find("{", m.end())
-    slot = braced_block(text, brace) if brace >= 0 else None
-    if slot is None:
-        results.append(("B01-SLOT", False,
-                        "`navigationSlot` has no brace body (fail-closed: re-derive)"))
-        return results
+    """B01-SLOT checks the live host body, not token presence in the file."""
     problems = []
-    if not NAV_ARM_RE.search(slot):
-        problems.append("the slot no longer honours the custom `navigation` slot")
-    arm = ONBACK_ARM_RE.search(slot)
-    if arm is None:
-        problems.append("the slot has no `onBack != null` arm — every screen that passes only "
-                        "`onBack` renders an empty navigation slot again")
-    else:
-        nxt = ARM_BOUNDARY_RE.search(slot, arm.end())
-        arm_body = slot[arm.end():nxt.start() if nxt else len(slot)]
-        dead = dead_guard_spans(slot)
-        base = arm.end()
-        live = []
-        for r in re.finditer(r"IconButton\s*\(", arm_body):
-            if _inside(dead, base + r.start()):
-                continue
-            op = base + r.end() - 1
-            cl = match_paren(slot, op)
-            if cl is None:
-                continue
-            for value in _onclick_values(slot, op, cl):
-                if ONBACK_ONCLICK_OK.match(strip_parens(value)):
-                    live.append(value)
-                    break
+    host = re.search(r"\bfun\s+SettingsScaffold\s*\(", text)
+    op = host.end() - 1 if host else -1
+    cl = match_paren(text, op) if host else None
+    brace = text.find("{", cl + 1) if cl is not None else -1
+    body = braced_block(text, brace) if brace >= 0 else None
+    if body is None:
+        return [("B01-SLOT", False, "cannot locate SettingsScaffold body (fail-closed)")]
+    if re.search(r"\bArrowBack\b", body):
+        problems.append("automatic app-navigation ArrowBack is forbidden")
+    m = NAV_SLOT_DECL_RE.search(body)
+    brace = body.find("{", m.end()) if m else -1
+    slot = braced_block(body, brace) if brace >= 0 else None
+    # Match the executed slot expression, not a lexical reference / dead arm.
+    # New rendering shapes must re-derive the check instead of passing silently.
+    if slot is None or re.sub(r"\s+", "", slot) != "navigation?.invoke()":
+        problems.append("custom Cancel navigation slot is not invoked directly")
+    dead = dead_guard_spans(body)
+    if m is not None and _inside(dead, m.start()):
+        problems.append("custom navigation slot is dead-guarded")
+    for bar in ("TopAppBar", "CenterAlignedTopAppBar"):
+        live = False
+        for bm in re.finditer(r"(?<![\w.])" + bar + r"\s*\(", body):
+            args = balanced_args(body, bm.end() - 1)
+            if args is not None and not _inside(dead, bm.start()):
+                value, _ = arg_value_by_key(args, 0, len(args), "navigationIcon")
+                live |= value is not None and strip_parens(value.strip()) == "navigationSlot"
         if not live:
-            problems.append(
-                "the `onBack` arm renders no LIVE `IconButton(onClick = onBack)` — a "
-                "literal-short-circuited wrapper (`if (false) IconButton(…)`, `when (false)`), "
-                "a deleted render, or a DISCARDING chain "
-                "(`onClick = onBack.takeIf { false } ?: {}`) keeps the spelling and loses the "
-                "back affordance")
-    results.append(("B01-SLOT", not problems,
-                    "the navigation slot honours the custom slot, and falls back to a back arrow "
-                    "when only `onBack` is set" if not problems else "; ".join(problems)))
-    return results
+            problems.append(bar + " does not render the custom navigation slot")
+    live_back = False
+    for bm in re.finditer(r"(?<![\w.])BackHandler\s*\(", body):
+        op = bm.end() - 1
+        cl = match_paren(body, op)
+        args = balanced_args(body, op)
+        if args is None or _inside(dead, bm.start()):
+            continue
+        enabled, _ = arg_value_by_key(args, 0, len(args), "enabled")
+        k = cl + 1
+        while k < len(body) and body[k].isspace():
+            k += 1
+        callback = braced_block(body, k) if k < len(body) and body[k] == "{" else None
+        live_back |= (enabled is not None and
+                      re.sub(r"\s+", "", strip_parens(enabled)) == "onBack!=null" and
+                      callback is not None and
+                      re.sub(r"\s+", "", callback) == "onBack?.invoke()")
+    if not live_back:
+        problems.append("no live system BackHandler invokes the supplied onBack")
+    return [("B01-SLOT", not problems, "; ".join(problems) if problems else
+             "arrow-free custom Cancel slot + live system back are wired")]
 
 
 # ── the exemption registry (registry axis: 清单外默认拒绝，清单只做豁免) ────
@@ -770,8 +713,7 @@ def check_scaffold_navigation(text):
 # parameter". The inline comments in those files say exactly that.
 #
 # The value test cannot tell them apart from a DRILL-DOWN screen that dropped
-# its arrow (external witness B01-CALLS: `ChatTuningScreen` → `onBack = null`
-# renders no back arrow and there is no bottom bar to escape with), so the
+# its local handler, so the
 # exemption is an explicit registry keyed by (relative path, enclosing
 # function). Everything NOT listed here must pass a non-null `onBack` or its own
 # `navigation` slot. An entry that stops matching is reported as ROT: the screen
@@ -844,7 +786,9 @@ def audit_scaffold_callsites(text, rel):
             continue
         value, _voff = arg_value_by_key(args, 0, len(args), "onBack")
         kind = onback_value_kind(value) if value is not None else "absent"
-        has_nav = arg_value_by_key(args, 0, len(args), "navigation")[0] is not None
+        nav_value = arg_value_by_key(args, 0, len(args), "navigation")[0]
+        has_nav = (nav_value is not None and
+                   onback_value_kind(nav_value) not in ("null", "false", "empty", "empty-lambda"))
         if kind not in ("null", "false", "absent"):
             non_null += 1
         idx = line_no - 1
@@ -864,17 +808,18 @@ def audit_scaffold_callsites(text, rel):
                 continue
             viols.append(
                 "B01-CALLS  %s:%d  passes `onBack = null` (and no `navigation` slot) while this "
-                "screen's own `onBack` handler is in scope — the back arrow disappears and a "
-                "drill-down screen is left with no visible way out" % (rel, line_no))
+                "screen's own `onBack` handler is in scope — the local system-back route "
+                "was dropped" % (rel, line_no))
             continue
-        # A present, non-null value can still DISCARD the handler: `{}` renders
-        # an arrow that does nothing (external witness B01-CALLS wide4), and so
-        # does any expression that never mentions the in-scope handler.
-        if kind in ("empty", "empty-lambda") or not any(
-                re.search(r"\b%s\b" % re.escape(h), value) for h in handlers):
+        # Accept values that actually forward the in-scope handler; references
+        # hidden in a false takeIf / inert lambda are not forwarding.
+        forwarding = any(re.fullmatch(
+            r"(?:" + re.escape(h) + r"|\{\s*" + re.escape(h) + r"\s*\(\s*\)\s*\})",
+            strip_parens(value.strip())) for h in handlers)
+        if kind in ("empty", "empty-lambda") or not forwarding:
             viols.append(
                 "B01-CALLS  %s:%d  discards in-scope `onBack` handler (passes `%s` instead of "
-                "wiring `%s`) — the back arrow renders but the tap does nothing"
+                "wiring `%s`) — system back no longer reaches the local handler"
                 % (rel, line_no, value.strip()[:48], handlers[0]))
     return viols, non_null, total, matched
 
@@ -947,11 +892,8 @@ def collect(root):
 def report(violations, scaffold_violations, scaffold_seen, onback_calls):
     if scaffold_violations:
         print(f"❌ SettingsScaffold navigation guard: {len(scaffold_violations)} violation(s)")
-        print("   The slot used to honour only the custom `navigation` parameter, so every")
-        print("   screen passing just `onBack` rendered an empty navigation slot: no back")
-        print("   arrow, and a user who does not know the system back gesture has no way out.")
-        print("   Fix: keep both arms of the `when` — `navigation != null -> navigation()`")
-        print("        and `onBack != null -> IconButton(onClick = onBack)`.")
+        print("   Keep application navigation arrow-free, wire the supplied onBack to")
+        print("   system BackHandler, and keep explicit Cancel actions in the custom slot.")
         for v in scaffold_violations:
             print("     " + v)
         return 1
@@ -974,7 +916,7 @@ def report(violations, scaffold_violations, scaffold_seen, onback_calls):
     print("✅ IME-inset guard: no unprotected text field in a bare-Scaffold host")
     if scaffold_seen:
         print(f"✅ SettingsScaffold navigation guard: {onback_calls} call site(s) pass `onBack`, "
-              "and the slot falls back to a back arrow")
+              "with live system back + an arrow-free custom Cancel slot")
     return 0
 
 
@@ -1002,15 +944,15 @@ private fun CleanScreen() {
 
 SLOT_GOOD = '''@Composable
 fun SettingsScaffold(title: String, onBack: (() -> Unit)?, navigation: (@Composable () -> Unit)?) {
+    BackHandler(enabled = onBack != null) { onBack?.invoke() }
     val navigationSlot: @Composable () -> Unit = {
-        when {
-            navigation != null -> navigation()
-            onBack != null -> IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-            }
-        }
+        navigation?.invoke()
     }
-    TopAppBar(navigationIcon = navigationSlot)
+    if (centerTitle) {
+        CenterAlignedTopAppBar(navigationIcon = navigationSlot)
+    } else {
+        TopAppBar(navigationIcon = navigationSlot)
+    }
 }
 '''
 
@@ -1115,18 +1057,26 @@ def selftest():
         '            OutlinedTextField(value = "", onValueChange = {})')
     arm("ime-ok escape hatch stays green", {pkg + "/Esc.kt": escaped}, 0, 0)
 
-    # 8. B01-SLOT: the real slot renders a live back arrow
-    arm("B01 slot renders back arrow",
-        {"com/rikkaminis/app/ui/settings/SettingsComponents.kt": SLOT_GOOD}, 0, 0)
-
-    # 9. B01-SLOT witness: `onBack != null -> if (false) IconButton(onClick = onBack)`
-    slot_dead = SLOT_GOOD.replace(
-        "onBack != null -> IconButton(onClick = onBack) {",
-        "onBack != null -> if (false) { IconButton(onClick = onBack) {").replace(
-        "            }\n        }\n    }",
-        "            } }\n        }\n    }")
-    arm("B01 dead-guarded back arrow is caught",
-        {"com/rikkaminis/app/ui/settings/SettingsComponents.kt": slot_dead}, 0, 1)
+    arm("B01 arrow-free Cancel + system back stays green", {SCAFFOLD_REL: SLOT_GOOD}, 0, 0)
+    arm("B01 restored ArrowBack is caught", {SCAFFOLD_REL: SLOT_GOOD.replace(
+        "navigation?.invoke()", "navigation?.invoke(); Icon(Icons.AutoMirrored.Filled.ArrowBack)")},
+        0, 1, needle="ArrowBack")
+    arm("B01 deleted Cancel invocation is caught", {SCAFFOLD_REL: SLOT_GOOD.replace(
+        "navigation?.invoke()", "")}, 0, 1, needle="Cancel")
+    arm("B01 dead-guarded Cancel is caught", {SCAFFOLD_REL: SLOT_GOOD.replace(
+        "navigation?.invoke()", "if (false) { navigation?.invoke() }")}, 0, 1, needle="Cancel")
+    arm("B01 app bar discards Cancel slot is caught", {SCAFFOLD_REL: SLOT_GOOD.replace(
+        "TopAppBar(navigationIcon = navigationSlot)", "TopAppBar(navigationIcon = {})")},
+        0, 1, needle="navigation slot")
+    arm("B01 deleted system back is caught", {SCAFFOLD_REL: SLOT_GOOD.replace(
+        "BackHandler(enabled = onBack != null) { onBack?.invoke() }", "")},
+        0, 1, needle="BackHandler")
+    arm("B01 disabled system back is caught", {SCAFFOLD_REL: SLOT_GOOD.replace(
+        "enabled = onBack != null", "enabled = false")}, 0, 1, needle="BackHandler")
+    arm("B01 inert system callback is caught", {SCAFFOLD_REL: SLOT_GOOD.replace(
+        "{ onBack?.invoke() }", "{}")}, 0, 1, needle="BackHandler")
+    arm("B01 dead-guarded system handler is caught", {SCAFFOLD_REL: SLOT_GOOD.replace(
+        "    BackHandler(", "    if (false) BackHandler(")}, 0, 1, needle="BackHandler")
 
     # 10. B01-CALLS: a drill-down screen discards its own handler
     callsite_null = CALLSITE_GOOD.replace("onBack = onBack,", "onBack = null,")
@@ -1172,13 +1122,9 @@ fun MemoryManagementScreen() {
     arm("w4 onBack = {} discards handler is caught", {pkg + "/W4b.kt": w4_calls}, 0, 1,
         needle="discards in-scope `onBack` handler")
 
-    # w4-3 (family-hole) discarding onClick chain in the slot arm
-    slot_chain = SLOT_GOOD.replace(
-        "onBack != null -> IconButton(onClick = onBack) {",
-        "onBack != null -> IconButton(onClick = onBack.takeIf { false } ?: {}) {")
-    arm("w4 onClick = onBack.takeIf{false} ?: {} is caught",
-        {"com/rikkaminis/app/ui/settings/SettingsComponents.kt": slot_chain}, 0, 1,
-        needle="no LIVE `IconButton(onClick = onBack)`")
+    chain = CALLSITE_GOOD.replace("onBack = onBack,", "onBack = onBack.takeIf { false } ?: {},")
+    arm("B01 discarding takeIf chain is caught", {pkg + "/Chain.kt": chain}, 0, 1,
+        needle="discards in-scope")
 
     # w4-4 (family-hole) padding inside a discarded lambda result: `.let { if (1 == 2) … }`
     w4_let = CLEAN_SCREEN.replace(
@@ -1200,15 +1146,8 @@ fun MemoryManagementScreen() {
         '            OutlinedTextField(value = "", onValueChange = {})')
     arm("w4 `false && x` dead guard stays caught", {pkg + "/W4e.kt": w4_short}, 1, 0)
 
-    # w4-7 (registry axis) `when (false)` inside the slot arm renders nothing
-    slot_when = SLOT_GOOD.replace(
-        "onBack != null -> IconButton(onClick = onBack) {",
-        "onBack != null -> when (false) { true -> IconButton(onClick = onBack) {").replace(
-        "            }\n        }\n    }",
-        "            } }\n        }\n    }")
-    arm("w4 `when (false)` back arrow is caught",
-        {"com/rikkaminis/app/ui/settings/SettingsComponents.kt": slot_when}, 0, 1,
-        needle="no LIVE `IconButton(onClick = onBack)`")
+    slot_when = SLOT_GOOD.replace("navigation?.invoke()", "when (false) { true -> navigation?.invoke() }")
+    arm("B01 constant-false Cancel arm is caught", {SCAFFOLD_REL: slot_when}, 0, 1, needle="Cancel")
 
     # w4-8 clean shapes that must stay green: the handler wired through a lambda
     calls_lambda = CALLSITE_GOOD.replace("onBack = onBack,", "onBack = { onBack() },")

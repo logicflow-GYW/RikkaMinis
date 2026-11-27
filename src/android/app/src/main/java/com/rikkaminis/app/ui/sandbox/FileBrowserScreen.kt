@@ -21,7 +21,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Archive
@@ -103,14 +102,8 @@ fun FileBrowserScreen(
     // scope so the dropdown can dismiss before the bottom-sheet appears.
     var webAppSheetSource by remember { mutableStateOf<com.rikkaminis.app.webapp.WebAppSource.HostFile?>(null) }
 
-    // When navigated into a subdirectory, the top-bar back button and the
-    // system back gesture both pop one directory level first. The
-    // ViewModel's `goBack()` returns `false` when we're already at the
-    // initial entry directory (T145) — at that point we exit the screen
-    // entirely rather than crawling further up toward the rootfs root,
-    // mirroring iOS FileBrowserView. The state.canGoBack pre-check is
-    // kept for the same shortcut and to flip the back button into a
-    // pure "close" affordance once the user is back at the entry dir.
+    // System back pops one directory level first. The ViewModel's goBack()
+    // returns false at the entry directory, where back leaves this screen.
     val handleBack = {
         if (!state.canGoBack || !viewModel.goBack()) onBack()
     }
@@ -121,11 +114,6 @@ fun FileBrowserScreen(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.filebrowser_title)) },
-                navigationIcon = {
-                    IconButton(onClick = handleBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                },
                 actions = {
                     // T-hidden-files a3e7f1d0: trailing toolbar collapsed
                     // to a single ⋯ menu (was a Sort-only IconButton). All
