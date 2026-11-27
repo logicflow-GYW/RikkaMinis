@@ -4423,7 +4423,6 @@ fun ChatScreen(
                                         // counter (the flag is false for it).
                                         awaitingResponseSinceMs = awaitingResponseSinceMs,
                                         processFoldEnabled = processFoldEnabled,
-                                        isProcessExpanded = processMessageId == item.message.id,
                                         onOpenProcess = { processMessageId = if (processMessageId == item.message.id) null else item.message.id },
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the
@@ -4448,7 +4447,14 @@ fun ChatScreen(
                         val lastAssistant = mergedMessages.lastOrNull {
                             it.role == "assistant" || (it.role == "user" && !it.isQueued)
                         }?.takeIf { it.role == "assistant" }
-                        val typingActive = lastAssistant != null && lastAssistant.isStreaming &&
+                        // [one-status-only] With compact process ON the turn's
+                        // single status line lives under the identity (it already
+                        // carries "thinking" / "running N tools" / "waiting Ns" /
+                        // the queue position). Rendering the transcript typing band
+                        // as well put the same sentence in two places a few dp
+                        // apart, which is the duplication this branch removes.
+                        val typingActive = !processFoldEnabled && lastAssistant != null &&
+                            lastAssistant.isStreaming &&
                             lastAssistant.content.isEmpty() && lastAssistant.toolBlocks.none {
                                 it.kind != "info" && (!processFoldEnabled || !it.isChatProcessBlock())
                             }
@@ -4592,6 +4598,7 @@ fun ChatScreen(
                         ChatProcessSheet(
                             messageId = processMessage.id,
                             blocks = processBlocks,
+                            isStreaming = processMessage.isStreaming,
                             selectedToolId = selectedToolDetailId,
                             onSelectTool = { viewModel.openToolDetail(it) },
                             onClearTool = { viewModel.closeToolDetail() },

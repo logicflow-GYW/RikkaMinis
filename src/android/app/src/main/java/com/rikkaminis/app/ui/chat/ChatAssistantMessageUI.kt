@@ -223,7 +223,6 @@ internal fun AssistantMessageView(
     // This is the existing user preference, not a live/settled state transition.
     processFoldEnabled: Boolean,
     onOpenProcess: (() -> Unit)? = null,
-    isProcessExpanded: Boolean = false,
     queueWaitingAhead: Int = -1,
 ) {
     val compactProcess = processFoldEnabled && message.role == "assistant"
@@ -257,7 +256,6 @@ internal fun AssistantMessageView(
                 ChatProcessEntry(
                     status = processStatus,
                     isStreaming = message.isStreaming,
-                    isExpanded = isProcessExpanded,
                     showWait = message.isAwaitingModelResponse,
                     queueWaitingAhead = queueWaitingAhead,
                     awaitingResponseSinceMs = awaitingResponseSinceMs,

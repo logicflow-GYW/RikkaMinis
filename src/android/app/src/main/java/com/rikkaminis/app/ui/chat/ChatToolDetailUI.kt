@@ -33,7 +33,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Description
@@ -99,7 +98,6 @@ internal fun ToolDetailSheetContent(
     onDismiss: () -> Unit,
     onOpenTerminalWithCommand: (String) -> Unit = {},
     onOpenBrowserForUrl: (String) -> Unit = {},
-    onLeave: (() -> Unit)? = null,
 ) {
     val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }
     val block = toolBlocks.getOrNull(currentIdx) ?: return
@@ -120,11 +118,6 @@ internal fun ToolDetailSheetContent(
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (onLeave != null) {
-                    IconButton(onClick = { onLeave() }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.chat_nav_previous))
-                    }
-                }
                 Spacer(modifier = Modifier.weight(1f))
 
                 // [T-step-timestamp v3 aa8b1128] Sheet header reverted to a

@@ -65,7 +65,19 @@ class UxIntegrationWiringTest {
         val render = ui.substringAfter("if (message.role != \"system\") {").substringBefore("// Text and notices")
         assertTrue(render.contains("AssistantHeader()\n"))
         assertTrue(render.indexOf("ChatProcessEntry(") > render.indexOf("AssistantHeader()"))
-        assertTrue(render.contains("isExpanded = isProcessExpanded"))
+        assertFalse(render.contains("isExpanded ="))
+        // The status row is a bare line of text: no container, no chevron.
+        // It lives in ChatProcessUI.kt, so read that file — substringAfter on
+        // the wrong source silently returns the WHOLE file and every
+        // "contains" assertion then passes/fails for unrelated reasons.
+        val processUi = source("ui/chat/ChatProcessUI.kt")
+        assertTrue(processUi.contains("internal fun ChatProcessEntry("))
+        val entry = processUi.substringAfter("internal fun ChatProcessEntry(")
+            .substringBefore("internal sealed interface ChatProcessPage")
+        assertTrue(entry.contains("onToggle"))
+        assertFalse(entry.contains(".background("))
+        assertFalse(entry.contains("TextButton("))
+        assertFalse(entry.contains("KeyboardArrowRight"))
     }
 
     @Test fun `tool shimmer is an isolated sibling and never rerecords static content`() {
@@ -182,16 +194,59 @@ class UxIntegrationWiringTest {
         assertFalse(band.contains("ChatProcessStatusBand("))
         assertTrue(band.contains("TypingIndicator("))
         assertTrue(screen.contains("ChatProcessSheet("))
-        assertTrue(screen.contains("isProcessExpanded = processMessageId == item.message.id"))
+        assertTrue(screen.contains("onOpenProcess = { processMessageId = if (processMessageId == item.message.id) null else item.message.id }"))
         assertFalse(screen.contains("ChatProcessDetailHost("))
         val ui = source("ui/chat/ChatProcessUI.kt")
         val host = ui.substringAfter("internal fun ChatProcessSheet(")
         assertTrue(host.contains("BackHandler(page !is ChatProcessPage.List, onBack = backToList)"))
-        assertTrue(host.contains("ChatProcessPage.Tool -> ToolDetailSheetContent("))
-        assertTrue(host.contains("is ChatProcessPage.Thinking -> ChatProcessThinkingReader("))
-        val entry = ui.substringAfter("internal fun ChatProcessEntry(").substringBefore("internal sealed interface ChatProcessPage")
-        assertTrue(entry.contains("stringResource(if (isExpanded) R.string.chat_process_collapse else R.string.chat_process_expand)"))
-        assertFalse(entry.contains("KeyboardArrowRight"))
+        assertTrue(host.contains("ChatProcessPage.Tool -> ProcessDrawer("))
+        assertTrue(host.contains("ToolDetailSheetContent("))
+        assertTrue(host.contains("is ChatProcessPage.Thinking -> ProcessDrawer("))
+        assertTrue(host.contains("ChatProcessThinkingReader(content = current.content)"))
+        // Every level is a drawer: scrim + rounded panel + drag handle.
+        val drawer = ui.substringAfter("private fun ProcessDrawer(").substringBefore("private fun ChatProcessList(")
+        assertTrue(drawer.contains("detectVerticalDragGestures("))
+        assertTrue(drawer.contains("RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)"))
+        assertTrue(drawer.contains("onClick = onDismiss"))
+        // Swipe-down works from anywhere, as a nested-scroll participant: a
+        // pointerInput detector on the body would fight the inner list.
+        assertTrue(drawer.contains(".nestedScroll(nestedScroll)"))
+        assertTrue(drawer.contains("override fun onPostScroll(consumed: Offset, available: Offset"))
+        assertTrue(drawer.contains("available.y > FLING_DISMISS_VELOCITY"))
+        // Below the threshold the panel springs back rather than snapping.
+        assertTrue(drawer.contains("settle.animateTo(0f, block = {"))
+        // Reasoning row inside the drawer keeps the ORIGINAL card: tinted
+        // background + hairline border + the existing duration/char-count
+        // toggles. A bespoke row here is what the user rejected.
+        val row = ui.substringAfter("private fun ProcessThinkingRow(").substringBefore("internal fun ChatProcessThinkingReader(")
+        assertTrue(row.contains("thinkingHeaderExtras("))
+        assertTrue(row.contains("thinkingDurationVisibleEnabled(context)"))
+        assertTrue(row.contains("thinkingCharCountVisibleEnabled(context)"))
+        assertTrue(row.contains("R.string.chat_deep_thinking"))
+        assertTrue(row.contains(".border(0.5.dp, thinkingBlue.copy(alpha = 0.15f)"))
+        assertFalse(row.contains("thinking_view_full"))
+        // Reader: title only. Long-press selection is the copy affordance, so
+        // a copy button (and the back arrow it used to sit next to) is gone.
+        val reader = ui.substringAfter("internal fun ChatProcessThinkingReader(")
+        assertFalse(reader.contains("IconButton("))
+        assertFalse(reader.contains("chat_process_copy_all"))
+        assertFalse(reader.contains("ArrowBack"))
+        val list = ui.substringAfter("private fun ChatProcessList(")
+        // Title is centred and the right edge stays empty: the call/failure
+        // counts are on the transcript entry, not repeated in the drawer.
+        assertTrue(list.contains("textAlign = TextAlign.Center"))
+        // No count anywhere in the drawer — not `status.failed`, and not a
+        // recomputed one either: the first mutation probe (restoring
+        // `${blocks.size} · ${chatProcessStatus(...).failed}`) slipped past a
+        // `status.failed`-only assertion.
+        assertFalse(list.contains(".failed"))
+        assertFalse(list.contains("chatProcessStatus("))
+        assertFalse(list.contains("blocks.size"))
+        // Opens at the newest entry.
+        assertTrue(list.contains("listState.scrollToItem(blocks.lastIndex)"))
+        // Every level closes by gesture: no back arrow, no close button.
+        assertFalse(ui.contains("Icons.Default.Close"))
+        assertFalse(ui.contains("ArrowBack"))
         val detail = source("ui/chat/ChatToolDetailUI.kt")
         assertTrue(detail.contains("val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }"))
         assertTrue(screen.contains("keepStopWithDraft = processFoldEnabled,"))
@@ -224,8 +279,10 @@ class UxIntegrationWiringTest {
             val strings = resource("$locale/strings_chat_process.xml")
             assertTrue(locale, strings.contains("name=\"chat_process_title\""))
             assertTrue(locale, strings.contains("name=\"chat_process_running\""))
-            assertTrue(locale, strings.contains("name=\"chat_process_expand\""))
-            assertTrue(locale, strings.contains("name=\"chat_process_collapse\""))
+            // The expand/collapse affordance is gone: the entry row itself is
+            // the tap target now, so a "Details" label has nothing to do.
+            assertFalse(locale, strings.contains("name=\"chat_process_expand\""))
+            assertFalse(locale, strings.contains("name=\"chat_process_collapse\""))
         }
     }
 }

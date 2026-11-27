@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="chat_process_expand">세부 정보</string>
-    <string name="chat_process_collapse">접기</string>
     <string name="chat_process_title">실행 과정</string>
     <string name="chat_process_running">도구 %1$d개 실행 중</string>
     <string name="chat_process_tools">도구 %1$d개 실행</string>
