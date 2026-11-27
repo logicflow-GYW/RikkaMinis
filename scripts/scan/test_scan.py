@@ -1196,6 +1196,17 @@ def test_ime_inset():
     check("ime-unreachable escape hatch passes (exit 0)", code == 0, f"exit={code}\n{out}")
     shutil.rmtree(un_esc)
 
+    # The arrow-free navigation contract has its own positive/negative arms.
+    # Execute them in CI as well; a real-tree-only green cannot witness teeth.
+    proc = subprocess.run(
+        [sys.executable, os.path.join(SCRIPT_DIR, "ime_inset_guard.py"), "--selftest"],
+        capture_output=True, text=True,
+    )
+    selftest_out = (proc.stdout or "") + (proc.stderr or "")
+    check("arrow-free navigation and IME selftests have teeth",
+          proc.returncode == 0 and "IME_INSET_GUARD_SELFTEST=PASS" in selftest_out,
+          selftest_out[-1200:])
+
 def test_stream_flow_dispatch():
     print("━━━ stream_flow_dispatch_guard ━━━")
     # Ground truth: a callbackFlow whose body blocks must carry a flowOn, or the
