@@ -1318,8 +1318,8 @@
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">思考ヘッダー</string>
     <string name="appearance_section_tool_steps">プロセス手順</string>
-    <string name="appearance_tool_fold_title">完了したプロセス区間を折りたたむ</string>
-    <string name="appearance_tool_fold_footer">既定でオンです。関連する思考とツール呼び出しを要約にまとめ、実行中は直近のステップを表示します。オフにすると、各ブロックを個別に表示します。</string>
+    <string name="appearance_tool_fold_title">処理の表示をコンパクトに</string>
+    <string name="appearance_tool_fold_footer">思考とツールの詳細を別のパネルに表示し、完了時に本文が折りたたまれないようにします。オフにすると本文内の表示とフローティングバーが使えます。</string>
     <string name="appearance_thinking_show_chars_title">思考の文字数を表示</string>
     <string name="appearance_thinking_show_duration_title">思考の所要時間を表示</string>
     <string name="appearance_thinking_header_footer">思考ブロックの見出しの横に表示する項目を選びます。文字数は推論テキストの文字数（9K ≒ 9千文字）です。所要時間はこの会話を開いている間だけ計測され、開き直すと表示されません。</string>

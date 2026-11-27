@@ -386,8 +386,8 @@
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">Заголовок размышлений</string>
     <string name="appearance_section_tool_steps">Шаги процесса</string>
-    <string name="appearance_tool_fold_title">Сворачивать завершённые участки процесса</string>
-    <string name="appearance_tool_fold_footer">Включено по умолчанию. Связанные рассуждения и вызовы инструментов сворачиваются в сводку, а во время выполнения последние шаги остаются видимыми. Если выключить, каждый блок будет отображаться отдельно.</string>
+    <string name="appearance_tool_fold_title">Компактное отображение процесса</string>
+    <string name="appearance_tool_fold_footer">Рассуждения и инструменты вынесены в отдельную панель, чтобы ответ не сдвигался при завершении. Отключите для показа в чате и использования плавающей панели.</string>
     <string name="appearance_thinking_show_chars_title">Показывать длину</string>
     <string name="appearance_thinking_show_duration_title">Показывать время</string>
     <string name="appearance_thinking_header_footer">Что показывать рядом с заголовком блока размышлений. Длина — число символов текста рассуждений (9K ≈ девять тысяч); время измеряется, пока беседа открыта, и исчезает после её повторного открытия.</string>

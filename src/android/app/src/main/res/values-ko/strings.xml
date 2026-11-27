@@ -1310,8 +1310,8 @@
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">사고 헤더</string>
     <string name="appearance_section_tool_steps">프로세스 단계</string>
-    <string name="appearance_tool_fold_title">완료된 프로세스 구간 접기</string>
-    <string name="appearance_tool_fold_footer">기본적으로 켜져 있습니다. 관련된 사고와 도구 호출을 한 줄 요약으로 접고, 실행 중에는 최근 단계를 표시합니다. 끄면 각 블록을 개별로 표시합니다.</string>
+    <string name="appearance_tool_fold_title">실행 과정 간단히 표시</string>
+    <string name="appearance_tool_fold_footer">사고와 도구 세부 정보는 별도 패널에 표시하므로 실행이 끝나도 본문이 접히지 않습니다. 끄면 본문에 표시하고 플로팅 도구 표시줄을 사용할 수 있습니다.</string>
     <string name="appearance_thinking_show_chars_title">사고 글자 수 표시</string>
     <string name="appearance_thinking_show_duration_title">사고 소요 시간 표시</string>
     <string name="appearance_thinking_header_footer">사고 블록 제목 옆에 표시할 항목을 선택합니다. 글자 수는 추론 텍스트의 문자 수(9K ≒ 9천 자)입니다. 소요 시간은 이 대화를 열어 둔 동안에만 측정되며 다시 열면 표시되지 않습니다.</string>

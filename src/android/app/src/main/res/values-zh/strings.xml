@@ -258,8 +258,8 @@
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">思考头部</string>
     <string name="appearance_section_tool_steps">过程步骤</string>
-    <string name="appearance_tool_fold_title">折叠已完成的过程段</string>
-    <string name="appearance_tool_fold_footer">默认开启。相关思考和工具调用会收成一行摘要，运行中保留最近步骤。关闭后，每个区块单独显示。</string>
+    <string name="appearance_tool_fold_title">紧凑显示执行过程</string>
+    <string name="appearance_tool_fold_footer">思考与工具详情单独显示，完成时不会在正文中收起。关闭后恢复逐块显示，并可使用工具悬浮栏。</string>
     <string name="appearance_thinking_show_chars_title">显示思考字数</string>
     <string name="appearance_thinking_show_duration_title">显示思考用时</string>
     <string name="appearance_thinking_header_footer">选择思考块标题旁显示的内容。字数是推理文本的字符数（9K 约九千字符）；用时仅在本次会话内有效，重开对话后不再显示。</string>

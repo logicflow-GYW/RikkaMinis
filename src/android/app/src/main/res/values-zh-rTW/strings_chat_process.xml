@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_process_title">執行過程</string>
+    <string name="chat_process_running">正在執行 %1$d 個工具</string>
     <string name="chat_process_tools">已執行 %1$d 個工具</string>
     <string name="chat_process_tool_calls">%1$d 次工具呼叫</string>
     <string name="chat_process_failed">%1$d 個失敗</string>

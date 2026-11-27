@@ -93,14 +93,15 @@ import com.rikkaminis.app.ui.theme.ChatColors
 @Composable
 internal fun ToolDetailSheet(
     toolBlocks: List<AssistantBlock>,
-    initialIndex: Int,
+    selectedToolId: String,
+    onSelectTool: (String) -> Unit,
     onDismiss: () -> Unit,
     onOpenTerminalWithCommand: (String) -> Unit = {},
     onOpenBrowserForUrl: (String) -> Unit = {},
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var currentIdx by remember { mutableStateOf(initialIndex.coerceIn(0, toolBlocks.lastIndex.coerceAtLeast(0))) }
-    val block = toolBlocks.getOrNull(currentIdx) ?: return onDismiss()
+    val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }
+    val block = toolBlocks.getOrNull(currentIdx) ?: return
 
     val isLive = block.toolStatus == ToolBlockStatus.RUNNING ||
         block.toolStatus == ToolBlockStatus.STREAMING ||
@@ -1074,7 +1075,7 @@ internal fun ToolDetailSheet(
                 ) {
                     // Back button (iOS: backward.end.fill)
                     IconButton(
-                        onClick = { if (currentIdx > 0) currentIdx-- },
+                        onClick = { toolBlocks.getOrNull(currentIdx - 1)?.let { onSelectTool(it.id) } },
                         enabled = currentIdx > 0,
                         modifier = Modifier.size(32.dp),
                     ) {
@@ -1120,7 +1121,7 @@ internal fun ToolDetailSheet(
 
                     // Forward button (iOS: forward.end.fill)
                     IconButton(
-                        onClick = { if (currentIdx < toolBlocks.lastIndex) currentIdx++ },
+                        onClick = { toolBlocks.getOrNull(currentIdx + 1)?.let { onSelectTool(it.id) } },
                         enabled = currentIdx < toolBlocks.lastIndex,
                         modifier = Modifier.size(32.dp),
                     ) {
