@@ -4826,7 +4826,6 @@ fun ChatScreen(
                 chatRepository = chatRepository,
                 chatActions = chatActions,
                 isStreaming = isStreaming,
-                keepStopWithDraft = processFoldEnabled,
                 isNearBottom = isNearBottom,
                 onFollowEvent = { followState = dispatchFollow(sessionId, followState, it, listState, isUserDragging, isStreaming) },
                 onMoveToSession = onMoveToSession,

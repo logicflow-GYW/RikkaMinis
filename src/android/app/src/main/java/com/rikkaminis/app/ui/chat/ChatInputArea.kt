@@ -166,7 +166,6 @@ internal fun ChatInputArea(
     chatRepository: com.rikkaminis.app.data.repository.ChatRepository,
     chatActions: ChatActionState,
     isStreaming: Boolean,
-    keepStopWithDraft: Boolean = false,
     isNearBottom: androidx.compose.runtime.State<Boolean>,
     onFollowEvent: (FollowEvent) -> Unit,
     onMoveToSession: (String) -> Unit,
@@ -2595,10 +2594,6 @@ internal fun ChatInputArea(
                     // stayed dimmed over a composer the user could see was full.
                     val hasContent = canSwipeSendNow()
                     val showStop = isStreaming && !hasContent
-                    if (keepStopWithDraft && isStreaming && hasContent) {
-                        ComposerStopButton(onStop = { viewModel.cancelStream() })
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
                     if (showStop) {
                         ComposerStopButton(onStop = { viewModel.cancelStream() })
                     } else {

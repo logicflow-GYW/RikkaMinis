@@ -1137,11 +1137,20 @@ internal fun ToolDetailSheet(
     onOpenTerminalWithCommand: (String) -> Unit = {},
     onOpenBrowserForUrl: (String) -> Unit = {},
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        ToolDetailSheetContent(
-            toolBlocks, selectedToolId, onSelectTool, onDismiss,
-            onOpenTerminalWithCommand, onOpenBrowserForUrl,
-        )
+    // Match the original tool drawer: no second drag handle or extra top inset.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        dragHandle = null,
+        contentWindowInsets = { WindowInsets(0) },
+    ) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.85f)) {
+            ToolDetailSheetContent(
+                toolBlocks, selectedToolId, onSelectTool, onDismiss,
+                onOpenTerminalWithCommand, onOpenBrowserForUrl,
+            )
+        }
     }
 }
 

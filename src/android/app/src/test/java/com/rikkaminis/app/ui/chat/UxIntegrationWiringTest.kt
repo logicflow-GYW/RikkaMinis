@@ -197,24 +197,30 @@ class UxIntegrationWiringTest {
         assertTrue(screen.contains("onOpenProcess = { processMessageId = if (processMessageId == item.message.id) null else item.message.id }"))
         assertFalse(screen.contains("ChatProcessDetailHost("))
         val ui = source("ui/chat/ChatProcessUI.kt")
+        assertTrue(ui.contains("internal fun ChatProcessSheet("))
         val host = ui.substringAfter("internal fun ChatProcessSheet(")
-        assertTrue(host.contains("BackHandler(page !is ChatProcessPage.List, onBack = backToList)"))
-        assertTrue(host.contains("ChatProcessPage.Tool -> ProcessDrawer("))
-        assertTrue(host.contains("ToolDetailSheetContent("))
-        assertTrue(host.contains("is ChatProcessPage.Thinking -> ProcessDrawer("))
-        assertTrue(host.contains("ChatProcessThinkingReader(content = current.content)"))
-        // Every level is a drawer: scrim + rounded panel + drag handle.
-        val drawer = ui.substringAfter("private fun ProcessDrawer(").substringBefore("private fun ChatProcessList(")
-        assertTrue(drawer.contains("detectVerticalDragGestures("))
-        assertTrue(drawer.contains("RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)"))
-        assertTrue(drawer.contains("onClick = onDismiss"))
-        // Swipe-down works from anywhere, as a nested-scroll participant: a
-        // pointerInput detector on the body would fight the inner list.
-        assertTrue(drawer.contains(".nestedScroll(nestedScroll)"))
-        assertTrue(drawer.contains("override fun onPostScroll(consumed: Offset, available: Offset"))
-        assertTrue(drawer.contains("available.y > FLING_DISMISS_VELOCITY"))
-        // Below the threshold the panel springs back rather than snapping.
-        assertTrue(drawer.contains("settle.animateTo(0f, block = {"))
+            .substringBefore("private fun ChatProcessList(")
+        val detailSwitch = host.indexOf("when (val current = page)")
+        assertTrue(detailSwitch > 0)
+        val parent = host.substring(0, detailSwitch)
+        // The parent must be unconditionally mounted, BEFORE the detail switch.
+        // Changing this to replace the list destroys its scroll state and flashes chat.
+        assertTrue(parent.contains("StandardChatSheet("))
+        assertTrue(parent.contains("title = stringResource(R.string.chat_process_title)"))
+        assertTrue(parent.contains("onDismiss = onDismiss,"))
+        assertTrue(parent.contains("ChatProcessList("))
+        val details = host.substring(detailSwitch)
+        assertTrue(details.contains("ToolDetailSheet("))
+        assertTrue(details.contains("is ChatProcessPage.Thinking -> StandardChatSheet("))
+        assertEquals(2, Regex("onDismiss = backToList,").findAll(details).count())
+        assertFalse(details.contains("onDismiss = onDismiss,"))
+        assertTrue(details.contains("ChatProcessThinkingReader(content = current.content)"))
+        assertEquals(2, Regex("showClose = false,").findAll(host).count())
+        // Gestures and scrims belong to the existing native sheets. Reintroducing
+        // a handwritten swipe chain recreates the offscreen-panel/visible-scrim bug.
+        for (retired in listOf("ProcessDrawer", "NestedScrollConnection", "pointerInput", "dragOffset", "Animatable", "DialogProperties", "BackHandler")) {
+            assertFalse(retired, ui.contains(retired))
+        }
         // Reasoning row inside the drawer keeps the ORIGINAL card: tinted
         // background + hairline border + the existing duration/char-count
         // toggles. A bespoke row here is what the user rejected.
@@ -231,10 +237,9 @@ class UxIntegrationWiringTest {
         assertFalse(reader.contains("IconButton("))
         assertFalse(reader.contains("chat_process_copy_all"))
         assertFalse(reader.contains("ArrowBack"))
+        // The shared shell owns the one centred title; bodies add no second header.
+        assertFalse(Regex("\\bText\\(").containsMatchIn(reader))
         val list = ui.substringAfter("private fun ChatProcessList(")
-        // Title is centred and the right edge stays empty: the call/failure
-        // counts are on the transcript entry, not repeated in the drawer.
-        assertTrue(list.contains("textAlign = TextAlign.Center"))
         // No count anywhere in the drawer — not `status.failed`, and not a
         // recomputed one either: the first mutation probe (restoring
         // `${blocks.size} · ${chatProcessStatus(...).failed}`) slipped past a
@@ -249,9 +254,21 @@ class UxIntegrationWiringTest {
         assertFalse(ui.contains("ArrowBack"))
         val detail = source("ui/chat/ChatToolDetailUI.kt")
         assertTrue(detail.contains("val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }"))
-        assertTrue(screen.contains("keepStopWithDraft = processFoldEnabled,"))
+        val originalShell = detail.substringAfter("internal fun ToolDetailSheet(")
+            .substringBefore("internal fun extractShellCommand(")
+        assertTrue(originalShell.contains("skipPartiallyExpanded = true"))
+        assertTrue(originalShell.contains("dragHandle = null"))
+        assertTrue(originalShell.contains("contentWindowInsets = { WindowInsets(0) }"))
+        assertTrue(originalShell.contains("fillMaxHeight(0.85f)"))
+        assertFalse(screen.contains("keepStopWithDraft"))
         val input = source("ui/chat/ChatInputArea.kt")
-        assertTrue(input.contains("if (keepStopWithDraft && isStreaming && hasContent)"))
+        assertFalse(input.contains("keepStopWithDraft"))
+        val button = input.substringAfter("val hasContent = canSwipeSendNow()")
+            .substringBefore("SwipeToSendHint(")
+        assertTrue(button.contains("val showStop = isStreaming && !hasContent"))
+        assertEquals(1, Regex("ComposerStopButton\\(").findAll(button).count())
+        assertTrue(Regex("if \\(showStop\\) \\{\\s*ComposerStopButton").containsMatchIn(button))
+        assertTrue(button.contains("performSendOrEnqueue()"))
     }
 
     @Test fun `a header reopen starts at the top but drag does not restart the scroller`() {

@@ -1,25 +1,16 @@
 package com.rikkaminis.app.ui.chat
 
-import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -27,7 +18,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,40 +26,23 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.DecorativeSpinner
 import com.rikkaminis.app.ui.settings.thinkingCharCountVisibleEnabled
 import com.rikkaminis.app.ui.settings.thinkingDurationVisibleEnabled
 import com.rikkaminis.app.ui.theme.ChatColors
-import kotlin.math.roundToInt
-
-/** Downward fling speed that closes a drawer even if it has barely moved. */
-private const val FLING_DISMISS_VELOCITY = 900f
 
 @Composable
 private fun chatProcessLabel(status: ChatProcessStatus, isStreaming: Boolean): String {
@@ -160,15 +133,9 @@ internal sealed interface ChatProcessPage {
 }
 
 /**
- * Bottom drawer that holds the process list, and — stacked on top of it — the
- * tool output and the reasoning reader.
- *
- * Shape contract (user-aligned 2026-11-27):
- *  • A drawer, not a full-screen page: rounded top corners, a drag handle, and
- *    a scrim. Dragging the handle down past the threshold, tapping the scrim,
- *    or the system back gesture closes exactly ONE level.
- *  • No close button and no back arrow anywhere: the gesture IS the exit.
- *  • The list opens at the newest entry, not at the top.
+ * The process list stays mounted beneath native detail sheets. Dismissal,
+ * nested scrolling and swipe/back gestures belong to the existing sheets;
+ * this host only owns which detail is above the list.
  */
 @Composable
 internal fun ChatProcessSheet(
@@ -193,166 +160,43 @@ internal fun ChatProcessSheet(
         page = ChatProcessPage.List
         onClearTool()
     }
-    // One BackHandler for the whole stack: it pops one level, never both.
-    BackHandler(page !is ChatProcessPage.List, onBack = backToList)
-    Dialog(
-        // Deliberately page-aware, not `onDismiss`: a plain Dialog can swallow
-        // the back press and dismiss the whole window before the BackHandler
-        // inside it sees the event. Routing it through the same one-level pop
-        // makes the guarantee hold whichever of the two wins.
-        onDismissRequest = { if (page is ChatProcessPage.List) onDismiss() else backToList() },
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+
+    // Same shell as TokenUsageSheet. It is NOT inside the detail-page when:
+    // opening a detail must keep this window and its list scroll state alive.
+    StandardChatSheet(
+        title = stringResource(R.string.chat_process_title),
+        onDismiss = onDismiss,
+        showClose = false,
     ) {
-        Box(Modifier.fillMaxSize()) {
-            when (val current = page) {
-                ChatProcessPage.List -> ProcessDrawer(
-                    heightFraction = 0.88f,
-                    onDismiss = onDismiss,
-                ) {
-                    ChatProcessList(
-                        blocks = blocks,
-                        isStreaming = isStreaming,
-                        onOpenTool = { onSelectTool(it); page = ChatProcessPage.Tool },
-                        onOpenThinking = { page = ChatProcessPage.Thinking(it) },
-                        toolActions = toolActions,
-                    )
-                }
-                ChatProcessPage.Tool -> ProcessDrawer(
-                    heightFraction = 0.94f,
-                    onDismiss = backToList,
-                ) {
-                    ToolDetailSheetContent(
-                        toolBlocks = tools,
-                        selectedToolId = selectedToolId ?: "",
-                        onSelectTool = onSelectTool,
-                        onDismiss = onDismiss,
-                        onOpenTerminalWithCommand = onOpenTerminalWithCommand,
-                        onOpenBrowserForUrl = onOpenBrowserForUrl,
-                    )
-                }
-                is ChatProcessPage.Thinking -> ProcessDrawer(
-                    heightFraction = 0.94f,
-                    onDismiss = backToList,
-                ) {
-                    ChatProcessThinkingReader(content = current.content)
-                }
-            }
-        }
-    }
-}
-
-/**
- * Bottom sheet shell: scrim + rounded panel + drag handle.
- *
- * Swipe-down-to-dismiss works from ANYWHERE on the panel, not just the handle,
- * and it is implemented as a nested-scroll participant rather than a raw
- * `pointerInput` on the body: a pointerInput drag detector and the body's own
- * LazyColumn/verticalScroll would both claim the same pointers and fight. As a
- * nested-scroll parent the drawer only receives the delta the child did NOT
- * consume — i.e. exactly the over-scroll that happens when the list is already
- * at its top — so scrolling inside the sheet keeps working and dragging past
- * the top peels the sheet down. The handle keeps its own detector because a
- * sheet whose content is shorter than the panel has no scrollable child at all.
- */
-@Composable
-private fun ProcessDrawer(
-    heightFraction: Float,
-    onDismiss: () -> Unit,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    var dragOffset by remember { mutableStateOf(0f) }
-    val thresholdPx = with(LocalDensity.current) { 88.dp.toPx() }
-    val settle = remember { Animatable(0f) }
-    // The connection object is remembered across recompositions, so it must not
-    // capture a stale onDismiss: on the Tool page that callback is `backToList`,
-    // which is rebuilt every time the page state changes.
-    val dismissNow by rememberUpdatedState(onDismiss)
-    val nestedScroll = remember(thresholdPx) {
-        object : NestedScrollConnection {
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                // Dragging back up while the sheet is already displaced must
-                // move the SHEET, not the list — otherwise the panel stays
-                // half-open and the content scrolls underneath it.
-                if (available.y < 0f && dragOffset > 0f) {
-                    val consumed = (-available.y).coerceAtMost(dragOffset)
-                    dragOffset -= consumed
-                    return Offset(0f, -consumed)
-                }
-                return Offset.Zero
-            }
-
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (available.y <= 0f) return Offset.Zero
-                dragOffset = (dragOffset + available.y).coerceAtLeast(0f)
-                return Offset(0f, available.y)
-            }
-
-            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
-                if (dragOffset <= 0f) return Velocity.Zero
-                if (dragOffset > thresholdPx || available.y > FLING_DISMISS_VELOCITY) {
-                    dismissNow()
-                } else {
-                    // Below the threshold: spring back instead of snapping, so
-                    // a short drag reads as "released", not as a jump.
-                    settle.snapTo(dragOffset)
-                    // `block` is the 4th parameter of animateTo; passing the
-                    // lambda positionally would land in animationSpec and not
-                    // compile.
-                    settle.animateTo(0f, block = { dragOffset = value })
-                    dragOffset = 0f
-                }
-                return Velocity.Zero
-            }
-        }
-    }
-    Box(Modifier.fillMaxSize()) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.5f))
-                .clickable(role = Role.Button, onClick = onDismiss),
+        ChatProcessList(
+            blocks = blocks,
+            isStreaming = isStreaming,
+            onOpenTool = { onSelectTool(it); page = ChatProcessPage.Tool },
+            onOpenThinking = { page = ChatProcessPage.Thinking(it) },
+            toolActions = toolActions,
         )
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .fillMaxHeight(heightFraction)
-                .offset { IntOffset(0, dragOffset.roundToInt()) }
-                .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
-                .background(ChatColors.secondaryBg)
-                .nestedScroll(nestedScroll)
-                .systemBarsPadding(),
+    }
+
+    // A separate native sheet is stacked ABOVE the still-mounted parent.
+    // Its completed dismiss only removes this detail, never the process list.
+    when (val current = page) {
+        ChatProcessPage.List -> Unit
+        ChatProcessPage.Tool -> if (selected) {
+            ToolDetailSheet(
+                toolBlocks = tools,
+                selectedToolId = selectedToolId ?: "",
+                onSelectTool = onSelectTool,
+                onDismiss = backToList,
+                onOpenTerminalWithCommand = onOpenTerminalWithCommand,
+                onOpenBrowserForUrl = onOpenBrowserForUrl,
+            )
+        }
+        is ChatProcessPage.Thinking -> StandardChatSheet(
+            title = stringResource(R.string.chat_deep_thinking),
+            onDismiss = backToList,
+            showClose = false,
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(24.dp)
-                    .pointerInput(Unit) {
-                        detectVerticalDragGestures(
-                            onDragEnd = {
-                                if (dragOffset > thresholdPx) dismissNow()
-                                dragOffset = 0f
-                            },
-                            onDragCancel = { dragOffset = 0f },
-                            onVerticalDrag = { _, dy ->
-                                dragOffset = (dragOffset + dy).coerceAtLeast(0f)
-                            },
-                        )
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(
-                    Modifier
-                        .size(width = 38.dp, height = 4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(MaterialTheme.colorScheme.outlineVariant),
-                )
-            }
-            // Bounded height for the page: a scrollable child measured against
-            // an infinite max height (which is what an unweighted Column gives
-            // it) crashes the way the nested list did before. weight(1f) hands
-            // the page exactly the leftover space instead.
-            Column(Modifier.fillMaxWidth().weight(1f)) { content() }
+            ChatProcessThinkingReader(content = current.content)
         }
     }
 }
@@ -364,19 +208,7 @@ private fun ChatProcessList(
     onOpenTool: (String) -> Unit,
     onOpenThinking: (String) -> Unit,
     toolActions: (AssistantBlock) -> ToolPillActions?,
-) = Column(Modifier.fillMaxSize()) {
-    // Centred title, and nothing on the right edge: the call/failure counts
-    // already live on the transcript entry, repeating them here would say the
-    // same thing twice in two places.
-    Box(Modifier.fillMaxWidth().padding(bottom = 4.dp), contentAlignment = Alignment.Center) {
-        Text(
-            stringResource(R.string.chat_process_title),
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-        )
-    }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+) {
     // Only the TRAILING block of a live turn is "live" — the transcript's
     // ThinkingBlock uses the same rule. Without it every reasoning row of a
     // streaming turn would spin at once.
@@ -391,10 +223,8 @@ private fun ChatProcessList(
     }
     LazyColumn(
         state = listState,
-        // weight(1f), not fillMaxSize: a non-weighted child is measured with
-        // the parent's FULL height, so the list would run the title's height
-        // past the bottom edge of the drawer.
-        modifier = Modifier.fillMaxWidth().weight(1f),
+        // The standard sheet already owns its header and bounds this body.
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 20.dp),
     ) {
         items(blocks, key = { "${it.kind}:${it.id}" }) { block ->
@@ -506,24 +336,11 @@ private fun ProcessThinkingRow(block: AssistantBlock, isLive: Boolean, onClick: 
     }
 }
 
-/**
- * Reasoning reader. Title only — no back arrow (the drawer gesture goes back
- * one level) and no copy button (long-press selection is the platform
- * behaviour, and a second affordance for it is noise).
- */
+/** Selectable reasoning body; the standard sheet owns the title and gestures. */
 @Composable
-internal fun ChatProcessThinkingReader(content: String) = Column(Modifier.fillMaxSize()) {
-    Box(Modifier.fillMaxWidth().padding(bottom = 4.dp), contentAlignment = Alignment.Center) {
-        Text(
-            stringResource(R.string.chat_deep_thinking),
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-        )
-    }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+internal fun ChatProcessThinkingReader(content: String) {
     Box(
-        Modifier.fillMaxWidth().weight(1f)
+        Modifier.fillMaxSize()
             .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 24.dp),
     ) {
         ChatProcessThinkingText(content)
