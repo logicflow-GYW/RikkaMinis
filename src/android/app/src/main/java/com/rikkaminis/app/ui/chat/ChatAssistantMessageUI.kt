@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -111,56 +112,29 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.sp
-import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.ui.theme.ChatColors
 import com.rikkaminis.app.ui.components.MinisTextButton
 
 @Composable
 internal fun AssistantHeader() {
-    // [T-soul-md] Identity header = locked ✨ sparkle gradient icon +
-    // SOUL.md-driven `name`. The emoji-customization field was removed,
-    // so we no longer branch on `SoulMetadata.emoji`; the icon stays the
-    // canonical sparkle (iOS: sparkles SF Symbol + gradient). Only the
-    // `name` field is user-customizable — defaults to the app name
-    // ("RikkaMinis", see SoulMetadata.DEFAULT.name) when
-    // SOUL.md is missing the field or set to the default value.
     val soulMeta by com.rikkaminis.app.agent.SoulStore.cachedMetadata.collectAsState()
     val displayName = soulMeta.name.ifBlank { com.rikkaminis.app.agent.SoulMetadata.DEFAULT.name }
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            // [T-android-user-assistant-spacing-16] top=10 so the
-            // User→Assistant boundary reads ~16dp: user-bubble bottom(4) +
-            // LazyColumn spacedBy(2) + this top(10) = 16. The header→body gap
-            // inside the turn is unaffected (that's this row's bottom=2).
-            .padding(top = 10.dp, bottom = 2.dp),
+        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
     ) {
-        val sparkleGradient = Brush.linearGradient(
-            colors = listOf(SparkleColor1, SparkleColor2),
-        )
+        val sparkleGradient = Brush.linearGradient(colors = listOf(SparkleColor1, SparkleColor2))
         Icon(
-            imageVector = Icons.Filled.AutoAwesome,
+            imageVector = Icons.Default.AutoAwesome,
             contentDescription = null,
             tint = Color.White,
-            modifier = Modifier
-                .size(18.dp)
+            modifier = Modifier.size(18.dp)
                 .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                .drawWithContent {
-                    drawContent()
-                    drawRect(brush = sparkleGradient, blendMode = BlendMode.SrcIn)
-                },
+                .drawWithContent { drawContent(); drawRect(brush = sparkleGradient, blendMode = BlendMode.SrcIn) },
         )
         Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = displayName,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
+        Text(text = displayName, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -246,66 +220,16 @@ internal fun AssistantMessageView(
     // yet; drives the TypingIndicator elapsed counter. Default 0 keeps every
     // other caller (previews, legacy paths) rendering the plain indicator.
     awaitingResponseSinceMs: Long = 0L,
-    // NOTE: there is deliberately no "is the user scrolling / browsing history"
-    // input here any more. It used to postpone the first automatic fold, which
-    // meant scrolling through an unfolded transcript opened every segment —
-    // the opposite of what it was meant to protect. Fold state now comes from
-    // the block list plus explicit taps only.
-    // The live preference is required: callers must not silently bypass OFF.
+    // This is the existing user preference, not a live/settled state transition.
     processFoldEnabled: Boolean,
-    // Bumped by the "back to newest" FAB. Closing the open segments is part of
-    // WHAT THAT BUTTON MEANS ("show me the newest thing"), not a second feature
-    // hung on it: the tap already moves the viewport by a screen or more, so the
-    // collapse costs nothing the reader can see.
-    collapseAllEpoch: Int = 0,
+    onOpenProcess: (() -> Unit)? = null,
+    queueWaitingAhead: Int,
 ) {
-    // Fold state = the plan plus explicit taps, nothing else. The previous
-    // version also tracked "already auto-folded once" and wrote it only while
-    // the list was NOT being scrolled, so scrolling a transcript that had never
-    // been folded re-opened every segment — the message blew open exactly when
-    // the user was trying to read it. That bookkeeping is gone.
-    var foldChoices by rememberSaveable(message.id) { mutableStateOf(hashMapOf<String, Boolean>()) }
-    // The epoch `foldChoices` was recorded under. Saved with the choices so a
-    // restored row cannot resurrect a choice that a later "close everything"
-    // has already retired (both halves survive together or neither does).
-    var foldChoicesEpoch by rememberSaveable(message.id) { mutableStateOf(0) }
-    // Choices in force right now. A "close everything" (the back-to-newest FAB)
-    // bumps [collapseAllEpoch]; every choice recorded under an older epoch is
-    // retired — including rows that are not composed at that moment, which is
-    // the case this is here for: an effect inside a row never runs for the rows
-    // scrolled off screen, and those are exactly the ones the reader left open
-    // further up.
-    val activeChoices = ChatProcessFoldPlanner.liveChoices(foldChoices, foldChoicesEpoch, collapseAllEpoch)
-    // Record a tap under the CURRENT epoch, so it survives later composition
-    // and is retired only by a later "close everything".
-    fun writeChoices(next: Map<String, Boolean>) {
-        foldChoices = HashMap(next)
-        foldChoicesEpoch = collapseAllEpoch
-    }
-    val foldSegments = remember(message.toolBlocks, message.isStreaming, processFoldEnabled) {
-        ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, processFoldEnabled)
-    }
-    fun segmentMode(segment: ChatProcessFoldPlanner.Segment): ChatProcessFoldPlanner.Mode =
-        ChatProcessFoldPlanner.mode(segment.key, activeChoices, segment.liveTail)
-    val segmentByIndex = buildMap {
-        foldSegments.forEach { segment -> segment.memberIndices.forEach { put(it, segment) } }
-    }
-
-    // ── [auto-fold] an OPEN segment is never closed by a scroll ──────────────
-    // There used to be a "fold it once it leaves the top of the viewport" rule
-    // here, driven by a zero-height probe. Two reasons it is gone:
-    //  1. It measured with `boundsInWindow()`, which returns Rect.Zero for a
-    //     zero-height node (AndroidX LayoutCoordinates.kt), so the segment's
-    //     bottom read as 0 and "has left the top" was true at all times. A
-    //     segment the reader opened folded itself one frame later — a manual
-    //     expand was impossible to keep, on every message but the live one.
-    //  2. Its only possible target was a FULL segment, i.e. exactly the one the
-    //     reader had just opened (a settled segment is COLLAPSED by default and
-    //     a running one shows TAIL). So the rule could only ever undo intent.
-    // Folding stays what the user asked for: a settled segment arrives
-    // collapsed, a tap opens or closes it, and the back-to-newest button closes
-    // what was left open — see `activeChoices` above for why that comparison,
-    // and not an effect, is what makes the button reach rows off screen.
+    val compactProcess = processFoldEnabled && message.role == "assistant"
+    val showThinking = message.canShowProcessThinking()
+    val processStatus = if (compactProcess) {
+        remember(message.toolBlocks, showThinking) { chatProcessStatus(message.toolBlocks, showThinking) }
+    } else null
 
     Column(
         modifier = Modifier
@@ -328,62 +252,34 @@ internal fun AssistantMessageView(
         // self-contained 44dp card with its own padding, so nothing collapses.
         if (message.role != "system") {
             AssistantHeader()
+            if (compactProcess && processStatus != null && (processStatus.hasDetails || message.isStreaming) && onOpenProcess != null) {
+                ChatProcessEntry(
+                    status = processStatus,
+                    isStreaming = message.isStreaming,
+                    showWait = message.isAwaitingModelResponse,
+                    queueWaitingAhead = queueWaitingAhead,
+                    awaitingResponseSinceMs = awaitingResponseSinceMs,
+                    onToggle = onOpenProcess,
+                )
+            }
         }
 
-        // Render blocks in original order — text, thinking, and tool calls interleaved
-        // exactly as they arrived in the stream (each assistant turn may contain multiple
-        // text ↔ tool_use transitions, which must be preserved for coherent reading).
-        val toolPillBlocks = message.toolBlocks.filter { it.kind == "tool_use" }
-        val lastThinkingId = message.toolBlocks.lastOrNull { it.kind == "thinking" }?.id
-        // [T-android-thinking-auto-collapse] Mirror the FlatChatItem path's
-        // `isLastBlockOverall` so the legacy renderer's ThinkingBlock also
-        // flips !isStreaming when a sibling block arrives (id of the last
-        // block of ANY kind in the message). See ChatFlatItems builder.
+        // Text and notices keep their original keys and ordering. Unlike a
+        // folding planner, this projection never looks ahead to later tools.
+        val toolPillBlocks = if (compactProcess) emptyList() else message.toolBlocks.filter { it.kind == "tool_use" }
+        val lastThinkingId = if (compactProcess) null else message.toolBlocks.lastOrNull { it.kind == "thinking" }?.id
         val lastBlockIdOverall = message.toolBlocks.lastOrNull()?.id
-        // Backward compat: if there are no text blocks but message.content is non-empty
-        // (e.g. legacy sessions saved before the text-block migration), fall back to
-        // rendering message.content after all tool blocks.
-        val hasAnyTextBlock = message.toolBlocks.any { it.kind == "text" }
+        val hasAnyTextBlock = message.toolBlocks.any { it.kind == "text" && it.content.isNotEmpty() }
         val lastTextBlockIndex = message.toolBlocks.indexOfLast { it.kind == "text" }
         message.toolBlocks.forEachIndexed { index, block ->
-            val segment = segmentByIndex[index]
-            if (segment != null) {
-                val mode = segmentMode(segment)
-                if (segment.range.first == index) {
-                    key("process:${message.id}:${segment.key}") {
-                        ChatProcessSummary(
-                            segment = segment,
-                            mode = mode,
-                            onToggle = {
-                                // A tap flips the CURRENT visual state. Closing a
-                                // running segment clears the explicit choice so the
-                                // tail comes back instead of freezing the row shut.
-                                val next = ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)
-                                writeChoices(
-                                    HashMap(activeChoices).apply {
-                                        if (next == null) remove(segment.key) else put(segment.key, next)
-                                    },
-                                )
-                            },
-                        )
-                    }
-                }
-                // COLLAPSED replaces the whole span with the row above; TAIL keeps
-                // only the newest steps; FULL keeps everything (the user opened it).
-                if (mode == ChatProcessFoldPlanner.Mode.COLLAPSED) return@forEachIndexed
-                if (mode == ChatProcessFoldPlanner.Mode.TAIL && index < segment.tailStart) {
-                    return@forEachIndexed
-                }
-            }
+            if (compactProcess && block.isChatProcessBlock()) return@forEachIndexed
             // Stable block scope, independent of added summaries and appended tokens.
             key(message.id, block.id) {
             when (block.kind) {
                 "thinking" -> {
                     // The live aggregate path must use the same per-message thinking-level
                     // gate as restored/legacy rows; never resurrect disabled reasoning.
-                    val effectiveLevel = message.thinkingLevel
-                        ?: com.rikkaminis.app.data.model.ThinkingLevel.MEDIUM
-                    if (effectiveLevel.isEnabled) {
+                    if (showThinking) {
                         // [T-android-thinking-auto-collapse] Stream signal
                         // requires THIS block to be the trailing block of
                         // any kind, not just the last thinking — see
@@ -485,104 +381,6 @@ internal fun AssistantMessageView(
             InlineErrorBanner(error = message.error, errorDetail = message.errorDetail, onRetry = onRetry)
         }
     }
-}
-
-/**
- * The process row. Plain text on one line — no card, no pill, no background: a
- * filled container around a line of meta text was itself part of what made the
- * old row read as a placeholder instead of a record of what happened.
- *
- * The row is also the live progress line while a turn runs: its counts grow as
- * calls finish, which is what keeps the transcript feeling active without any
- * height animation (an assistant message is ONE LazyColumn item, so a height
- * animation re-measures the whole row every frame — see ThinkingReadPlanner).
- */
-@Composable
-private fun ChatProcessSummary(
-    segment: ChatProcessFoldPlanner.Segment,
-    mode: ChatProcessFoldPlanner.Mode,
-    onToggle: () -> Unit,
-) {
-    val expansionLabel = stringResource(
-        if (mode == ChatProcessFoldPlanner.Mode.COLLAPSED) {
-            R.string.chat_process_collapsed
-        } else {
-            R.string.chat_process_expanded
-        },
-    )
-    // Counts only: no title, no duration.
-    //  - The title came from the segment's own last reasoning (else the last
-    //    call's label) — the final second of a run that may hold eighty calls,
-    //    and usually a headless fragment ("按真实diff行号修正…"). It described
-    //    nothing the row's reader wanted.
-    //  - The duration was the SUM of per-call durations (parallel calls counted
-    //    twice, not wall time) and is not persisted with the tool_use part, so
-    //    it vanished on reload and the same segment changed shape across a
-    //    restart.
-    val toolsText = stringResource(
-        if (segment.allCallsSucceeded) R.string.chat_process_tools else R.string.chat_process_tool_calls,
-        segment.toolCount,
-    )
-    val failedText = if (segment.failedCount > 0) {
-        stringResource(R.string.chat_process_failed, segment.failedCount)
-    } else {
-        null
-    }
-    val cancelledText = if (segment.cancelledCount > 0) {
-        stringResource(R.string.chat_process_cancelled, segment.cancelledCount)
-    } else {
-        null
-    }
-    val deduplicatedText = if (segment.deduplicatedCount > 0) {
-        stringResource(R.string.chat_process_deduplicated, segment.deduplicatedCount)
-    } else {
-        null
-    }
-    val neutral = MaterialTheme.colorScheme.onSurfaceVariant
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
-            .semantics { stateDescription = expansionLabel }
-            .clickable(role = Role.Button, onClick = onToggle)
-            .padding(vertical = 6.dp),
-    ) {
-        Icon(
-            if (mode == ChatProcessFoldPlanner.Mode.COLLAPSED) {
-                Icons.Default.KeyboardArrowRight
-            } else {
-                Icons.Default.KeyboardArrowDown
-            },
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-            modifier = Modifier.size(14.dp),
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text = buildAnnotatedString {
-                withStyle(SpanStyle(color = neutral)) { append(toolsText) }
-                // Failures are the one detail worth colouring: a collapsed
-                // segment holding them must say so from the row alone. The rest
-                // stays neutral — a whole red line shouted for one bad call.
-                appendMetaPart(failedText, ToolErrorColor, neutral)
-                appendMetaPart(cancelledText, neutral, neutral)
-                appendMetaPart(deduplicatedText, neutral, neutral)
-            },
-            fontSize = 12.5.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-/** Appends " · <text>" to a summary row, or nothing when [text] is null. */
-private fun androidx.compose.ui.text.AnnotatedString.Builder.appendMetaPart(
-    text: String?,
-    color: Color,
-    neutral: Color,
-) {
-    if (text == null) return
-    withStyle(SpanStyle(color = neutral.copy(alpha = 0.7f))) { append(" · ") }
-    withStyle(SpanStyle(color = color)) { append(text) }
 }
 
 /**
@@ -1545,7 +1343,6 @@ internal fun ThinkingBlock(
     }
 }
 
-/** Full-content snapshot: split off-main once per explicit opening; lay out only visible chunks. */
 @Composable
 private fun ThinkingFullContentDialog(content: String, onDismiss: () -> Unit) {
     val textColor = MaterialTheme.colorScheme.onSurface
@@ -1632,8 +1429,47 @@ private fun ThinkingFullContentDialog(content: String, onDismiss: () -> Unit) {
     }
 }
 
+/** Lazy, selectable reasoning body shared by the compact process reader. */
+@Composable
+internal fun ChatProcessThinkingText(content: String) {
+    val textColor = MaterialTheme.colorScheme.onSurface
+    val snapshot = content
+    var chunks by remember(content) { mutableStateOf<List<IntRange>?>(null) }
+    LaunchedEffect(content) {
+        chunks = withContext(Dispatchers.Default) { ThinkingReadPlanner.chunks(content) }
+    }
+    val ranges = chunks
+    if (ranges == null) {
+        DecorativeSpinner(color = textColor, modifier = Modifier.padding(24.dp).size(40.dp))
+    } else {
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(count = ranges.size, key = { ranges[it].first }) { index ->
+                val range = ranges[index]
+                val snapshot = remember(snapshot, range) { snapshot.substring(range.first, range.last + 1) }
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        android.widget.TextView(ctx).apply {
+                            textSize = 14f
+                            setTextColor(textColor.toArgb())
+                            setTextIsSelectable(true)
+                            text = snapshot
+                        }
+                    },
+                    update = { textView ->
+                        textView.setTextColor(textColor.toArgb())
+                        if (shouldSyncFullContentText(textView.text, snapshot)) {
+                            textView.text = snapshot
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
 /** A URI clipboard streams the complete UTF-8 file instead of sending MBs through Binder. */
-private suspend fun copyThinkingFullContent(context: android.content.Context, content: String) {
+internal suspend fun copyThinkingFullContent(context: android.content.Context, content: String) {
     val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
     val label = context.getString(R.string.chat_deep_thinking)
     if (ThinkingReadPlanner.canCopyAsText(content.length)) {

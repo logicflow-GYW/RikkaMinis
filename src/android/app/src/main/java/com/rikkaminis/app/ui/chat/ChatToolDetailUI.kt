@@ -91,33 +91,24 @@ import com.rikkaminis.app.ui.theme.ChatColors
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ToolDetailSheet(
+internal fun ToolDetailSheetContent(
     toolBlocks: List<AssistantBlock>,
-    initialIndex: Int,
+    selectedToolId: String,
+    onSelectTool: (String) -> Unit,
     onDismiss: () -> Unit,
     onOpenTerminalWithCommand: (String) -> Unit = {},
     onOpenBrowserForUrl: (String) -> Unit = {},
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var currentIdx by remember { mutableStateOf(initialIndex.coerceIn(0, toolBlocks.lastIndex.coerceAtLeast(0))) }
-    val block = toolBlocks.getOrNull(currentIdx) ?: return onDismiss()
+    val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }
+    val block = toolBlocks.getOrNull(currentIdx) ?: return
 
     val isLive = block.toolStatus == ToolBlockStatus.RUNNING ||
         block.toolStatus == ToolBlockStatus.STREAMING ||
         block.toolStatus == ToolBlockStatus.PENDING
     val toolAccent = toolAccentColor(block.toolName)
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        dragHandle = null,
-        contentWindowInsets = { WindowInsets(0) },
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.85f)
-                .background(ChatColors.secondaryBg),
+    Column(
+            modifier = Modifier.fillMaxSize().background(ChatColors.secondaryBg),
         ) {
             // ── Top Nav Bar ("Minis Computer" + action button) ──
             Row(
@@ -1074,7 +1065,7 @@ internal fun ToolDetailSheet(
                 ) {
                     // Back button (iOS: backward.end.fill)
                     IconButton(
-                        onClick = { if (currentIdx > 0) currentIdx-- },
+                        onClick = { toolBlocks.getOrNull(currentIdx - 1)?.let { onSelectTool(it.id) } },
                         enabled = currentIdx > 0,
                         modifier = Modifier.size(32.dp),
                     ) {
@@ -1120,7 +1111,7 @@ internal fun ToolDetailSheet(
 
                     // Forward button (iOS: forward.end.fill)
                     IconButton(
-                        onClick = { if (currentIdx < toolBlocks.lastIndex) currentIdx++ },
+                        onClick = { toolBlocks.getOrNull(currentIdx + 1)?.let { onSelectTool(it.id) } },
                         enabled = currentIdx < toolBlocks.lastIndex,
                         modifier = Modifier.size(32.dp),
                     ) {
@@ -1133,6 +1124,32 @@ internal fun ToolDetailSheet(
                     }
                 }
             }
+        }
+    }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ToolDetailSheet(
+    toolBlocks: List<AssistantBlock>,
+    selectedToolId: String,
+    onSelectTool: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onOpenTerminalWithCommand: (String) -> Unit = {},
+    onOpenBrowserForUrl: (String) -> Unit = {},
+) {
+    // Match the original tool drawer: no second drag handle or extra top inset.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        dragHandle = null,
+        contentWindowInsets = { WindowInsets(0) },
+    ) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.85f)) {
+            ToolDetailSheetContent(
+                toolBlocks, selectedToolId, onSelectTool, onDismiss,
+                onOpenTerminalWithCommand, onOpenBrowserForUrl,
+            )
         }
     }
 }

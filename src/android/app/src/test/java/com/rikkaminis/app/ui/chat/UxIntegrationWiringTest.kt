@@ -46,36 +46,38 @@ class UxIntegrationWiringTest {
         error("production resource not found: $relative")
     }
 
-    @Test fun `scroll position never reaches the fold decision`() {
+    @Test fun `compact display is a projection not a scroll or settlement decision`() {
         val screen = source("ui/chat/ChatScreen.kt")
-        val aggregate = screen.substringAfter("is FlatChatItem.AssistantMessageItem -> {")
-        assertTrue(aggregate.contains("AssistantMessageView("))
-        // The browsing/drag signal used to be passed in and expanded every
-        // not-yet-folded segment while the user scrolled. It must not come back.
-        assertFalse(aggregate.contains("isBrowsingHistory"))
+        val row = screen.substringAfter("is FlatChatItem.AssistantMessageItem -> {")
+        assertTrue(row.contains("AssistantMessageView("))
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val view = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
+        val view = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("internal fun BoundsTrackedBlock(")
+        assertTrue(view.contains("val compactProcess = processFoldEnabled && message.role == \"assistant\""))
+        assertFalse(view.contains("ChatProcessFoldPlanner"))
         assertFalse(view.contains("isBrowsingHistory"))
-        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        val mode = planner.substringAfter("fun mode(")
-        assertFalse(mode.contains("browsing"))
-        assertFalse(mode.contains("scroll"))
+        assertFalse(view.contains("requestScrollToItem("))
+        assertFalse(view.contains("onFoldAnchor"))
+        assertFalse(screen.contains("collapseAllEpoch"))
     }
 
-    @Test fun `only a live segment keeps its tail open`() {
-        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        assertTrue(planner.contains("null -> if (liveTail) Mode.TAIL else Mode.COLLAPSED"))
-        assertFalse(planner.contains("openByDefault"))
-    }
-
-    @Test fun `the summary row is plain text with no filled container`() {
+    @Test fun `process status is a sibling below the identity rather than a header column`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val row = ui.substringAfter("private fun ChatProcessSummary(").substringBefore("internal fun BoundsTrackedBlock(")
-        assertFalse(row.contains(".background("))
-        assertFalse(row.contains("RoundedCornerShape"))
-        assertTrue(row.contains("buildAnnotatedString"))
-        // No second "hidden prefix" row: the summary line IS that line.
-        assertFalse(ui.contains("ChatProcessHiddenPrefix"))
+        val render = ui.substringAfter("if (message.role != \"system\") {").substringBefore("// Text and notices")
+        assertTrue(render.contains("AssistantHeader()\n"))
+        assertTrue(render.indexOf("ChatProcessEntry(") > render.indexOf("AssistantHeader()"))
+        assertFalse(render.contains("isExpanded ="))
+        // The status row is a bare line of text: no container, no chevron.
+        // It lives in ChatProcessUI.kt, so read that file — substringAfter on
+        // the wrong source silently returns the WHOLE file and every
+        // "contains" assertion then passes/fails for unrelated reasons.
+        val processUi = source("ui/chat/ChatProcessUI.kt")
+        assertTrue(processUi.contains("internal fun ChatProcessEntry("))
+        val entry = processUi.substringAfter("internal fun ChatProcessEntry(")
+            .substringBefore("internal sealed interface ChatProcessPage")
+        assertTrue(entry.contains("onToggle"))
+        assertFalse(entry.contains(".background("))
+        assertFalse(entry.contains("TextButton("))
+        assertFalse(entry.contains("KeyboardArrowRight"))
     }
 
     @Test fun `tool shimmer is an isolated sibling and never rerecords static content`() {
@@ -99,7 +101,7 @@ class UxIntegrationWiringTest {
 
     @Test fun `shared spinners preserve progress semantics and full viewer dimensions`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        assertEquals(3, Regex("DecorativeSpinner\\(").findAll(ui).count())
+        assertEquals(4, Regex("DecorativeSpinner\\(").findAll(ui).count())
         assertFalse(ui.contains("CircularProgressIndicator("))
         assertTrue(ui.contains("DecorativeSpinner(color = textColor, modifier = Modifier.padding(24.dp).size(40.dp))"))
         val decorative = source("ui/components/DecorativeAnimation.kt")
@@ -127,10 +129,7 @@ class UxIntegrationWiringTest {
     @Test fun `process folding defaults to on without overriding a saved choice`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         assertTrue(ui.contains("processFoldEnabled: Boolean,"))
-        assertTrue(ui.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming, processFoldEnabled)"))
-        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        assertTrue(planner.contains("enabled: Boolean): List<Segment>"))
-        assertTrue(planner.contains("if (!enabled"))
+        assertTrue(ui.contains("if (compactProcess && block.isChatProcessBlock()) return@forEachIndexed"))
         val settings = source("ui/settings/AppearanceScreen.kt")
         assertTrue(settings.contains("const val KEY_TOOL_FOLD_ENABLED = \"chat.toolFoldEnabled\""))
         assertTrue(settings.contains("const val DEFAULT_TOOL_FOLD_ENABLED = true"))
@@ -149,18 +148,23 @@ class UxIntegrationWiringTest {
         assertTrue(screen.contains("processFoldEnabled = processFoldEnabled,"))
     }
 
-    @Test fun `aggregate still consumes exact segment members and original tool callbacks`() {
+    @Test fun `both modes preserve text ordering and the original tool actions`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val aggregate = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
-        assertTrue(aggregate.contains("ChatProcessFoldPlanner.plan(message.toolBlocks, message.isStreaming"))
-        assertTrue(aggregate.contains("segment.memberIndices.forEach { put(it, segment) }"))
-        assertTrue(aggregate.contains("if (segment != null)"))
-        assertTrue(aggregate.contains("return@forEachIndexed"))
+        val aggregate = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("internal fun BoundsTrackedBlock(")
+        val loop = aggregate.indexOf("message.toolBlocks.forEachIndexed")
+        val guard = aggregate.indexOf("if (compactProcess && block.isChatProcessBlock()) return@forEachIndexed")
+        val keyedBlock = aggregate.indexOf("key(message.id, block.id)")
+        assertTrue(loop >= 0 && guard > loop && keyedBlock > guard)
+        assertTrue(aggregate.contains("FallbackInfoBlock(block, onRevert = onRevert)"))
+        assertTrue(aggregate.contains("InlineErrorBanner(error = message.error"))
+        assertTrue(aggregate.contains("if (!hasAnyTextBlock && message.content.isNotEmpty())"))
         assertTrue(aggregate.contains("val actions = toolPillActions(block)"))
-        assertTrue(aggregate.contains("key(message.id, block.id)"))
+        val screen = source("ui/chat/ChatScreen.kt")
+        assertTrue(screen.contains("toolPillActions = { block -> processToolActions(item.message, block) }"))
+        assertTrue(screen.contains("toolActions = { block ->\n                                processToolActions(processMessage, block)"))
     }
 
-    @Test fun `reasoning keeps its card whether or not it sits inside a segment`() {
+    @Test fun `detailed mode keeps the original reasoning card`() {
         // Regression (2026-11-26 user report: "启动那个折叠的，思考胶囊就变回原版
         // 没有背景了"). The segment renderer used to pass inProcessSegment=true and
         // strip the card, so turning folding ON silently changed the look of
@@ -168,76 +172,103 @@ class UxIntegrationWiringTest {
         // ORDERING purposes only — its card is presentation the user already had.
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         assertFalse(ui.contains("inProcessSegment"))
-        val thinking = ui.substringAfter("internal fun ThinkingBlock(").substringBefore("private fun ChatProcessSummary(")
+        val thinking = ui.substringAfter("internal fun ThinkingBlock(").substringBefore("internal fun ChatProcessThinkingText(")
         assertTrue(thinking.contains(".background(thinkingBlue.copy(alpha = 0.06f), RoundedCornerShape(12.dp))"))
         assertTrue(thinking.contains(".border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), RoundedCornerShape(12.dp))"))
         // The card must not be behind a condition that a fold mode can flip.
         assertFalse(thinking.contains("if (segment"))
     }
 
-    @Test fun `closing a running segment returns to its tail instead of freezing shut`() {
-        // Regression (2026-11-26 user report: "点开折叠再收回去，留下的尾巴就不见
-        // 了"). The tap handler wrote an explicit `false`, which outranks the live
-        // default forever; only a settled segment has a collapsed state worth
-        // remembering, so the running one must clear its choice instead.
-        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        assertTrue(planner.contains("fun nextChoice(current: Mode, liveTail: Boolean): Boolean?"))
-        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val aggregate = ui.substringAfter("internal fun AssistantMessageView(").substringBefore("private fun ChatProcessSummary(")
-        assertTrue(aggregate.contains("ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)"))
-        assertTrue(aggregate.contains("if (next == null) remove(segment.key) else put(segment.key, next)"))
-        // The old shape hard-wrote the choice and lost the tail.
-        assertFalse(aggregate.contains("Mode.COLLAPSED -> true"))
+    @Test fun `legacy floating bar and its space share one decision`() {
+        val screen = source("ui/chat/ChatScreen.kt")
+        assertTrue(screen.contains("val hasFloatingTools = !processOpen && showsLegacyToolBar(processFoldEnabled, toolStatusBarEnabled, legacyToolBlocks.isNotEmpty())"))
+        assertTrue(screen.contains("val bottomReserve = if (hasFloatingTools) 79.dp else 20.dp"))
+        assertTrue(Regex("if \\(hasFloatingTools && !processOpen\\) \\{[\\s\\S]*?FloatingToolStatusBar\\(").containsMatchIn(screen))
+        assertTrue(screen.contains("val upBaseBottom = if (hasFloatingTools)"))
+        assertTrue(screen.contains("val fabBottomPadding = if (hasFloatingTools)"))
     }
 
-    // ── auto-fold: scroll may never change a fold decision ──────────────────
-
-    @Test fun `a scroll never closes what the reader opened`() {
-        // 2026-11-26: a "fold it once it leaves the top of the viewport" rule
-        // shipped and made every manual expand impossible to keep. It measured
-        // with `boundsInWindow()` on a zero-height probe, which returns
-        // Rect.Zero for a zero-height node — so "has left the top" was true at
-        // all times, and the only state it could ever change was the FULL one a
-        // tap had just written. The rule is gone; nothing here may come back.
-        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val aggregate = ui.substringAfter("internal fun AssistantMessageView(")
-            .substringBefore("private fun ChatProcessSummary(")
-        assertFalse(aggregate.contains("fullyAboveViewport("))
-        assertFalse(aggregate.contains("outOfViewKeys"))
-        assertFalse(aggregate.contains("height(0.dp)"))
-        assertFalse(aggregate.contains("onFoldAnchor"))
-        assertFalse(aggregate.contains("foldListState"))
-        // The fold choice is still written by the tap only.
-        assertTrue(aggregate.contains("ChatProcessFoldPlanner.nextChoice(mode, segment.liveTail)"))
-        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        assertFalse(planner.contains("fun fullyAboveViewport("))
-        assertFalse(planner.contains("fun anchoredOffset("))
-        // No viewport plumbing left in the list either.
+    @Test fun `process entry is unique and the details keep the parent alive`() {
         val screen = source("ui/chat/ChatScreen.kt")
-        assertFalse(screen.contains("LocalChatViewportTracker"))
-        assertFalse(screen.contains("ChatViewportTracker()"))
-    }
-
-    @Test fun `the back-to-newest button closes what the reader left open`() {
-        val screen = source("ui/chat/ChatScreen.kt")
-        val fab = screen.substringAfter("FollowEvent.FabDown")
-        assertTrue(fab.contains("collapseAllEpoch++"))
-        assertTrue(screen.contains("collapseAllEpoch = collapseAllEpoch"))
-        // The epoch must share the rows' lifetime: a plain `remember` restores to
-        // 0 while the rows restore to N, which silently retires every expansion.
-        assertTrue(screen.contains("var collapseAllEpoch by rememberSaveable"))
-        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val aggregate = ui.substringAfter("internal fun AssistantMessageView(")
-            .substringBefore("private fun ChatProcessSummary(")
-        // Reaching off-screen rows is a COMPARISON, not an effect: a row scrolled
-        // out of the list is not composed, so an effect inside it never runs for
-        // exactly the rows the button is supposed to close (2026-11-26 device
-        // report: the visible ones closed, the ones further up stayed open).
-        assertTrue(aggregate.contains("ChatProcessFoldPlanner.liveChoices(foldChoices, foldChoicesEpoch, collapseAllEpoch)"))
-        assertFalse(aggregate.contains("LaunchedEffect(collapseAllEpoch)"))
-        assertFalse(aggregate.contains("appliedCollapseEpoch"))
-        // A tap records under the current epoch, or the next bump retires it.
-        assertTrue(aggregate.contains("foldChoicesEpoch = collapseAllEpoch"))
+        val band = screen.substringAfter("item(key = \"__typing_band__\"").substringBefore("item(key = ScrollBottomKey")
+        assertFalse(band.contains("ChatProcessStatusBand("))
+        assertTrue(band.contains("TypingIndicator("))
+        assertTrue(screen.contains("ChatProcessSheet("))
+        assertTrue(screen.contains("onOpenProcess = { processMessageId = if (processMessageId == item.message.id) null else item.message.id }"))
+        assertFalse(screen.contains("ChatProcessDetailHost("))
+        val ui = source("ui/chat/ChatProcessUI.kt")
+        assertTrue(ui.contains("internal fun ChatProcessSheet("))
+        val host = ui.substringAfter("internal fun ChatProcessSheet(")
+            .substringBefore("private fun ChatProcessList(")
+        val detailSwitch = host.indexOf("when (val current = page)")
+        assertTrue(detailSwitch > 0)
+        val parent = host.substring(0, detailSwitch)
+        // The parent must be unconditionally mounted, BEFORE the detail switch.
+        // Changing this to replace the list destroys its scroll state and flashes chat.
+        assertTrue(parent.contains("StandardChatSheet("))
+        assertTrue(parent.contains("title = stringResource(R.string.chat_process_title)"))
+        assertTrue(parent.contains("onDismiss = onDismiss,"))
+        assertTrue(parent.contains("ChatProcessList("))
+        val details = host.substring(detailSwitch)
+        assertTrue(details.contains("ToolDetailSheet("))
+        assertTrue(details.contains("is ChatProcessPage.Thinking -> StandardChatSheet("))
+        assertEquals(2, Regex("onDismiss = backToList,").findAll(details).count())
+        assertFalse(details.contains("onDismiss = onDismiss,"))
+        assertTrue(details.contains("ChatProcessThinkingReader(content = current.content)"))
+        assertEquals(2, Regex("showClose = false,").findAll(host).count())
+        // Gestures and scrims belong to the existing native sheets. Reintroducing
+        // a handwritten swipe chain recreates the offscreen-panel/visible-scrim bug.
+        for (retired in listOf("ProcessDrawer", "NestedScrollConnection", "pointerInput", "dragOffset", "Animatable", "DialogProperties", "BackHandler")) {
+            assertFalse(retired, ui.contains(retired))
+        }
+        // Reasoning row inside the drawer keeps the ORIGINAL card: tinted
+        // background + hairline border + the existing duration/char-count
+        // toggles. A bespoke row here is what the user rejected.
+        val row = ui.substringAfter("private fun ProcessThinkingRow(").substringBefore("internal fun ChatProcessThinkingReader(")
+        assertTrue(row.contains("thinkingHeaderExtras("))
+        assertTrue(row.contains("thinkingDurationVisibleEnabled(context)"))
+        assertTrue(row.contains("thinkingCharCountVisibleEnabled(context)"))
+        assertTrue(row.contains("R.string.chat_deep_thinking"))
+        assertTrue(row.contains(".border(0.5.dp, thinkingBlue.copy(alpha = 0.15f)"))
+        assertFalse(row.contains("thinking_view_full"))
+        // Reader: title only. Long-press selection is the copy affordance, so
+        // a copy button (and the back arrow it used to sit next to) is gone.
+        val reader = ui.substringAfter("internal fun ChatProcessThinkingReader(")
+        assertFalse(reader.contains("IconButton("))
+        assertFalse(reader.contains("chat_process_copy_all"))
+        assertFalse(reader.contains("ArrowBack"))
+        // The shared shell owns the one centred title; bodies add no second header.
+        assertFalse(Regex("\\bText\\(").containsMatchIn(reader))
+        val list = ui.substringAfter("private fun ChatProcessList(")
+        // No count anywhere in the drawer — not `status.failed`, and not a
+        // recomputed one either: the first mutation probe (restoring
+        // `${blocks.size} · ${chatProcessStatus(...).failed}`) slipped past a
+        // `status.failed`-only assertion.
+        assertFalse(list.contains(".failed"))
+        assertFalse(list.contains("chatProcessStatus("))
+        assertFalse(list.contains("blocks.size"))
+        // Opens at the newest entry.
+        assertTrue(list.contains("listState.scrollToItem(blocks.lastIndex)"))
+        // Every level closes by gesture: no back arrow, no close button.
+        assertFalse(ui.contains("Icons.Default.Close"))
+        assertFalse(ui.contains("ArrowBack"))
+        val detail = source("ui/chat/ChatToolDetailUI.kt")
+        assertTrue(detail.contains("val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }"))
+        val originalShell = detail.substringAfter("internal fun ToolDetailSheet(")
+            .substringBefore("internal fun extractShellCommand(")
+        assertTrue(originalShell.contains("skipPartiallyExpanded = true"))
+        assertTrue(originalShell.contains("dragHandle = null"))
+        assertTrue(originalShell.contains("contentWindowInsets = { WindowInsets(0) }"))
+        assertTrue(originalShell.contains("fillMaxHeight(0.85f)"))
+        assertFalse(screen.contains("keepStopWithDraft"))
+        val input = source("ui/chat/ChatInputArea.kt")
+        assertFalse(input.contains("keepStopWithDraft"))
+        val button = input.substringAfter("val hasContent = canSwipeSendNow()")
+            .substringBefore("SwipeToSendHint(")
+        assertTrue(button.contains("val showStop = isStreaming && !hasContent"))
+        assertEquals(1, Regex("ComposerStopButton\\(").findAll(button).count())
+        assertTrue(Regex("if \\(showStop\\) \\{\\s*ComposerStopButton").containsMatchIn(button))
+        assertTrue(button.contains("performSendOrEnqueue()"))
     }
 
     @Test fun `a header reopen starts at the top but drag does not restart the scroller`() {
@@ -260,28 +291,56 @@ class UxIntegrationWiringTest {
         assertTrue(body.contains("if (readAnchor.isReadingHistory || currentDragging) return@collect"))
     }
 
-    @Test fun `the summary row is counts only`() {
-        // 2026-11-26: the title (last reasoning's bold phrase, else the last
-        // call's label) described the final second of a run of eighty calls;
-        // the "累计 N 秒" was a SUM of per-call durations (parallel calls
-        // double-counted, not wall time) and is not persisted with the tool_use
-        // part, so it vanished on reload.
+    @Test fun `compact status receives queue position only for the live message`() {
+        val screen = source("ui/chat/ChatScreen.kt")
+        val branch = "is FlatChatItem.AssistantMessageItem -> {"
+        assertTrue(screen.contains(branch))
+        val row = screen.substringAfter(branch).substringBefore("val lastAssistantHasError")
+        assertTrue(row.contains("queueWaitingAhead = if (item.message.isStreaming) queueWaitingAhead else -1,"))
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val row = ui.substringAfter("private fun ChatProcessSummary(")
-            .substringBefore("internal fun BoundsTrackedBlock(")
-        assertFalse(row.contains("segment.title"))
-        assertFalse(row.contains("chat_process_duration"))
-        assertTrue(row.contains("if (segment.allCallsSucceeded) R.string.chat_process_tools else R.string.chat_process_tool_calls"))
-        // Failures are the only coloured token; a whole red line shouted for one
-        // bad call.
-        assertTrue(row.contains("appendMetaPart(failedText, ToolErrorColor, neutral)"))
-        val planner = source("ui/chat/ChatProcessFoldPlanner.kt")
-        assertFalse(planner.contains("val title: String?"))
-        assertFalse(planner.contains("titleOf("))
+        val marker = "internal fun AssistantMessageView("
+        assertTrue(ui.contains(marker))
+        val signature = ui.substringAfter(marker).substringBefore(") {")
+        assertTrue(signature.contains("queueWaitingAhead: Int,"))
+        assertFalse(signature.contains("queueWaitingAhead: Int ="))
+        val entry = ui.substringAfter("ChatProcessEntry(").substringBefore("onToggle =")
+        assertTrue(entry.contains("queueWaitingAhead = queueWaitingAhead,"))
+    }
+
+    @Test fun `process setting describes its panel entry and independent toolbar switch`() {
+        val terms = mapOf(
+            "values" to listOf("panel", "Tap", "status", "switch"),
+            "values-de" to listOf("Fenster", "Tippe", "Statuszeile", "Schalter"),
+            "values-ja" to listOf("パネル", "タップ", "ステータス", "スイッチ"),
+            "values-ko" to listOf("패널", "누르면", "상태", "스위치"),
+            "values-ru" to listOf("панели", "Нажмите", "состояния", "отдельно"),
+            "values-zh" to listOf("面板", "点击", "状态行", "独立开关"),
+            "values-zh-rTW" to listOf("面板", "點選", "狀態列", "獨立開關"),
+        )
+        for ((locale, keywords) in terms) {
+            val strings = resource("$locale/strings.xml")
+            val footer = Regex("<string name=\"appearance_tool_fold_footer\">(.*?)</string>")
+                .find(strings)?.groupValues?.get(1) ?: error("$locale: missing process footer")
+            for (term in keywords) assertTrue("$locale: $term", footer.contains(term))
+        }
+        val settings = source("ui/settings/AppearanceScreen.kt")
+        assertTrue(settings.contains("footer = stringResource(R.string.appearance_tool_fold_footer)"))
+        assertTrue(settings.contains("title = stringResource(R.string.appearance_tool_fold_title)"))
+        val config = source("config/ConfigBuiltins.kt").substringAfter("path = \"chat.toolFoldEnabled\"")
+            .substringBefore("prefs = appearancePrefs")
+        assertTrue(config.contains("status line"))
+        assertTrue(config.contains("own switch"))
+    }
+
+    @Test fun `compact process labels are available in all full locales`() {
         for (locale in listOf("values", "values-de", "values-ja", "values-ko", "values-ru", "values-zh", "values-zh-rTW")) {
             val strings = resource("$locale/strings_chat_process.xml")
-            assertTrue(locale, strings.contains("name=\"chat_process_tool_calls\""))
-            assertFalse(locale, strings.contains("chat_process_duration"))
+            assertTrue(locale, strings.contains("name=\"chat_process_title\""))
+            assertTrue(locale, strings.contains("name=\"chat_process_running\""))
+            // The expand/collapse affordance is gone: the entry row itself is
+            // the tap target now, so a "Details" label has nothing to do.
+            assertFalse(locale, strings.contains("name=\"chat_process_expand\""))
+            assertFalse(locale, strings.contains("name=\"chat_process_collapse\""))
         }
     }
 }

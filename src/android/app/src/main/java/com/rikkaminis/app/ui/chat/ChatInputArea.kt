@@ -2595,21 +2595,7 @@ internal fun ChatInputArea(
                     val hasContent = canSwipeSendNow()
                     val showStop = isStreaming && !hasContent
                     if (showStop) {
-                        Box(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .background(ChatColors.error, CircleShape)
-                                .clip(CircleShape)
-                                .clickable { viewModel.cancelStream() },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                Icons.Default.Stop,
-                                contentDescription = "Stop",
-                                tint = Color.White,
-                                modifier = Modifier.size(20.dp),
-                            )
-                        }
+                        ComposerStopButton(onStop = { viewModel.cancelStream() })
                     } else {
                         // Streaming with content → Send-into-queue; Idle with content → Send.
                         // Idle without text or attachments → disabled.
@@ -2742,6 +2728,25 @@ private data class SlashMenuPayload(
     val commands: List<SlashCommand> = emptyList(),
     val loaded: Boolean = false,
 )
+
+/** Same 38dp footprint as the adjacent send button; never adds a composer row. */
+@Composable
+private fun ComposerStopButton(onStop: () -> Unit) {
+    Box(
+        modifier = Modifier.size(38.dp)
+            .background(ChatColors.error, CircleShape)
+            .clip(CircleShape)
+            .clickable(onClick = onStop),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Default.Stop,
+            contentDescription = stringResource(R.string.stop_tool),
+            tint = Color.White,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
 
 /**
  * [dv22-B4] First-load placeholder for the async slash menu: the same locked

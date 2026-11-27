@@ -524,9 +524,9 @@
     <string name="appearance_auto_expand_thinking_footer">When on, a new thinking block expands automatically while the model is reasoning and collapses when it finishes. When off, thinking blocks stay collapsed — tap one to read it.</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">Thinking Header</string>
-    <string name="appearance_section_tool_steps">Process Steps</string>
-    <string name="appearance_tool_fold_title">Fold finished process steps</string>
-    <string name="appearance_tool_fold_footer">On by default. Related reasoning and tool calls collapse into a summary; recent steps stay visible during a run. Turn off to show every block separately.</string>
+    <string name="appearance_section_tool_steps">Execution Process</string>
+    <string name="appearance_tool_fold_title">Separate process panel</string>
+    <string name="appearance_tool_fold_footer">When on, thinking and tool calls appear in a separate panel. Tap the status line below the assistant name to view details. When off, they appear inline; the floating tool bar has its own switch.</string>
     <string name="appearance_thinking_show_chars_title">Show Thinking Length</string>
     <string name="appearance_thinking_show_duration_title">Show Thinking Time</string>
     <string name="appearance_thinking_header_footer">Choose what a thinking block shows next to its title. Length is the reasoning text measured in characters (9K = about nine thousand); time is measured while this conversation is open and disappears once you reopen it.</string>

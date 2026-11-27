@@ -1310,9 +1310,9 @@
     <string name="appearance_auto_expand_thinking_footer">Wenn aktiviert, wird ein neuer Denkblock automatisch erweitert, während das Modell denkt, und beim Abschluss eingeklappt. Wenn deaktiviert, bleiben Denkblöcke eingeklappt – tippen Sie auf einen, um ihn zu lesen.</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">Denk-Header</string>
-    <string name="appearance_section_tool_steps">Prozessschritte</string>
-    <string name="appearance_tool_fold_title">Abgeschlossene Prozessabschnitte einklappen</string>
-    <string name="appearance_tool_fold_footer">Standardmäßig aktiviert. Zusammengehörige Denkabschnitte und Werkzeugaufrufe werden zu einer Zusammenfassung eingeklappt. Während der Ausführung bleiben die letzten Schritte sichtbar. Ist die Option aus, wird jeder Block einzeln angezeigt.</string>
+    <string name="appearance_section_tool_steps">Ausführungsprozess</string>
+    <string name="appearance_tool_fold_title">Separates Prozessfenster</string>
+    <string name="appearance_tool_fold_footer">Aktiviert werden Denkschritte und Werkzeugaufrufe in einem separaten Fenster angezeigt. Tippe auf die Statuszeile unter dem Assistentennamen, um Details zu sehen. Deaktiviert erscheinen sie im Nachrichtentext; die schwebende Werkzeugleiste hat einen eigenen Schalter.</string>
     <string name="appearance_thinking_show_chars_title">Denk-Länge anzeigen</string>
     <string name="appearance_thinking_show_duration_title">Denk-Dauer anzeigen</string>
     <string name="appearance_thinking_header_footer">Legt fest, was ein Denkblock neben seinem Titel zeigt. Die Länge zählt die Zeichen des Denktextes (9K ≈ neuntausend Zeichen); die Dauer wird nur gemessen, solange diese Unterhaltung geöffnet ist, und verschwindet beim erneuten Öffnen.</string>

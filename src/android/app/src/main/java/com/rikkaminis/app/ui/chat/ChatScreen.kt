@@ -1900,14 +1900,15 @@ fun ChatScreen(
     // DismissImeWhileOverlayOpen（ChatInputArea 的做法）| 天花板: 未列入下方表达式的新
     // 覆盖层、以及未经本处处理的其他宿主，关闭后仍可能弹回键盘；
     // pendingNonTextSelection 是 model picker 块内的子对话框，picker 一开本守卫已生效。
-    val toolDetailIdForIme by viewModel.selectedToolDetailId.collectAsState()
+    var processMessageId by remember(viewModel) { mutableStateOf<String?>(null) }
+    val selectedToolDetailId by viewModel.selectedToolDetailId.collectAsState()
     val pendingOffloadRequest by OffloadPermissionManager.pendingRequest.collectAsState()
     val anyOverlayOpen = showModelPicker || showThinkingLevelSheet ||
         showInputHistorySheet || showSkillsSheet || showMcpsSheet ||
         showTokenUsageSheet || showExportFormatSheet || showClearChatDialog ||
         showEnhancedCacheDialog || showContextExhaustedDialog ||
         showMemorySheet || showBrowserSheet ||
-        toolDetailIdForIme != null || editingSession != null ||
+        selectedToolDetailId != null || processMessageId != null || editingSession != null ||
         previewUrl != null || htmlPreviewHolder != null ||
         previewImageGallery != null || previewVideoFile != null ||
         webAppSheetTarget != null || pendingOffloadRequest != null
@@ -3215,116 +3216,32 @@ fun ChatScreen(
 
             // Messages + scroll-to-bottom button
             Box(modifier = Modifier.weight(1f)) {
-                var toolBarHeightPx by remember { mutableStateOf(0) }
-                val density = LocalDensity.current
-                val toolBarHeightDp = with(density) { toolBarHeightPx.toDp() }
-                // T166 / T170 / T173: bottomReserve must clear the visible
-                // top of the floating tool-status overlay. Layout primitives
-                // come from FloatingToolStatusBar:
-                //   - status bar height = 38 dp
-                //   - thumbnail floats over the bar with overhang = 27 dp
-                //   - thumbnail TOP = bar top - overhang = 65 dp above the
-                //     input bar's upper edge (which is also the LazyColumn
-                //     bottom edge under reverseLayout).
-                //
-                // `onGloballyPositioned` on the wrapper Box reports ~98 dp
-                // because it includes wrapper padding(bottom=6) + horizontal
-                // padding insets + shadow allowance — none of which are
-                // *visually occluding* the LazyColumn. Using the measured
-                // value + 8 dp left a ~25 dp gap above the thumbnail (red
-                // box in the user's report).
-                //
-                // Pin to the visual constant: thumbnail height (65 dp) + a
-                // visual buffer (18 dp) so the latest row's bottom has clear
-                // breathing room above the thumbnail top.
-                //
-                // T174: an earlier version gated reserve on `toolBarHeightPx
-                // > 0`, but `onGloballyPositioned` fires asynchronously after
-                // the first floating-bar layout pass; for one frame after
-                // toolBlocks appeared the reserve evaluated the small
-                // default (28 dp) and the just-arrived user bubble landed
-                // beneath the bar. Logcat showed the inverse glitch too:
-                // `toolBarHeightPx=258 toolBarHeightDp=0 reserve=28` — the
-                // px state and the dp/reserve values come from different
-                // recomposition snapshots. Drive the reserve directly off
-                // the same predicate used for *whether* the floating bar is
-                // emitted (`hasFloatingTools` below) so reserve and bar
-                // visibility flip on the same frame.
-                // [T-android-chat-cannot-scroll-bottom-many-tools]
-                // Bug 𝙓𝙄𝙉 TG36286: with 7+ tools the user couldn't scroll the
-                // last messages above the floating tool status bar.
-                //
-                // Asymmetry between the bar's render condition and its
-                // bottomReserve gate: [lastToolBlocks] (drives whether to
-                // mount FloatingToolStatusBar) merges `messages` with the
-                // streaming-side-channel `streamingById`, so during a live
-                // turn the in-flight tool's toolStatus shows up there →
-                // bar renders. [hasFloatingTools] (drives bottomReserve)
-                // only read `messages`, which the streaming architecture
-                // intentionally leaves stable during a turn — so the
-                // in-flight tool is invisible to this predicate → reserve
-                // collapsed to 20dp while a 65dp+6dp floating bar covered
-                // the bottom of the LazyColumn. The new arrivals (status
-                // pill, "Minis is thinking" indicator, inline retry banner) landed
-                // behind the bar with no way to scroll them into view.
-                //
-                // Fix: also subscribe to streamingById so the predicate
-                // matches the bar's actual mount condition. The bar's
-                // mount uses `lastToolBlocks.isNotEmpty()` over the merged
-                // view; we mirror that semantically by checking the same
-                // filter on both sources.
+                // The transcript, legacy bar, padding, FABs and tool viewer
+                // share one live message snapshot. Compact mode never allocates
+                // any of the floating bar's padding, even for its first tool.
                 val streamingById by viewModel.streamingById.collectAsState()
-                // Also gated on toolStatusBarEnabled: when the user hides the
-                // whole floating bar, hasFloatingTools must report false so
-                // bottomReserve drops to the normal no-tool padding (otherwise
-                // an empty 65dp+ gap stays above the composer). Recompute on
-                // toggle so the reserve and bar flip together.
-                val hasFloatingTools = remember(messages, streamingById, toolStatusBarEnabled) {
-                    if (!toolStatusBarEnabled) return@remember false
-                    val merged = if (streamingById.isEmpty()) messages
-                                 else mergeStreamingOverlay(messages, streamingById, viewModel.currentStreamEpoch())
-                    merged.any { msg ->
-                        msg.role == "assistant" && msg.toolBlocks.any { tb ->
-                            tb.toolStatus != null && tb.kind != "thinking" && tb.kind != "info"
-                        }
-                    }
+                val mergedMessages = remember(messages, streamingById) {
+                    mergeStreamingOverlay(messages, streamingById, viewModel.currentStreamEpoch())
                 }
-                val visualOverlayHeight = 65.dp  // thumbnailHeight in FloatingToolStatusBar
-                // Halve the breathing room above the input bar in both
-                // states — felt too sparse before. The thumbnail's 65dp
-                // physical height is preserved (it has to clear the
-                // floating overlay).
-                //
-                // T245: buffer raised 9dp → 14dp so the gap between the
-                // last LazyColumn tool row and the floating thumbnail's
-                // top reads at least as loose as the inter-tool spacing
-                // (each ToolCallPill carries padding(vertical = 3.dp) +
-                // LazyColumn spacedBy(2.dp) = ~8dp inter-tool gap; the
-                // 9dp buffer combined with the floating bar's internal
-                // overhang was visually tighter than 8dp). 14dp also
-                // matches the no-tool branch — single visual constant
-                // for "row-bottom → bottom chrome" breathing room.
-                // [T-bottom-occluded 0a6d3c92] No-tools branch bumped from
-                // 14dp → 20dp to give the last message bubble a comfortable
-                // gap above the composer's top edge. With 14dp the trailing
-                // line sat too close to the composer shadow / rounded edge
-                // (user reported "the bottom of the text is slightly clipped"). The floating-tools branch
-                // already reserves visualOverlayHeight (65dp) + buffer and
-                // was not part of the report; keep its +14 buffer.
-                val bottomReserve =
-                    if (hasFloatingTools) visualOverlayHeight + 14.dp else 20.dp
-                // T120: removed three streaming-time LaunchedEffects that
-                // each called scrollToItem(0) on every chunk:
-                //   - LE(bottomReserve): toolbar resize re-snap
-                //   - LE(lastToolCount): per-tool-pill follow
-                //   - LE(lastAwaiting):  thinking-indicator follow
-                // They fired several times per second during streaming and
-                // turned every layout pass into a scroll command, fighting
-                // reverseLayout's native bottom-anchor behavior. With
-                // reverseLayout=true Compose already keeps the visual
-                // bottom pinned when the list is at offset 0; if the user
-                // scrolled away, the JumpToBottom FAB is the explicit
-                // affordance to return.
+                val legacyToolBlocks = remember(mergedMessages, processFoldEnabled) {
+                    if (processFoldEnabled) emptyList()
+                    else mergedMessages.asSequence().filter { it.role == "assistant" }
+                        .flatMap { it.toolBlocks.asSequence() }
+                        .filter { it.toolStatus != null && it.kind != "thinking" && it.kind != "info" }
+                        .toList()
+                }
+                val processMessage = if (processFoldEnabled) {
+                    processMessageId?.let { id -> mergedMessages.firstOrNull { it.id == id && it.role == "assistant" } }
+                } else null
+                val processOpen = processMessage != null
+                val hasFloatingTools = !processOpen && showsLegacyToolBar(processFoldEnabled, toolStatusBarEnabled, legacyToolBlocks.isNotEmpty())
+                val bottomReserve = if (hasFloatingTools) 79.dp else 20.dp
+                val processBlocks = remember(processMessage?.toolBlocks, processMessage?.thinkingLevel) {
+                    processMessage?.let { chatProcessBlocks(it.toolBlocks, it.canShowProcessThinking()) }.orEmpty()
+                }
+                val detailTools = if (processMessage != null) {
+                    remember(processBlocks) { processBlocks.filter { it.kind == "tool_use" } }
+                } else legacyToolBlocks
 
                 // Flatten each message into multiple LazyColumn items so that older blocks
                 // (text / tool pills / thinking) are frozen LazyList items while only the
@@ -3824,15 +3741,36 @@ fun ChatScreen(
                     block()
                 }
                 // (selectionController declared above, before markdownToolbar.)
-                // [auto-fold] Bumped by the "back to newest" FAB. Rows compare
-                // it against the epoch their choices were recorded under, so
-                // the retire reaches rows that are NOT composed (scrolled off
-                // screen) — an effect inside a row never runs for those.
-                // Saveable so it survives process death together with the
-                // per-row choice epochs; a plain `remember` would restore to 0
-                // while the rows restore to N and silently retire every
-                // expansion.
-                var collapseAllEpoch by rememberSaveable { mutableStateOf(0) }
+                fun processToolActions(message: ChatMessage, block: AssistantBlock): ToolPillActions? {
+                    if (block.kind != "tool_use") return null
+                    return ToolPillActions(
+                        onRetry = if (block.toolStatus == ToolBlockStatus.CANCELLED && !isStreaming && !canResume) {
+                            { safeMutate { viewModel.retryLast() } }
+                        } else null,
+                        onStop = if (isStreaming && (message.isStreaming || !processFoldEnabled)) {
+                            { viewModel.cancelStream() }
+                        } else null,
+                        onOpenTerminalWithCommand = onOpenTerminalWithCommand,
+                        onOpenDetail = { viewModel.openToolDetail(it) },
+                        onRerunFromHere = if (!isStreaming) ({
+                            followState = dispatchFollow(sessionId, followState, FollowEvent.Retry, listState, isUserDragging, isStreaming)
+                            safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
+                                coroutineScope.launch { tracedScrollToItem("RERUN-FROM-AGG-TOOL", idx, 0) }
+                            }
+                            safeMutate { viewModel.rerunFromToolBlock(message.id, block.id) }
+                        }) else null,
+                        onCopyDetails = {
+                            val text = formatToolDetailsForClipboard(block)
+                            val cb = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                            cb.setPrimaryClip(android.content.ClipData.newPlainText("tool", text))
+                            android.widget.Toast.makeText(
+                                context,
+                                context.getString(R.string.tool_longpress_copied_toast),
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        },
+                    )
+                }
                 androidx.compose.runtime.CompositionLocalProvider(
                     LocalMessageBoundsRegistry provides messageBounds,
                     androidx.compose.ui.platform.LocalTextToolbar provides markdownToolbar,
@@ -4485,55 +4423,15 @@ fun ChatScreen(
                                         // counter (the flag is false for it).
                                         awaitingResponseSinceMs = awaitingResponseSinceMs,
                                         processFoldEnabled = processFoldEnabled,
-                                        // The back-to-newest button closes what the
-                                        // reader left open (see the param doc).
-                                        collapseAllEpoch = collapseAllEpoch,
+                                        queueWaitingAhead = if (item.message.isStreaming) queueWaitingAhead else -1,
+                                        onOpenProcess = { processMessageId = if (processMessageId == item.message.id) null else item.message.id },
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the
                                         // flat AssistantInfo branch).
                                         onRevert = if (item.message.toolBlocks.any { it.kind == "info" && it.toolName == "compact" }) {
                                             { viewModel.revertCompact() }
                                         } else null,
-                                        toolPillActions = { block ->
-                                            if (block.kind != "tool_use") {
-                                                null
-                                            } else {
-                                                val isCancelled = block.toolStatus == ToolBlockStatus.CANCELLED
-                                                ToolPillActions(
-                                                    // re-run only surfaces on a cancelled trailing tool (mirrors
-                                                    // flat `isLastCancelled && !isStreaming && !canResume` — here
-                                                    // derived per-block from this message's own tool status).
-                                                    onRetry = if (isCancelled && !isStreaming && !canResume) {
-                                                        { safeMutate { viewModel.retryLast() } }
-                                                    } else null,
-                                                    onStop = { viewModel.cancelStream() },
-                                                    onOpenTerminalWithCommand = onOpenTerminalWithCommand,
-                                                    onOpenDetail = { viewModel.openToolDetail(it) },
-                                                    onRerunFromHere = if (!isStreaming) ({
-                                                        val messageId = item.messageId
-                                                        val blockId = block.id
-                                                        // [incr1118 D1-F05] Re-run =
-                                                        // new stream → re-engage follow.
-                                                        followState = dispatchFollow(sessionId, followState, FollowEvent.Retry, listState, isUserDragging, isStreaming)
-                                                        // [incr1118 D1-F08] shared index resolver.
-                                                        safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
-                                                            coroutineScope.launch { tracedScrollToItem("RERUN-FROM-AGG-TOOL", idx, 0) }
-                                                        }
-                                                        safeMutate { viewModel.rerunFromToolBlock(messageId, blockId) }
-                                                    }) else null,
-                                                    onCopyDetails = {
-                                                        val text = formatToolDetailsForClipboard(block)
-                                                        val cb = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                                        cb.setPrimaryClip(android.content.ClipData.newPlainText("tool", text))
-                                                        android.widget.Toast.makeText(
-                                                            context,
-                                                            context.getString(R.string.tool_longpress_copied_toast),
-                                                            android.widget.Toast.LENGTH_SHORT,
-                                                        ).show()
-                                                    },
-                                                )
-                                            }
-                                        },
+                                        toolPillActions = { block -> processToolActions(item.message, block) },
                                     )
                                 }
                             }
@@ -4544,49 +4442,29 @@ fun ChatScreen(
                         .lastOrNull { it.role == "assistant" }
                         ?.error
                         ?.isNotBlank() == true
-                    // [fix/typing-band-live] Persistent fixed-height status
-                    // band at the visual bottom of the transcript. Idle →
-                    // blank 36dp placeholder (zero layout shift, ever);
-                    // streaming → the typing indicator shows INSIDE the band
-                    // (same 36dp). typingActive is derived from the LIVE
-                    // trailing message's state: FlatChatItem.AssistantTyping
-                    // items only ever come from the runtime-dead legacy
-                    // pipeline (LegacyFlatChatBuilder), so they can't be the
-                    // signal. Mirrors the old in-bubble indicator condition
-                    // (streaming + no visible content), whose render site this
-                    // band replaces (see ChatAssistantMessageUI).
-                    // [fix/typing-band-overlay] The band previously read the
-                    // canonical trailing message, whose content/toolBlocks
-                    // stay empty for the WHOLE live turn — during streaming
-                    // those fields live in the streamingById side-channel
-                    // (T-streaming-side-channel) and only drain back into the
-                    // canonical list at stream end, so typingActive was stuck
-                    // true until the turn finished and the band showed
-                    // "thinking / waiting" the entire time (user-reported
-                    // 2026-09-26). Derive from the overlay-merged view — the
-                    // same source the message renderers use — so the band
-                    // goes dark the moment real content or tool blocks become
-                    // visible, and the awaiting seconds counter only ticks
-                    // during actual network waits. The collect lives INSIDE
-                    // the item lambda: LazyListScope's builder is not a
-                    // composable context (CI caught the first placement at
-                    // 4121:70), while LazyItemScope is — and per-item
-                    // subscription keeps recomposition scoped to this 36dp
-                    // band instead of the whole transcript.
+                    // Only the normal typing/waiting indicator belongs in the transcript's
+                    // fixed band. The process already owns its own entry below the name.
                     item(key = "__typing_band__", contentType = "typing_band") {
-                        val streamingBandById by viewModel.streamingById.collectAsState()
-                        val bandMerged = if (streamingBandById.isEmpty()) messages
-                            else mergeStreamingOverlay(messages, streamingBandById, viewModel.currentStreamEpoch())
-                        val lastAssistant = bandMerged.lastOrNull { it.role == "assistant" }
-                        val typingActive = lastAssistant != null &&
+                        val lastAssistant = mergedMessages.lastOrNull {
+                            it.role == "assistant" || (it.role == "user" && !it.isQueued)
+                        }?.takeIf { it.role == "assistant" }
+                        // [one-status-only] With compact process ON the turn's
+                        // single status line lives under the identity (it already
+                        // carries "thinking" / "running N tools" / "waiting Ns" /
+                        // the queue position). Rendering the transcript typing band
+                        // as well put the same sentence in two places a few dp
+                        // apart, which is the duplication this branch removes.
+                        val typingActive = !processFoldEnabled && lastAssistant != null &&
                             lastAssistant.isStreaming &&
-                            lastAssistant.content.isEmpty() &&
-                            lastAssistant.toolBlocks.none { it.kind != "info" }
+                            lastAssistant.content.isEmpty() && lastAssistant.toolBlocks.none {
+                                it.kind != "info" && (!processFoldEnabled || !it.isChatProcessBlock())
+                            }
                         if (typingActive) {
                             TypingIndicator(
                                 queueWaitingAhead = queueWaitingAhead,
-                                awaitingNetworkSinceMs =
-                                    if (lastAssistant?.isAwaitingModelResponse == true) awaitingResponseSinceMs else 0L,
+                                awaitingNetworkSinceMs = if (lastAssistant?.isAwaitingModelResponse == true) {
+                                    awaitingResponseSinceMs
+                                } else 0L,
                             )
                         } else {
                             Spacer(Modifier.height(TYPING_BAND_HEIGHT))
@@ -4698,96 +4576,68 @@ fun ChatScreen(
                 } // Box (selection scope)
                 } // CompositionLocalProvider
 
-                // Floating tool status bar — shows only actual tool calls (not text/thinking/info).
-                // Matches iOS: filter on toolStatus != nil (text blocks have toolStatus = null).
-                //
-                // T-streaming-side-channel-tool-blocks: lastToolBlocks must
-                // include the streamingById side-channel, otherwise a tool
-                // pill mounted mid-turn is missing → ToolDetailSheet never
-                // opens (its sentinel closes the detail because the id
-                // "doesn't exist").
-                //
-                // [fix/tool-bar-reserve-frame-skew] Computed SYNCHRONOUSLY in
-                // composition (remember(messages, streamingById)), not via a
-                // LaunchedEffect collect. The old async derivation lagged the
-                // reserve by one frame: bottomReserve is driven off
-                // `hasFloatingTools` (a synchronous remember over the same
-                // sources), so on the frame a tool first appeared the reserve
-                // flipped 20dp → 79dp while the bar itself was still missing —
-                // a 59dp hole at the transcript bottom, then the bar mounted a
-                // frame later (user-reported jump "when calling tools";
-                // the unmount side mirrored it: reserve collapsed first, bar
-                // covered the bottom rows one extra frame). Same state source
-                // as the reserve, same frame — bar and reserve now flip
-                // together. The old "keeps streaming-tick churn off the
-                // ChatScreen invalidation list" rationale no longer holds:
-                // hasFloatingTools already collects streamingById in
-                // composition.
-                val lastToolBlocks = remember(messages, streamingById) {
-                    val merged = if (streamingById.isEmpty()) messages
-                        else mergeStreamingOverlay(messages, streamingById, viewModel.currentStreamEpoch())
-                    merged.filter { it.role == "assistant" }
-                        .flatMap { it.toolBlocks }
-                        .filter { it.toolStatus != null && it.kind != "thinking" && it.kind != "info" }
-                }
-                // Whole-bar visibility gate: when the user disables the
-                // floating tool status bar in Appearance, skip both the render
-                // AND the height reserve (otherwise an empty gap lingers above
-                // the composer). Reserve and bar must flip on the same frame for
-                // the T174 reserve logic to stay consistent.
-                if (lastToolBlocks.isNotEmpty() && toolStatusBarEnabled) {
+                if (hasFloatingTools && !processOpen) {
                     Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .onGloballyPositioned { toolBarHeightPx = it.size.height }
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 6.dp),
+                        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                            .padding(horizontal = 12.dp).padding(bottom = 6.dp),
                     ) {
                         FloatingToolStatusBar(
-                            toolBlocks = lastToolBlocks,
-                            // T14: per-card stop on the floating bar — same
-                            // global cancel as the message-list pill button.
+                            toolBlocks = legacyToolBlocks,
                             onStop = { viewModel.cancelStream() },
                             onOpenTerminalWithCommand = onOpenTerminalWithCommand,
-                            // T261: route detail open through the same VM
-                            // state as in-list pills so both surfaces share
-                            // one always-mounted sheet instance.
                             onOpenDetail = { viewModel.openToolDetail(it) },
                         )
                     }
-                } else {
-                    SideEffect { toolBarHeightPx = 0 }
                 }
 
-                // T261: tool-detail sheet hoisted out of LazyColumn item
-                // scope. Visibility driven by ViewModel state so streaming /
-                // pill-disposal / new-tool emissions can't snap it shut.
-                // existence guard auto-closes the sheet when the underlying
-                // block disappears (T258 retry-preserve removes in-flight
-                // tools, clearChat, etc.). Reuses lastToolBlocks (already
-                // computed above) so we don't traverse messages twice.
-                val selectedToolDetailId by viewModel.selectedToolDetailId.collectAsState()
-                LaunchedEffect(selectedToolDetailId, lastToolBlocks) {
-                    val id = selectedToolDetailId ?: return@LaunchedEffect
-                    if (lastToolBlocks.none { it.id == id }) viewModel.closeToolDetail()
+                val hasSelectedTool = selectedToolDetailId != null && detailTools.any { it.id == selectedToolDetailId }
+                LaunchedEffect(selectedToolDetailId, hasSelectedTool) {
+                    if (selectedToolDetailId != null && !hasSelectedTool) viewModel.closeToolDetail()
                 }
-                val selectedToolBlock = selectedToolDetailId?.let { id ->
-                    lastToolBlocks.firstOrNull { it.id == id }
-                }
-                if (selectedToolBlock != null) {
-                    val initialIdx = lastToolBlocks
-                        .indexOfFirst { it.id == selectedToolBlock.id }
-                        .coerceAtLeast(0)
+                if (processMessage != null) {
+                    CompositionLocalProvider(LocalToolProgressById provides viewModel.toolProgressById) {
+                        ChatProcessSheet(
+                            messageId = processMessage.id,
+                            blocks = processBlocks,
+                            isStreaming = processMessage.isStreaming,
+                            selectedToolId = selectedToolDetailId,
+                            onSelectTool = { viewModel.openToolDetail(it) },
+                            onClearTool = { viewModel.closeToolDetail() },
+                            onDismiss = {
+                                viewModel.closeToolDetail()
+                                processMessageId = null
+                            },
+                            onOpenTerminalWithCommand = { command ->
+                                processMessageId = null
+                                onOpenTerminalWithCommand(command)
+                            },
+                            onOpenBrowserForUrl = { url ->
+                                viewModel.closeToolDetail()
+                                processMessageId = null
+                                viewModel.openBrowserSheetForUrl(url)
+                            },
+                            toolActions = { block ->
+                                processToolActions(processMessage, block)?.let { actions ->
+                                    actions.copy(
+                                        onRetry = actions.onRetry?.let { retry ->
+                                            { processMessageId = null; retry() }
+                                        },
+                                        onRerunFromHere = actions.onRerunFromHere?.let { rerun ->
+                                            { processMessageId = null; rerun() }
+                                        },
+                                    )
+                                }
+                            },
+                        )
+                    }
+                } else if (!processFoldEnabled && selectedToolDetailId != null && hasSelectedTool) {
                     ToolDetailSheet(
-                        toolBlocks = lastToolBlocks,
-                        initialIndex = initialIdx,
+                        toolBlocks = detailTools,
+                        selectedToolId = selectedToolDetailId!!,
+                        onSelectTool = { viewModel.openToolDetail(it) },
                         onDismiss = { viewModel.closeToolDetail() },
                         onOpenTerminalWithCommand = onOpenTerminalWithCommand,
-                        onOpenBrowserForUrl = { url ->
-                            viewModel.closeToolDetail()
-                            viewModel.openBrowserSheetForUrl(url)
-                        },
+                        onOpenBrowserForUrl = { viewModel.openBrowserSheetForUrl(it) },
                     )
                 }
 
@@ -4811,7 +4661,7 @@ fun ChatScreen(
                 // spacing). Scrolls to the OLDEST message (highest index under
                 // reverseLayout).
                 if (messages.isNotEmpty() && isFarFromTop.value && isFarFromBottom.value) {
-                    val upBaseBottom = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
+                    val upBaseBottom = if (hasFloatingTools) 80.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
                             coroutineScope.launch {
@@ -4865,7 +4715,7 @@ fun ChatScreen(
                 // history and the "return to newest" button should be available
                 // as the explicit resume-follow escape hatch.
                 if (!followState.isFollowing && contentOverflows.value && messages.isNotEmpty()) {
-                    val fabBottomPadding = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
+                    val fabBottomPadding = if (hasFloatingTools) 80.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
                             // [T-android-scroll-fab-down-stuck] Re-engage follow
@@ -4881,13 +4731,6 @@ fun ChatScreen(
                             // gesture. [forward-stable] Exactly one pending
                             // bottom request — no settle second call.
                             followState = dispatchFollow(sessionId, followState, FollowEvent.FabDown, listState, isUserDragging, isStreaming)
-                            // [auto-fold] "Show me the newest" also closes the
-                            // segments the reader left open. Not a second
-                            // feature on the same button: the jump already moves
-                            // the viewport by a screen or more, so the collapse
-                            // costs nothing visible — and it is what makes a
-                            // long process impossible to leave open behind you.
-                            collapseAllEpoch++
                         },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)

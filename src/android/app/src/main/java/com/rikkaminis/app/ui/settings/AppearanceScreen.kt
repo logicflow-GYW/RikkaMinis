@@ -541,8 +541,8 @@ fun AppearanceScreen(
             )
         }
 
-        // [ux-1125] Tool Steps folds related reasoning and calls by default.
-        // Switching OFF preserves the flat transcript with one row per block.
+        // Keep thinking and tool calls in a separate panel opened from the
+        // assistant status line. OFF restores one inline row per block.
         SettingsSection(
             header = stringResource(R.string.appearance_section_tool_steps),
             footer = stringResource(R.string.appearance_tool_fold_footer),

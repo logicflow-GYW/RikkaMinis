@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_process_title">실행 과정</string>
+    <string name="chat_process_running">도구 %1$d개 실행 중</string>
     <string name="chat_process_tools">도구 %1$d개 실행</string>
     <string name="chat_process_tool_calls">도구 호출 %1$d건</string>
     <string name="chat_process_failed">실패 %1$d개</string>

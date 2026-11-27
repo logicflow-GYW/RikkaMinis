@@ -62,25 +62,25 @@ class SystemRowHeaderSuppressionTest {
         return count
     }
 
-    /** The [AssistantHeader] DECLARATION (`fun AssistantHeader() {`). */
-    private val declIdx: Int get() = rendererText.indexOf("fun AssistantHeader()")
+    /** The [AssistantHeader] DECLARATION (`fun AssistantHeader( {`). */
+    private val declIdx: Int get() = rendererText.indexOf("fun AssistantHeader(")
 
     /**
      * The first CALL site — searched from the END of the declaration line, so
      * the `AssistantHeader()` substring inside the declaration itself
-     * (`fun AssistantHeader() {`) cannot be mistaken for the call.
+     * (`fun AssistantHeader( {`) cannot be mistaken for the call.
      */
     private val callIdx: Int
         get() {
             val from = rendererText.indexOf("\n", declIdx).let { if (it >= 0) it else declIdx }
-            return rendererText.indexOf("AssistantHeader()", from)
+            return rendererText.indexOf("AssistantHeader(", from)
         }
 
     @Test
     fun `AssistantHeader has exactly one call site`() {
         assertTrue("AssistantHeader declaration not found", declIdx >= 0)
         assertTrue("AssistantHeader() is never called", callIdx >= 0)
-        val second = rendererText.indexOf("AssistantHeader()", callIdx + 1)
+        val second = rendererText.indexOf("AssistantHeader(", callIdx + 1)
         assertEquals(
             "AssistantHeader() must be called exactly once in this file — a second " +
                 "call site bypasses the system-role guard (offset=$second)",
