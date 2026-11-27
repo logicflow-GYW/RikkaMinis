@@ -33,6 +33,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Description
@@ -91,7 +92,7 @@ import com.rikkaminis.app.ui.theme.ChatColors
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ToolDetailSheet(
+internal fun ToolDetailSheetContent(
     toolBlocks: List<AssistantBlock>,
     selectedToolId: String,
     onSelectTool: (String) -> Unit,
@@ -99,7 +100,6 @@ internal fun ToolDetailSheet(
     onOpenTerminalWithCommand: (String) -> Unit = {},
     onOpenBrowserForUrl: (String) -> Unit = {},
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }
     val block = toolBlocks.getOrNull(currentIdx) ?: return
 
@@ -108,17 +108,8 @@ internal fun ToolDetailSheet(
         block.toolStatus == ToolBlockStatus.PENDING
     val toolAccent = toolAccentColor(block.toolName)
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        dragHandle = null,
-        contentWindowInsets = { WindowInsets(0) },
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.85f)
-                .background(ChatColors.secondaryBg),
+    Column(
+            modifier = Modifier.fillMaxSize().background(ChatColors.secondaryBg),
         ) {
             // ── Top Nav Bar ("Minis Computer" + action button) ──
             Row(
@@ -128,6 +119,11 @@ internal fun ToolDetailSheet(
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (onLeave != null) {
+                    IconButton(onClick = { onLeave() }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.chat_nav_previous))
+                    }
+                }
                 Spacer(modifier = Modifier.weight(1f))
 
                 // [T-step-timestamp v3 aa8b1128] Sheet header reverted to a
@@ -1135,6 +1131,24 @@ internal fun ToolDetailSheet(
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ToolDetailSheet(
+    toolBlocks: List<AssistantBlock>,
+    selectedToolId: String,
+    onSelectTool: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onOpenTerminalWithCommand: (String) -> Unit = {},
+    onOpenBrowserForUrl: (String) -> Unit = {},
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        ToolDetailSheetContent(
+            toolBlocks, selectedToolId, onSelectTool, onDismiss,
+            onOpenTerminalWithCommand, onOpenBrowserForUrl,
+        )
     }
 }
 

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_process_expand">Подробнее</string>
+    <string name="chat_process_collapse">Свернуть</string>
     <string name="chat_process_title">Ход выполнения</string>
     <string name="chat_process_running">Выполняется: %1$d</string>
     <string name="chat_process_tools">Выполнено инструментов: %1$d</string>

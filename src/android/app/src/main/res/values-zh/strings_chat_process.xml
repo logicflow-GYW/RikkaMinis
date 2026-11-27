@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_process_expand">展开详情</string>
+    <string name="chat_process_collapse">收起</string>
     <string name="chat_process_title">执行过程</string>
     <string name="chat_process_running">正在执行 %1$d 个工具</string>
     <string name="chat_process_tools">已执行 %1$d 个工具</string>

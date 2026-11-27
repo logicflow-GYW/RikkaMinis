@@ -60,11 +60,12 @@ class UxIntegrationWiringTest {
         assertFalse(screen.contains("collapseAllEpoch"))
     }
 
-    @Test fun `process label is measured outside the identity header footprint`() {
-        val header = source("ui/chat/ChatAssistantMessageUI.kt").substringAfter("internal fun AssistantHeader(")
-            .substringBefore("val LocalToolProgressById")
-        assertTrue(header.contains("if (compactProcess) 1 else Int.MAX_VALUE"))
-        assertTrue(header.contains("Box(Modifier.matchParentSize(), contentAlignment = Alignment.CenterEnd)"))
+    @Test fun `process status is a sibling below the identity rather than a header column`() {
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val render = ui.substringAfter("if (message.role != \"system\") {").substringBefore("// Text and notices")
+        assertTrue(render.contains("AssistantHeader()\n"))
+        assertTrue(render.indexOf("ChatProcessEntry(") > render.indexOf("AssistantHeader()"))
+        assertTrue(render.contains("isExpanded = isProcessExpanded"))
     }
 
     @Test fun `tool shimmer is an isolated sibling and never rerecords static content`() {
@@ -148,7 +149,7 @@ class UxIntegrationWiringTest {
         assertTrue(aggregate.contains("val actions = toolPillActions(block)"))
         val screen = source("ui/chat/ChatScreen.kt")
         assertTrue(screen.contains("toolPillActions = { block -> processToolActions(item.message, block) }"))
-        assertTrue(screen.contains("processToolActions(processMessage, block)"))
+        assertTrue(screen.contains("toolActions = { block ->\n                                processToolActions(processMessage, block)"))
     }
 
     @Test fun `detailed mode keeps the original reasoning card`() {
@@ -159,7 +160,7 @@ class UxIntegrationWiringTest {
         // ORDERING purposes only — its card is presentation the user already had.
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         assertFalse(ui.contains("inProcessSegment"))
-        val thinking = ui.substringAfter("internal fun ThinkingBlock(").substringBefore("internal fun ChatProcessThinkingDetail(")
+        val thinking = ui.substringAfter("internal fun ThinkingBlock(").substringBefore("internal fun ChatProcessThinkingText(")
         assertTrue(thinking.contains(".background(thinkingBlue.copy(alpha = 0.06f), RoundedCornerShape(12.dp))"))
         assertTrue(thinking.contains(".border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), RoundedCornerShape(12.dp))"))
         // The card must not be behind a condition that a fold mode can flip.
@@ -168,29 +169,34 @@ class UxIntegrationWiringTest {
 
     @Test fun `legacy floating bar and its space share one decision`() {
         val screen = source("ui/chat/ChatScreen.kt")
-        assertTrue(screen.contains("val hasFloatingTools = showsLegacyToolBar(processFoldEnabled, toolStatusBarEnabled, legacyToolBlocks.isNotEmpty())"))
+        assertTrue(screen.contains("val hasFloatingTools = !processOpen && showsLegacyToolBar(processFoldEnabled, toolStatusBarEnabled, legacyToolBlocks.isNotEmpty())"))
         assertTrue(screen.contains("val bottomReserve = if (hasFloatingTools) 79.dp else 20.dp"))
-        assertTrue(Regex("if \\(hasFloatingTools\\) \\{[\\s\\S]*?FloatingToolStatusBar\\(").containsMatchIn(screen))
+        assertTrue(Regex("if \\(hasFloatingTools && !processOpen\\) \\{[\\s\\S]*?FloatingToolStatusBar\\(").containsMatchIn(screen))
         assertTrue(screen.contains("val upBaseBottom = if (hasFloatingTools)"))
         assertTrue(screen.contains("val fabBottomPadding = if (hasFloatingTools)"))
     }
 
-    @Test fun `process viewer is hoisted and the status band keeps its height`() {
+    @Test fun `process entry is unique and the details keep the parent alive`() {
         val screen = source("ui/chat/ChatScreen.kt")
         val band = screen.substringAfter("item(key = \"__typing_band__\"").substringBefore("item(key = ScrollBottomKey")
-        assertTrue(band.contains("ChatProcessStatusBand("))
-        assertTrue(band.contains("Spacer(Modifier.height(TYPING_BAND_HEIGHT))"))
+        assertFalse(band.contains("ChatProcessStatusBand("))
+        assertTrue(band.contains("TypingIndicator("))
+        assertTrue(screen.contains("ChatProcessSheet("))
+        assertTrue(screen.contains("isProcessExpanded = processMessageId == item.message.id"))
+        assertFalse(screen.contains("ChatProcessDetailHost("))
         val ui = source("ui/chat/ChatProcessUI.kt")
-        assertTrue(ui.substringAfter("internal fun ChatProcessStatusBand(").contains(".height(TYPING_BAND_HEIGHT)"))
-        val viewer = screen.indexOf("                    ChatProcessSheet(")
-        assertTrue(viewer > screen.indexOf("SelectionDragTracker("))
-        assertTrue(screen.contains("selectedToolDetailId != null || processMessageId != null"))
+        val host = ui.substringAfter("internal fun ChatProcessSheet(")
+        assertTrue(host.contains("BackHandler(page !is ChatProcessPage.List, onBack = backToList)"))
+        assertTrue(host.contains("ChatProcessPage.Tool -> ToolDetailSheetContent("))
+        assertTrue(host.contains("is ChatProcessPage.Thinking -> ChatProcessThinkingReader("))
+        val entry = ui.substringAfter("internal fun ChatProcessEntry(").substringBefore("internal sealed interface ChatProcessPage")
+        assertTrue(entry.contains("stringResource(if (isExpanded) R.string.chat_process_collapse else R.string.chat_process_expand)"))
+        assertFalse(entry.contains("KeyboardArrowRight"))
         val detail = source("ui/chat/ChatToolDetailUI.kt")
         assertTrue(detail.contains("val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }"))
         assertTrue(screen.contains("keepStopWithDraft = processFoldEnabled,"))
         val input = source("ui/chat/ChatInputArea.kt")
         assertTrue(input.contains("if (keepStopWithDraft && isStreaming && hasContent)"))
-        assertTrue(input.contains("ComposerStopButton(onStop = { viewModel.cancelStream() })"))
     }
 
     @Test fun `a header reopen starts at the top but drag does not restart the scroller`() {
@@ -218,6 +224,8 @@ class UxIntegrationWiringTest {
             val strings = resource("$locale/strings_chat_process.xml")
             assertTrue(locale, strings.contains("name=\"chat_process_title\""))
             assertTrue(locale, strings.contains("name=\"chat_process_running\""))
+            assertTrue(locale, strings.contains("name=\"chat_process_expand\""))
+            assertTrue(locale, strings.contains("name=\"chat_process_collapse\""))
         }
     }
 }

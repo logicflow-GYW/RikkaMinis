@@ -75,7 +75,7 @@ class ThinkingFullContentSyncTest {
     fun `the thinking dialog syncs content and colour through an update block`() {
         val body = bodyOf(
             stripComments(readRepoFile(UI)),
-            "private fun ThinkingFullContentDialog(",
+            "internal fun ChatProcessThinkingText(",
         )
         val factory = body.indexOf("factory = {")
         val update = body.indexOf("update = {")
@@ -97,7 +97,7 @@ class ThinkingFullContentSyncTest {
         )
         assertTrue(
             "the guarded write must actually assign the new content",
-            sync.indexOf("textView.text = content") > decision,
+            sync.indexOf("textView.text = snapshot") > decision,
         )
     }
 
@@ -105,7 +105,7 @@ class ThinkingFullContentSyncTest {
     fun `the huge thinking buffer is never rebuilt by keying the node on its content`() {
         val body = bodyOf(
             stripComments(readRepoFile(UI)),
-            "private fun ThinkingFullContentDialog(",
+            "internal fun ChatProcessThinkingText(",
         )
         assertFalse(
             "key(content) would rebuild the node (and lose the reader's scroll " +

@@ -3230,8 +3230,18 @@ fun ChatScreen(
                         .filter { it.toolStatus != null && it.kind != "thinking" && it.kind != "info" }
                         .toList()
                 }
-                val hasFloatingTools = showsLegacyToolBar(processFoldEnabled, toolStatusBarEnabled, legacyToolBlocks.isNotEmpty())
+                val processMessage = if (processFoldEnabled) {
+                    processMessageId?.let { id -> mergedMessages.firstOrNull { it.id == id && it.role == "assistant" } }
+                } else null
+                val processOpen = processMessage != null
+                val hasFloatingTools = !processOpen && showsLegacyToolBar(processFoldEnabled, toolStatusBarEnabled, legacyToolBlocks.isNotEmpty())
                 val bottomReserve = if (hasFloatingTools) 79.dp else 20.dp
+                val processBlocks = remember(processMessage?.toolBlocks, processMessage?.thinkingLevel) {
+                    processMessage?.let { chatProcessBlocks(it.toolBlocks, it.canShowProcessThinking()) }.orEmpty()
+                }
+                val detailTools = if (processMessage != null) {
+                    remember(processBlocks) { processBlocks.filter { it.kind == "tool_use" } }
+                } else legacyToolBlocks
 
                 // Flatten each message into multiple LazyColumn items so that older blocks
                 // (text / tool pills / thinking) are frozen LazyList items while only the
@@ -4413,7 +4423,8 @@ fun ChatScreen(
                                         // counter (the flag is false for it).
                                         awaitingResponseSinceMs = awaitingResponseSinceMs,
                                         processFoldEnabled = processFoldEnabled,
-                                        onOpenProcess = { processMessageId = item.message.id },
+                                        isProcessExpanded = processMessageId == item.message.id,
+                                        onOpenProcess = { processMessageId = if (processMessageId == item.message.id) null else item.message.id },
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the
                                         // flat AssistantInfo branch).
@@ -4431,9 +4442,8 @@ fun ChatScreen(
                         .lastOrNull { it.role == "assistant" }
                         ?.error
                         ?.isNotBlank() == true
-                    // Keep the existing 36dp band in every state. When a tool
-                    // runs beyond the viewport, the same detail panel stays
-                    // reachable here without adding height to the transcript.
+                    // Only the normal typing/waiting indicator belongs in the transcript's
+                    // fixed band. The process already owns its own entry below the name.
                     item(key = "__typing_band__", contentType = "typing_band") {
                         val lastAssistant = mergedMessages.lastOrNull {
                             it.role == "assistant" || (it.role == "user" && !it.isQueued)
@@ -4442,21 +4452,12 @@ fun ChatScreen(
                             lastAssistant.content.isEmpty() && lastAssistant.toolBlocks.none {
                                 it.kind != "info" && (!processFoldEnabled || !it.isChatProcessBlock())
                             }
-                        val activeProcess = if (processFoldEnabled && isStreaming && lastAssistant?.isStreaming == true) {
-                            chatProcessStatus(lastAssistant.toolBlocks, lastAssistant.canShowProcessThinking())
-                        } else null
-                        if (lastAssistant != null && activeProcess != null && activeProcess.hasDetails &&
-                            (activeProcess.running > 0 || activeProcess.isThinkingNow ||
-                                (typingActive && !lastAssistant.isAwaitingModelResponse))
-                        ) {
-                            ChatProcessStatusBand(chatProcessLabel(activeProcess, isStreaming = true)) {
-                                processMessageId = lastAssistant.id
-                            }
-                        } else if (typingActive) {
+                        if (typingActive) {
                             TypingIndicator(
                                 queueWaitingAhead = queueWaitingAhead,
-                                awaitingNetworkSinceMs =
-                                    if (lastAssistant?.isAwaitingModelResponse == true) awaitingResponseSinceMs else 0L,
+                                awaitingNetworkSinceMs = if (lastAssistant?.isAwaitingModelResponse == true) {
+                                    awaitingResponseSinceMs
+                                } else 0L,
                             )
                         } else {
                             Spacer(Modifier.height(TYPING_BAND_HEIGHT))
@@ -4568,7 +4569,7 @@ fun ChatScreen(
                 } // Box (selection scope)
                 } // CompositionLocalProvider
 
-                if (hasFloatingTools) {
+                if (hasFloatingTools && !processOpen) {
                     Box(
                         modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                             .padding(horizontal = 12.dp).padding(bottom = 6.dp),
@@ -4582,47 +4583,31 @@ fun ChatScreen(
                     }
                 }
 
-                // Hoist both viewers above virtualized rows. Selecting a tool
-                // swaps viewers; Back returns to this message's process list.
-                val processMessage = if (processFoldEnabled) {
-                    processMessageId?.let { id -> mergedMessages.firstOrNull { it.id == id && it.role == "assistant" } }
-                } else null
-                val processBlocks = remember(processMessage?.toolBlocks, processMessage?.thinkingLevel) {
-                    processMessage?.let { chatProcessBlocks(it.toolBlocks, it.canShowProcessThinking()) }.orEmpty()
-                }
-                val detailTools = if (processMessage != null) {
-                    remember(processBlocks) { processBlocks.filter { it.kind == "tool_use" } }
-                } else legacyToolBlocks
                 val hasSelectedTool = selectedToolDetailId != null && detailTools.any { it.id == selectedToolDetailId }
                 LaunchedEffect(selectedToolDetailId, hasSelectedTool) {
                     if (selectedToolDetailId != null && !hasSelectedTool) viewModel.closeToolDetail()
                 }
-                LaunchedEffect(processMessageId, processBlocks.isNotEmpty()) {
-                    if (processMessageId != null && processBlocks.isEmpty()) processMessageId = null
-                }
-                val toolId = selectedToolDetailId
-                if (toolId != null && hasSelectedTool) {
-                    ToolDetailSheet(
-                        toolBlocks = detailTools,
-                        selectedToolId = toolId,
-                        onSelectTool = { viewModel.openToolDetail(it) },
-                        onDismiss = { viewModel.closeToolDetail() },
-                        onOpenTerminalWithCommand = { command ->
-                            processMessageId = null
-                            onOpenTerminalWithCommand(command)
-                        },
-                        onOpenBrowserForUrl = { url ->
-                            processMessageId = null
-                            viewModel.closeToolDetail()
-                            viewModel.openBrowserSheetForUrl(url)
-                        },
-                    )
-                } else if (processMessage != null && processBlocks.isNotEmpty()) {
+                if (processMessage != null) {
                     CompositionLocalProvider(LocalToolProgressById provides viewModel.toolProgressById) {
                         ChatProcessSheet(
                             messageId = processMessage.id,
                             blocks = processBlocks,
-                            onDismiss = { processMessageId = null },
+                            selectedToolId = selectedToolDetailId,
+                            onSelectTool = { viewModel.openToolDetail(it) },
+                            onClearTool = { viewModel.closeToolDetail() },
+                            onDismiss = {
+                                viewModel.closeToolDetail()
+                                processMessageId = null
+                            },
+                            onOpenTerminalWithCommand = { command ->
+                                processMessageId = null
+                                onOpenTerminalWithCommand(command)
+                            },
+                            onOpenBrowserForUrl = { url ->
+                                viewModel.closeToolDetail()
+                                processMessageId = null
+                                viewModel.openBrowserSheetForUrl(url)
+                            },
                             toolActions = { block ->
                                 processToolActions(processMessage, block)?.let { actions ->
                                     actions.copy(
@@ -4637,6 +4622,15 @@ fun ChatScreen(
                             },
                         )
                     }
+                } else if (!processFoldEnabled && selectedToolDetailId != null && hasSelectedTool) {
+                    ToolDetailSheet(
+                        toolBlocks = detailTools,
+                        selectedToolId = selectedToolDetailId!!,
+                        onSelectTool = { viewModel.openToolDetail(it) },
+                        onDismiss = { viewModel.closeToolDetail() },
+                        onOpenTerminalWithCommand = onOpenTerminalWithCommand,
+                        onOpenBrowserForUrl = { viewModel.openBrowserSheetForUrl(it) },
+                    )
                 }
 
                 // Scroll-to-bottom FAB (iOS: circle chevron.down, bottom-right)

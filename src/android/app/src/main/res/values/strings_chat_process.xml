@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_process_expand">Details</string>
+    <string name="chat_process_collapse">Hide</string>
     <string name="chat_process_title">Run details</string>
     <string name="chat_process_running">Running %1$d tools</string>
     <string name="chat_process_tools">Ran %1$d tools</string>

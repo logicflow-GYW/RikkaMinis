@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -116,64 +117,24 @@ import com.rikkaminis.app.ui.theme.ChatColors
 import com.rikkaminis.app.ui.components.MinisTextButton
 
 @Composable
-internal fun AssistantHeader(
-    compactProcess: Boolean = false,
-    processLabel: String? = null,
-    onOpenProcess: (() -> Unit)? = null,
-) {
+internal fun AssistantHeader() {
     val soulMeta by com.rikkaminis.app.agent.SoulStore.cachedMetadata.collectAsState()
     val displayName = soulMeta.name.ifBlank { com.rikkaminis.app.agent.SoulMetadata.DEFAULT.name }
-    // The identity sets height. A late tool, failure label or larger count must
-    // not remeasure the name at a different width, or determine header height.
-    Box(
-        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
-            .then(if (compactProcess) Modifier.fillMaxWidth() else Modifier),
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
     ) {
-        Row(
-            modifier = if (compactProcess) Modifier.fillMaxWidth(0.52f) else Modifier,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            val sparkleGradient = Brush.linearGradient(
-                colors = listOf(SparkleColor1, SparkleColor2),
-            )
-            Icon(
-                imageVector = Icons.Filled.AutoAwesome,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier
-                    .size(18.dp)
-                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                    .drawWithContent {
-                        drawContent()
-                        drawRect(brush = sparkleGradient, blendMode = BlendMode.SrcIn)
-                    },
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = displayName,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = if (compactProcess) 1 else Int.MAX_VALUE,
-                overflow = TextOverflow.Ellipsis,
-                modifier = if (compactProcess) Modifier.weight(1f) else Modifier,
-            )
-        }
-        if (compactProcess && processLabel != null && onOpenProcess != null) {
-            Box(Modifier.matchParentSize(), contentAlignment = Alignment.CenterEnd) {
-                Text(
-                    text = processLabel,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth(0.48f)
-                        .clickable(role = Role.Button, onClick = onOpenProcess)
-                        .padding(start = 6.dp),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.End,
-                )
-            }
-        }
+        val sparkleGradient = Brush.linearGradient(colors = listOf(SparkleColor1, SparkleColor2))
+        Icon(
+            imageVector = Icons.Default.AutoAwesome,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(18.dp)
+                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                .drawWithContent { drawContent(); drawRect(brush = sparkleGradient, blendMode = BlendMode.SrcIn) },
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(text = displayName, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -262,6 +223,8 @@ internal fun AssistantMessageView(
     // This is the existing user preference, not a live/settled state transition.
     processFoldEnabled: Boolean,
     onOpenProcess: (() -> Unit)? = null,
+    isProcessExpanded: Boolean = false,
+    queueWaitingAhead: Int = -1,
 ) {
     val compactProcess = processFoldEnabled && message.role == "assistant"
     val showThinking = message.canShowProcessThinking()
@@ -289,11 +252,18 @@ internal fun AssistantMessageView(
         // FlatChatItem) keeps the row's body identical: FallbackInfoBlock is a
         // self-contained 44dp card with its own padding, so nothing collapses.
         if (message.role != "system") {
-            AssistantHeader(
-                compactProcess = compactProcess,
-                processLabel = processStatus?.takeIf { it.hasDetails }?.let { chatProcessLabel(it, message.isStreaming) },
-                onOpenProcess = onOpenProcess,
-            )
+            AssistantHeader()
+            if (compactProcess && processStatus != null && (processStatus.hasDetails || message.isStreaming) && onOpenProcess != null) {
+                ChatProcessEntry(
+                    status = processStatus,
+                    isStreaming = message.isStreaming,
+                    isExpanded = isProcessExpanded,
+                    showWait = message.isAwaitingModelResponse,
+                    queueWaitingAhead = queueWaitingAhead,
+                    awaitingResponseSinceMs = awaitingResponseSinceMs,
+                    onToggle = onOpenProcess,
+                )
+            }
         }
 
         // Text and notices keep their original keys and ordering. Unlike a
@@ -1375,12 +1345,7 @@ internal fun ThinkingBlock(
     }
 }
 
-/** Full-content snapshot: split off-main once per explicit opening; lay out only visible chunks. */
 @Composable
-internal fun ChatProcessThinkingDetail(content: String, onDismiss: () -> Unit) {
-    ThinkingFullContentDialog(content, onDismiss)
-}
-
 @Composable
 private fun ThinkingFullContentDialog(content: String, onDismiss: () -> Unit) {
     val textColor = MaterialTheme.colorScheme.onSurface
@@ -1468,7 +1433,7 @@ private fun ThinkingFullContentDialog(content: String, onDismiss: () -> Unit) {
 }
 
 /** A URI clipboard streams the complete UTF-8 file instead of sending MBs through Binder. */
-private suspend fun copyThinkingFullContent(context: android.content.Context, content: String) {
+internal suspend fun copyThinkingFullContent(context: android.content.Context, content: String) {
     val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
     val label = context.getString(R.string.chat_deep_thinking)
     if (ThinkingReadPlanner.canCopyAsText(content.length)) {

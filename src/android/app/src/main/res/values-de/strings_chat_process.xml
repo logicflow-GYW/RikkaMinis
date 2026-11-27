@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_process_expand">Details</string>
+    <string name="chat_process_collapse">Schließen</string>
     <string name="chat_process_title">Prozessdetails</string>
     <string name="chat_process_running">%1$d Tools laufen</string>
     <string name="chat_process_tools">%1$d Tools ausgeführt</string>
