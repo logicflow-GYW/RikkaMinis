@@ -21,7 +21,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -192,15 +191,17 @@ fun ModelGroupsScreen(
         providerRepository.reorderGroups(newOrder)
     }
 
+    fun moveGroupBy(groupId: String, delta: Int): Boolean {
+        val cur = providerRepository.config.value.modelGroups.map { it.id }
+        val moved = moveEntryByDelta(cur, groupId, delta) ?: return false
+        providerRepository.reorderGroups(moved)
+        return true
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.model_groups_model_groups)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.model_group_detail_back))
-                    }
-                },
                 actions = {
                     IconButton(onClick = { showNewGroupDialog = true }) {
                         Icon(Icons.Default.Add, contentDescription = stringResource(R.string.model_groups_new_group))
@@ -266,7 +267,7 @@ fun ModelGroupsScreen(
                     items = reorderableGroups,
                     key = { _, g -> "group:${g.id}" },
                 ) { index, group ->
-                    ReorderableItem(state = reorderState, key = "group:${group.id}") { _ ->
+                    ReorderableItem(state = reorderState, key = "group:${group.id}") { isDragging ->
                         // [remove-group-swipe-delete] Delete now lives only in the
                         // group detail screen (⋮ menu): one destructive action, one
                         // entry point. The row-level swipe was redundant with it and
@@ -286,11 +287,19 @@ fun ModelGroupsScreen(
                                     onClick = { onGroupClick(group.id) },
                                     onSetPrimary = { providerRepository.defaultPrimaryGroupId = group.id },
                                     onClearPrimary = { providerRepository.defaultPrimaryGroupId = null },
-                                    // Drag only from the explicit handle. The row
-                                    // itself is clickable, so a whole-row drag
-                                    // would fight the tap.
-                                    dragHandleModifier = Modifier.then(
-                                        with(this@ReorderableItem) { Modifier.draggableHandle() },
+                                    // Whole-row long press is the reorder gesture; the row remains clickable.
+                                    reorderModifier = with(this@ReorderableItem) {
+                                        longPressReorder(isDragging)
+                                    },
+                                    accessibilityModifier = Modifier.reorderAccessibilityActions(
+                                        moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                        onMoveUp = if (index > 0) {
+                                            { moveGroupBy(group.id, -1) }
+                                        } else null,
+                                        moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                        onMoveDown = if (index < reorderableGroups.lastIndex) {
+                                            { moveGroupBy(group.id, 1) }
+                                        } else null,
                                     ),
                                 )
                             }
@@ -576,11 +585,8 @@ private fun GroupRow(
     onClick: () -> Unit,
     onSetPrimary: () -> Unit,
     onClearPrimary: () -> Unit,
-    /** [reorder-groups] Built by the caller from
-     *  `ReorderableItemScope.draggableHandle()` (scope-bound), so this row
-     *  stays scope-agnostic. Defaults to a no-op modifier, which renders an
-     *  inert handle — fine for previews/non-reorderable hosts. */
-    dragHandleModifier: Modifier = Modifier,
+    reorderModifier: Modifier = Modifier,
+    accessibilityModifier: Modifier = Modifier,
 ) {
     // [deep-audit-1043 B-06] System voice members are virtual — resolving only
     // through `config.modelEntries` left the default Voice groups with an empty
@@ -618,21 +624,20 @@ private fun GroupRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(reorderModifier)
+            .then(accessibilityModifier)
             .clickable(onClick = onClick)
-            // [reorder-groups] Left padding tightened from RowHorizontalPadding
-            // to 8dp because the drag handle now occupies that gutter (its
-            // 36dp IconButton carries its own optical inset). Trailing padding
-            // is unchanged.
+            // [reorder-groups] The whole row is the long-press target now, so
+            // the old 8dp handle gutter goes back to the shared text inset.
             .padding(
-                start = 8.dp,
+                start = SectionDesign.RowHorizontalPadding,
                 end = SectionDesign.RowHorizontalPadding,
                 top = SectionDesign.RowVerticalPadding,
                 bottom = SectionDesign.RowVerticalPadding,
             ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        DragHandleButton(handleModifier = dragHandleModifier)
-        Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+        Column(modifier = Modifier.weight(1f)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

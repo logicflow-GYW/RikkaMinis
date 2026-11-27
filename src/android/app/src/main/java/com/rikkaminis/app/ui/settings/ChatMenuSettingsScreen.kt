@@ -9,16 +9,10 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.DragHandle
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -34,7 +28,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
@@ -84,7 +80,7 @@ fun ChatMenuSettingsScreen(
     var menuOrder by remember {
         mutableStateOf(
             ChatMenuPrefs.resolveOrder(prefs)
-                .filter { ChatActionCatalog.spec(it)?.defaultMenuVisible != false },
+                .filter { it in ChatMenuPrefs.DEFAULT_ORDER },
         )
     }
     // Section B: footer pin order (all 10 entries, with SETTINGS anchored)
@@ -151,7 +147,7 @@ fun ChatMenuSettingsScreen(
                     prefsTick++
                     if (draggingEntry == null) {
                         menuOrder = ChatMenuPrefs.resolveOrder(prefs)
-                            .filter { ChatActionCatalog.spec(it)?.defaultMenuVisible != false }
+                            .filter { it in ChatMenuPrefs.DEFAULT_ORDER }
                         footerOrder = ChatMenuPrefs.settingsPinOrder(prefs)
                         attachOrder = ChatMenuPrefs.resolveAttachOrder(prefs)
                     }
@@ -174,6 +170,27 @@ fun ChatMenuSettingsScreen(
     fun commitAttachOrder(newOrder: List<String>) {
         attachOrder = newOrder
         ChatMenuPrefs.writeAttachOrder(prefs, newOrder)
+    }
+
+    fun moveMenuEntryBy(entryKey: String, delta: Int): Boolean {
+        val moved = moveEntryByDelta(menuOrder, entryKey, delta) ?: return false
+        commitMenuOrder(moved)
+        return true
+    }
+
+    fun moveAttachEntryBy(entryKey: String, delta: Int): Boolean {
+        val moved = moveEntryByDelta(attachOrder, entryKey, delta) ?: return false
+        commitAttachOrder(moved)
+        return true
+    }
+
+    fun moveFooterEntryBy(entryKey: String, delta: Int): Boolean {
+        val from = footerOrder.indexOf(entryKey)
+        if (from < 0) return false
+        val target = chatMenuDragTargetIndex(footerOrder, from, delta, setOf(ChatMenuPrefs.SETTINGS))
+        if (target == from) return false
+        commitFooterOrder(chatMenuDragSwap(footerOrder, from, target))
+        return true
     }
 
     SettingsScaffold(
@@ -232,6 +249,10 @@ fun ChatMenuSettingsScreen(
                                 draggable = true,
                                 rowHeightPx = rowHeightPx,
                                 order = attachOrder,
+                                moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                onMoveUp = if (index > 0) ({ key -> moveAttachEntryBy(key, -1) }) else null,
+                                moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                onMoveDown = if (index < attachOrder.lastIndex) ({ key -> moveAttachEntryBy(key, 1) }) else null,
                                 draggingEntry = draggingEntry,
                                 dragOffset = dragOffset,
                                 onDragStart = { draggingEntry = it; dragOffset = 0f },
@@ -241,12 +262,6 @@ fun ChatMenuSettingsScreen(
                                 prefsTick = prefsTick,
                             ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    Icons.Outlined.DragHandle,
-                                    contentDescription = stringResource(R.string.chat_menu_drag_handle),
-                                    modifier = Modifier.padding(end = 4.dp).size(28.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
                                 Switch(
                                     checked = ChatMenuPrefs.isAttachVisible(prefs, entryKey),
                                     onCheckedChange = { newValue ->
@@ -279,6 +294,10 @@ fun ChatMenuSettingsScreen(
                                 draggable = true,
                                 rowHeightPx = rowHeightPx,
                                 order = menuOrder,
+                                moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                onMoveUp = if (index > 0) ({ key -> moveMenuEntryBy(key, -1) }) else null,
+                                moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                onMoveDown = if (index < menuOrder.lastIndex) ({ key -> moveMenuEntryBy(key, 1) }) else null,
                                 draggingEntry = draggingEntry,
                                 dragOffset = dragOffset,
                                 onDragStart = { draggingEntry = it; dragOffset = 0f },
@@ -288,12 +307,6 @@ fun ChatMenuSettingsScreen(
                                 prefsTick = prefsTick,
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    Icons.Outlined.DragHandle,
-                                    contentDescription = stringResource(R.string.chat_menu_drag_handle),
-                                    modifier = Modifier.padding(end = 4.dp).size(28.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
                                 Switch(
                                     checked = ChatMenuPrefs.isVisible(prefs, entryKey),
                                     onCheckedChange = { newValue ->
@@ -335,6 +348,10 @@ fun ChatMenuSettingsScreen(
                                 lockedKeys = setOf(ChatMenuPrefs.SETTINGS),
                                 rowHeightPx = rowHeightPx,
                                 order = footerOrder,
+                                moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                onMoveUp = if (!isSettings && index > 0) ({ key -> moveFooterEntryBy(key, -1) }) else null,
+                                moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                onMoveDown = if (!isSettings && index < footerOrder.lastIndex - 1) ({ key -> moveFooterEntryBy(key, 1) }) else null,
                                 draggingEntry = draggingEntry,
                                 dragOffset = dragOffset,
                                 onDragStart = { draggingEntry = it; dragOffset = 0f },
@@ -345,23 +362,15 @@ fun ChatMenuSettingsScreen(
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 if (isSettings && ChatMenuPrefs.isPinned(prefs, entryKey)) {
-                                    // SETTINGS pinned: show "fixed right" hint instead of drag handle
+                                    // SETTINGS does not participate in drag; keep the
+                                    // "fixed last" hint that says why its row has no
+                                    // long-press gesture.
                                     Text(
                                         text = stringResource(R.string.chat_menu_settings_always_last),
                                         fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(end = 8.dp),
                                     )
-                                } else if (!isSettings) {
-                                    Icon(
-                                        Icons.Outlined.DragHandle,
-                                        contentDescription = stringResource(R.string.chat_menu_drag_handle),
-                                        modifier = Modifier.padding(end = 4.dp).size(28.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                } else {
-                                    // SETTINGS unpinned: no hint, just space
-                                    Spacer(Modifier.width(28.dp + 4.dp))
                                 }
                                 Switch(
                                     checked = ChatMenuPrefs.isPinned(prefs, entryKey),
@@ -411,6 +420,10 @@ private fun DraggableActionRow(
     lockedKeys: Set<String> = emptySet(),
     rowHeightPx: Float,
     order: List<String>,
+    moveUpLabel: String,
+    onMoveUp: ((String) -> Boolean)?,
+    moveDownLabel: String,
+    onMoveDown: ((String) -> Boolean)?,
     draggingEntry: String?,
     dragOffset: Float,
     onDragStart: (String) -> Unit,
@@ -431,22 +444,40 @@ private fun DraggableActionRow(
     // (`setOf(ChatMenuPrefs.SETTINGS)`), so a fresh instance per recomposition
     // must not be able to leave the handler holding a stale set.
     val currentLockedKeys by rememberUpdatedState(lockedKeys)
+    val currentMoveUp by rememberUpdatedState(onMoveUp)
+    val currentMoveDown by rememberUpdatedState(onMoveDown)
+    val haptics = LocalHapticFeedback.current
     val isDragging = draggingEntry == entryKey
 
     // Read prefsTick to establish re-composition dependency when prefs change
     @Suppress("UNUSED_EXPRESSION")
     prefsTick
 
+    val accessibility = if (draggable) {
+        Modifier.reorderAccessibilityActions(
+            moveUpLabel = moveUpLabel,
+            onMoveUp = currentMoveUp?.let { callback -> { callback(entryKey) } },
+            moveDownLabel = moveDownLabel,
+            onMoveDown = currentMoveDown?.let { callback -> { callback(entryKey) } },
+        )
+    } else {
+        Modifier
+    }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(56.dp)
             .offset { IntOffset(0, if (isDragging) dragOffset.roundToInt() else 0) }
+            .then(accessibility)
             .then(
                 if (draggable) {
                     Modifier.pointerInput(entryKey) {
                         detectDragGesturesAfterLongPress(
-                            onDragStart = { onDragStart(entryKey) },
+                            onDragStart = {
+                                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                                onDragStart(entryKey)
+                            },
                             onDrag = { change, amount ->
                                 change.consume()
                                 val newOffset = currentDragOffset + amount.y
@@ -473,8 +504,14 @@ private fun DraggableActionRow(
                                     }
                                 }
                             },
-                            onDragEnd = { onDragEnd() },
-                            onDragCancel = { onDragEnd() },
+                            onDragEnd = {
+                                haptics.performHapticFeedback(HapticFeedbackType.GestureEnd)
+                                onDragEnd()
+                            },
+                            onDragCancel = {
+                                haptics.performHapticFeedback(HapticFeedbackType.GestureEnd)
+                                onDragEnd()
+                            },
                         )
                     }
                 } else {

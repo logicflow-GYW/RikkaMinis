@@ -15,10 +15,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Psychology
@@ -160,16 +158,19 @@ fun ModelGroupDetailScreen(
         providerRepository.updateGroup(currentGroup().copy(memberEntryIds = memberIds.toMutableList()))
     }
 
+    /** Accessibility / two-finger reorder for one group member. */
+    fun moveMemberBy(entryId: String, delta: Int): Boolean {
+        val moved = moveEntryByDelta(memberIds, entryId, delta) ?: return false
+        memberIds = moved
+        providerRepository.updateGroup(currentGroup().copy(memberEntryIds = moved.toMutableList()))
+        return true
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text(group.name, fontWeight = FontWeight.SemiBold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.model_group_detail_back))
-                    }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
                 ),
@@ -326,8 +327,20 @@ fun ModelGroupDetailScreen(
 
                     if (entry == null) {
                         // Stale member: UUID no longer resolves to any ModelEntry
-                        ReorderableItem(reorderState, key = entryId) { _ ->
+                        ReorderableItem(reorderState, key = entryId) { isDragging ->
                             ListItem(
+                                modifier = Modifier
+                                    .then(with(this@ReorderableItem) { longPressReorder(isDragging) })
+                                    .reorderAccessibilityActions(
+                                        moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                        onMoveUp = if (memberIds.indexOf(entryId) > 0) {
+                                            { moveMemberBy(entryId, -1) }
+                                        } else null,
+                                        moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                        onMoveDown = if (memberIds.indexOf(entryId) < memberIds.lastIndex) {
+                                            { moveMemberBy(entryId, 1) }
+                                        } else null,
+                                    ),
                                 headlineContent = {
                                     Text(
                                         stringResource(R.string.model_group_model_unavailable),
@@ -393,8 +406,20 @@ fun ModelGroupDetailScreen(
                         )
                         var showMenu by remember { mutableStateOf(false) }
 
-                        ReorderableItem(reorderState, key = entryId) { _ ->
+                        ReorderableItem(reorderState, key = entryId) { isDragging ->
                             ListItem(
+                                modifier = Modifier
+                                    .then(with(this@ReorderableItem) { longPressReorder(isDragging) })
+                                    .reorderAccessibilityActions(
+                                        moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                        onMoveUp = if (memberIds.indexOf(entryId) > 0) {
+                                            { moveMemberBy(entryId, -1) }
+                                        } else null,
+                                        moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                        onMoveDown = if (memberIds.indexOf(entryId) < memberIds.lastIndex) {
+                                            { moveMemberBy(entryId, 1) }
+                                        } else null,
+                                    ),
                                 // No whole-row alpha any more: a disabled provider
                                 // used to fade the id to 40% and the red warning
                                 // with it. The state is now carried by the red
@@ -425,14 +450,6 @@ fun ModelGroupDetailScreen(
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
                                         }
-                                    }
-                                },
-                                leadingContent = {
-                                    IconButton(
-                                        modifier = Modifier.draggableHandle(),
-                                        onClick = {},
-                                    ) {
-                                        Icon(Icons.Default.DragHandle, contentDescription = stringResource(R.string.model_group_detail_drag_to_reorder))
                                     }
                                 },
                                 trailingContent = {
