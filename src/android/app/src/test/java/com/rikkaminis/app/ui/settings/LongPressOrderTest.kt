@@ -1,6 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -163,6 +164,22 @@ class LongPressOrderTest {
             assertTrue("$file: no handle-only drag path may remain", !c.contains(".draggableHandle()"))
             assertTrue("$file: no drag-handle icon may remain", !c.contains("Icons.Outlined.DragHandle") && !c.contains("Icons.Default.DragHandle"))
         }
+    }
+
+    @Test
+    fun `model member titles keep one leading slot when the drag handle is hidden`() {
+        val c = code("$dir/ModelGroupDetailScreen.kt")
+        assertTrue("stale rows still have a warning leading slot", c.contains("Icons.Default.Warning"))
+        assertEquals(
+            "stale warning and normal row must both occupy a leading slot",
+            2,
+            c.split("leadingContent =").size - 1,
+        )
+        assertTrue(
+            "normal model row must keep a 24.dp invisible slot",
+            c.contains("Spacer(modifier = Modifier.size(24.dp))"),
+        )
+        assertFalse("the visible drag handle must stay removed", c.contains("DragHandle"))
     }
 
     @Test

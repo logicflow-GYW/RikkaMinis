@@ -420,10 +420,14 @@ fun ModelGroupDetailScreen(
                                             { moveMemberBy(entryId, 1) }
                                         } else null,
                                     ),
-                                // No whole-row alpha any more: a disabled provider
-                                // used to fade the id to 40% and the red warning
-                                // with it. The state is now carried by the red
-                                // line below, so the id stays readable.
+                                leadingContent = {
+                                    // Keep normal model titles aligned with stale rows:
+                                    // the latter still use the 24.dp warning slot. The
+                                    // reorder affordance is now the whole-row long press,
+                                    // so this slot stays invisible rather than restoring
+                                    // a visible drag handle.
+                                    Spacer(modifier = Modifier.size(24.dp))
+                                },
                                 headlineContent = {
                                     Text(
                                         text = entry.model.displayName,
