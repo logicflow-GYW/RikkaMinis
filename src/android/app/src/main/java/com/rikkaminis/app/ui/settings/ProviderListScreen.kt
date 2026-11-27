@@ -177,16 +177,10 @@ fun ProviderListScreen(
         val fromIdx = memberIds.indexOf(fromId)
         val toIdx = memberIds.indexOf(toId)
         if (fromIdx < 0 || toIdx < 0) return@rememberReorderableLazyListState
-        val newMembers = memberIds.toMutableList().apply { add(toIdx, removeAt(fromIdx)) }
-        // Splice the re-ordered section back into the flat instance order.
-        // Each section is derived by filtering this flat list, so the
-        // relative order of everything outside the section must be preserved.
-        val memberSet = memberIds.toSet()
-        val newOrder = ArrayList<String>(cur.size)
-        var memberPos = 0
-        for (inst in cur) {
-            if (inst.id in memberSet) newOrder.add(newMembers[memberPos++]) else newOrder.add(inst.id)
-        }
+        // Each section is derived by filtering this flat list, so everything
+        // outside the dragged section must keep its relative order.
+        val newOrder = spliceSectionOrder(cur.map { it.id }, memberIds, fromIdx, toIdx)
+            ?: return@rememberReorderableLazyListState
         providerRepository.reorderInstances(newOrder)
     }
 
@@ -354,7 +348,7 @@ fun ProviderListScreen(
                         items = section.items,
                         key = { _, row -> "inst:${row.instance.id}" },
                     ) { index, row ->
-                        ReorderableItem(state = reorderState, key = "inst:${row.instance.id}") { _ ->
+                        ReorderableItem(state = reorderState, key = "inst:${row.instance.id}") { isDragging ->
                             Column {
                                 if (index != 0) SectionDividerInsetCard()
                                 Box(
@@ -373,7 +367,19 @@ fun ProviderListScreen(
                                             { providerRepository.setInstancePinned(row.instance.id, !row.instance.pinned) }
                                         },
                                         onClick = remember(row.instance.id) { { onProviderClick(row.instance.id) } },
-                                        dragHandleModifier = with(this@ReorderableItem) { Modifier.draggableHandle() },
+                                        reorderModifier = with(this@ReorderableItem) {
+                                            longPressReorder(isDragging)
+                                        },
+                                        accessibilityModifier = Modifier.reorderAccessibilityActions(
+                                            moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                            onMoveUp = if (index > 0) {
+                                                { moveProviderBy(providerRepository, row.instance.id, -1) }
+                                            } else null,
+                                            moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                            onMoveDown = if (index < section.items.lastIndex) {
+                                                { moveProviderBy(providerRepository, row.instance.id, 1) }
+                                            } else null,
+                                        ),
                                     )
                                 }
                             }
@@ -445,18 +451,16 @@ private fun ProviderInstanceRow(
     pinned: Boolean,
     onTogglePinned: () -> Unit,
     onClick: () -> Unit,
-    // [reorder-providers] Built by the caller because
-    // ReorderableItemScope.draggableHandle() is scope-bound; threading it in
-    // keeps this row scope-agnostic (same pattern as GroupRow on the Model
-    // Groups list). Only the handle starts a drag — the row itself stays
-    // clickable and the star stays a tap, so neither gesture fights the drag.
-    dragHandleModifier: Modifier = Modifier,
+    reorderModifier: Modifier = Modifier,
+    accessibilityModifier: Modifier = Modifier,
 ) {
     val isActive = isConfigured && instance.isEnabled
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(reorderModifier)
+            .then(accessibilityModifier)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -547,12 +551,35 @@ private fun ProviderInstanceRow(
             )
         }
 
-        // [reorder-providers] Explicit drag handle (IconButton, not a bare Icon
-        // — see [T198] on DragHandleButton). Content description reuses the
-        // model-group "drag to reorder" string: same gesture, same meaning.
-        DragHandleButton(handleModifier = dragHandleModifier)
-
     }
+}
+
+/**
+ * One accessibility / two-finger step for a provider row.
+ *
+ * Top-level (not a local `fun` inside the screen): the settings-navigation
+ * gate derives each `SettingsScaffold` call site's owning function from the
+ * nearest preceding declaration, and a local `fun` above that call made the
+ * page's own `onBack` handler invisible to it. Keeping the step here also
+ * gives the gesture and the accessibility action the same section maths.
+ */
+private fun moveProviderBy(
+    providerRepository: ProviderRepository,
+    instanceId: String,
+    delta: Int,
+): Boolean {
+    val cur = providerRepository.config.value.instances
+    val fromInst = cur.find { it.id == instanceId } ?: return false
+    val memberIds = cur.filter {
+        if (fromInst.pinned) it.pinned
+        else !it.pinned && it.providerType == fromInst.providerType
+    }.map { it.id }
+    val fromIdx = memberIds.indexOf(instanceId)
+    if (fromIdx < 0) return false
+    val newOrder = spliceSectionOrder(cur.map { it.id }, memberIds, fromIdx, fromIdx + delta)
+        ?: return false
+    providerRepository.reorderInstances(newOrder)
+    return true
 }
 
 private fun maskKey(key: String): String {

@@ -5,24 +5,28 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.rikkaminis.app.R
+import sh.calvin.reorderable.ReorderableCollectionItemScope
+import sh.calvin.reorderable.ReorderableScope
 import com.rikkaminis.app.ui.components.SectionDesign
 
 /**
@@ -118,38 +122,78 @@ internal fun BadgeLabel(text: String, color: Color) {
 }
 
 /**
- * The drag affordance for a reorderable row.
- *
- * [T198] The handle MUST be an `IconButton`, not a bare `Icon`: reorderable
- * 2.4.0's `draggableHandle()` attaches a pointer-input node, and a raw Icon
- * is just vector graphics with no pointer consumer, so it never receives
- * ACTION_DOWN/MOVE. `IconButton` is Compose's clickable container and does
- * consume pointer events, which lets [handleModifier] route the gesture.
- *
- * [handleModifier] is built by the caller because
- * `ReorderableItemScope.draggableHandle()` is scope-bound; threading it in
- * keeps row composables scope-agnostic.
- *
- * Using an explicit handle (rather than making the whole row draggable) is
- * also what keeps drag-to-reorder from fighting a row's other gestures —
- * the Model Groups row and the provider row are both clickable, and the
- * provider row also carries the pinned-star toggle.
+ * Whole-row long-press reorder for a LazyColumn item. The 2.4.0 API exposes
+ * [ReorderableCollectionItemScope], not the newer ReorderableListItemScope.
  */
 @Composable
-internal fun DragHandleButton(
-    handleModifier: Modifier = Modifier,
-    contentDescription: String? = null,
-) {
-    IconButton(
-        onClick = {},
-        modifier = handleModifier.size(36.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Default.DragHandle,
-            contentDescription = contentDescription
-                ?: stringResource(R.string.model_group_detail_drag_to_reorder),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-            modifier = Modifier.size(20.dp),
+internal fun ReorderableCollectionItemScope.longPressReorder(
+    isDragging: Boolean,
+    enabled: Boolean = true,
+): Modifier {
+    val haptics = LocalHapticFeedback.current
+    val scale by animateFloatAsState(
+        targetValue = if (isDragging) 0.95f else 1f,
+        label = "reorder_scale",
+    )
+    return Modifier
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+        }
+        .longPressDraggableHandle(
+            enabled = enabled,
+            onDragStarted = {
+                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+            },
+            onDragStopped = {
+                haptics.performHapticFeedback(HapticFeedbackType.GestureEnd)
+            },
         )
+}
+
+/** Whole-row long-press reorder for the 2.4.0 ReorderableColumn API. */
+@Composable
+internal fun ReorderableScope.longPressReorder(
+    isDragging: Boolean,
+    enabled: Boolean = true,
+): Modifier {
+    val haptics = LocalHapticFeedback.current
+    val scale by animateFloatAsState(
+        targetValue = if (isDragging) 0.95f else 1f,
+        label = "reorder_scale",
+    )
+    return Modifier
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+        }
+        .longPressDraggableHandle(
+            enabled = enabled,
+            onDragStarted = {
+                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+            },
+            onDragStopped = {
+                haptics.performHapticFeedback(HapticFeedbackType.GestureEnd)
+            },
+        )
+}
+
+/**
+ * Keeps reorder reachable without a visible handle. Each action calls the
+ * screen's real persistence callback and returns false only when absent.
+ */
+internal fun Modifier.reorderAccessibilityActions(
+    moveUpLabel: String,
+    onMoveUp: (() -> Boolean)?,
+    moveDownLabel: String,
+    onMoveDown: (() -> Boolean)?,
+): Modifier = semantics {
+    customActions = buildList {
+        onMoveUp?.let { callback ->
+            add(CustomAccessibilityAction(moveUpLabel) { callback() })
+        }
+        onMoveDown?.let { callback ->
+            add(CustomAccessibilityAction(moveDownLabel) { callback() })
+        }
     }
 }
