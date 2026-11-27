@@ -42,7 +42,6 @@ import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.ui.components.MinisOutlinedButton
 import com.rikkaminis.app.ui.components.SectionDesign
 import com.rikkaminis.app.ui.components.SectionFooter
-import com.rikkaminis.app.ui.components.SectionHeader
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.ReorderableLazyListState
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -138,7 +137,7 @@ fun AgentLoopModelsScreen(
                 .padding(padding),
             contentPadding = PaddingValues(bottom = 24.dp),
         ) {
-            item("top_gap") { Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap)) }
+            item("top_gap") { Spacer(modifier = Modifier.height(SectionDesign.FirstSectionTopGap)) }
 
             agentLoopModelsSectionItems(
                 providerRepository = providerRepository,
@@ -202,13 +201,6 @@ private fun LazyListScope.agentLoopModelsSectionItems(
     // applies horizontal insets, surface fill, and rounded corners only
     // on the first/last row. SectionDivider is emitted as its own item
     // between rows so the inner card reads as one continuous panel.
-    item("agent_loop_section_spacer") {
-        Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap))
-    }
-    item("agent_loop_section_header") {
-        SectionHeader(text = stringResource(R.string.agent_loop_section_title))
-    }
-
     if (isEmpty) {
         item("agent_loop_section_empty") {
             Box(modifier = Modifier.cardRow(isFirst = true, isLast = true)) {

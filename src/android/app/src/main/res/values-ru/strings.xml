@@ -763,7 +763,6 @@
     <string name="model_group_detail_fallback_trigger">Условие резервного перехода</string>
     <string name="common_default">По умолчанию</string>
     <string name="model_group_detail_always">Всегда</string>
-    <string name="model_group_detail_unavailable">Недоступно</string>
     <string name="model_group_detail_drag_to_reorder">Перетащите для изменения порядка</string>
     <string name="model_group_detail_more_options">Больше параметров</string>
     <string name="model_group_detail_remove_from_group">Удалить из группы</string>

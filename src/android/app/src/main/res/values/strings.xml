@@ -963,7 +963,6 @@
     <string name="model_group_detail_fallback_trigger">Fallback Trigger</string>
     <string name="common_default">Default</string>
     <string name="model_group_detail_always">Always</string>
-    <string name="model_group_detail_unavailable">Unavailable</string>
     <string name="model_group_name_saved">Name saved</string>
     <string name="model_group_routing_fallback_footer">Try models in order. The fallback trigger controls when to try the next available model.</string>
     <string name="model_group_routing_loadbalance_footer">Each new message advances to the next model in the group.</string>

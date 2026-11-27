@@ -317,7 +317,6 @@
     <string name="model_group_detail_fallback_trigger">Fallback 觸發條件</string>
     <string name="common_default">默認</string>
     <string name="model_group_detail_always">始終</string>
-    <string name="model_group_detail_unavailable">無法使用</string>
     <string name="model_group_detail_drag_to_reorder">拖曳以重新排序</string>
     <string name="model_group_detail_more_options">更多選項</string>
     <string name="model_group_detail_remove_from_group">從群組中移除</string>

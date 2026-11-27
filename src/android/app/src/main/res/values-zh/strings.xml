@@ -807,7 +807,6 @@
     <string name="model_group_detail_fallback_trigger">Fallback 触发条件</string>
     <string name="common_default">默认</string>
     <string name="model_group_detail_always">始终</string>
-    <string name="model_group_detail_unavailable">不可用</string>
     <string name="model_group_name_saved">名称已保存</string>
     <string name="model_group_routing_fallback_footer">按顺序尝试模型。何时切换到下一个可用模型，由回退触发条件决定。</string>
     <string name="model_group_routing_loadbalance_footer">每条新消息依次切换到组内的下一个模型。</string>

@@ -671,7 +671,6 @@
     <string name="model_group_detail_fallback_trigger">Fallback-Auslöser</string>
     <string name="common_default">Standard</string>
     <string name="model_group_detail_always">Immer</string>
-    <string name="model_group_detail_unavailable">Nicht verfügbar</string>
     <string name="model_group_detail_drag_to_reorder">Zum Neuanordnen ziehen</string>
     <string name="model_group_detail_more_options">Weitere Optionen</string>
     <string name="model_group_detail_remove_from_group">Aus Gruppe entfernen</string>

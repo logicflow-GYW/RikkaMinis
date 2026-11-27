@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -21,7 +20,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
@@ -75,6 +73,7 @@ import sh.calvin.reorderable.rememberReorderableLazyListState
 import com.rikkaminis.app.ui.components.MinisButton
 import com.rikkaminis.app.ui.components.MinisOutlinedButton
 import com.rikkaminis.app.ui.components.MinisTextButton
+import com.rikkaminis.app.ui.components.SectionDesign
 import com.rikkaminis.app.ui.components.SectionTextField
 import kotlin.math.roundToInt
 
@@ -330,6 +329,7 @@ fun ModelGroupDetailScreen(
                         // Stale member: UUID no longer resolves to any ModelEntry
                         ReorderableItem(reorderState, key = entryId) { isDragging ->
                             ListItem(
+                                // Match the Models header with the ListItem's own inner inset.
                                 modifier = Modifier
                                     .then(with(this@ReorderableItem) { longPressReorder(isDragging) })
                                     .reorderAccessibilityActions(
@@ -341,7 +341,8 @@ fun ModelGroupDetailScreen(
                                         onMoveDown = if (memberIds.indexOf(entryId) < memberIds.lastIndex) {
                                             { moveMemberBy(entryId, 1) }
                                         } else null,
-                                    ),
+                                    )
+                                    .padding(start = SectionDesign.ScreenHorizontalPadding),
                                 headlineContent = {
                                     Text(
                                         stringResource(R.string.model_group_model_unavailable),
@@ -355,13 +356,6 @@ fun ModelGroupDetailScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
                                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                    )
-                                },
-                                leadingContent = {
-                                    Icon(
-                                        imageVector = Icons.Default.Warning,
-                                        contentDescription = stringResource(R.string.model_group_detail_unavailable),
-                                        tint = MaterialTheme.colorScheme.error,
                                     )
                                 },
                                 trailingContent = {
@@ -420,15 +414,8 @@ fun ModelGroupDetailScreen(
                                         onMoveDown = if (memberIds.indexOf(entryId) < memberIds.lastIndex) {
                                             { moveMemberBy(entryId, 1) }
                                         } else null,
-                                    ),
-                                leadingContent = {
-                                    // Keep normal model titles aligned with stale rows:
-                                    // the latter still use the 24.dp warning slot. The
-                                    // reorder affordance is now the whole-row long press,
-                                    // so this slot stays invisible rather than restoring
-                                    // a visible drag handle.
-                                    Spacer(modifier = Modifier.size(24.dp))
-                                },
+                                    )
+                                    .padding(start = SectionDesign.ScreenHorizontalPadding),
                                 headlineContent = {
                                     Text(
                                         text = entry.model.displayName,

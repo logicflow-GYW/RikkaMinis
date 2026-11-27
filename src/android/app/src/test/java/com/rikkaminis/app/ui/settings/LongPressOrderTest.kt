@@ -167,19 +167,23 @@ class LongPressOrderTest {
     }
 
     @Test
-    fun `model member titles keep one leading slot when the drag handle is hidden`() {
-        val c = code("$dir/ModelGroupDetailScreen.kt")
-        assertTrue("stale rows still have a warning leading slot", c.contains("Icons.Default.Warning"))
-        assertEquals(
-            "stale warning and normal row must both occupy a leading slot",
-            2,
-            c.split("leadingContent =").size - 1,
-        )
-        assertTrue(
-            "normal model row must keep a 24.dp invisible slot",
-            c.contains("Spacer(modifier = Modifier.size(24.dp))"),
-        )
-        assertFalse("the visible drag handle must stay removed", c.contains("DragHandle"))
+    fun `normal and unavailable model names align with the Models heading without a leading slot`() {
+        val members = code("$dir/ModelGroupDetailScreen.kt")
+            .substringAfter("R.string.model_group_detail_models_header_count,", "")
+            .substringBefore("R.string.model_group_detail_session_defaults,")
+        assertTrue("keep the existing heading inset", members.contains("Modifier.padding(horizontal = 32.dp,"))
+        val rows = members.split("ListItem(").drop(1)
+        assertEquals("check both the unavailable and resolved member row", 2, rows.size)
+        for ((index, row) in rows.withIndex()) {
+            assertTrue("row $index must render its headline", row.contains("headlineContent ="))
+            assertTrue("row $index: add the outer inset to Material3's own start padding",
+                row.substringBefore("headlineContent =").contains(".padding(start = SectionDesign.ScreenHorizontalPadding)"))
+            assertFalse("row $index must not have an icon or spacer in a leading slot", row.contains("leadingContent ="))
+        }
+        assertTrue(rows[0].contains("R.string.model_group_model_unavailable"))
+        assertTrue(rows[0].contains("Icons.Default.Delete"))
+        assertTrue(rows[1].contains("text = entry.model.displayName"))
+        assertTrue(rows[1].contains("Icons.Default.MoreVert"))
     }
 
     @Test

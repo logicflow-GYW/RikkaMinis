@@ -104,6 +104,36 @@ class UiSimplificationIntegrationTest {
         assertFalse("visibility defaults must not drop configurable rows", settings.contains("?.defaultMenuVisible"))
     }
 
+    @Test fun `agent loop entry keeps the section header and has only the trailing arrow`() {
+        val groups = source("ui/settings/ModelGroupsScreen.kt")
+        val header = groups.substringAfter("item(\"agent_loop_entry_header\")", "")
+            .substringBefore("item(\"agent_loop_entry_row\")")
+        assertTrue("the entry card's section title stays",
+            header.contains("SectionHeader(text = stringResource(R.string.agent_loop_section_entry_title))"))
+        assertTrue(groups.contains("AgentLoopEntryRow(onClick = onAgentLoopClick)"))
+        val row = groups.substringAfter("private fun AgentLoopEntryRow(", "")
+            .substringBefore("private data class GroupModalityMarker(")
+        assertTrue("the full row remains clickable", row.contains(".clickable(onClick = onClick)"))
+        val label = row.indexOf("text = stringResource(R.string.agent_loop_section_entry_title)")
+        assertTrue("the one icon is the arrow after the label",
+            label >= 0 && row.indexOf("imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight") > label)
+        assertEquals(1, row.split("Icon(").size - 1)
+        assertFalse("no gap for a removed icon", row.contains("Spacer("))
+    }
+
+    @Test fun `agent loop screen shows only its app bar title and one compact top gap`() {
+        val screen = source("ui/settings/AgentLoopModelsScreen.kt")
+        assertEquals(1, Regex("\\bR\\.string\\.agent_loop_section_title\\b").findAll(screen).count())
+        assertTrue(screen.contains("title = { Text(stringResource(R.string.agent_loop_section_title)) }"))
+        val top = screen.substringAfter("LazyColumn(", "").substringBefore("agentLoopModelsSectionItems(", "")
+        assertEquals(1, top.split("Spacer(").size - 1)
+        assertTrue(top.contains("Spacer(modifier = Modifier.height(SectionDesign.FirstSectionTopGap))"))
+        val sectionStart = screen.substringAfter("private fun LazyListScope.agentLoopModelsSectionItems(", "")
+            .substringBefore("if (isEmpty)", "")
+        assertTrue("find the section before its first rendered content", sectionStart.contains("val isEmpty ="))
+        assertFalse("the content must not add another intro item", sectionStart.contains("item("))
+    }
+
     @Test fun `model entry editor keeps explicit cancel and save rather than treating them as arrows`() {
         val editor = source("ui/settings/ModelEntryDetailScreen.kt")
         assertTrue(editor.contains("fun ModelEntryDetailScreen("))

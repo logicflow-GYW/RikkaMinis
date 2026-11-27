@@ -671,7 +671,6 @@
     <string name="model_group_detail_fallback_trigger">フォールバックのトリガー</string>
     <string name="common_default">デフォルト</string>
     <string name="model_group_detail_always">常に</string>
-    <string name="model_group_detail_unavailable">利用不可</string>
     <string name="model_group_detail_drag_to_reorder">ドラッグして並べ替え</string>
     <string name="model_group_detail_more_options">その他のオプション</string>
     <string name="model_group_detail_remove_from_group">グループから削除</string>
