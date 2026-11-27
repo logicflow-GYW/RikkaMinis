@@ -69,8 +69,7 @@ fun AddProviderScreen(
     var step by remember { mutableStateOf(AddProviderStep.CHOOSE_TYPE) }
     var selectedType by remember { mutableStateOf<ProviderType?>(null) }
 
-    // Unified back handler: reuse each step's onBack so predictive-back gesture
-    // and the top-bar arrow behave identically (go back to prior step, not exit).
+    // Keep the configure step's system back inside this flow; step zero exits.
     val handleBack: () -> Unit = {
         when (step) {
             AddProviderStep.CHOOSE_TYPE -> onBack()

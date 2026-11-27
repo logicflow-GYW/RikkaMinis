@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisButton
 import com.rikkaminis.app.ui.components.MinisTextButton
@@ -28,7 +30,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
@@ -711,6 +712,7 @@ fun SkillDetailScreen(
     onBack: () -> Unit,
     onFileClick: (String, String) -> Unit = { _, _ -> },
 ) {
+    BackHandler(onBack = onBack)
     val skills by skillRepository.skills.collectAsState()
     val skill = skills.find { it.id == skillId }
     var deleted by remember { mutableStateOf(false) }
@@ -887,11 +889,6 @@ fun SkillDetailScreen(
         topBar = {
             TopAppBar(
                 title = { Text(skill.name) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                },
                 actions = {
                     // [T-android-skill-export] Export the skill as a .zip and
                     // hand it to the system share sheet — the round-trip
@@ -1415,6 +1412,7 @@ fun SkillFileViewerScreen(
     skillRepository: SkillRepository,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val skills by skillRepository.skills.collectAsState()
     val skill = skills.find { it.id == skillId }
     if (skill == null) {
@@ -1522,11 +1520,6 @@ fun SkillFileViewerScreen(
         topBar = {
             TopAppBar(
                 title = { Text(fileName) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                },
                 actions = {
                     if (isEditing) {
                         MinisTextButton(onClick = {

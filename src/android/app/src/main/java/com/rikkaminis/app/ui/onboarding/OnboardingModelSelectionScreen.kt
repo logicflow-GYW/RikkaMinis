@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.onboarding
 
+import androidx.activity.compose.BackHandler
+
 import com.rikkaminis.app.R
 import androidx.compose.ui.res.stringResource
 import com.rikkaminis.app.ui.components.MinisButton
@@ -24,13 +26,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -65,6 +63,7 @@ fun OnboardingModelSelectionScreen(
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     // [audit-0917] Resolved in the composable so the persisted group name is
     // localised (see the note at the ModelGroup construction below).
     val defaultGroupName = stringResource(R.string.onboarding_default_group_name)
@@ -104,11 +103,6 @@ fun OnboardingModelSelectionScreen(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.onboarding_select_models_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                },
                 actions = {
                     MinisTextButton(onClick = onBack) {
                         Text(stringResource(R.string.common_skip))

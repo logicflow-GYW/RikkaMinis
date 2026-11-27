@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,11 +19,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -56,6 +56,7 @@ fun SharedFolderDetailScreen(
     onBack: () -> Unit,
     onBrowseFiles: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val folder = SharedFolderRegistry.find(folderId)
     if (folder == null) {
         // Unknown id — pop out so we never render an empty/broken detail.
@@ -67,11 +68,6 @@ fun SharedFolderDetailScreen(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.shared_folder_detail_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                    }
-                },
             )
         },
     ) { padding ->

@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,13 +19,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderShared
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -78,6 +78,7 @@ fun MountDetailScreen(
     onBack: () -> Unit,
     onBrowseFiles: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val scope = rememberCoroutineScope()
     val entries by store.entries.collectAsState()
     val entry = entries.firstOrNull { it.id == mountId }
@@ -104,11 +105,6 @@ fun MountDetailScreen(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.mount_detail_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                    }
-                },
                 actions = {
                     MinisTextButton(
                         enabled = canSave,
