@@ -67,6 +67,43 @@ class UiSimplificationIntegrationTest {
         assertTrue(route.contains("onBack = { navController.safePopBackStack() }"))
     }
 
+    @Test fun `only custom thinking rules sort and both inputs use the same persistence path`() {
+        val section = source("ui/settings/ThinkingRulesSection.kt")
+        val start = section.indexOf("ReorderableColumn(")
+        val builtInHeader = section.indexOf("title = stringResource(R.string.thinking_rules_default_rules_count")
+        assertTrue("custom rules must precede built-ins", start >= 0 && builtInHeader > start)
+        val custom = section.substring(start, builtInHeader)
+        assertTrue(custom.contains("list = customIds"))
+        assertTrue(custom.contains("onSettle = { fromIndex, toIndex -> moveRule(customIds, fromIndex, toIndex) }"))
+        assertTrue(custom.contains("longPressReorder(isDragging, enabled = customIds.size > 1 && !reorderInFlight)"))
+        assertTrue(custom.contains(".reorderAccessibilityActions("))
+        assertTrue(custom.contains("moveRule(customIds, idx, idx - 1)"))
+        assertTrue(custom.contains("moveRule(customIds, idx, idx + 1)"))
+        assertTrue(section.contains("val moved = movedThinkingRules(customRulesAndIds, dragIds, fromIndex, toIndex) ?: return false"))
+        assertTrue(section.contains("customRulesAndIds = moved"))
+        assertTrue(section.contains("providerRepository.reorderThinkingRules(instance.id, moved.second)"))
+        val builtIns = section.substring(builtInHeader).substringBefore("title = stringResource(R.string.thinking_rules_add_rule)")
+        assertTrue(builtIns.contains("locked = true"))
+        assertFalse(builtIns.contains("longPressReorder("))
+        assertFalse(section.contains("KeyboardArrowDown"))
+    }
+
+    @Test fun `release top bar has no empty overflow while menu visibility stays editable`() {
+        val chat = source("ui/chat/ChatScreen.kt")
+        val menuStart = chat.indexOf("val visibleCustomEntries = resolveVisibleMenuEntries(")
+        assertTrue("visible action calculation must exist", menuStart >= 0)
+        val menu = chat.substring(menuStart).substringBefore("expanded = showChatMenu,")
+        assertTrue(menu.contains("chatActions::isVisible"))
+        assertTrue(menu.contains("visibleCustomEntries.size +"))
+        assertTrue(menu.contains("if (BuildConfig.DEBUG) 1 else 0"))
+        assertTrue(menu.contains("val hasAnyMenuItems = visibleMenuCount >= 1 && soloCustomKey == null"))
+        assertTrue(menu.contains("else if (hasAnyMenuItems) {"))
+        assertTrue(menu.contains("IconButton(onClick = { showChatMenu = true })"))
+        val settings = source("ui/settings/ChatMenuSettingsScreen.kt")
+        assertEquals(2, Regex("\\.filter \\{ it in ChatMenuPrefs\\.DEFAULT_ORDER \\}").findAll(settings).count())
+        assertFalse("visibility defaults must not drop configurable rows", settings.contains("?.defaultMenuVisible"))
+    }
+
     @Test fun `model entry editor keeps explicit cancel and save rather than treating them as arrows`() {
         val editor = source("ui/settings/ModelEntryDetailScreen.kt")
         assertTrue(editor.contains("fun ModelEntryDetailScreen("))
