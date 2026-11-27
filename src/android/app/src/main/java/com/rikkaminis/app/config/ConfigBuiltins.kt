@@ -1188,16 +1188,13 @@ internal object ConfigBuiltins {
         )
         // Chat action customization (Settings → Appearance → Chat Menu).
         // The action pool spans the top-right "..." menu AND the history-drawer
-        // footer. Each stable key contributes two independent bool fields:
-        //   appearance.chatMenu.<key>      — "..." menu visibility
-        //   appearance.chatMenuPin.<key>   — footer pin
-        // plus two comma-separated order fields. All live in appearance_prefs so
-        // they round-trip through minis-config AND every local backup
-        // automatically (ConfigBackup walks the registry). Defaults keep the
-        // original menu entries visible and pin Token Usage + Settings to the
-        // footer — identical to the pre-customization UI. The two
-        // model-conditional toggles are pool members too (default visible), so
-        // hiding them is a normal entry choice, not a special case.
+        // footer. Each stable key contributes two independent bool fields; the
+        // menu starts hidden by default while footer Token Usage + Settings
+        // start pinned. Hidden menu entries remain in the pool and can be
+        // enabled in Chat Menu settings. All values round-trip through config
+        // and local backups. Model-conditional toggles remain ordinary pool
+        // members: menu visibility is an entry choice, runtime support is a
+        // separate availability check.
         for (entryKey in ChatMenuPrefs.ALL_ENTRIES) {
             r.register(
                 PrefsBoolField(
@@ -1238,8 +1235,7 @@ internal object ConfigBuiltins {
                 description = "Comma-separated stable keys defining the display order of actions pinned to the history-drawer footer. Unknown keys are ignored; missing pinned keys fall back to their default position. Settings is always anchored last when pinned.",
                 prefs = appearancePrefs,
                 key = ChatMenuPrefs.PIN_ORDER_KEY,
-                defaultValue = ChatMenuPrefs.DEFAULT_ORDER.joinToString(",") +
-                    "," + ChatMenuPrefs.TOKEN_USAGE + "," + ChatMenuPrefs.SETTINGS,
+                defaultValue = ChatMenuPrefs.DEFAULT_PIN_ORDER.joinToString(","),
                 maxLength = 512,
             )
         )
@@ -1279,8 +1275,8 @@ internal object ConfigBuiltins {
                     "giving one-tap access to a searchable history of all messages in the session. " +
                     "Hiding it does not disable the feature — it can still be re-enabled here.",
                 prefs = appearancePrefs,
-                key = "topBar.inputHistory.visible",
-                defaultValue = true,
+                key = ChatMenuPrefs.TOP_BAR_INPUT_HISTORY_PREF,
+                defaultValue = false,
             )
         )
         // Composer model-picker button visibility (independent fixed slot).
@@ -1292,7 +1288,7 @@ internal object ConfigBuiltins {
                     "for one-tap access to the model picker. Hiding it does not disable the feature — " +
                     "the model name in the top-right subtitle stays tappable and opens the same picker.",
                 prefs = appearancePrefs,
-                key = "composer.modelPickerButton.visible",
+                key = ChatMenuPrefs.COMPOSER_MODEL_PICKER_BUTTON_PREF,
                 defaultValue = true,
             )
         )

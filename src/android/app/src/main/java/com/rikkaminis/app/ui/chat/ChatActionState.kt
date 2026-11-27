@@ -50,7 +50,7 @@ class ChatActionState internal constructor(prefs: SharedPreferences) {
         ChatMenuPrefs.ALL_ENTRIES.associateWith { ChatMenuPrefs.isPinned(prefs, it) }
     private val attachVisible: Map<String, Boolean> =
         AttachActionCatalog.DEFAULT_ORDER.associateWith { ChatMenuPrefs.isAttachVisible(prefs, it) }
-    /** Whether the "Input History" top-bar icon is shown. Defaults to true. */
+    /** Whether the "Input History" top-bar icon is shown. Defaults to false. */
     val topBarInputHistoryVisible: Boolean = ChatMenuPrefs.isTopBarInputHistoryVisible(prefs)
 
     /** Whether the composer's circular model-picker button is shown. Defaults to true. */
