@@ -386,6 +386,24 @@ fun AppearanceScreen(
             )
         }
 
+        // -- Chat Menu --
+        // Keep this immediately after the Theme / Glass pair: it controls the
+        // chat action surface, while the remaining sections retain their prior
+        // relative order.
+        SettingsSection(
+            header = stringResource(R.string.appearance_section_chat_menu),
+        ) {
+            SettingsRow(
+                icon = Icons.Outlined.MoreVert,
+                iconColor = tileTeal,
+                title = stringResource(R.string.appearance_section_chat_menu),
+                subtitle = stringResource(R.string.appearance_chat_menu_summary),
+                onClick = onChatMenuClick,
+                showChevron = true,
+                showDivider = false,
+            )
+        }
+
         // -- Launch Session --
         // Same per-row icon treatment as the Theme section. Bolt = Auto
         // (system picks), History = Last Session (revisit), ChatBubble =
@@ -610,26 +628,6 @@ fun AppearanceScreen(
                     showChatTitle = it
                     prefs.edit().putBoolean(KEY_SHOW_CHAT_TITLE, it).apply()
                 },
-                showDivider = false,
-            )
-        }
-
-        // [T-chat-menu-customize] -- Chat Menu --
-        // One entry point to the dedicated Chat Menu screen where the user can
-        // hide unused entries and drag-reorder the rest. Hiding an entry never
-        // touches its underlying data or feature — it just removes it from the
-        // chat "..." menu (re-enable any time). Prefs live in appearance_prefs,
-        // so they round-trip through minis-config and every local backup.
-        SettingsSection(
-            header = stringResource(R.string.appearance_section_chat_menu),
-        ) {
-            SettingsRow(
-                icon = Icons.Outlined.MoreVert,
-                iconColor = tileTeal,
-                title = stringResource(R.string.appearance_section_chat_menu),
-                subtitle = stringResource(R.string.appearance_chat_menu_summary),
-                onClick = onChatMenuClick,
-                showChevron = true,
                 showDivider = false,
             )
         }

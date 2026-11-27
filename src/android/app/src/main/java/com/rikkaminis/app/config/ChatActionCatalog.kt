@@ -44,23 +44,21 @@ data class ChatActionSpec(
  */
 object ChatActionCatalog {
     val ALL: List<ChatActionSpec> = listOf(
-        ChatActionSpec(ChatMenuPrefs.TERMINAL, R.string.chat_menu_open_terminal, Icons.Outlined.Terminal, true, false),
-        ChatActionSpec(ChatMenuPrefs.BROWSER, R.string.chat_menu_open_browser, Icons.Outlined.Language, true, false),
-        ChatActionSpec(ChatMenuPrefs.CHAT_FILES, R.string.chat_menu_browse_chat_files, Icons.Outlined.Description, true, false),
-        ChatActionSpec(ChatMenuPrefs.COMPACT, R.string.chat_menu_compact, Icons.Outlined.Compress, true, false),
-        ChatActionSpec(ChatMenuPrefs.THINKING, R.string.chat_menu_thinking, Icons.Outlined.Lightbulb, true, false),
-        // [chat-menu-model-toggles-1126] The two model-conditional toggles are
-        // pool members like any other: the user decides whether they belong on
-        // the "..." menu / drawer footer, and `ChatActionAvailability` decides
-        // whether the ACTIVE model can use them. Bolt matches the nav-bar ⚡
-        // status badge; Timer reads as the 1-hour cache TTL.
-        ChatActionSpec(ChatMenuPrefs.FAST_MODE, R.string.chat_menu_fast_mode, Icons.Outlined.Bolt, true, false),
-        ChatActionSpec(ChatMenuPrefs.ENHANCED_CACHE, R.string.chat_menu_enhanced_cache, Icons.Outlined.Timer, true, false),
-        ChatActionSpec(ChatMenuPrefs.SESSION_SKILLS, R.string.session_skills_title, Icons.Outlined.Build, true, false),
-        ChatActionSpec(ChatMenuPrefs.SESSION_MCPS, R.string.session_mcps_title, Icons.Outlined.Extension, true, false),
-        ChatActionSpec(ChatMenuPrefs.SESSION_MEMORY, R.string.session_memory_title, Icons.Outlined.Psychology, true, false),
-        ChatActionSpec(ChatMenuPrefs.SLASH_COMMANDS, R.string.chat_menu_slash_commands, Icons.Outlined.Keyboard, true, false),
-        ChatActionSpec(ChatMenuPrefs.EXPORT, R.string.sessionlist_export, Icons.Outlined.Share, true, false),
+        ChatActionSpec(ChatMenuPrefs.TERMINAL, R.string.chat_menu_open_terminal, Icons.Outlined.Terminal, false, false),
+        ChatActionSpec(ChatMenuPrefs.BROWSER, R.string.chat_menu_open_browser, Icons.Outlined.Language, false, false),
+        ChatActionSpec(ChatMenuPrefs.CHAT_FILES, R.string.chat_menu_browse_chat_files, Icons.Outlined.Description, false, false),
+        ChatActionSpec(ChatMenuPrefs.COMPACT, R.string.chat_menu_compact, Icons.Outlined.Compress, false, false),
+        ChatActionSpec(ChatMenuPrefs.THINKING, R.string.chat_menu_thinking, Icons.Outlined.Lightbulb, false, false),
+        // [chat-menu-model-toggles-1126] Menu visibility defaults to hidden;
+        // runtime availability remains independent and does not remove the
+        // action from the settings catalog or disable its underlying feature.
+        ChatActionSpec(ChatMenuPrefs.FAST_MODE, R.string.chat_menu_fast_mode, Icons.Outlined.Bolt, false, false),
+        ChatActionSpec(ChatMenuPrefs.ENHANCED_CACHE, R.string.chat_menu_enhanced_cache, Icons.Outlined.Timer, false, false),
+        ChatActionSpec(ChatMenuPrefs.SESSION_SKILLS, R.string.session_skills_title, Icons.Outlined.Build, false, false),
+        ChatActionSpec(ChatMenuPrefs.SESSION_MCPS, R.string.session_mcps_title, Icons.Outlined.Extension, false, false),
+        ChatActionSpec(ChatMenuPrefs.SESSION_MEMORY, R.string.session_memory_title, Icons.Outlined.Psychology, false, false),
+        ChatActionSpec(ChatMenuPrefs.SLASH_COMMANDS, R.string.chat_menu_slash_commands, Icons.Outlined.Keyboard, false, false),
+        ChatActionSpec(ChatMenuPrefs.EXPORT, R.string.sessionlist_export, Icons.Outlined.Share, false, false),
         ChatActionSpec(ChatMenuPrefs.TOKEN_USAGE, R.string.settings_token_usage, Icons.Outlined.DataUsage, false, true),
         ChatActionSpec(ChatMenuPrefs.SETTINGS, R.string.settings, Icons.Outlined.Settings, false, true),
     )
