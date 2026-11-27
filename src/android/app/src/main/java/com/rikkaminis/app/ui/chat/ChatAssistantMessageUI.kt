@@ -1346,7 +1346,6 @@ internal fun ThinkingBlock(
 }
 
 @Composable
-@Composable
 private fun ThinkingFullContentDialog(content: String, onDismiss: () -> Unit) {
     val textColor = MaterialTheme.colorScheme.onSurface
     val snapshot = content
@@ -1427,6 +1426,45 @@ private fun ThinkingFullContentDialog(content: String, onDismiss: () -> Unit) {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Lazy, selectable reasoning body shared by the compact process reader. */
+@Composable
+internal fun ChatProcessThinkingText(content: String) {
+    val textColor = MaterialTheme.colorScheme.onSurface
+    val snapshot = content
+    var chunks by remember(content) { mutableStateOf<List<IntRange>?>(null) }
+    LaunchedEffect(content) {
+        chunks = withContext(Dispatchers.Default) { ThinkingReadPlanner.chunks(content) }
+    }
+    val ranges = chunks
+    if (ranges == null) {
+        DecorativeSpinner(color = textColor, modifier = Modifier.padding(24.dp).size(40.dp))
+    } else {
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(count = ranges.size, key = { ranges[it].first }) { index ->
+                val range = ranges[index]
+                val chunk = remember(snapshot, range) { snapshot.substring(range.first, range.last + 1) }
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        android.widget.TextView(ctx).apply {
+                            textSize = 14f
+                            setTextColor(textColor.toArgb())
+                            setTextIsSelectable(true)
+                            text = chunk
+                        }
+                    },
+                    update = { textView ->
+                        textView.setTextColor(textColor.toArgb())
+                        if (shouldSyncFullContentText(textView.text, chunk)) {
+                            textView.text = chunk
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
     }
