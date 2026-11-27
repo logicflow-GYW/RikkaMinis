@@ -99,6 +99,7 @@ internal fun ToolDetailSheetContent(
     onDismiss: () -> Unit,
     onOpenTerminalWithCommand: (String) -> Unit = {},
     onOpenBrowserForUrl: (String) -> Unit = {},
+    onLeave: (() -> Unit)? = null,
 ) {
     val currentIdx = toolBlocks.indexOfFirst { it.id == selectedToolId }
     val block = toolBlocks.getOrNull(currentIdx) ?: return
@@ -1132,7 +1133,6 @@ internal fun ToolDetailSheetContent(
             }
         }
     }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
