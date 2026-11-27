@@ -89,7 +89,7 @@ class UxIntegrationWiringTest {
 
     @Test fun `shared spinners preserve progress semantics and full viewer dimensions`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        assertEquals(3, Regex("DecorativeSpinner\\(").findAll(ui).count())
+        assertEquals(4, Regex("DecorativeSpinner\\(").findAll(ui).count())
         assertFalse(ui.contains("CircularProgressIndicator("))
         assertTrue(ui.contains("DecorativeSpinner(color = textColor, modifier = Modifier.padding(24.dp).size(40.dp))"))
         val decorative = source("ui/components/DecorativeAnimation.kt")

@@ -1447,20 +1447,20 @@ internal fun ChatProcessThinkingText(content: String) {
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(count = ranges.size, key = { ranges[it].first }) { index ->
                 val range = ranges[index]
-                val chunk = remember(snapshot, range) { snapshot.substring(range.first, range.last + 1) }
+                val snapshot = remember(snapshot, range) { snapshot.substring(range.first, range.last + 1) }
                 androidx.compose.ui.viewinterop.AndroidView(
                     factory = { ctx ->
                         android.widget.TextView(ctx).apply {
                             textSize = 14f
                             setTextColor(textColor.toArgb())
                             setTextIsSelectable(true)
-                            text = chunk
+                            text = snapshot
                         }
                     },
                     update = { textView ->
                         textView.setTextColor(textColor.toArgb())
-                        if (shouldSyncFullContentText(textView.text, chunk)) {
-                            textView.text = chunk
+                        if (shouldSyncFullContentText(textView.text, snapshot)) {
+                            textView.text = snapshot
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
