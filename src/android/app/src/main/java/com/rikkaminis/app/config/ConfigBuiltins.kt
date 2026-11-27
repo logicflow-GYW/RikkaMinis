@@ -1174,13 +1174,13 @@ internal object ConfigBuiltins {
                 defaultValue = false,
             )
         )
-        // [ux-1125] Process folding round-trips through minis-config and backups.
+        // Process presentation round-trips through minis-config and backups.
         // Use the same default as the two live SharedPreferences readers.
         r.register(
             PrefsBoolField(
                 path = "chat.toolFoldEnabled",
-                displayName = "Keep chat process compact",
-                description = "ON by default: tools and reasoning stay in a separate process panel so they never collapse inside the reply. OFF shows them inline and allows the floating tool bar.",
+                displayName = "Separate process panel",
+                description = "ON by default: thinking and tool calls appear in a separate panel opened by tapping the status line below the assistant name. OFF shows them inline; the floating tool bar has its own switch.",
                 prefs = appearancePrefs,
                 key = com.rikkaminis.app.ui.settings.KEY_TOOL_FOLD_ENABLED,
                 defaultValue = com.rikkaminis.app.ui.settings.DEFAULT_TOOL_FOLD_ENABLED,

@@ -4423,6 +4423,7 @@ fun ChatScreen(
                                         // counter (the flag is false for it).
                                         awaitingResponseSinceMs = awaitingResponseSinceMs,
                                         processFoldEnabled = processFoldEnabled,
+                                        queueWaitingAhead = if (item.message.isStreaming) queueWaitingAhead else -1,
                                         onOpenProcess = { processMessageId = if (processMessageId == item.message.id) null else item.message.id },
                                         // "Revert Compact" only surfaces on the
                                         // compact-divider info row (mirrors the

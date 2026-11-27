@@ -291,6 +291,47 @@ class UxIntegrationWiringTest {
         assertTrue(body.contains("if (readAnchor.isReadingHistory || currentDragging) return@collect"))
     }
 
+    @Test fun `compact status receives queue position only for the live message`() {
+        val screen = source("ui/chat/ChatScreen.kt")
+        val branch = "is FlatChatItem.AssistantMessageItem -> {"
+        assertTrue(screen.contains(branch))
+        val row = screen.substringAfter(branch).substringBefore("val lastAssistantHasError")
+        assertTrue(row.contains("queueWaitingAhead = if (item.message.isStreaming) queueWaitingAhead else -1,"))
+        val ui = source("ui/chat/ChatAssistantMessageUI.kt")
+        val marker = "internal fun AssistantMessageView("
+        assertTrue(ui.contains(marker))
+        val signature = ui.substringAfter(marker).substringBefore(") {")
+        assertTrue(signature.contains("queueWaitingAhead: Int,"))
+        assertFalse(signature.contains("queueWaitingAhead: Int ="))
+        val entry = ui.substringAfter("ChatProcessEntry(").substringBefore("onToggle =")
+        assertTrue(entry.contains("queueWaitingAhead = queueWaitingAhead,"))
+    }
+
+    @Test fun `process setting describes its panel entry and independent toolbar switch`() {
+        val terms = mapOf(
+            "values" to listOf("panel", "Tap", "status", "switch"),
+            "values-de" to listOf("Fenster", "Tippe", "Statuszeile", "Schalter"),
+            "values-ja" to listOf("パネル", "タップ", "ステータス", "スイッチ"),
+            "values-ko" to listOf("패널", "누르면", "상태", "스위치"),
+            "values-ru" to listOf("панели", "Нажмите", "состояния", "отдельно"),
+            "values-zh" to listOf("面板", "点击", "状态行", "独立开关"),
+            "values-zh-rTW" to listOf("面板", "點選", "狀態列", "獨立開關"),
+        )
+        for ((locale, keywords) in terms) {
+            val strings = resource("$locale/strings.xml")
+            val footer = Regex("<string name=\"appearance_tool_fold_footer\">(.*?)</string>")
+                .find(strings)?.groupValues?.get(1) ?: error("$locale: missing process footer")
+            for (term in keywords) assertTrue("$locale: $term", footer.contains(term))
+        }
+        val settings = source("ui/settings/AppearanceScreen.kt")
+        assertTrue(settings.contains("footer = stringResource(R.string.appearance_tool_fold_footer)"))
+        assertTrue(settings.contains("title = stringResource(R.string.appearance_tool_fold_title)"))
+        val config = source("config/ConfigBuiltins.kt").substringAfter("path = \"chat.toolFoldEnabled\"")
+            .substringBefore("prefs = appearancePrefs")
+        assertTrue(config.contains("status line"))
+        assertTrue(config.contains("own switch"))
+    }
+
     @Test fun `compact process labels are available in all full locales`() {
         for (locale in listOf("values", "values-de", "values-ja", "values-ko", "values-ru", "values-zh", "values-zh-rTW")) {
             val strings = resource("$locale/strings_chat_process.xml")

@@ -385,9 +385,9 @@
     <string name="appearance_auto_expand_thinking_footer">Когда включено, новый блок размышлений автоматически разворачивается, пока модель рассуждает, и сворачивается по завершении. Когда выключено, блоки размышлений остаются свёрнутыми — коснитесь блока, чтобы прочитать его.</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">Заголовок размышлений</string>
-    <string name="appearance_section_tool_steps">Шаги процесса</string>
-    <string name="appearance_tool_fold_title">Компактное отображение процесса</string>
-    <string name="appearance_tool_fold_footer">Рассуждения и инструменты вынесены в отдельную панель, чтобы ответ не сдвигался при завершении. Отключите для показа в чате и использования плавающей панели.</string>
+    <string name="appearance_section_tool_steps">Ход выполнения</string>
+    <string name="appearance_tool_fold_title">Отдельная панель процесса</string>
+    <string name="appearance_tool_fold_footer">При включении рассуждения и вызовы инструментов собраны в отдельной панели. Нажмите строку состояния под именем ассистента, чтобы открыть подробности. При выключении они отображаются в тексте сообщения; плавающая панель инструментов включается отдельно.</string>
     <string name="appearance_thinking_show_chars_title">Показывать длину</string>
     <string name="appearance_thinking_show_duration_title">Показывать время</string>
     <string name="appearance_thinking_header_footer">Что показывать рядом с заголовком блока размышлений. Длина — число символов текста рассуждений (9K ≈ девять тысяч); время измеряется, пока беседа открыта, и исчезает после её повторного открытия.</string>

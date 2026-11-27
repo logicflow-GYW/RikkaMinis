@@ -1112,9 +1112,9 @@
     <string name="appearance_auto_expand_thinking_footer">開啟後，模型思考時新的思考塊會自動展開，思考結束後自動摺疊。關閉後，思考塊保持摺疊狀態——點選即可檢視。</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">思考標題列</string>
-    <string name="appearance_section_tool_steps">過程步驟</string>
-    <string name="appearance_tool_fold_title">緊湊顯示執行過程</string>
-    <string name="appearance_tool_fold_footer">思考與工具詳情分開顯示，完成時不會在正文中收合。關閉後恢復逐區塊顯示，並可使用工具浮動列。</string>
+    <string name="appearance_section_tool_steps">執行過程</string>
+    <string name="appearance_tool_fold_title">獨立顯示執行過程</string>
+    <string name="appearance_tool_fold_footer">開啟後，思考與工具呼叫集中在獨立面板中，點選助手名稱下方的狀態列查看詳情。關閉後在訊息本文中逐區塊顯示；工具浮動列由其獨立開關控制。</string>
     <string name="appearance_thinking_show_chars_title">顯示思考字數</string>
     <string name="appearance_thinking_show_duration_title">顯示思考耗時</string>
     <string name="appearance_thinking_header_footer">選擇思考區塊標題旁顯示的內容。字數是推理文字的字元數（9K 約九千字元）；耗時僅在本次工作階段內有效，重新開啟對話後即不顯示。</string>

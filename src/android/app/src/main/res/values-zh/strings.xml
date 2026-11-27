@@ -257,9 +257,9 @@
     <string name="appearance_auto_expand_thinking_footer">开启后，模型思考时新的思考块会自动展开，思考结束后自动折叠。关闭后，思考块保持折叠状态——点击即可查看。</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">思考头部</string>
-    <string name="appearance_section_tool_steps">过程步骤</string>
-    <string name="appearance_tool_fold_title">紧凑显示执行过程</string>
-    <string name="appearance_tool_fold_footer">思考与工具详情单独显示，完成时不会在正文中收起。关闭后恢复逐块显示，并可使用工具悬浮栏。</string>
+    <string name="appearance_section_tool_steps">执行过程</string>
+    <string name="appearance_tool_fold_title">独立显示执行过程</string>
+    <string name="appearance_tool_fold_footer">开启后，思考和工具调用集中在独立面板中，点击助手名称下方的状态行查看详情。关闭后在消息正文中逐块显示；工具悬浮栏由其独立开关控制。</string>
     <string name="appearance_thinking_show_chars_title">显示思考字数</string>
     <string name="appearance_thinking_show_duration_title">显示思考用时</string>
     <string name="appearance_thinking_header_footer">选择思考块标题旁显示的内容。字数是推理文本的字符数（9K 约九千字符）；用时仅在本次会话内有效，重开对话后不再显示。</string>

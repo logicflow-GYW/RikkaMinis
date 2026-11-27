@@ -1309,9 +1309,9 @@
     <string name="appearance_auto_expand_thinking_footer">켜면 모델이 추론하는 동안 새 생각 블록이 자동으로 펼쳐지고 완료되면 접힙니다. 끄면 생각 블록이 접힌 상태로 유지됩니다 — 탭하여 읽으세요.</string>
     <!-- [T-thinking-header-toggles] Which extras a thinking block header shows beside its title. -->
     <string name="appearance_section_thinking_header">사고 헤더</string>
-    <string name="appearance_section_tool_steps">프로세스 단계</string>
-    <string name="appearance_tool_fold_title">실행 과정 간단히 표시</string>
-    <string name="appearance_tool_fold_footer">사고와 도구 세부 정보는 별도 패널에 표시하므로 실행이 끝나도 본문이 접히지 않습니다. 끄면 본문에 표시하고 플로팅 도구 표시줄을 사용할 수 있습니다.</string>
+    <string name="appearance_section_tool_steps">실행 과정</string>
+    <string name="appearance_tool_fold_title">실행 과정을 별도 패널에 표시</string>
+    <string name="appearance_tool_fold_footer">켜면 사고와 도구 호출을 별도 패널에 모아 표시합니다. 어시스턴트 이름 아래의 상태 줄을 누르면 세부 정보를 볼 수 있습니다. 끄면 메시지 본문에 표시합니다. 플로팅 도구 표시줄은 별도 스위치로 설정합니다.</string>
     <string name="appearance_thinking_show_chars_title">사고 글자 수 표시</string>
     <string name="appearance_thinking_show_duration_title">사고 소요 시간 표시</string>
     <string name="appearance_thinking_header_footer">사고 블록 제목 옆에 표시할 항목을 선택합니다. 글자 수는 추론 텍스트의 문자 수(9K ≒ 9천 자)입니다. 소요 시간은 이 대화를 열어 둔 동안에만 측정되며 다시 열면 표시되지 않습니다.</string>
