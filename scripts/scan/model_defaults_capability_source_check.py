@@ -323,9 +323,9 @@ def selftest():
          lambda s: s.replace('inputModalities = listOf("text")', "inputModalities = null", 1), "A3"),
         ("A4 cache path stops enriching", CACHE_ENRICH_RELS[2],
          lambda s: s.replace(
-             "AnthropicModelsCache.load(context, cacheKey)\n                "
+             "cache.load(context, cacheKey)\n                "
              "?.let { return@withContext ModelsDevApi.enrichModels(it) }",
-             "AnthropicModelsCache.load(context, cacheKey)?.let { return@withContext it }", 1),
+             "cache.load(context, cacheKey)?.let { return@withContext it }", 1),
          "A4"),
         ("A5 registry floor un-guarded", MODELS_DEV_REL,
          lambda s: s.replace("if (parsed.size < MIN_REGISTRY_PROVIDERS) {", "if (false) {", 1), "A5"),
@@ -353,6 +353,9 @@ def selftest():
             if not findings:
                 failures.append(label)
                 print("  [FAIL] %s — stayed green" % label)
+            elif needle == "A4" and (len(findings) != 1 or not findings[0].startswith("A4 ")):
+                failures.append(label + " (expected exactly one A4 violation)")
+                print("  [FAIL] %s — imprecise red: %s" % (label, findings))
             elif not any(f.startswith(needle) for f in findings):
                 failures.append(label + " (wrong arm)")
                 print("  [FAIL] %s — red for the wrong reason: %s" % (label, findings[0][:80]))

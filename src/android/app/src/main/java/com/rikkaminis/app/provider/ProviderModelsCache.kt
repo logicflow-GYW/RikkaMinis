@@ -105,9 +105,10 @@ internal class ProviderModelsCache(
         )
     }
 
-    fun save(context: Context, cacheKey: String, models: List<LLMModel>) {
+    /** True only after the write completes; callers may then retire an older cache file. */
+    fun save(context: Context, cacheKey: String, models: List<LLMModel>): Boolean {
         val file = keyFile(context, cacheKey)
-        runCatching {
+        return runCatching {
             // [fix/audit0917-b8] tmp + rename (the repo's atomic-write idiom,
             // see RootfsEventLog.writeBootId / MCPOAuthStore). writeText
             // truncates in place, so a mid-write process death left a torn
@@ -125,7 +126,7 @@ internal class ProviderModelsCache(
                 file.writeText(tmp.readText())
                 tmp.delete()
             }
-        }
+        }.isSuccess
     }
 
     /**
@@ -153,6 +154,15 @@ internal class ProviderModelsCache(
         }
     }
 
+    /**
+     * Retire only this key's pre-namespace Anthropic file. No directory sweep:
+     * other flat keys and all provider subdirectories must remain untouched.
+     * Call after a successful namespaced save, or to invalidate a rejected key.
+     */
+    fun invalidateLegacyFlatFile(context: Context, cacheKey: String) {
+        runCatching { keyFile(File(context.cacheDir, "models-cache"), cacheKey).delete() }
+    }
+
     fun invalidate(context: Context, cacheKey: String) {
         runCatching { keyFile(context, cacheKey).delete() }
         // [fix/audit0917-b8] Also sweep orphans. Files are named by a hash of
@@ -165,12 +175,8 @@ internal class ProviderModelsCache(
         // reclaims cacheDir under pressure — this just stops unbounded growth
         // in the meantime.
         //
-        // [FIX-1 / F-210] The sweep itself moved to sweepOrphanCacheFiles() so
-        // AnthropicModelsCache — the twin implementation of this class — can
-        // share it. That twin got the atomic-write half of fix/audit0917-b8 but
-        // not this half, which is exactly the "same semantics, two call sites,
-        // one fixed" shape this repo keeps re-finding. One shared function
-        // means a third drift is not expressible.
+        // [FIX-1 / F-210] All provider families, including Anthropic, now use
+        // this same namespaced cache and orphan sweep.
         sweepOrphanCacheFiles(cacheDir(context), ttlMs)
     }
 
@@ -230,13 +236,10 @@ internal fun decodeCachedModels(
 /**
  * [FIX-1 / F-210] Delete cache files in [dir] that are older than [ttlMs].
  *
- * Shared by [ProviderModelsCache] and `AnthropicModelsCache` — the two
- * independent implementations of the same on-disk model cache. Credential-
- * keyed file names mean a rotated key or edited baseURL leaves the previous
- * file behind forever (`load` is only ever called with the *current* key and
- * the TTL check lives on the read path), so the sweep is what bounds growth.
- * Kept as a top-level function rather than a method so the second caller does
- * not have to depend on the first class's constructor.
+ * Used by the namespaced [ProviderModelsCache] instances. Credential-keyed
+ * file names mean a rotated key or edited baseURL leaves the previous file
+ * behind forever (`load` is only ever called with the *current* key and the
+ * TTL check lives on the read path), so the sweep is what bounds growth.
  */
 internal fun sweepOrphanCacheFiles(dir: File, ttlMs: Long) {
     runCatching {
