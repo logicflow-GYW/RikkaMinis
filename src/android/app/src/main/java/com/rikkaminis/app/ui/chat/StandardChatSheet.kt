@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
@@ -80,6 +81,7 @@ fun StandardChatSheet(
     heightFraction: Float? = 0.9f,
     showClose: Boolean = true,
     onBackPress: (() -> Unit)? = null,
+    containerColor: Color = ChatColors.background,
     content: @Composable () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -92,7 +94,7 @@ fun StandardChatSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = ChatColors.background,
+        containerColor = containerColor,
         dragHandle = { CompactDragHandle() },
         // Material3 1.3.2 installs a window-level predictive-back callback before
         // it reaches onDismissRequest. Disable ONLY that path for custom back;
