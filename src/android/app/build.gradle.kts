@@ -371,7 +371,6 @@ dependencies {
 
     // OkHttp
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
 
     // Kotlinx Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
@@ -379,9 +378,6 @@ dependencies {
     // Coil (image loading)
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // Markdown rendering (mikepenz multiplatform-markdown-renderer)
-    implementation("com.mikepenz:multiplatform-markdown-renderer-android:0.33.0")
-    implementation("com.mikepenz:multiplatform-markdown-renderer-m3-android:0.33.0")
 
     // Chrome Custom Tabs (in-app browser for OAuth)
     implementation("androidx.browser:browser:1.8.0")
@@ -455,4 +451,30 @@ dependencies {
     // Host activity needed by createComposeRule; debugImplementation only so
     // it never ships in release builds.
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+// Retirement evidence runs on the CI build's resolved release graph, not a
+// source grep: dependencyInsight also sees accidentally reintroduced transitives.
+val retiredChatDependencyInsight by tasks.registering(org.gradle.api.tasks.diagnostics.DependencyInsightReportTask::class) {
+    showingAllVariants.set(false)
+    configuration = configurations.getByName("releaseRuntimeClasspath")
+    setDependencySpec(org.gradle.api.specs.Spec<org.gradle.api.artifacts.result.DependencyResult> {
+        val requested = it.requested.displayName
+        requested.startsWith("com.mikepenz:") ||
+            requested.startsWith("org.jetbrains:markdown") ||
+            requested.startsWith("com.squareup.okhttp3:okhttp-sse:")
+    })
+    doLast {
+        val forbidden = configurations.getByName("releaseRuntimeClasspath")
+            .incoming.resolutionResult.allComponents.mapNotNull { it.moduleVersion }
+            .filter { it.group == "com.mikepenz" ||
+                (it.group == "org.jetbrains" && it.name.startsWith("markdown")) ||
+                (it.group == "com.squareup.okhttp3" && it.name == "okhttp-sse") }
+        check(forbidden.isEmpty()) { "Retired chat runtime dependencies returned: $forbidden" }
+        println("RETIRED_CHAT_RUNTIME_DEPENDENCIES=ABSENT (releaseRuntimeClasspath)")
+    }
+}
+// Do not resolve release dependencies when building only a debug variant.
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn(retiredChatDependencyInsight)
 }

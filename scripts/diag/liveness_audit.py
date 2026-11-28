@@ -51,13 +51,9 @@ RARE = {
     ("cat", "MemoryPressureGate"): "only logs on a SOFT/HARD level transition",
     ("cat", "ChatVMRouting"): "load-balance rotation; LB groups disabled",
     ("cat", "StreamRender"): "live-tail parse; covered by RenderCensus",
-    ("step", "coldParse.offmain"): "frozen cache miss; covered by RenderCensus",
-    # ("cat", "RenderCensus") pruned 2026-09-22: the pending-install entry was
-    # wired in fix/liveness-followups-0914 and produced its FIRST hits in the
-    # 09-22 window (hit=12) — the audit itself flagged "prune its RARE entry"
-    # and this is that prune. This is the documented lifecycle working end to
-    # end: wire → first hit → audit says prune → entry removed.
-    ("step", "buildFlatChatItems.progress"): "full rebuild of a 100+ message session",
+    # The old coldParse.offmain and buildFlatChatItems.progress probes were
+    # retired with the fragment MarkdownBlockBody and frozen flat pipeline.
+    # Current message rendering is measured by RenderCensus.
 }
 # Removed 2026-09-22: ("step", "buildFlatChatItems.ledgerReseed") — the probe
 # no longer exists anywhere in main source (the ledger reseed path was deleted

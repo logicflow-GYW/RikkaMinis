@@ -31,6 +31,7 @@ import com.rikkaminis.app.provider.sseDataPayload
 import com.rikkaminis.app.provider.nonStreamCeilingCutLogLine
 import com.rikkaminis.app.provider.nonStreamOutputCeilingCut
 import com.rikkaminis.app.provider.executeOrCancel
+import com.rikkaminis.app.provider.llmErrorOf
 import com.rikkaminis.app.provider.LegacyMediaPlan
 import com.rikkaminis.app.provider.clampOutboundMaxTokens
 import com.rikkaminis.app.provider.clampOutboundTemperature
@@ -1699,7 +1700,7 @@ class OpenAIProvider constructor(
                     "[T321] stream parse exception: ${e.causeChainSummary()} @ $frames " +
                         "(events=$sseEventCount contentLen=$contentLen reasoningLen=$reasoningLen)"
                 )
-                cancel("Stream error", mapError(e))
+                cancel("Stream error", llmErrorOf(e))
             }
         } finally {
             reader.close()
@@ -3826,12 +3827,6 @@ class OpenAIProvider constructor(
             return LLMError.TransientError(message)
         }
         return LLMError.ProviderError(message)
-    }
-
-    private fun mapError(error: Throwable): LLMError {
-        if (error is LLMError) return error
-        if (error is java.io.IOException) return LLMError.NetworkError(error)
-        return LLMError.Unknown(error)
     }
 }
 

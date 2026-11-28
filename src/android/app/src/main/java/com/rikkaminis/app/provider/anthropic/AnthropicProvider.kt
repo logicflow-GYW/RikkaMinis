@@ -28,6 +28,7 @@ import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.TOOL_LOG_INPUT_STEP_CHARS
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import com.rikkaminis.app.provider.executeOrCancel
+import com.rikkaminis.app.provider.llmErrorOf
 import com.rikkaminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -650,7 +651,7 @@ class AnthropicProvider(
                 )
                 cancel(consumerCancel)
             } else {
-                cancel("Stream error", mapError(e))
+                cancel("Stream error", llmErrorOf(e))
             }
         } finally {
             firstDataWatchdog.cancel()
@@ -1718,12 +1719,6 @@ class AnthropicProvider(
             return LLMError.TransientError(publicDetail)
         }
         return LLMError.ProviderError(publicDetail)
-    }
-
-    private fun mapError(error: Throwable): LLMError {
-        if (error is LLMError) return error
-        if (error is java.io.IOException) return LLMError.NetworkError(error)
-        return LLMError.Unknown(error)
     }
 }
 

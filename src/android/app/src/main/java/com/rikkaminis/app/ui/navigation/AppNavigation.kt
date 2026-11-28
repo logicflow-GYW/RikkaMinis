@@ -85,7 +85,6 @@ import com.rikkaminis.app.ui.settings.ShizukuPermissionScreen
 import com.rikkaminis.app.sandbox.RootfsManager
 import com.rikkaminis.app.sandbox.TerminalSession
 import com.rikkaminis.app.ui.terminal.TerminalScreen
-import com.rikkaminis.app.ui.onboarding.OnboardingModelSelectionScreen
 
 // T342: Material 3 motion easing curves. Compose-Material3 (1.3.x) ships
 // `MotionScheme` only in 1.4-alpha; mirror the spec values directly so we
@@ -269,7 +268,6 @@ object Routes {
     const val CHAT_MENU = "appearance/chat_menu"
 
     const val BACKGROUND = "background"
-    const val ONBOARDING_MODELS = "onboarding_models"
     /** T219-2: Mount external folders settings + detail. */
     const val MOUNTED_FOLDERS = "mounted_folders"
     const val MOUNTED_FOLDERS_DETAIL = "mounted_folders_detail/{mountId}"
@@ -1628,13 +1626,6 @@ fun AppNavigation(
             val fileName = backStackEntry.arguments?.getString("fileName") ?: return@composable
             LogDetailScreen(
                 fileName = fileName,
-                onBack = { navController.safePopBackStack() },
-            )
-        }
-
-        composable(Routes.ONBOARDING_MODELS) {
-            OnboardingModelSelectionScreen(
-                providerRepository = providerRepository,
                 onBack = { navController.safePopBackStack() },
             )
         }

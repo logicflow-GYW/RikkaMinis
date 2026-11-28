@@ -195,24 +195,21 @@ BLOCKING_IO_CALLS = (
         r"\bfun\s+verifyIntegrity\s*\(",
         "rootfs integrity verification (reads .integrity_manifest + stats 7 critical files)",
     ),
-    # [deep-audit-1033 I05 / I08] Save paths that wrote on the click's thread.
-    # The call regexes are receiver-qualified on purpose: the blocking work is
-    # reached through the repository/store handle the UI holds, while the same
-    # operation called from a repository-internal or debug-RPC caller (which
-    # already runs off Main) is not what this criterion is about. Unqualified
-    # names would flag those callers too and force churn far outside the
-    # screens that actually had the defect.
+    # [deep-audit-1033 I05 / I08] Active provider-add screen save path.
+    # The receiver-qualified calls are scanned app-wide, but AddProviderScreen
+    # remains the rot anchor so retiring the dead first-run flow cannot erase
+    # coverage of either blocking write.
     (
-        "ui/onboarding/OnboardingScreen.kt",
+        "ui/settings/AddProviderScreen.kt",
         r"providerRepository\.addInstance\s*\(",
         r"\bfun\s+addInstance\s*\(",
-        "provider instance insert (SQLite write from the onboarding save button)",
+        "provider instance insert (SQLite write from the AddProviderScreen save button)",
     ),
     (
-        "ui/onboarding/OnboardingScreen.kt",
+        "ui/settings/AddProviderScreen.kt",
         r"providerRepository\.saveApiKey\s*\(",
         r"\bfun\s+saveApiKey\s*\(",
-        "API key persist (EncryptedSharedPreferences commit from the UI)",
+        "API key persist (EncryptedSharedPreferences commit from AddProviderScreen)",
     ),
     (
         "ui/settings/AddCustomModelScreen.kt",
@@ -2136,7 +2133,7 @@ def _save_targets():
     """Declarations the C2 rows look for (a call without a declaration would be
     reported as vacuous instead of passing, so the fixture ships both)."""
     return (
-        "package com.rikkaminis.app.ui.settings\n"
+        "package com.rikkaminis.app.data.repository\n"
         "\n"
         "class ProviderRepository {\n"
         "    fun addInstance(instance: Any, apiKey: String) {}\n"
@@ -2151,45 +2148,51 @@ def _save_targets():
     )
 
 
-def _onboarding_screen(shape="io"):
-    """Onboarding save button: SQLite insert + Keystore commit, in that order."""
-    calls = (
-        "                providerRepository.addInstance(instance, apiKey)\n"
-        "                providerRepository.saveApiKey(instance.id, apiKey.trim())\n"
-    )
-    if shape == "io":
-        body = (
-            "        scope.launch {\n"
-            "            withContext(Dispatchers.IO) {\n"
-            + calls +
-            "            }\n"
-            "        }\n"
+def _add_provider_screen(add_instance_shape="io", save_api_key_shape="io",
+                         nested=False):
+    """Active provider-add save path; each write can be mutated independently."""
+    add_call = "providerRepository.addInstance(instance)"
+    key_call = "providerRepository.saveApiKey(instance.id, apiKey.trim())"
+    if add_instance_shape == "io" and save_api_key_shape == "io":
+        calls = (
+            "                    providerRepository.addInstance(instance)\n"
+            "                    providerRepository.saveApiKey(instance.id, apiKey.trim())\n"
         )
-    elif shape == "io_nested":
-        body = (
-            "        scope.launch {\n"
-            "            runCatching {\n"
-            "                withContext(Dispatchers.IO) {\n"
-            + calls +
-            "                }\n"
-            "            }\n"
-            "        }\n"
-        )
-    else:  # direct
-        body = (
-            "        providerRepository.addInstance(instance, apiKey)\n"
-            "        providerRepository.saveApiKey(instance.id, apiKey.trim())\n"
-        )
+        wrapped = "                withContext(Dispatchers.IO) {\n" + calls + "                }\n"
+        if nested:
+            wrapped = (
+                "                runCatching {\n"
+                "                    withContext(Dispatchers.IO) {\n"
+                + calls +
+                "                    }\n"
+                "                }\n"
+            )
+    else:
+        def one_call(call, shape):
+            if shape == "io":
+                return (
+                    "                withContext(Dispatchers.IO) {\n"
+                    f"                    {call}\n"
+                    "                }\n"
+                )
+            if shape == "io_unrelated":
+                return (
+                    "                withContext(Dispatchers.IO) {\n"
+                    "                    providerRepository.refreshModels(instance)\n"
+                    "                }\n"
+                    f"                {call}\n"
+                )
+            return f"                {call}\n"
+        wrapped = one_call(add_call, add_instance_shape) + one_call(key_call, save_api_key_shape)
     return (
-        "package com.rikkaminis.app.ui.onboarding\n"
-        "\n"
-        "class OnboardingScreen {\n"
-        "    fun save(\n"
-        "        providerRepository: ProviderRepository,\n"
-        "        instance: Any,\n"
-        "        apiKey: String,\n"
-        "    ) {\n"
-        + body +
+        "package com.rikkaminis.app.ui.settings\n\n"
+        "class AddProviderScreen {\n"
+        "    fun save(providerRepository: ProviderRepository, instance: Any, apiKey: String) {\n"
+        "        scope.launch {\n"
+        "            try {\n"
+        + wrapped +
+        "            }\n"
+        "        }\n"
         "    }\n"
         "}\n"
     )
@@ -3086,7 +3089,9 @@ def write_io_fixture(root, store_shape="io", log_shape="io", store_fn="probeWrit
                      toast_hop="hop", rootfs_shape="io", drop_rootfs=False,
                      browser_shape="guard", rpc_shape="guard", nav_shape="guard",
                      drop_guard_anchors=False,
-                     onboarding_shape="io", add_model_shape="io", backup_shape="io",
+                     add_instance_shape="io", save_api_key_shape="io",
+                     add_provider_nested=False, drop_add_provider=False,
+                     add_model_shape="io", backup_shape="io",
                      provider_shape="clean", volume_shape="single",
                      volume_mirror=False, verdict_shape="derived",
                      settlement_shape="settled"):
@@ -3139,13 +3144,12 @@ def write_io_fixture(root, store_shape="io", log_shape="io", store_fn="probeWrit
         files["ui/sandbox/FileBrowserViewModel.kt"] = _file_browser_vm(browser_shape)
         files["debug/DebugRPCHandler.kt"] = _debug_rpc(rpc_shape)
         files["ui/navigation/AppNavigation.kt"] = _app_nav(nav_shape)
-    # [deep-audit-1033 I05 / I08] criterion-2's new subjects belong to the same
-    # "did this tree ever ship the package?" question. The onboarding pair is
-    # unconditional (no arm drops `ui/onboarding/`), and its declaration stubs
-    # travel with it so the anchor is never reported as vacuous. The two
-    # `ui/settings/` anchors follow that package's existence.
-    files["ui/onboarding/OnboardingScreen.kt"] = _onboarding_screen(onboarding_shape)
-    files["ui/onboarding/SaveTargets.kt"] = _save_targets()
+    # [deep-audit-1033 I05 / I08] Keep the active provider-add anchor present
+    # in the clean fixture; its independent write mutations must remain visible.
+    if not drop_add_provider and (not drop_log or keep_pkgs_when_dropped):
+        files["ui/settings/AddProviderScreen.kt"] = _add_provider_screen(
+            add_instance_shape, save_api_key_shape, add_provider_nested)
+    files["filler/SaveTargets.kt"] = _save_targets()
     if not drop_log or keep_pkgs_when_dropped:
         files["ui/settings/AddCustomModelScreen.kt"] = _add_model_screen(add_model_shape)
         files["ui/settings/BackupSettingsScreen.kt"] = _backup_screen(backup_shape)
@@ -3282,17 +3286,26 @@ def selftest():
     run("a tree that never shipped the criterion-5 anchors is skipped, not failed", False,
         "[PARTIAL] the read-only-mount guard anchors", drop_guard_anchors=True)
 
-    # ── criterion 2 (da1033 I05 / I08): the save paths off the click's thread ─
-    run("the three save paths wrapped in Dispatchers.IO pass", False,
+    # ── criterion 2 (da1033 I05 / I08): active provider-add save path ───────
+    run("AddProviderScreen writes and other save paths wrapped in IO pass", False,
         "blocking-IO call site(s) inside Dispatchers.IO")
-    run("the onboarding insert on the click's thread is caught", True,
-        "ui/onboarding/OnboardingScreen.kt", onboarding_shape="direct")
+    run("AddProviderScreen addInstance outside IO is caught despite adjacent IO key save", True,
+        "provider instance insert (SQLite write from the AddProviderScreen save button)",
+        add_instance_shape="direct")
+    run("AddProviderScreen saveApiKey outside IO is caught despite adjacent IO insert", True,
+        "API key persist (EncryptedSharedPreferences commit from AddProviderScreen)",
+        save_api_key_shape="direct")
+    run("an unrelated adjacent IO block cannot shield addInstance", True,
+        "provider instance insert (SQLite write from the AddProviderScreen save button)",
+        add_instance_shape="io_unrelated")
+    run("a nested IO block inside runCatching still covers both writes", False,
+        "blocking-IO call site(s) inside Dispatchers.IO", add_provider_nested=True)
+    run("AddProviderScreen missing from a shipped settings package is a rot failure", True,
+        "lost its anchor", drop_add_provider=True)
     run("a model insert left on the click's thread is caught", True,
         "ui/settings/AddCustomModelScreen.kt", add_model_shape="direct")
     run("the WebDAV read + persist on the composable's thread is caught", True,
         "ui/settings/BackupSettingsScreen.kt", backup_shape="direct")
-    run("an IO wrap nested inside launch + runCatching still counts", False,
-        onboarding_shape="io_nested")
     run("a save path whose call was removed is a rot failure, not a silent skip", True,
         "nothing calls this any more", add_model_shape="none")
 

@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RikkaMinis</string>
-    <string name="onboarding_default_group_name">Default Models</string>
     <string name="settings">Settings</string>
     <string name="no_sessions">No conversations yet</string>
     <string name="delete">Delete</string>
@@ -332,24 +331,10 @@
     <string name="common_no">No</string>
     <string name="memory_file_empty">Empty</string>
 
-    <!-- T172 — components / onboarding / preview i18n -->
+    <!-- T172 — components / preview i18n -->
     <string name="common_close">Close</string>
     <string name="common_skip">Skip</string>
     <string name="common_next">Next</string>
-    <string name="onboarding_welcome_title">Welcome to RikkaMinis</string>
-    <string name="onboarding_welcome_subtitle">Your AI agent with terminal, browser, and native device access.</string>
-    <string name="onboarding_get_started">Get Started</string>
-    <string name="onboarding_provider_title">Add a Provider</string>
-    <string name="onboarding_provider_subtitle">Enter an API key for at least one provider to get started.</string>
-    <string name="onboarding_provider_api_key_label">%1$s API Key</string>
-    <string name="onboarding_save_api_key">Save API Key</string>
-    <string name="onboarding_saved">Saved</string>
-    <string name="onboarding_select_models_title">Select Models</string>
-    <string name="onboarding_select_models_subtitle">Choose up to 3 models for your default group.</string>
-    <string name="onboarding_search_models">Search models</string>
-    <string name="onboarding_filter_models">Filter models</string>
-    <string name="onboarding_done_count">Done (%1$d/3)</string>
-    <string name="onboarding_loading_models">Loading models…</string>
     <string name="webpreview_close">Close</string>
     <string name="webpreview_stop">Stop loading</string>
     <string name="webpreview_reload">Reload</string>

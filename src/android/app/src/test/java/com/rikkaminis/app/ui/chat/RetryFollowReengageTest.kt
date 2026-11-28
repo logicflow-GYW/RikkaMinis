@@ -15,7 +15,7 @@ import org.junit.Test
  * bottom, a new answer streams — and the viewport never moves again, because
  * every automatic scroll is gated on `FOLLOWING`; the Down-FAB also stays on
  * screen over a list that is already at the bottom. The banner path already did
- * this (`FollowEvent.Resume`); the four retry/rerun entry points did not.
+ * this (`FollowEvent.Resume`); the message/tool retry/rerun entry points did not.
  *
  * RULE layer: `followReducer(DETACHED, Retry)` must re-engage and raise exactly
  * one bottom request — the same contract as Send / Resume.
@@ -54,8 +54,6 @@ class RetryFollowReengageTest {
 
     private val entryPoints = listOf(
         "RETRY-FROM-MSG",
-        "RERUN-FROM-TOOLRUN",
-        "INLINE-RETRY-LAST",
         "RERUN-FROM-AGG-TOOL",
     )
 

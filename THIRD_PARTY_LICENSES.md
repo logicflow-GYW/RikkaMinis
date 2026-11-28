@@ -23,11 +23,10 @@ LICENSE files).
 | Library | Version | License |
 |---|---|---|
 | AndroidX / Jetpack (Compose BOM 2025.09.00, core-ktx, lifecycle, activity, navigation, Room, DataStore, security-crypto, browser, webkit, exifinterface) | see `app/build.gradle.kts` | **Apache-2.0** (Google / AOSP) |
-| OkHttp + okhttp-sse | 4.12.0 | **Apache-2.0** |
+| OkHttp | 4.12.0 | **Apache-2.0** |
 | kotlinx-serialization-json | 1.7.3 | **Apache-2.0** |
 | kotlinx-coroutines-android | 1.9.0 | **Apache-2.0** |
 | Coil (coil-compose) | 2.7.0 | **Apache-2.0** |
-| multiplatform-markdown-renderer (+ m3) — mikepenz | 0.33.0 | **Apache-2.0** |
 | Reorderable (sh.calvin.reorderable) | 2.4.0 | **Apache-2.0** |
 | ACRA (acra-core) | 5.12.0 | **Apache-2.0** |
 | Shizuku API + provider (dev.rikka.shizuku) | 13.1.5 | **MIT** |

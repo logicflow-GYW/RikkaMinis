@@ -82,7 +82,9 @@ class UxIntegrationWiringTest {
 
     @Test fun `tool shimmer is an isolated sibling and never rerecords static content`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        val pill = ui.substringAfter("internal fun ToolCallPill(").substringBefore("internal fun ToolCallRunGroup(")
+        assertTrue(ui.contains("internal fun ToolCallPill("))
+        assertTrue(ui.contains("internal fun ThinkingBlock("))
+        val pill = ui.substringAfter("internal fun ToolCallPill(").substringBefore("internal fun ThinkingBlock(")
         val overlay = pill.substringAfter("if (shimmerTick != null) {").substringBefore("MinisMenu(")
         assertTrue(pill.contains("val shimmerTick = if (isRunning) rememberDecorativeTick() else null"))
         assertTrue(overlay.contains("Modifier.matchParentSize()"))
@@ -101,7 +103,8 @@ class UxIntegrationWiringTest {
 
     @Test fun `shared spinners preserve progress semantics and full viewer dimensions`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
-        assertEquals(4, Regex("DecorativeSpinner\\(").findAll(ui).count())
+        // Three live sites remain after the retired tool-run group was removed.
+        assertEquals(3, Regex("DecorativeSpinner\\(").findAll(ui).count())
         assertFalse(ui.contains("CircularProgressIndicator("))
         assertTrue(ui.contains("DecorativeSpinner(color = textColor, modifier = Modifier.padding(24.dp).size(40.dp))"))
         val decorative = source("ui/components/DecorativeAnimation.kt")

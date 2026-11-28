@@ -1,5 +1,6 @@
 package com.rikkaminis.app.provider.anthropic
 
+import com.rikkaminis.app.provider.usesBuiltinCatalogOnFailure
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,26 +17,26 @@ class AnthropicModelsFallbackTest {
 
     @Test
     fun `official instance keeps the builtin catalog as a network net`() {
-        assertTrue(usesBuiltinCatalogOnFailure(isCustomEndpoint = false, lastFailureCode = 502))
+        assertTrue(usesBuiltinCatalogOnFailure(isCustom = false, statusCode = 502))
     }
 
     @Test
     fun `official instance does not use it after 401`() {
-        assertFalse(usesBuiltinCatalogOnFailure(isCustomEndpoint = false, lastFailureCode = 401))
+        assertFalse(usesBuiltinCatalogOnFailure(isCustom = false, statusCode = 401))
     }
 
     @Test
     fun `official instance does not use it after 403`() {
-        assertFalse(usesBuiltinCatalogOnFailure(isCustomEndpoint = false, lastFailureCode = 403))
+        assertFalse(usesBuiltinCatalogOnFailure(isCustom = false, statusCode = 403))
     }
 
     @Test
     fun `a custom endpoint never gets the builtin catalog`() {
-        assertFalse(usesBuiltinCatalogOnFailure(isCustomEndpoint = true, lastFailureCode = 500))
+        assertFalse(usesBuiltinCatalogOnFailure(isCustom = true, statusCode = 500))
     }
 
     @Test
     fun `a never-attempted code -1 stays a network failure`() {
-        assertTrue(usesBuiltinCatalogOnFailure(isCustomEndpoint = false, lastFailureCode = -1))
+        assertTrue(usesBuiltinCatalogOnFailure(isCustom = false, statusCode = -1))
     }
 }

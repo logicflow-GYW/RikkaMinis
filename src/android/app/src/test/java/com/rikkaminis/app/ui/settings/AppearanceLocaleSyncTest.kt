@@ -7,28 +7,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [deep-audit-1034 FIX-B1] Production wiring for B-01 and B-02.
+ * [deep-audit-1034 FIX-B1] Production wiring for B-02.
  *
- * Both defects are "two halves that must agree, wired in only one place":
- *
- *  * B-02 ([AppearanceScreen]'s language row): registering a locale in
- *    `res/xml/locales_config.xml` must track the `values-*` directories that
- *    actually ship (zh-TW shipped 1568 strings and was never registered; `fr`
- *    was registered with no `values-fr/` at all), and a language change must
- *    reach the *running process* — not only the Compose state — including when
- *    the pref is written from outside the screen (backup restore /
- *    `minis-config set appearance.language` / WebDAV restore).
- *  * B-01 ([com.rikkaminis.app.ui.onboarding.OnboardingScreen] step 1): the
- *    post-save model fetch is fire-and-forget, but it must not run on the
- *    step's composition scope — `saved` unlocks Next and the next tap disposes
- *    the step, cancelling the fetch and leaving the model picker empty.
+ * Registering a locale in `res/xml/locales_config.xml` must track the
+ * `values-*` directories that actually ship, and a language change must reach
+ * the running process — not only the Compose state — including when the pref
+ * is written from outside the screen (backup restore / minis-config / WebDAV).
  *
  * These are shape/wiring assertions on purpose: the behaviour needs a real
  * Activity + LocaleManager (API 33 branching, `recreate()`), and the sandbox
- * has no Android runtime. The mechanical half of both defects lives in
+ * has no Android runtime. The mechanical half lives in
  * `scripts/scan/i18n_check.py`; this class pins the Kotlin side so a later
- * "quick fix" cannot re-inline the second copy or move the fetch back onto the
- * step's scope without turning a test red.
+ * "quick fix" cannot re-inline the shared locale update without turning a
+ * test red.
  *
  * Source-shape assertions read the repo files (Gradle sets `user.dir` to the
  * module dir; a sandbox JVM run may start anywhere under the repo, so the
@@ -128,40 +119,6 @@ class AppearanceLocaleSyncTest {
                 "assignment(s) to applicationLocales",
             pushes == 1,
         )
-    }
-
-    // ── B-01: the onboarding model fetch outlives its step ───────────────
-
-    @Test
-    fun `the onboarding model refresh runs on the application scope`() {
-        val src = readRepoFile(ONBOARDING)
-        val body = declarationSlice(src, "private fun ApiKeyStep(")
-        assertFalse(
-            "the fire-and-forget refresh must not be launched on the step's composition " +
-                "scope — Next disposes the step and cancels it:\n$body",
-            Regex("""(?<![\w.])scope\.launch\s*\{[^}]*refreshModels""").containsMatchIn(body),
-        )
-        assertTrue(
-            "the refresh must be launched on MinisApp's application scope:\n$body",
-            Regex("""appScope\.applicationScope|\(appScope \?: scope\)\.launch""").containsMatchIn(body),
-        )
-        assertTrue(
-            "a null app scope must be reported instead of silently degrading:\n$body",
-            body.contains("AppLogger.warning("),
-        )
-    }
-
-    @Test
-    fun `the onboarding save still writes off the main thread behind the double-tap guard`() {
-        val body = declarationSlice(readRepoFile(ONBOARDING), "private fun ApiKeyStep(")
-        assertTrue(
-            "the deep-audit-1033 I05 contract: addInstance + saveApiKey stay inside " +
-                "withContext(Dispatchers.IO):\n$body",
-            body.contains("withContext(Dispatchers.IO)"),
-        )
-        assertTrue("the double-tap guard must survive:\n$body", body.contains("!saving"))
-        assertTrue("saved must still gate Next:\n$body", body.contains("enabled = apiKey.isNotBlank() && !saved && !saving"))
-        assertTrue("the skip path must survive:\n$body", body.contains("onSkip"))
     }
 
     // ── helpers ─────────────────────────────────────────────────────────
@@ -281,7 +238,6 @@ class AppearanceLocaleSyncTest {
         private const val ANDROID_MAIN =
             "src/android/app/src/main/java/com/rikkaminis/app"
         private const val APPEARANCE = "$ANDROID_MAIN/ui/settings/AppearanceScreen.kt"
-        private const val ONBOARDING = "$ANDROID_MAIN/ui/onboarding/OnboardingScreen.kt"
         private const val LOCALES_CONFIG = "src/android/app/src/main/res/xml/locales_config.xml"
         private const val RES_DIR = "src/android/app/src/main/res"
         // Only used to locate the repo root from a possibly-arbitrary cwd.

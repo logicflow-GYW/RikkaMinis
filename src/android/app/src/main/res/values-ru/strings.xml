@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RikkaMinis</string>
-    <string name="onboarding_default_group_name">Модели по умолчанию</string>
     <string name="settings">Настройки</string>
     <string name="no_sessions">Пока нет разговоров</string>
     <string name="delete">Удалить</string>
@@ -220,20 +219,6 @@
     <string name="common_close">Закрыть</string>
     <string name="common_skip">Пропустить</string>
     <string name="common_next">Далее</string>
-    <string name="onboarding_welcome_title">Добро пожаловать в RikkaMinis</string>
-    <string name="onboarding_welcome_subtitle">Ваш ИИ-агент с Терминалом, браузером и доступом к функциям устройства.</string>
-    <string name="onboarding_get_started">Начать</string>
-    <string name="onboarding_provider_title">Добавить Провайдера</string>
-    <string name="onboarding_provider_subtitle">Чтобы начать, введите Ключ API хотя бы для одного Провайдера.</string>
-    <string name="onboarding_provider_api_key_label">Ключ API %1$s</string>
-    <string name="onboarding_save_api_key">Сохранить Ключ API</string>
-    <string name="onboarding_saved">Сохранено</string>
-    <string name="onboarding_select_models_title">Выбрать Модели</string>
-    <string name="onboarding_select_models_subtitle">Выберите до 3 Моделей для группы по умолчанию.</string>
-    <string name="onboarding_search_models">Поиск Моделей</string>
-    <string name="onboarding_filter_models">Фильтр Моделей</string>
-    <string name="onboarding_done_count">Готово (%1$d/3)</string>
-    <string name="onboarding_loading_models">Загрузка Моделей…</string>
     <string name="webpreview_close">Закрыть</string>
     <string name="webpreview_stop">Остановить загрузку</string>
     <string name="webpreview_reload">Обновить</string>

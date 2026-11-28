@@ -55,6 +55,17 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _kotlin_lexer import KotlinLexError, mask_code
+
+
+def strip_comments_and_strings(text: str) -> str:
+    """Shared lexer; unlexable source degrades to blank text (arms then RED)."""
+    try:
+        return mask_code(text)
+    except KotlinLexError:
+        return ""
+
 ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
 
 TARGET_REL = "src/android/app/src/main/java/com/rikkaminis/app/offload/MediaPlayerManager.kt"
@@ -65,39 +76,6 @@ INLINE_PLAYER_REL = (
 
 MARKER = "MEDIAPLAYER_RELEASE_SELFTEST=PASS"
 
-
-def strip_comments_and_strings(text: str) -> str:
-    """Blank out // comments, /* */ blocks and string literals (brace-safe)."""
-    out = []
-    i, n = 0, len(text)
-    state = None
-    while i < n:
-        c = text[i]
-        two = text[i:i + 2]
-        if state is None:
-            if two == "//":
-                state = "line"; out.append("  "); i += 2; continue
-            if two == "/*":
-                state = "block"; out.append("  "); i += 2; continue
-            if c == '"':
-                state = "str"; out.append(" "); i += 1; continue
-            out.append(c); i += 1; continue
-        if state == "line":
-            out.append("\n" if c == "\n" else " ")
-            if c == "\n":
-                state = None
-            i += 1; continue
-        if state == "block":
-            if two == "*/":
-                state = None; out.append("  "); i += 2; continue
-            out.append("\n" if c == "\n" else " "); i += 1; continue
-        if state == "str":
-            if c == "\\":
-                out.append("  "); i += 2; continue
-            if c == '"':
-                state = None; out.append(" "); i += 1; continue
-            out.append(" "); i += 1; continue
-    return "".join(out)
 
 
 def brace_span(text: str, open_idx: int) -> tuple:
@@ -1097,6 +1075,39 @@ object MediaPlayerManager {
         ok = False
     else:
         print("  selftest no-releaseSession: RED (expect RED) ok")
+
+    # Exercise THIS gate's decisions with the shapes that broke the deleted
+    # private lexer (measured with a probe against the HEAD copy, see
+    # evidence/lexer_decoy_probe.py):
+    #  - a nested block comment whose tail leaked as code let a comment satisfy
+    #    arm2's `@Volatile` (false green);
+    #  - a `'"'` char literal swallowed the rest of the file (false red:
+    #    "could not locate releaseSession").
+    nested = COMPLIANT.replace(
+        "        @Volatile var state: PlayerState = PlayerState.IDLE,",
+        "        /* outer /* inner */ @Volatile var state: PlayerState */\n"
+        "        var state: PlayerState = PlayerState.IDLE,")
+    for name, src, expected_arms in (
+        ("nested block comment", nested, {"arm2"}),
+        ("double quote char", "val quote = '\"'\n" + COMPLIANT, set()),
+        # ...and a REAL violation after that char literal must still be caught,
+        # which is what "the code after the literal is not eaten" means.
+        ("double quote char then real violation", "val quote = '\"'\n" + M2, {"arm2"}),
+    ):
+        problems = check_arms(strip_comments_and_strings(src))
+        arms = {p.split(":", 1)[0] for p in problems}
+        passed = arms == expected_arms
+        print(f"  lexer selftest {name}: arms={sorted(arms)} "
+              f"(expect {sorted(expected_arms)}) {'ok' if passed else 'FAIL'}")
+        ok = passed and ok
+
+    # Fail-closed: unlexable source must never read as "compliant".
+    unlexable = check_arms(strip_comments_and_strings(
+        'object X { val s = "unterminated\n fun f() {}'))
+    print("  lexer selftest unlexable source: "
+          f"{'RED' if unlexable else 'GREEN'} (expect RED) "
+          f"{'ok' if unlexable else 'FAIL'}")
+    ok = bool(unlexable) and ok
 
     ok = run_inline_player_selftest() and ok
     ok = run_inline_player_guards_selftest() and ok
