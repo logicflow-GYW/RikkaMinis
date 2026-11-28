@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisTextButton
 
@@ -19,7 +21,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -566,6 +567,7 @@ fun LogDetailScreen(
     fileName: String,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var lazyLog by remember(fileName) { mutableStateOf<LazyLogFile?>(null) }
@@ -617,11 +619,6 @@ fun LogDetailScreen(
         topBar = {
             TopAppBar(
                 title = { Text(fileName) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                },
                 actions = {
                     IconButton(onClick = {
                         // [deep-audit-1041 B-07] Both the existence stat and the

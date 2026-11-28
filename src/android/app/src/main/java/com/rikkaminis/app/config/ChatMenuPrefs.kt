@@ -69,24 +69,40 @@ object ChatMenuPrefs {
      */
     val MODEL_CONDITIONAL_ENTRIES: List<String> = listOf(FAST_MODE, ENHANCED_CACHE)
 
-    /** Original customizable entries, in their default menu order. */
+    /** Default "..." menu order (twelve configurable menu entries only). */
     val DEFAULT_ORDER: List<String> = listOf(
         TERMINAL,
         BROWSER,
         CHAT_FILES,
-        COMPACT,
-        THINKING,
-        FAST_MODE,
-        ENHANCED_CACHE,
         SESSION_SKILLS,
         SESSION_MCPS,
         SESSION_MEMORY,
         SLASH_COMMANDS,
         EXPORT,
+        COMPACT,
+        THINKING,
+        FAST_MODE,
+        ENHANCED_CACHE,
     )
 
-    /** The full action pool: menu entries first (default order), then the two
-     *  footer-only actions. Both order resolvers work over this list. */
+    /** Default editor/render order for the history-drawer footer pool. */
+    val DEFAULT_PIN_ORDER: List<String> = listOf(
+        BROWSER,
+        TERMINAL,
+        SESSION_SKILLS,
+        SESSION_MCPS,
+        SESSION_MEMORY,
+        CHAT_FILES,
+        SLASH_COMMANDS,
+        EXPORT,
+        COMPACT,
+        THINKING,
+        FAST_MODE,
+        ENHANCED_CACHE,
+        TOKEN_USAGE,
+        SETTINGS,
+    )
+
     val ALL_ENTRIES: List<String> = DEFAULT_ORDER + listOf(TOKEN_USAGE, SETTINGS)
 
     /** SharedPreferences key for the "..." menu display order. */
@@ -131,31 +147,17 @@ object ChatMenuPrefs {
     fun defaultAttachVisible(entryKey: String): Boolean = true
 
     /**
-     * Default visibility: every original menu entry is visible; the two
-     * footer-only actions are hidden from the "..." menu.
+     * Default visibility: the built-in layout starts with every configurable
+     * menu entry hidden. A hidden entry remains configurable; it is not a
+     * runtime feature flag and can be enabled from Chat Menu settings.
      */
-    fun defaultVisible(entryKey: String): Boolean =
-        entryKey != TOKEN_USAGE && entryKey != SETTINGS
+    fun defaultVisible(entryKey: String): Boolean = false
 
     /**
-     * [chat-menu-model-toggles-1126] One-time adoption of the two
-     * model-conditional toggles into the pool.
-     *
-     * Before this change Fast Mode / Enhanced Cache were not pool members: they
-     * rendered unconditionally (when the active model supported them) and no
-     * setting could hide them. Their visibility keys therefore do not exist on
-     * any install that predates the change, and a plain "default true" would
-     * re-inject two entries into a menu the user had deliberately emptied — the
-     * exact complaint this fix answers ("I hide everything and ⚡ is still
-     * there").
-     *
-     * Rule: for an install that has NO stored choice for a toggle key, the
-     * toggle inherits the user's existing intent — hidden when every
-     * pre-existing menu entry is explicitly hidden, visible otherwise. The
-     * decision is persisted once, so afterwards the keys behave like any other
-     * pool entry (and a backup restore of an explicit value wins, because the
-     * write only happens while the key is absent).
-     *
+     * Adopt previously absent model-conditional entries using the current
+     * built-in menu default. Never infer visibility from unrelated legacy
+     * entries: doing so would re-inject Fast Mode / Enhanced Cache into the
+     * hidden-by-default menu. Explicit user or restored values always win.
      * Idempotent and safe to call on every cold start.
      */
     fun adoptModelConditionalEntries(prefs: SharedPreferences) {
@@ -163,29 +165,15 @@ object ChatMenuPrefs {
         var dirty = false
         for (key in MODEL_CONDITIONAL_ENTRIES) {
             if (prefs.contains(visibilityKey(key))) continue
-            editor.putBoolean(visibilityKey(key), !legacyMenuFullyHidden(prefs))
+            editor.putBoolean(visibilityKey(key), defaultVisible(key))
             dirty = true
         }
         if (dirty) editor.apply()
     }
 
-    /** Entries that existed in the pool BEFORE the model toggles were adopted. */
-    private val LEGACY_MENU_ENTRIES: List<String> =
-        DEFAULT_ORDER.filterNot { it in MODEL_CONDITIONAL_ENTRIES }
-
     /**
-     * True when the user has explicitly hidden every pre-existing menu entry.
-     * A single entry left at its default (no stored value) means the user never
-     * emptied the menu, so the toggles keep the visible default.
-     */
-    private fun legacyMenuFullyHidden(prefs: SharedPreferences): Boolean =
-        LEGACY_MENU_ENTRIES.all { key ->
-            prefs.contains(visibilityKey(key)) && !prefs.getBoolean(visibilityKey(key), true)
-        }
-
-    /**
-     * Default pinning: Token Usage and Settings start in the footer; the
-     * other ten entries do not.
+     * Default pinning: Token Usage and Settings start in the footer; other
+     * actions start unpinned.
      */
     fun defaultPinned(entryKey: String): Boolean =
         entryKey == TOKEN_USAGE || entryKey == SETTINGS
@@ -269,9 +257,9 @@ object ChatMenuPrefs {
         return ordered
     }
 
-    /** Resolve the persisted "..." menu order (all fourteen entries). */
+    /** Resolve the persisted "..." menu order (twelve menu entries only). */
     fun resolveOrder(prefs: SharedPreferences): List<String> =
-        normalizeOrder(prefs.getString(ORDER_KEY, null), ALL_ENTRIES)
+        normalizeOrder(prefs.getString(ORDER_KEY, null), DEFAULT_ORDER)
 
     /**
      * Resolve the persisted footer pin order over all fourteen entries — unpinned
@@ -279,7 +267,7 @@ object ChatMenuPrefs {
      * list. Render-time filtering happens in [resolvePinnedOrder].
      */
     fun resolvePinOrder(prefs: SharedPreferences): List<String> =
-        normalizeOrder(prefs.getString(PIN_ORDER_KEY, null), ALL_ENTRIES)
+        normalizeOrder(prefs.getString(PIN_ORDER_KEY, null), DEFAULT_PIN_ORDER)
 
     /**
      * Move SETTINGS to the very end whenever it is pinned; when unpinned it is
@@ -316,11 +304,11 @@ object ChatMenuPrefs {
     // -- Top-bar pinned-button visibility (independent of "..." menu entries) --
 
     /**
-     * Key for the "Input History" top-bar icon (the always-visible list-bullet
-     * button alongside New Chat). Unlike the fourteen [ALL_ENTRIES] items it does
+     * Key for the "Input History" top-bar icon (the list-bullet button
+     * alongside New Chat). Unlike the fourteen [ALL_ENTRIES] items it does
      * NOT participate in the overflow menu or footer — it has a fixed top-bar
      * slot. The preference only controls whether the icon is rendered at all.
-     * Default: true (visible).
+     * Default: false (hidden).
      */
     const val TOP_BAR_INPUT_HISTORY = "topBar.inputHistory"
     // internal (was private): ChatMenuSettingsScreen's prefs-change listener
@@ -330,7 +318,7 @@ object ChatMenuPrefs {
     internal const val TOP_BAR_INPUT_HISTORY_PREF = "topBar.inputHistory.visible"
 
     fun isTopBarInputHistoryVisible(prefs: SharedPreferences): Boolean =
-        prefs.getBoolean(TOP_BAR_INPUT_HISTORY_PREF, true)
+        prefs.getBoolean(TOP_BAR_INPUT_HISTORY_PREF, false)
 
     fun setTopBarInputHistoryVisible(prefs: SharedPreferences, visible: Boolean) {
         prefs.edit().putBoolean(TOP_BAR_INPUT_HISTORY_PREF, visible).apply()
@@ -363,14 +351,14 @@ object ChatMenuPrefs {
     /** Persist a new "..." menu order (comma-separated, sanitized). */
     fun writeOrder(prefs: SharedPreferences, order: List<String>) {
         prefs.edit()
-            .putString(ORDER_KEY, sanitizeForWrite(order, ALL_ENTRIES).joinToString(","))
+            .putString(ORDER_KEY, sanitizeForWrite(order, DEFAULT_ORDER).joinToString(","))
             .apply()
     }
 
     /** Persist a new footer pin order (comma-separated, sanitized). */
     fun writePinOrder(prefs: SharedPreferences, order: List<String>) {
         prefs.edit()
-            .putString(PIN_ORDER_KEY, sanitizeForWrite(order, ALL_ENTRIES).joinToString(","))
+            .putString(PIN_ORDER_KEY, sanitizeForWrite(order, DEFAULT_PIN_ORDER).joinToString(","))
             .apply()
     }
 }

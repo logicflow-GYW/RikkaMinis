@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.sandbox
 
+import androidx.activity.compose.BackHandler
+
 import com.rikkaminis.app.R
 
 import android.content.Context
@@ -22,7 +24,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
@@ -33,7 +34,6 @@ import androidx.compose.material.icons.outlined.Javascript
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -979,6 +979,7 @@ fun MirrorCategoryDetailScreen(
     category: MirrorCategory,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val context = LocalContext.current
     MirrorSpeedTestViewModel.ensureLoaded(context)
     val vm = MirrorSpeedTestViewModel
@@ -991,11 +992,6 @@ fun MirrorCategoryDetailScreen(
         topBar = {
             TopAppBar(
                 title = { Text(category.displayName) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.mirror_back))
-                    }
-                },
             )
         },
     ) { padding ->

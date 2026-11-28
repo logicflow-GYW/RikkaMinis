@@ -17,7 +17,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Icon
@@ -73,9 +72,9 @@ private const val MEMORY_SHEET_TAG = "SessionMemorySheet"
  *                   Edit / Save / Revoke
  *   - Detail.Get:   per-entry view of a memory_get op-log row
  *
- * The sheet header swaps its leading slot to a back-arrow when in any detail
- * mode; the trailing close X always dismisses the entire sheet, mirroring iOS
- * `NavigationStack` push behavior inside `SessionMemoryView`.
+ * System back pops Edit -> Detail -> List before closing the sheet. Explicit
+ * close / outside-tap / swipe dismissal still close the entire sheet; none of
+ * these cancellation paths save the edit buffer.
  */
 @Composable
 fun SessionMemorySheet(
@@ -182,23 +181,13 @@ fun SessionMemorySheet(
     StandardChatSheet(
         title = title,
         onDismiss = onDismiss,
-        leadingAction = if (mode != MemorySheetMode.List) {
-            {
-                IconButton(onClick = {
-                    if (isEditing) {
-                        // Cancel edit, stay on detail.
-                        isEditing = false
-                    } else {
-                        mode = MemorySheetMode.List
-                    }
-                }) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = stringResource(R.string.memory_action_back),
-                    )
-                }
+        onBackPress = {
+            when (memorySheetBackAction(isEditing, mode != MemorySheetMode.List)) {
+                MemorySheetBackAction.CancelEdit -> isEditing = false
+                MemorySheetBackAction.ShowList -> mode = MemorySheetMode.List
+                MemorySheetBackAction.Dismiss -> onDismiss()
             }
-        } else null,
+        },
     ) {
         when (val m = mode) {
             MemorySheetMode.List -> ListBody(
@@ -386,7 +375,7 @@ fun SessionMemorySheet(
  * Compact toolbar rendered inside the body (above the main content) for
  * detail screens. Sits inside the body slot so it doesn't compete with the
  * sheet's standard header — keeps the header visually identical across all
- * modes (back-arrow / title / close X).
+ * modes (title / close X).
  */
 @Composable
 private fun DetailToolbar(
@@ -580,8 +569,7 @@ data class MemoryToolRecord(
 )
 
 /**
- * Sheet navigation state. Held by [SessionMemorySheet] so a back arrow in the
- * standard sheet header can pop without unmounting the bottom sheet host.
+ * Sheet navigation state. System back pops without unmounting the sheet host.
  */
 private sealed class MemorySheetMode {
     data object List : MemorySheetMode()

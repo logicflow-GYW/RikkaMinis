@@ -1,5 +1,6 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -20,7 +21,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -76,17 +76,10 @@ import dev.chrisbanes.haze.rememberHazeState
 @Composable
 fun SettingsScaffold(
     title: String,
-    // [T-android-settings-ui-md3] #11 onBack is nullable so an EDIT screen can
-    // suppress the back arrow and use an explicit Cancel/Save action pair instead
-    // (a back arrow + a "Cancel" action that both pop the screen is redundant and
-    // semantically muddy). Non-edit screens keep passing a non-null onBack and get
-    // the usual back arrow — unchanged.
+    // Route back through the system dispatcher; navigation stays reserved for
+    // explicit edit actions such as Cancel, never an automatic back arrow.
     onBack: (() -> Unit)? = null,
     actions: @Composable (() -> Unit)? = null,
-    // [T-android-modeldetail-savecancel-ios-parity] Optional custom
-    // navigation slot — e.g. a leading Cancel text action on modal-style
-    // edit screens. When null, the slot falls back to the back arrow iff
-    // onBack is set, so every existing caller renders unchanged.
     navigation: @Composable (() -> Unit)? = null,
     // [T-android-modeldetail-savecancel-ios-parity] Center the title
     // (CenterAlignedTopAppBar) for iOS-modal-style edit screens. Default
@@ -96,6 +89,7 @@ fun SettingsScaffold(
     scrollable: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    BackHandler(enabled = onBack != null) { onBack?.invoke() }
     val scrollState = rememberScrollState()
     val hazeState = rememberHazeState()
     val backdrop = rememberGlassBackdrop(hazeState, hasSafeSource = scrollable)
@@ -111,29 +105,8 @@ fun SettingsScaffold(
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-            // [deep-audit-1040 B-01] The slot used to honour ONLY `navigation`,
-            // so every screen that passed just `onBack` got an EMPTY navigation
-            // slot — no back arrow at all (the KDoc above has always promised
-            // "the slot falls back to the back arrow iff onBack is set"). 10 call
-            // sites across 9 settings screens were in that state (provider
-            // detail/connection, storage session, runtime limits, Shizuku /
-            // offload permissions, provider add, custom model add, chat tuning).
-            // The system back gesture still worked, which is exactly why it went
-            // unnoticed: a user who does not know the gesture has no way out.
-            //
-            // Both arms stay nullable on purpose — a top-level screen passes
-            // neither (README: rely on system back / bottom nav) and must keep
-            // rendering an empty slot.
             val navigationSlot: @Composable () -> Unit = {
-                when {
-                    navigation != null -> navigation()
-                    onBack != null -> IconButton(onClick = onBack) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.common_back),
-                        )
-                    }
-                }
+                navigation?.invoke()
             }
             if (centerTitle) {
                 CenterAlignedTopAppBar(

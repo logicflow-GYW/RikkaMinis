@@ -26,14 +26,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -86,9 +84,8 @@ fun MinisSkillsBrowserScreen(
     var rendererEpoch by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
 
-    // System back / gesture: walk WebView history first, leave the screen
-    // only when the WebView has nothing left to pop. The TopAppBar back
-    // button uses the same handler so both entry points behave identically.
+    // System back / gesture walks WebView history first, leaving the screen
+    // only when the WebView has nothing left to pop.
     val handleBack = {
         val wv = webViewRef
         if (wv != null && wv.canGoBack()) {
@@ -108,11 +105,6 @@ fun MinisSkillsBrowserScreen(
             // signature stays consistent with the rest of the settings stack.
             TopAppBar(
                 title = { Text(stringResource(R.string.skills_browser_title), fontWeight = FontWeight.SemiBold) },
-                navigationIcon = {
-                    IconButton(onClick = handleBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                },
                 actions = {
                     MinisTextButton(
                         onClick = {

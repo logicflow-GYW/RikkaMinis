@@ -18,7 +18,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -43,7 +42,6 @@ import com.rikkaminis.app.data.repository.ProviderRepository
 import com.rikkaminis.app.ui.components.MinisOutlinedButton
 import com.rikkaminis.app.ui.components.SectionDesign
 import com.rikkaminis.app.ui.components.SectionFooter
-import com.rikkaminis.app.ui.components.SectionHeader
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.ReorderableLazyListState
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -109,15 +107,26 @@ fun AgentLoopModelsScreen(
         }
     }
 
+    /** Accessibility / two-finger reorder for one pinned entry. */
+    fun moveAgentLoopEntryBy(entryId: String, delta: Int): Boolean {
+        val cur = providerRepository.config.value.agentLoopModelEntryIds.toList()
+        val moved = moveEntryByDelta(cur, entryId, delta) ?: return false
+        providerRepository.reorderAgentLoopEntries(moved)
+        return true
+    }
+
+    /** Accessibility / two-finger reorder for one pinned group. */
+    fun moveAgentLoopGroupBy(groupId: String, delta: Int): Boolean {
+        val cur = providerRepository.config.value.agentLoopGroupIds.toList()
+        val moved = moveEntryByDelta(cur, groupId, delta) ?: return false
+        providerRepository.reorderAgentLoopGroups(moved)
+        return true
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.agent_loop_section_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                    }
-                },
             )
         },
     ) { padding ->
@@ -128,7 +137,7 @@ fun AgentLoopModelsScreen(
                 .padding(padding),
             contentPadding = PaddingValues(bottom = 24.dp),
         ) {
-            item("top_gap") { Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap)) }
+            item("top_gap") { Spacer(modifier = Modifier.height(SectionDesign.FirstSectionTopGap)) }
 
             agentLoopModelsSectionItems(
                 providerRepository = providerRepository,
@@ -136,6 +145,8 @@ fun AgentLoopModelsScreen(
                 reorderState = reorderState,
                 onAddModelsTap = onAddModelsTap,
                 onAddGroupsTap = onAddGroupsTap,
+                onMoveEntry = ::moveAgentLoopEntryBy,
+                onMoveGroup = ::moveAgentLoopGroupBy,
             )
         }
     }
@@ -164,6 +175,8 @@ private fun LazyListScope.agentLoopModelsSectionItems(
     reorderState: ReorderableLazyListState,
     onAddModelsTap: () -> Unit,
     onAddGroupsTap: () -> Unit,
+    onMoveEntry: (String, Int) -> Boolean,
+    onMoveGroup: (String, Int) -> Boolean,
 ) {
     // [T-android-agentloop-dup-key-crash] distinctBy id (belt-and-suspenders
     // alongside the data-layer sink dedup). A config that's ALREADY corrupted
@@ -188,13 +201,6 @@ private fun LazyListScope.agentLoopModelsSectionItems(
     // applies horizontal insets, surface fill, and rounded corners only
     // on the first/last row. SectionDivider is emitted as its own item
     // between rows so the inner card reads as one continuous panel.
-    item("agent_loop_section_spacer") {
-        Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap))
-    }
-    item("agent_loop_section_header") {
-        SectionHeader(text = stringResource(R.string.agent_loop_section_title))
-    }
-
     if (isEmpty) {
         item("agent_loop_section_empty") {
             Box(modifier = Modifier.cardRow(isFirst = true, isLast = true)) {
@@ -212,7 +218,7 @@ private fun LazyListScope.agentLoopModelsSectionItems(
             ReorderableItem(
                 state = reorderState,
                 key = "agent_group:${group.id}",
-            ) { _ ->
+            ) { isDragging ->
                 // [deep-audit-1043 B-06] Resolve through the System single
                 // source, or a group of system voice entries reports "0 models".
                 val resolvedCount = group.memberEntryIds.count { mid ->
@@ -236,10 +242,18 @@ private fun LazyListScope.agentLoopModelsSectionItems(
                             subtitle = subtitle,
                             badge = stringResource(R.string.agent_loop_section_group_badge),
                             onRemove = { providerRepository.removeAgentLoopGroup(group.id) },
-                            dragHandleModifier = Modifier.then(
-                                with(this@ReorderableItem) {
-                                    Modifier.draggableHandle()
-                                }
+                            reorderModifier = with(this@ReorderableItem) {
+                                longPressReorder(isDragging)
+                            },
+                            accessibilityModifier = Modifier.reorderAccessibilityActions(
+                                moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                onMoveUp = if (index > 0) {
+                                    { onMoveGroup(group.id, -1) }
+                                } else null,
+                                moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                onMoveDown = if (index < pinnedGroups.lastIndex) {
+                                    { onMoveGroup(group.id, 1) }
+                                } else null,
                             ),
                         )
                     }
@@ -251,7 +265,7 @@ private fun LazyListScope.agentLoopModelsSectionItems(
             ReorderableItem(
                 state = reorderState,
                 key = "agent_entry:${entry.id}",
-            ) { _ ->
+            ) { isDragging ->
                 val instance = config.instances
                     .find { it.id == entry.providerInstanceId }
                 // [agentloop-member-id] This list is the drag-reorder surface for
@@ -289,10 +303,18 @@ private fun LazyListScope.agentLoopModelsSectionItems(
                             subtitle = secondaryLine,
                             badge = null,
                             onRemove = { providerRepository.removeAgentLoopEntry(entry.id) },
-                            dragHandleModifier = Modifier.then(
-                                with(this@ReorderableItem) {
-                                    Modifier.draggableHandle()
-                                }
+                            reorderModifier = with(this@ReorderableItem) {
+                                longPressReorder(isDragging)
+                            },
+                            accessibilityModifier = Modifier.reorderAccessibilityActions(
+                                moveUpLabel = stringResource(R.string.thinking_rules_move_up),
+                                onMoveUp = if (absIndex > pinnedGroups.size) {
+                                    { onMoveEntry(entry.id, -1) }
+                                } else null,
+                                moveDownLabel = stringResource(R.string.thinking_rules_move_down),
+                                onMoveDown = if (index < pinnedEntries.lastIndex) {
+                                    { onMoveEntry(entry.id, 1) }
+                                } else null,
                             ),
                         )
                     }
@@ -346,31 +368,27 @@ private fun LazyListScope.agentLoopModelsSectionItems(
     item("bottom_gap") { Spacer(modifier = Modifier.height(SectionDesign.SectionTopGap)) }
 }
 
-/** Single row inside the agent-loop section. Drag handle on the left
- *  (T186), title + optional subtitle + optional "Group" badge in the
- *  middle, × to unpin on the right. The drag-handle modifier is built
- *  by the parent (since ReorderableItemScope.draggableHandle() is
- *  scope-bound) and threaded in here to keep the row composable
- *  scope-agnostic. */
+/** Single row inside the agent-loop section. Whole-row long press
+ *  reorders; the × unpins. Both modifiers are threaded from the parent
+ *  because the reorder scope is bound to the ReorderableItem. */
 @Composable
 private fun AgentLoopRow(
     title: String,
     subtitle: String?,
     badge: String?,
     onRemove: () -> Unit,
-    dragHandleModifier: Modifier = Modifier,
+    reorderModifier: Modifier = Modifier,
+    accessibilityModifier: Modifier = Modifier,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .then(reorderModifier)
+            .then(accessibilityModifier)
+            .padding(horizontal = SectionDesign.RowHorizontalPadding, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // [reorder-unify] Shared with the Model Groups list; see
-        // DragHandleButton in ReorderableCardRow.kt for why the handle has to
-        // be an IconButton (T198) rather than a bare Icon.
-        DragHandleButton(handleModifier = dragHandleModifier)
-        Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+        Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = title,

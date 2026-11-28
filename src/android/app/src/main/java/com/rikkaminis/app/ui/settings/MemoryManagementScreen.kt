@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisTextButton
 
@@ -17,7 +19,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -376,6 +377,7 @@ fun MemoryFileEditScreen(
     memoryRepository: MemoryRepository,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     // [fix-memory-editor-windowed-edit] Windowed editing on 200KB+ files:
     // fullBase is the file text captured at entry (source of truth for the
     // read-only viewer AND for splice-back); the editor state only holds the
@@ -425,11 +427,6 @@ fun MemoryFileEditScreen(
         topBar = {
             TopAppBar(
                 title = { Text(fileName) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                },
                 actions = {
                     // [T-android-memory-file-jank] Edit <-> Save swap. In
                     // read-only mode we show the pencil; while editing we show

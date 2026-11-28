@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.sandbox
 
+import androidx.activity.compose.BackHandler
+
 import com.rikkaminis.app.R
 import com.rikkaminis.app.ui.components.MinisTextButton
 
@@ -16,7 +18,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
@@ -28,7 +29,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -61,6 +61,7 @@ fun RootfsManagementScreen(
     onMirrorCategoryClick: (MirrorCategory) -> Unit = {},
     viewModel: RootfsManagementViewModel = viewModel(),
 ) {
+    BackHandler(onBack = onBack)
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
@@ -78,11 +79,6 @@ fun RootfsManagementScreen(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.rootfs_management_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = groupedBg),
             )
         },

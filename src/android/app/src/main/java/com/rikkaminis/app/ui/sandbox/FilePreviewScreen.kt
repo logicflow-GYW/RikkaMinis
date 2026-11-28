@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.sandbox
 
+import androidx.activity.compose.BackHandler
+
 import com.rikkaminis.app.R
 import androidx.compose.ui.res.stringResource
 import android.content.Context
@@ -41,7 +43,6 @@ import androidx.compose.foundation.overscroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Print
@@ -132,6 +133,7 @@ fun FilePreviewScreen(
     item: FileItem,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -266,11 +268,6 @@ fun FilePreviewScreen(
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.clickable { showFullPath = !showFullPath },
                     )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
-                    }
                 },
                 actions = {
                     // T142: Share works for any file — FileProvider URI +

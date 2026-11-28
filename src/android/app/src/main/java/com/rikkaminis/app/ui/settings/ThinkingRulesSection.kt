@@ -12,7 +12,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Icon
@@ -22,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -40,6 +40,7 @@ import com.rikkaminis.app.provider.thinking.ThinkingRuleResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import sh.calvin.reorderable.ReorderableColumn
 
 /**
  * [T-android-thinking-rules-phase2 §3 / parity with iOS ThinkingRulesSection.swift]
@@ -54,9 +55,9 @@ import kotlinx.coroutines.withContext
  *     Responses-API / Gemini / Anthropic get an explanatory notice (never a hidden
  *     section — silently dropping reads as "feature missing").
  *
- * Reorder is via up/down affordances rather than drag: this section lives inside the
- * provider screen's plain Column (not a LazyColumn), so a drag handle would fight the
- * outer scroll. Up/down is the robust equivalent and keeps sort_order = priority.
+ * Custom rules use the installed reorderable library's ordinary Column support:
+ * long-press the row to drag, while ordinary scrolling and built-in rules stay unchanged.
+ * The persisted order still defines the rule priority.
  */
 @Composable
 fun ThinkingRulesSection(
@@ -165,50 +166,69 @@ fun ThinkingRulesSection(
     // The scope is bound to this composable, so a write in flight when the
     // screen leaves is cancelled with it.
     val rulesScope = rememberCoroutineScope()
+    var reorderInFlight by remember(instance.id) { mutableStateOf(false) }
     /** Run one rule mutation off the main thread, then re-key the loader. */
-    fun mutateRules(block: suspend () -> Unit) {
+    fun mutateRules(onFinished: () -> Unit = {}, block: suspend () -> Unit) {
         rulesScope.launch {
-            withContext(Dispatchers.IO) { block() }
-            reloadKey++
+            try {
+                withContext(Dispatchers.IO) { block() }
+            } finally {
+                reloadKey++
+                onFinished()
+            }
         }
+    }
+
+    val moveUpLabel = stringResource(R.string.thinking_rules_move_up)
+    val moveDownLabel = stringResource(R.string.thinking_rules_move_down)
+
+    fun moveRule(dragIds: List<String>, fromIndex: Int, toIndex: Int): Boolean {
+        if (reorderInFlight) return false
+        val moved = movedThinkingRules(customRulesAndIds, dragIds, fromIndex, toIndex) ?: return false
+        // The Column keeps the settled item's offset until its input order changes.
+        // Move both columns together, then reconcile with the authoritative Room read.
+        customRulesAndIds = moved
+        reorderInFlight = true
+        mutateRules(onFinished = { reorderInFlight = false }) {
+            providerRepository.reorderThinkingRules(instance.id, moved.second)
+        }
+        return true
     }
 
     SettingsSection(
         header = stringResource(R.string.thinking_rules_section),
         footer = stringResource(R.string.thinking_rules_footer),
     ) {
-        // --- Custom rules (editable, reorderable) ---
-        customRules.forEachIndexed { idx, rule ->
-            val ruleId = customIds.getOrNull(idx)
-            ThinkingRuleRow(
-                title = rule.label,
-                subtitle = ruleScopeSummary(rule) + " · " + wireFormatSummary(rule.wireFormat),
-                locked = false,
-                onClick = {
-                    if (ruleId != null) {
+        // Built-in rows are outside the reorderable column and cannot be dragged.
+        key(instance.id) {
+            ReorderableColumn(
+                list = customIds,
+                onSettle = { fromIndex, toIndex -> moveRule(customIds, fromIndex, toIndex) },
+            ) { idx, ruleId, isDragging ->
+                val rule = customRules.getOrNull(idx) ?: return@ReorderableColumn
+                ThinkingRuleRow(
+                    title = rule.label,
+                    subtitle = ruleScopeSummary(rule) + " · " + wireFormatSummary(rule.wireFormat),
+                    locked = false,
+                    modifier = longPressReorder(isDragging, enabled = customIds.size > 1 && !reorderInFlight)
+                        .reorderAccessibilityActions(
+                            moveUpLabel = moveUpLabel,
+                            onMoveUp = if (idx > 0) {
+                                { moveRule(customIds, idx, idx - 1) }
+                            } else null,
+                            moveDownLabel = moveDownLabel,
+                            onMoveDown = if (idx < customIds.lastIndex) {
+                                { moveRule(customIds, idx, idx + 1) }
+                            } else null,
+                        ),
+                    onClick = {
                         editorRequest = ThinkingRuleEditorRequest(existingId = ruleId, seed = rule, isNew = false)
-                    }
-                },
-                onMoveUp = if (idx > 0 && ruleId != null) {
-                    {
-                        val order = customIds.toMutableList()
-                        order.add(idx - 1, order.removeAt(idx))
-                        mutateRules { providerRepository.reorderThinkingRules(instance.id, order) }
-                    }
-                } else null,
-                onMoveDown = if (idx < customRules.lastIndex && ruleId != null) {
-                    {
-                        val order = customIds.toMutableList()
-                        order.add(idx + 1, order.removeAt(idx))
-                        mutateRules { providerRepository.reorderThinkingRules(instance.id, order) }
-                    }
-                } else null,
-                onDelete = if (ruleId != null) {
-                    {
+                    },
+                    onDelete = {
                         mutateRules { providerRepository.deleteThinkingRule(instance.id, ruleId) }
-                    }
-                } else null,
-            )
+                    },
+                )
+            }
         }
 
         // --- Default (built-in) rules, collapsed ---
@@ -330,21 +350,20 @@ fun ThinkingRulesSection(
     }
 }
 
-/** Compact rule row with a lock badge for built-ins and up/down/delete affordances for custom. */
+/** Compact rule row: built-ins are locked; custom rules can be moved or deleted. */
 @Composable
 private fun ThinkingRuleRow(
     title: String,
     subtitle: String,
     locked: Boolean,
     onClick: () -> Unit,
-    onMoveUp: (() -> Unit)? = null,
-    onMoveDown: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
     onDelete: (() -> Unit)? = null,
     showDivider: Boolean = true,
 ) {
     Column {
         Row(
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxWidth()
                 .clickable(onClick = onClick)
                 .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -374,24 +393,6 @@ private fun ThinkingRuleRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-            }
-            if (onMoveUp != null) {
-                Icon(
-                    Icons.Default.KeyboardArrowUp,
-                    contentDescription = stringResource(R.string.thinking_rules_move_up),
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(24.dp).clickable(onClick = onMoveUp),
-                )
-                Spacer(Modifier.width(4.dp))
-            }
-            if (onMoveDown != null) {
-                Icon(
-                    Icons.Default.KeyboardArrowDown,
-                    contentDescription = stringResource(R.string.thinking_rules_move_down),
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(24.dp).clickable(onClick = onMoveDown),
-                )
-                Spacer(Modifier.width(4.dp))
             }
             if (onDelete != null) {
                 Text(

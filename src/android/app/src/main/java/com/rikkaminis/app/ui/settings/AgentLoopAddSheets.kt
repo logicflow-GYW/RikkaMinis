@@ -1,5 +1,7 @@
 package com.rikkaminis.app.ui.settings
 
+import androidx.activity.compose.BackHandler
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -14,13 +16,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -67,6 +67,7 @@ fun AddAgentLoopModelsScreen(
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val config by providerRepository.config.collectAsState()
 
     val pinnedEntries = config.agentLoopModelEntryIds.toSet()
@@ -100,14 +101,6 @@ fun AddAgentLoopModelsScreen(
                         stringResource(R.string.agent_loop_section_add_models_title),
                         fontWeight = FontWeight.SemiBold,
                     )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.model_group_detail_back),
-                        )
-                    }
                 },
                 actions = {
                     MinisTextButton(onClick = onBack) { Text(stringResource(R.string.common_cancel)) }
@@ -191,6 +184,7 @@ fun AddAgentLoopGroupsScreen(
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     val config by providerRepository.config.collectAsState()
     val pinnedGroups = config.agentLoopGroupIds.toSet()
     val available = remember(config, pinnedGroups) {
@@ -206,14 +200,6 @@ fun AddAgentLoopGroupsScreen(
                         stringResource(R.string.agent_loop_section_add_groups_title),
                         fontWeight = FontWeight.SemiBold,
                     )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.model_group_detail_back),
-                        )
-                    }
                 },
                 actions = {
                     MinisTextButton(onClick = onBack) { Text(stringResource(R.string.common_cancel)) }

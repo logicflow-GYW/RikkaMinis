@@ -103,21 +103,21 @@ class ChatMenuPrefsTest {
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     @Test
-    fun `original eight actions default to visible`() {
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.TERMINAL))
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.BROWSER))
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.CHAT_FILES))
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.SESSION_SKILLS))
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.SESSION_MCPS))
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.SESSION_MEMORY))
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.SLASH_COMMANDS))
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.EXPORT))
+    fun `original eight actions default to hidden`() {
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.TERMINAL))
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.BROWSER))
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.CHAT_FILES))
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.SESSION_SKILLS))
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.SESSION_MCPS))
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.SESSION_MEMORY))
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.SLASH_COMMANDS))
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.EXPORT))
     }
 
     @Test
-    fun `COMPACT and THINKING default to visible`() {
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.COMPACT))
-        assertTrue(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.THINKING))
+    fun `COMPACT and THINKING default to hidden`() {
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.COMPACT))
+        assertFalse(ChatMenuPrefs.defaultVisible(ChatMenuPrefs.THINKING))
     }
 
     @Test
@@ -228,17 +228,21 @@ class ChatMenuPrefsTest {
     }
 
     @Test
-    fun `resolveOrder on empty prefs yields all fourteen entries in default order`() {
+    fun `resolveOrder on empty prefs yields only twelve configurable menu entries`() {
         val prefs = FakePrefs()
         val result = ChatMenuPrefs.resolveOrder(prefs)
-        assertEquals(ChatMenuPrefs.ALL_ENTRIES, result)
+        assertEquals(ChatMenuPrefs.DEFAULT_ORDER, result)
+        assertEquals(12, result.size)
+        assertFalse(ChatMenuPrefs.TOKEN_USAGE in result)
+        assertFalse(ChatMenuPrefs.SETTINGS in result)
     }
 
     @Test
-    fun `resolvePinOrder on empty prefs yields all fourteen entries in default order`() {
+    fun `resolvePinOrder on empty prefs yields independent fourteen entry footer order`() {
         val prefs = FakePrefs()
         val result = ChatMenuPrefs.resolvePinOrder(prefs)
-        assertEquals(ChatMenuPrefs.ALL_ENTRIES, result)
+        assertEquals(ChatMenuPrefs.DEFAULT_PIN_ORDER, result)
+        assertEquals(14, result.size)
     }
 
     @Test
@@ -443,15 +447,12 @@ class ChatMenuPrefsTest {
 
     @Test
     fun `model conditional toggles are ordinary pool members`() {
-        // Both keys must be visible AND pinnable pool members: that is what
-        // gives the user the same two independent controls (menu visibility,
-        // footer pin) every other entry already has. Leaving them outside the
-        // pool is exactly the defect this fix answers — with them excluded, no
-        // setting could hide the ⚡ button the screen force-rendered.
+        // Both keys remain configurable and pinnable even when hidden by
+        // default. Runtime availability does not remove them from the pool.
         for (key in ChatMenuPrefs.MODEL_CONDITIONAL_ENTRIES) {
             assertTrue("$key must be in ALL_ENTRIES", key in ChatMenuPrefs.ALL_ENTRIES)
             assertTrue("$key must be in DEFAULT_ORDER", key in ChatMenuPrefs.DEFAULT_ORDER)
-            assertTrue("$key must default to visible", ChatMenuPrefs.defaultVisible(key))
+            assertFalse("$key must default to hidden", ChatMenuPrefs.defaultVisible(key))
             assertFalse("$key must default to unpinned", ChatMenuPrefs.defaultPinned(key))
             // A pin must round-trip through the shared order helpers.
             val prefs = FakePrefs()
@@ -496,20 +497,25 @@ class ChatMenuPrefsTest {
     }
 
     @Test
-    fun `adoption keeps the toggles visible for a menu the user never emptied`() {
+    fun `adoption does not infer visible model toggles from unrelated legacy choices`() {
         val prefs = FakePrefs()
-        ChatMenuPrefs.setVisible(prefs, ChatMenuPrefs.TERMINAL, false)
+        ChatMenuPrefs.setVisible(prefs, ChatMenuPrefs.TERMINAL, true)
+        prefs.edit().putString(ChatMenuPrefs.ORDER_KEY, "menu_terminal,menu_browser").apply()
         ChatMenuPrefs.adoptModelConditionalEntries(prefs)
-        assertTrue(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.FAST_MODE))
-        assertTrue(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.ENHANCED_CACHE))
+        assertTrue(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.TERMINAL))
+        assertFalse(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.FAST_MODE))
+        assertFalse(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.ENHANCED_CACHE))
     }
 
     @Test
     fun `adoption is idempotent and never overwrites an explicit choice`() {
         val prefs = FakePrefs()
         ChatMenuPrefs.setVisible(prefs, ChatMenuPrefs.FAST_MODE, false)
+        ChatMenuPrefs.setVisible(prefs, ChatMenuPrefs.ENHANCED_CACHE, true)
+        val before = prefs.getAll()
         ChatMenuPrefs.adoptModelConditionalEntries(prefs)
         ChatMenuPrefs.adoptModelConditionalEntries(prefs)
+        assertEquals(before, prefs.getAll())
         assertFalse(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.FAST_MODE))
         assertTrue(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.ENHANCED_CACHE))
     }
@@ -586,6 +592,111 @@ class ChatMenuPrefsTest {
             assertFalse(key in ChatMenuPrefs.ALL_ENTRIES)
             assertFalse(key in ChatMenuPrefs.DEFAULT_ORDER)
         }
+    }
+
+    @Test
+    fun `fresh install keeps the complete hidden menu layout after cold start adoption`() {
+        val prefs = FakePrefs()
+        repeat(2) { ChatMenuPrefs.adoptModelConditionalEntries(prefs) }
+        for (key in ChatMenuPrefs.ALL_ENTRIES) {
+            assertFalse("new menu entry $key", ChatMenuPrefs.isVisible(prefs, key))
+            assertEquals(
+                "new pin $key",
+                key == ChatMenuPrefs.TOKEN_USAGE || key == ChatMenuPrefs.SETTINGS,
+                ChatMenuPrefs.isPinned(prefs, key),
+            )
+        }
+        assertEquals(
+            emptyList<String>(),
+            resolveVisibleMenuEntries(
+                ChatMenuPrefs.resolveOrder(prefs),
+                { ChatMenuPrefs.isVisible(prefs, it) },
+                ChatActionAvailability(true, true, true, true, true),
+            ),
+        )
+        assertEquals(
+            listOf("footer_token_usage", "footer_settings"),
+            ChatMenuPrefs.resolvePinnedOrder(prefs),
+        )
+        assertFalse(ChatMenuPrefs.isTopBarInputHistoryVisible(prefs))
+        assertTrue(ChatMenuPrefs.isComposerModelPickerVisible(prefs))
+        for (key in AttachActionCatalog.DEFAULT_ORDER) {
+            assertTrue(ChatMenuPrefs.isAttachVisible(prefs, key))
+        }
+    }
+
+    @Test
+    fun `stored true and false choices override every changed default`() {
+        for (choice in listOf(false, true)) {
+            val prefs = FakePrefs()
+            for (key in ChatMenuPrefs.ALL_ENTRIES) {
+                ChatMenuPrefs.setVisible(prefs, key, choice)
+                ChatMenuPrefs.setPinned(prefs, key, choice)
+            }
+            for (key in AttachActionCatalog.DEFAULT_ORDER) {
+                ChatMenuPrefs.setAttachVisible(prefs, key, choice)
+            }
+            ChatMenuPrefs.setTopBarInputHistoryVisible(prefs, choice)
+            ChatMenuPrefs.setComposerModelPickerVisible(prefs, choice)
+            val before = prefs.getAll()
+            ChatMenuPrefs.adoptModelConditionalEntries(prefs)
+            for (key in ChatMenuPrefs.ALL_ENTRIES) {
+                assertEquals("stored visibility $key", choice, ChatMenuPrefs.isVisible(prefs, key))
+                assertEquals("stored pin $key", choice, ChatMenuPrefs.isPinned(prefs, key))
+            }
+            for (key in AttachActionCatalog.DEFAULT_ORDER) {
+                assertEquals(choice, ChatMenuPrefs.isAttachVisible(prefs, key))
+            }
+            assertEquals(choice, ChatMenuPrefs.isTopBarInputHistoryVisible(prefs))
+            assertEquals(choice, ChatMenuPrefs.isComposerModelPickerVisible(prefs))
+            assertEquals("reads and adoption must not rewrite explicit values", before, prefs.getAll())
+        }
+    }
+
+    @Test
+    fun `restore after adoption wins and legacy raw orders are never rewritten`() {
+        val prefs = FakePrefs()
+        ChatMenuPrefs.adoptModelConditionalEntries(prefs)
+        // Model explicit values restored AFTER the first cold start must also
+        // win. The raw order string remains byte-identical, including stale
+        // unknown members; normalization is read-only.
+        prefs.edit()
+            .putBoolean(ChatMenuPrefs.visibilityKey(ChatMenuPrefs.FAST_MODE), true)
+            .putBoolean(ChatMenuPrefs.visibilityKey(ChatMenuPrefs.ENHANCED_CACHE), false)
+            .putString(ChatMenuPrefs.ORDER_KEY, "menu_export,menu_thinking,retired,menu_terminal")
+            .putString(ChatMenuPrefs.PIN_ORDER_KEY, "footer_settings,menu_terminal,footer_token_usage")
+            .putString(ChatMenuPrefs.ATTACH_ORDER_KEY, "attach_take_photo,attach_add_file,attach_choose_photos")
+            .apply()
+        val restored = prefs.getAll()
+        repeat(2) { ChatMenuPrefs.adoptModelConditionalEntries(prefs) }
+        assertTrue(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.FAST_MODE))
+        assertFalse(ChatMenuPrefs.isVisible(prefs, ChatMenuPrefs.ENHANCED_CACHE))
+        assertEquals(listOf("menu_export", "menu_thinking", "menu_terminal"), ChatMenuPrefs.resolveOrder(prefs).take(3))
+        assertEquals(listOf("footer_settings", "menu_terminal", "footer_token_usage"), ChatMenuPrefs.resolvePinOrder(prefs).take(3))
+        assertEquals(listOf("attach_take_photo", "attach_add_file", "attach_choose_photos"), ChatMenuPrefs.resolveAttachOrder(prefs))
+        assertEquals(restored, prefs.getAll())
+    }
+
+    @Test
+    fun `input history defaults hidden and explicit values roundtrip`() {
+        val prefs = FakePrefs()
+        assertFalse(ChatMenuPrefs.isTopBarInputHistoryVisible(prefs))
+        ChatMenuPrefs.setTopBarInputHistoryVisible(prefs, true)
+        assertTrue(ChatMenuPrefs.isTopBarInputHistoryVisible(prefs))
+        ChatMenuPrefs.setTopBarInputHistoryVisible(prefs, false)
+        assertFalse(ChatMenuPrefs.isTopBarInputHistoryVisible(prefs))
+    }
+
+    @Test
+    fun `menu write keeps twelve configurable members and excludes footer only keys`() {
+        val prefs = FakePrefs()
+        ChatMenuPrefs.writeOrder(prefs, listOf("unknown", "footer_settings", "menu_export", "menu_export"))
+        val result = ChatMenuPrefs.resolveOrder(prefs)
+        assertEquals(12, result.size)
+        assertEquals("menu_export", result.first())
+        assertFalse("footer_settings" in result)
+        assertFalse("footer_token_usage" in result)
+        assertEquals(result.joinToString(","), prefs.getString(ChatMenuPrefs.ORDER_KEY, null))
     }
 
     @Test

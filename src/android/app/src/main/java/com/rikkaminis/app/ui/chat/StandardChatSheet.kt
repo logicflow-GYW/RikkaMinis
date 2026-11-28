@@ -1,5 +1,8 @@
 package com.rikkaminis.app.ui.chat
 
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.activity.findViewTreeOnBackPressedDispatcherOwner
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,12 +23,16 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -56,6 +63,10 @@ import com.rikkaminis.app.ui.theme.ChatColors
  * [showClose] toggles the header's close button. Sheets that rely on
  * swipe-down / scrim-tap dismissal alone (e.g. [TokenUsageSheet]) pass false;
  * the reserved 48dp slot stays on both sides so the title remains centered.
+ *
+ * [onBackPress] optionally handles system back inside this Dialog window, without
+ * hiding the sheet first. Null preserves native dismissal for all existing callers.
+ * Scrim taps, drag dismissal and the close action always keep using [onDismiss].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,6 +76,7 @@ fun StandardChatSheet(
     leadingAction: (@Composable () -> Unit)? = null,
     heightFraction: Float? = 0.9f,
     showClose: Boolean = true,
+    onBackPress: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -79,7 +91,22 @@ fun StandardChatSheet(
         sheetState = sheetState,
         containerColor = ChatColors.background,
         dragHandle = { CompactDragHandle() },
+        // Material3 1.3.2 installs a window-level predictive-back callback before
+        // it reaches onDismissRequest. Disable ONLY that path for custom back;
+        // otherwise an inner navigation pop would hide the entire sheet first.
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = onBackPress == null),
     ) {
+        if (onBackPress != null) {
+            // Resolve inside the Dialog content, not from the Activity composition
+            // inherited by ModalBottomSheet. ComponentDialog owns this view tree.
+            val dialogOwner = checkNotNull(LocalView.current.findViewTreeOnBackPressedDispatcherOwner())
+            CompositionLocalProvider(
+                LocalOnBackPressedDispatcherOwner provides dialogOwner,
+                LocalLifecycleOwner provides dialogOwner,
+            ) {
+                BackHandler(onBack = onBackPress)
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
