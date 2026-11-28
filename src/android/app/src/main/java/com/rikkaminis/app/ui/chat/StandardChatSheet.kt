@@ -60,6 +60,9 @@ import com.rikkaminis.app.ui.theme.ChatColors
  * open (a fixed half-screen detent forced scrolling to the lower
  * sections).
  *
+ * [title] may be null to omit the entire header row. The drag handle, divider,
+ * body and native dismissal still belong to the sheet.
+ *
  * [showClose] toggles the header's close button. Sheets that rely on
  * swipe-down / scrim-tap dismissal alone (e.g. [TokenUsageSheet]) pass false;
  * the reserved 48dp slot stays on both sides so the title remains centered.
@@ -71,7 +74,7 @@ import com.rikkaminis.app.ui.theme.ChatColors
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StandardChatSheet(
-    title: String,
+    title: String?,
     onDismiss: () -> Unit,
     leadingAction: (@Composable () -> Unit)? = null,
     heightFraction: Float? = 0.9f,
@@ -121,12 +124,14 @@ fun StandardChatSheet(
                     }
                 ),
         ) {
-            StandardChatSheetHeader(
-                title = title,
-                onDismiss = onDismiss,
-                leadingAction = leadingAction,
-                showClose = showClose,
-            )
+            if (title != null) {
+                StandardChatSheetHeader(
+                    title = title,
+                    onDismiss = onDismiss,
+                    leadingAction = leadingAction,
+                    showClose = showClose,
+                )
+            }
             HorizontalDivider(thickness = 0.5.dp, color = ChatColors.separator)
             Box(modifier = Modifier.fillMaxSize()) {
                 content()
@@ -141,7 +146,7 @@ fun StandardChatSheet(
  * sits closer to the indicator than the Material default (22dp / 22dp).
  */
 @Composable
-private fun CompactDragHandle() {
+internal fun CompactDragHandle() {
     Box(
         modifier = Modifier
             .fillMaxWidth()

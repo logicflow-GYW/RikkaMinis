@@ -205,19 +205,21 @@ class UxIntegrationWiringTest {
         val parent = host.substring(0, detailSwitch)
         // The parent must be unconditionally mounted, BEFORE the detail switch.
         // Changing this to replace the list destroys its scroll state and flashes chat.
-        assertTrue(parent.contains("StandardChatSheet("))
-        assertTrue(parent.contains("title = stringResource(R.string.chat_process_title)"))
-        assertTrue(parent.contains("onDismiss = onDismiss,"))
+        assertTrue(parent.contains("TopChatSheet("))
+        assertTrue(parent.contains("paneName = stringResource(R.string.chat_process_title)"))
+        assertTrue(parent.contains("onDismissRequest = onDismiss,"))
         assertTrue(parent.contains("ChatProcessList("))
         val details = host.substring(detailSwitch)
         assertTrue(details.contains("ToolDetailSheet("))
-        assertTrue(details.contains("is ChatProcessPage.Thinking -> StandardChatSheet("))
+        assertTrue(Regex("is ChatProcessPage\\.Thinking -> StandardChatSheet\\(\\s*title = null,").containsMatchIn(details))
         assertEquals(2, Regex("onDismiss = backToList,").findAll(details).count())
         assertFalse(details.contains("onDismiss = onDismiss,"))
         assertTrue(details.contains("ChatProcessThinkingReader(content = current.content)"))
-        assertEquals(2, Regex("showClose = false,").findAll(host).count())
-        // Gestures and scrims belong to the existing native sheets. Reintroducing
-        // a handwritten swipe chain recreates the offscreen-panel/visible-scrim bug.
+        assertEquals(1, Regex("showClose = false,").findAll(host).count())
+        val standard = source("ui/chat/StandardChatSheet.kt")
+        assertTrue(Regex("if \\(title != null\\) \\{\\s*StandardChatSheetHeader\\(").containsMatchIn(standard))
+        // Only the parent shell bridges scroll deltas. The route and the two
+        // detail bodies must not reintroduce an independent gesture chain.
         for (retired in listOf("ProcessDrawer", "NestedScrollConnection", "pointerInput", "dragOffset", "Animatable", "DialogProperties", "BackHandler")) {
             assertFalse(retired, ui.contains(retired))
         }
@@ -231,8 +233,7 @@ class UxIntegrationWiringTest {
         assertTrue(row.contains("R.string.chat_deep_thinking"))
         assertTrue(row.contains(".border(0.5.dp, thinkingBlue.copy(alpha = 0.15f)"))
         assertFalse(row.contains("thinking_view_full"))
-        // Reader: title only. Long-press selection is the copy affordance, so
-        // a copy button (and the back arrow it used to sit next to) is gone.
+        // Only the shell changes; long-press selection remains the copy affordance.
         val reader = ui.substringAfter("internal fun ChatProcessThinkingReader(")
         assertFalse(reader.contains("IconButton("))
         assertFalse(reader.contains("chat_process_copy_all"))
