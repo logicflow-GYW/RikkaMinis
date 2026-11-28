@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -199,7 +200,7 @@ internal fun TopChatSheet(
         ),
     ) {
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
-        val panelColor = ChatColors.background
+        val panelColor = if (ChatColors.isDark) MaterialTheme.colorScheme.surfaceContainerLow else ChatColors.background
         SideEffect {
             window?.let {
                 // Only the scrim below should dim chat; the panel owns the status-bar background.

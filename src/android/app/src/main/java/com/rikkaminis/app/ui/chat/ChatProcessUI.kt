@@ -278,6 +278,7 @@ internal fun ChatProcessSheet(
             title = null,
             onDismiss = backToList,
             showClose = false,
+            containerColor = if (ChatColors.isDark) MaterialTheme.colorScheme.surfaceContainerHigh else ChatColors.background,
         ) {
             ChatProcessThinkingReader(content = current.content)
         }
