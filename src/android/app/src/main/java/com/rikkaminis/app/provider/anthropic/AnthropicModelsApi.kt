@@ -6,6 +6,7 @@ import com.rikkaminis.app.provider.usesBuiltinCatalogOnFailure
 import android.content.Context
 import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.provider.ModelsDevApi
+import com.rikkaminis.app.provider.ProviderModelsCache
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -17,14 +18,16 @@ import org.json.JSONObject
 
 object AnthropicModelsApi {
     private val client = OkHttpClient()
+    private val cache = ProviderModelsCache("anthropic")
 
     /**
      * Fetch models from Anthropic API.
      * @param apiKey The API key
      * @param baseURL Optional custom base URL
      * @param context Optional Android [Context]; when provided, results are cached
-     *   for 7 days at `cacheDir/models-cache/<sha256(credential)>.json` (matches
-     *   iOS `ModelsCache`). When null, the fetch bypasses the cache entirely.
+     *   for 7 days at `cacheDir/models-cache/anthropic/<sha256(cacheKey)>.json`.
+     *   Legacy flat rows intentionally miss once; a successful write retires
+     *   only the same key's old file. Null bypasses the cache entirely.
      * @param forceRefresh When true, skip the cache read but still write-through
      *   on success. Used for explicit "refresh models" UI actions.
      */
@@ -46,7 +49,7 @@ object AnthropicModelsApi {
             // metadata, so a row cached before the models.dev registry landed
             // would keep supportsReasoning=null (thinking pill gate) for the
             // full 7-day TTL.
-            AnthropicModelsCache.load(context, cacheKey)
+            cache.load(context, cacheKey)
                 ?.let { return@withContext ModelsDevApi.enrichModels(it) }
         }
 
@@ -115,7 +118,8 @@ object AnthropicModelsApi {
                         // 401/403 almost always means the credential rotated; drop any stale
                         // cache entry so the next lookup hits the network again.
                         if (context != null && (response.code == 401 || response.code == 403)) {
-                            AnthropicModelsCache.invalidate(context, cacheKey)
+                            cache.invalidate(context, cacheKey)
+                            cache.invalidateLegacyFlatFile(context, cacheKey)
                         }
                         lastFailureCode = response.code
                         lastFailureBody = body
@@ -197,8 +201,8 @@ object AnthropicModelsApi {
             return fallback
         }
 
-        if (context != null) {
-            AnthropicModelsCache.save(context, cacheKey, models)
+        if (context != null && cache.save(context, cacheKey, models)) {
+            cache.invalidateLegacyFlatFile(context, cacheKey)
         }
         return models
     }
