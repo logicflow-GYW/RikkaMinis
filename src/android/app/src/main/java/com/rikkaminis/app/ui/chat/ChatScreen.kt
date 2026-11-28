@@ -104,7 +104,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -114,7 +113,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
@@ -3306,39 +3304,18 @@ fun ChatScreen(
                 val screenMountAtMs = remember(sessionId) { System.currentTimeMillis() }
                 // T-streaming-side-channel: messages-level changes (new
                 // message, retry, etc.) AND streamingById deltas both feed
-                // buildFlatChatItems, but we subscribe to streamingById
+                // buildAggregateChatItems, but we subscribe to streamingById
                 // INSIDE LaunchedEffect (not at top-level) so per-token
                 // emissions don't recompose the surrounding ChatScreen
                 // scope. The flatten still runs per token (cheap-ish; ran
                 // before too), but the rebuild stays off the main UI
                 // composable's invalidation list.
                 LaunchedEffect(messages, sessionId) {
-                    // [T-android-stream-pipeline-incremental] Frozen/live split.
-                    //
-                    // `messages` is CONSTANT within this effect (the effect is
-                    // keyed on it and the streaming turn writes high-frequency
-                    // fields into the streamingById side-channel, never the
-                    // canonical list). So the rows for every message BEFORE the
-                    // first streamed one (= the frozen prefix) can be computed
-                    // ONCE per effect lifetime and reused by reference on every
-                    // tick. Per tick we only rebuild the live suffix (usually a
-                    // single message). Pre-split, every 80ms tick re-flattened
-                    // ALL messages (1146 rows on the ANR-loop session), re-ran
-                    // splitMarkdownIntoBlockTexts over every frozen message,
-                    // and allocated the whole row set fresh — the 130–180MB/s
-                    // GC storm and the 100s builds in minis-2026-06-10.log.
-                    //
-                    // Row-for-row equivalence with the old full build holds by
-                    // construction: buildFlatChatItems' neighbor lookbacks
-                    // (precededByUser / isResumeContinuation) only ever read
-                    // EARLIER messages, the live suffix is built against the
-                    // full merged list with fromIndex (lookbacks cross the
-                    // boundary), and dedupe continuity is preserved via
-                    // seedKeys. Frozen rows are the same instances every tick,
-                    // so LazyColumn's key+equals skip path sees ZERO change.
-                    //
-                    // Throttle (unchanged): conflate() + sample(80) keeps UI
-                    // publication at ~12fps regardless of token rate.
+                    // The canonical list stays stable during streaming. The
+                    // incremental aggregate builder reuses the identity-equal
+                    // message prefix and rebuilds only the changed suffix.
+                    // Lookbacks use the full message list across that boundary.
+                    // conflate() + sample(80) keeps publication at ~12fps.
                     var streamWasActive = false
                     // [fix/history-open-at-bottom-04] The INITIAL_OPEN
                     // scroll-to-bottom is owned by THIS collector, not the
@@ -3373,19 +3350,8 @@ fun ChatScreen(
                                 streamWasActive = true
                                 com.rikkaminis.app.diagnostics.StreamPerfMonitor.turnStart(sessionId)
                             }
-                            // [audit-0920] This collector now has exactly ONE
-                            // pipeline. The [forward-stable]
-                            // StableChatRowLedger path that used to sit below
-                            // was made unreachable when the aggregate path was
-                            // promoted to main and this branch started
-                            // early-returning; its 174 lines, the
-                            // lightFingerprint throttle and the ledger
-                            // instance were deleted rather than kept behind a
-                            // compile-time `true`. See
-                            // `legacy/LegacyFlatChatBuilder.kt` — that file
-                            // keeps its own RUNTIME-DEAD header, so the ledger
-                            // stays deletable on its own schedule (its unit
-                            // tests are the last consumer).
+                            // One live message-level pipeline; the retired
+                            // fragment/ledger implementation is no longer kept.
                             val merged = mergeStreamingOverlay(msgs, stream, viewModel.currentStreamEpoch())
                             // [fix/message-node-item-generator] Message-level
                             // aggregate path: the whole merged list is built
@@ -3586,7 +3552,7 @@ fun ChatScreen(
                 // assistant-row clusters (header + text + tool pills) at
                 // render time — mirrors iOS isCompactedHistory opacity(0.5).
                 // The lookup uses the underlying message id stripped of any
-                // dedupe suffix (`id#2`) added by buildFlatChatItems.
+                // dedupe suffix (`id#2`) carried by older row ids.
                 // originalMessageId is defined in ChatScreenUtils.kt.
                 val grayedMap = remember(messages) {
                     messages.associate { it.id to it.isCompactedHistory }
@@ -3609,7 +3575,7 @@ fun ChatScreen(
                 //      scrollToItem must be computed in REVERSED space.
                 //      Using the oldest-first index would jump to the mirror
                 //      position at the other end of the conversation.
-                //   3. buildFlatChatItems disambiguates duplicate ids with a
+                //   3. Previously published row ids may carry a
                 //      `#n` suffix, so matching goes through
                 //      originalMessageId() on both sides.
                 //
@@ -4256,142 +4222,6 @@ fun ChatScreen(
                                 },
                             )
                             } // close UserBubble SideEffect + UserMessageBubble block
-                            is FlatChatItem.AssistantHeader -> AssistantHeader()
-                            is FlatChatItem.AssistantMarkdownBlock -> BoundsTrackedBlock(
-                                messageId = item.messageId,
-                                slotKey = "mdblock:${item.parentBlockId}:${item.blockIndex}",
-                                markdown = item.messageMarkdown,
-                            ) {
-                                LargeContentGuard(
-                                    content = item.rawText,
-                                    isStreaming = item.isStreaming,
-                                    stableKey = "mdblock:${item.messageId}:${item.parentBlockId}:${item.blockIndex}",
-                                ) {
-                                    SideEffect {
-                                        selectionController.rememberMessageMarkdown(item.messageId, item.messageMarkdown)
-                                    }
-                                    MarkdownBlock(
-                                        rawText = item.rawText,
-                                        isStreaming = item.isStreaming,
-                                        shardId = TextShardId(
-                                            messageId = item.messageId,
-                                            shardId = "mdblock:${item.parentBlockId}:${item.blockIndex}",
-                                        ),
-                                    )
-                                }
-                            }
-                            // [incr1113 F-08] NO-OP, and deliberately so.
-                            //
-                            // This branch used to render a thinking block for a
-                            // legacy per-block row. Nothing constructs that row
-                            // any more: the ONLY constructor of the row is
-                            // `LegacyFlatChatBuilder` (one site), and that file
-                            // is runtime-dead (the aggregate collect early-returns
-                            // before it, `buildFlatChatItems` has zero callers
-                            // outside the frozen legacy package, and
-                            // `AGGREGATE_MESSAGE_ITEMS` — the switch that used
-                            // to pick between the pipelines — was deleted in
-                            // [audit-0920]). So the branch was unreachable, and
-                            // the thinking-level read that lint flagged
-                            // (`viewModel.thinkingLevel.value` inside an item)
-                            // was fixing a dead path while hoisting a
-                            // `collectAsState` to the top of ChatScreen: every
-                            // level change recomposed the whole screen and every
-                            // item closure.
-                            //
-                            // The live path is `AssistantMessageItem` →
-                            // `AssistantMessageView`, which resolves the level
-                            // itself from `message.thinkingLevel`.
-                            //
-                            // Kept as an explicit arm rather than deleted: the
-                            // `when` is exhaustive over the sealed `FlatChatItem`,
-                            // and an `else` would let a NEW subtype render nothing
-                            // silently. If the legacy pipeline is ever revived,
-                            // this is the one place that has to be re-filled.
-                            is FlatChatItem.AssistantThinking -> Unit
-                            is FlatChatItem.AssistantToolRunGroup -> ToolCallRunGroup(
-                                group = item,
-                                onRetry = if (item.isLastCancelled && !isStreaming && !canResume) ({ safeMutate { viewModel.retryLast() } }) else null,
-                                onStop = { viewModel.cancelStream() },
-                                onOpenTerminalWithCommand = onOpenTerminalWithCommand,
-                                onOpenDetail = { viewModel.openToolDetail(it) },
-                                onRerunFromHere = if (!isStreaming) ({
-                                    val anchorId = item.tools.firstOrNull()?.id
-                                    if (anchorId != null) {
-                                        // [incr1118 D1-F05] Re-run = new stream →
-                                        // re-engage follow (see RETRY-FROM-MSG).
-                                        followState = dispatchFollow(sessionId, followState, FollowEvent.Retry, listState, isUserDragging, isStreaming)
-                                        // [incr1118 D1-F08] shared index resolver.
-                                        safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
-                                            coroutineScope.launch { tracedScrollToItem("RERUN-FROM-TOOLRUN", idx, 0) }
-                                        }
-                                        safeMutate { viewModel.rerunFromToolBlock(item.messageId, anchorId) }
-                                    }
-                                }) else null,
-                                // T288: same long-press copy menu as single pills —
-                                // copies the whole group's tool list summary.
-                                onCopyDetails = if (!isStreaming) ({
-                                    val text = item.tools.joinToString("\n") { b ->
-                                        "${b.toolTitle.ifEmpty { b.toolName }} - ${b.toolStatus}"
-                                    }
-                                    val cb = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                    cb.setPrimaryClip(android.content.ClipData.newPlainText("toolrun", text))
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        context.getString(R.string.tool_longpress_copied_toast),
-                                        android.widget.Toast.LENGTH_SHORT,
-                                    ).show()
-                                }) else null,
-                            )
-                            is FlatChatItem.AssistantInfo -> FallbackInfoBlock(
-                                block = item.block,
-                                // Only the compact-divider info block should
-                                // surface a "Revert Compact" button on its
-                                // detail sheet — other info rows (slash
-                                // notices, fallback notices) have nothing
-                                // to revert.
-                                onRevert = if (item.block.toolName == "compact") {
-                                    { viewModel.revertCompact() }
-                                } else null,
-                            )
-                            is FlatChatItem.AssistantTyping -> TypingIndicator(queueWaitingAhead = queueWaitingAhead)
-                            is FlatChatItem.AssistantError -> InlineErrorBanner(
-                                error = item.error,
-                                errorDetail = item.errorDetail,
-                                onRetry = {
-                                    // [incr1118 D1-F05] Inline error retry = new
-                                    // stream → re-engage follow.
-                                    followState = dispatchFollow(sessionId, followState, FollowEvent.Retry, listState, isUserDragging, isStreaming)
-                                    // [incr1118 D1-F08] shared index resolver.
-                                    safeBottomScrollIndex(listState.layoutInfo.totalItemsCount)?.let { idx ->
-                                        coroutineScope.launch { tracedScrollToItem("INLINE-RETRY-LAST", idx, 0) }
-                                    }
-                                    safeMutate { viewModel.retryLast() }
-                                },
-                            )
-                            is FlatChatItem.AssistantLegacyContent -> BoundsTrackedBlock(
-                                messageId = item.messageId,
-                                slotKey = "legacy",
-                                markdown = item.messageMarkdown,
-                            ) {
-                                LargeContentGuard(
-                                    content = item.content,
-                                    isStreaming = item.isStreaming,
-                                    stableKey = "legacy:${item.messageId}",
-                                ) {
-                                    SideEffect {
-                                        selectionController.rememberMessageMarkdown(item.messageId, item.messageMarkdown)
-                                    }
-                                    StreamingMarkdownText(
-                                        content = item.content,
-                                        isStreaming = item.isStreaming,
-                                        shardId = TextShardId(
-                                            messageId = item.messageId,
-                                            shardId = "legacy",
-                                        ),
-                                    )
-                                }
-                            }
                             is FlatChatItem.AssistantMessageItem -> {
                                 // [fix/message-node-item-renderer] Aggregate
                                 // message row — the ONLY assistant row type.
@@ -5383,7 +5213,7 @@ fun ChatScreen(
 // [T-android-split-chat] UserMessageBubble / UserAttachmentList /
 // FileAttachmentTile / fileIconFor / ImageGalleryDialog moved verbatim to
 // ChatUserMessageUI.kt.
-// [T-android-split-chat] FlatChatItem / mergeStreamingOverlay / buildFlatChatItems
+// [T-android-split-chat] FlatChatItem / mergeStreamingOverlay / aggregate builders
 // moved verbatim to ChatFlatItems.kt (now internal).
 
 // [T-android-split-chat] AssistantHeader / AssistantMessageView /
@@ -5480,37 +5310,19 @@ private typealias ComposeType = com.rikkaminis.app.diagnostics.RenderAttribution
 
 private fun flatItemDiagType(item: FlatChatItem): ComposeType = when (item) {
     is FlatChatItem.UserBubble -> ComposeType.USER
-    is FlatChatItem.AssistantHeader -> ComposeType.HEADER
-    is FlatChatItem.AssistantMarkdownBlock -> ComposeType.MDBLOCK
-    is FlatChatItem.AssistantThinking -> ComposeType.THINKING
-    is FlatChatItem.AssistantToolRunGroup -> ComposeType.TOOLRUN
-    is FlatChatItem.AssistantInfo -> ComposeType.INFO
-    is FlatChatItem.AssistantTyping -> ComposeType.TYPING
-    is FlatChatItem.AssistantError -> ComposeType.ERROR
     is FlatChatItem.AssistantMessageItem -> ComposeType.MSGITEM
-    is FlatChatItem.AssistantLegacyContent -> ComposeType.LEGACY
 }
 
 /** Cheap content-length proxy for the attributed row — never walks chars. */
 private fun flatItemDiagChars(item: FlatChatItem): Int = when (item) {
     is FlatChatItem.UserBubble -> item.message.content.length
-    is FlatChatItem.AssistantMarkdownBlock -> item.rawText.length
-    is FlatChatItem.AssistantLegacyContent -> item.content.length
     is FlatChatItem.AssistantMessageItem -> item.message.content.length
-    is FlatChatItem.AssistantThinking -> item.block.content.length
-    is FlatChatItem.AssistantInfo -> item.block.content.length
-    is FlatChatItem.AssistantToolRunGroup -> item.tools.sumOf { it.toolArgs.length }
-    is FlatChatItem.AssistantError -> item.error.length
-    is FlatChatItem.AssistantHeader, is FlatChatItem.AssistantTyping -> -1
 }
 
 /** The item's own streaming flag where one exists (the row renderers branch on it). */
 private fun flatItemDiagStreaming(item: FlatChatItem): Boolean = when (item) {
-    is FlatChatItem.AssistantMarkdownBlock -> item.isStreaming
-    is FlatChatItem.AssistantLegacyContent -> item.isStreaming
     is FlatChatItem.AssistantMessageItem -> item.message.isStreaming
-    is FlatChatItem.AssistantThinking -> item.messageIsStreaming && item.isLastBlockOverall
-    else -> false
+    is FlatChatItem.UserBubble -> false
 }
 
 private fun followEventLabel(event: FollowEvent): String = when (event) {

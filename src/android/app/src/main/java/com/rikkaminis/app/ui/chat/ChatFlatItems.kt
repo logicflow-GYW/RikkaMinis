@@ -2,30 +2,9 @@ package com.rikkaminis.app.ui.chat
 
 // [T-android-split-chat] Flat-chat-item data model + flatten/merge transforms
 // extracted verbatim from ChatScreen.kt: FlatChatItem (sealed), mergeStreamingOverlay,
-// buildFlatChatItems. Imports pruned to used symbols (2026-10-27); all internal.
+// message-level aggregate builders. All row types and transforms are internal.
 
 import androidx.compose.runtime.Immutable
-import androidx.compose.foundation.layout.size
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.input.key.key
-import com.rikkaminis.app.data.model.ThinkingLevel
-
-/**
- * [render-churn-2] Element-reference list equality for block lists: true
- * when both lists carry the same instances. A per-tick rebuild of unchanged
- * blocks (publish's `toolBlocks.toList()`) compares equal WITHOUT walking
- * multi-KB content strings — completed blocks stay frozen while only the
- * live (copy()'d) block differs by reference.
- */
-internal fun sameBlockRefs(a: List<AssistantBlock>, b: List<AssistantBlock>): Boolean {
-    if (a === b) return true
-    if (a.size != b.size) return false
-    for (i in a.indices) {
-        if (a[i] !== b[i]) return false
-    }
-    return true
-}
 
 @Immutable
 internal sealed class FlatChatItem {
@@ -33,7 +12,7 @@ internal sealed class FlatChatItem {
     abstract val contentType: String
 
     /**
-     * Cheap-equals — see [AssistantMarkdownBlock]. User messages are short and don't
+     * Cheap-equals — compare by the wrapped message. User messages are short and don't
      * stream, but during a streaming overlay rebuild we still re-create the
      * entire FlatChatItem list, and LazyColumn calls equals to decide skip.
      * Compare by id + reference identity of the wrapped ChatMessage.
@@ -42,7 +21,7 @@ internal sealed class FlatChatItem {
      * [T-android-candidate-bubble-gap] `precededByUser` is true when the
      * immediately-preceding flat item is also a user bubble (e.g. two
      * candidate / queued messages sent back to back). Consecutive user
-     * bubbles have no intervening AssistantHeader row to create visual
+     * bubbles have no intervening assistant message row to create visual
      * separation, and the LazyColumn's `spacedBy(2.dp)` alone is too tight
      * — the two bubbles read as one. When set, UserMessageBubble adds extra
      * top padding so the pair is clearly two distinct messages.
@@ -64,239 +43,14 @@ internal sealed class FlatChatItem {
         override fun hashCode(): Int = message.hashCode() * 31 + precededByUser.hashCode()
     }
 
-    @Immutable
-    data class AssistantHeader(val messageId: String) : FlatChatItem() {
-        override val key = "header:$messageId"
-        override val contentType = "header"
-    }
-
-    /**
-     * One rendered markdown sub-block (paragraph, code block, list, …) of an
-     * AssistantText. Pattern A from the streaming-markdown research: each
-     * block is its own LazyColumn item so completed blocks are frozen by
-     * LazyList's per-item anchor and only the trailing "live" block
-     * re-parses on every chunk. Replaces the previous "whole AssistantText
-     * is a single LazyColumn item containing an internal Column of blocks"
-     * design which caused the user's scroll position to drift mid-stream.
-     */
-    /**
-     * See [AssistantMarkdownBlock] for the rationale behind the hand-rolled equals.
-     * `rawText` and `messageMarkdown` are both potentially long; we compare
-     * by length (cheap proxy for "has content grown") and identity instead
-     * of char-by-char.
-     */
-    @Immutable
-    class AssistantMarkdownBlock(
-        val messageId: String,
-        val parentBlockId: String,
-        val rawText: String,
-        val blockIndex: Int,
-        val isLastBlockOfMessage: Boolean,
-        val messageIsStreaming: Boolean,
-        /** Joined raw markdown of the parent message, used by Copy Markdown. */
-        val messageMarkdown: String,
-    ) : FlatChatItem() {
-        override val key = "mdblock:$messageId:$parentBlockId:$blockIndex"
-        override val contentType = "mdblock"
-        /** True when this fragment is the streaming tail of a live message. */
-        val isStreaming: Boolean get() = messageIsStreaming && isLastBlockOfMessage
-        // [render-churn-2] messageMarkdown is deliberately NOT compared: it
-        // is the joined markdown of ALL text blocks in the message, so it
-        // grows on every streamed chunk — comparing its length made every
-        // mdblock row of a long message recompose on every tick (LongCtx
-        // 3-5s re-layout root cause). The selection toolbar's Copy Markdown
-        // reads the freshest registration via rememberMessageMarkdown from
-        // the trailing row (which DOES recompose while streaming), and the
-        // turn-end reconcileAndVerifyTerminalText converges same-length
-        // rewrites — so dropping it from equals loses nothing rendered.
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is AssistantMarkdownBlock) return false
-            return messageId == other.messageId &&
-                parentBlockId == other.parentBlockId &&
-                blockIndex == other.blockIndex &&
-                isLastBlockOfMessage == other.isLastBlockOfMessage &&
-                messageIsStreaming == other.messageIsStreaming &&
-                rawText.length == other.rawText.length
-        }
-        override fun hashCode(): Int {
-            var h = messageId.hashCode()
-            h = h * 31 + parentBlockId.hashCode()
-            h = h * 31 + blockIndex
-            h = h * 31 + isLastBlockOfMessage.hashCode()
-            h = h * 31 + messageIsStreaming.hashCode()
-            h = h * 31 + rawText.length
-            return h
-        }
-    }
-
-    @Immutable
-    data class AssistantThinking(
-        val messageId: String,
-        val block: AssistantBlock,
-        val isLast: Boolean,
-        val messageIsStreaming: Boolean,
-        // T300: thinking level captured at the message's creation. Null
-        // for assistant messages restored from DB (legacy / pre-T300) —
-        // the renderer falls back to the chat's current level.
-        val messageThinkingLevel: com.rikkaminis.app.data.model.ThinkingLevel? = null,
-        // [T-android-thinking-auto-collapse] True when this thinking block
-        // is the LAST block of any kind in the message (including text /
-        // tool_use), not merely the last thinking block. Drives the
-        // auto-collapse `isStreaming` signal so a thinking block flips to
-        // collapsed the moment a subsequent text or tool block arrives —
-        // mirrors iOS ThinkingBlockView, which only sees `isStreaming=true`
-        // while it really is the trailing block. Defaults false so DB-
-        // restored / legacy items render collapsed (the pre-change
-        // behaviour for non-trailing thinking).
-        val isLastBlockOverall: Boolean = false,
-    ) : FlatChatItem() {
-        override val key = "thinking:$messageId:${block.id}"
-        override val contentType = "thinking"
-    }
-
-    /**
-     * [T-android-tool-run-collapse] One collapsible row representing ALL
-     * tool_use blocks of a single assistant message. Emitted instead of
-     * individual per-tool rows when a message has >= 2 tool blocks.
-     *
-     * Renders as a foldable "tool run" card: while any tool is still
-     * streaming/pending/running the group stays expanded (so the user sees
-     * live progress); once every tool reached a terminal state the card
-     * auto-collapses into a single summary header ("N tools · total").
-     * Tapping the header expands it again (user takes over the state).
-     *
-     * Mirrors OmniBot's AgentRunHeader semantics: running forces open,
-     * completion collapses, user tap overrides either way.
-     *
-     * `isRunning` is derived here from the carried blocks rather than
-     * persisted: a tool is live while its status is STREAMING/PENDING/
-     * RUNNING. This keeps collapse/expand purely a UI concern — nothing in
-     * the data layer changes.
-     */
-    @Immutable
-    data class AssistantToolRunGroup(
-        val messageId: String,
-        val tools: List<AssistantBlock>,
-        /**
-         * Same-message thinking blocks (kind == "thinking"), folded into the
-         * same run group so ONE agent turn = ONE card (thinking + tools).
-         * Rendered above the tool pills inside the expanded area; the group
-         * header shows the tool count / thinking title + aggregate duration.
-         */
-        val thinkingBlocks: List<AssistantBlock> = emptyList(),
-        /** True if ANY block (thinking or tool) in the group is still live (STREAMING/PENDING/RUNNING). */
-        val isRunning: Boolean,
-        /** True if the last tool in the group is CANCELLED — drives the single Retry affordance. */
-        val isLastCancelled: Boolean,
-        // T300: thinking-level snapshot at the message's creation, carried
-        // through from ChatMessage so the renderer can gate the thinking
-        // section exactly like the retired AssistantThinking row did. Null
-        // for DB-restored messages — the renderer falls back to the chat's
-        // current level (see ChatScreen's ToolCallRunGroup call site).
-        val messageThinkingLevel: com.rikkaminis.app.data.model.ThinkingLevel? = null,
-    ) : FlatChatItem() {
-        override val key = "toolrun:$messageId"
-        override val contentType = "toolrun"
-
-        /** Aggregate duration of all finished tools, ms. */
-        val totalDurationMs: Long
-            get() = tools.sumOf { it.durationMs }
-
-        val count: Int get() = tools.size
-
-        /** Thinking + tool block count. */
-        val stepCount: Int get() = thinkingBlocks.size + tools.size
-
-        // [render-churn-2] Hand-rolled cheap equals: tools/thinkingBlocks
-        // compared element-wise by REFERENCE — unchanged completed blocks
-        // are the same instances across ticks (only the live block gets
-        // copy()'d), so a per-tick rebuild of the same blocks compares
-        // equal and the completed run card stays frozen. The old
-        // data-class equals walked every field including multi-KB content
-        // strings and reported "changed" whenever the live block's content
-        // ticked, recomposing the whole group every second.
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is AssistantToolRunGroup) return false
-            if (messageId != other.messageId) return false
-            if (isRunning != other.isRunning || isLastCancelled != other.isLastCancelled) return false
-            if (messageThinkingLevel != other.messageThinkingLevel) return false
-            if (!sameBlockRefs(tools, other.tools)) return false
-            if (!sameBlockRefs(thinkingBlocks, other.thinkingBlocks)) return false
-            return true
-        }
-        override fun hashCode(): Int {
-            var h = messageId.hashCode()
-            h = h * 31 + tools.size
-            h = h * 31 + thinkingBlocks.size
-            h = h * 31 + isRunning.hashCode()
-            h = h * 31 + isLastCancelled.hashCode()
-            h = h * 31 + (messageThinkingLevel?.hashCode() ?: 0)
-            return h
-        }
-    }
-
-    @Immutable
-    data class AssistantInfo(
-        val messageId: String,
-        val block: AssistantBlock,
-    ) : FlatChatItem() {
-        override val key = "info:$messageId:${block.id}"
-        override val contentType = "info"
-    }
-
-    @Immutable
-    data class AssistantTyping(val messageId: String) : FlatChatItem() {
-        override val key = "typing:$messageId"
-        override val contentType = "typing"
-    }
-
-    @Immutable
-    data class AssistantError(val messageId: String, val error: String, val errorDetail: String? = null) : FlatChatItem() {
-        override val key = "error:$messageId"
-        override val contentType = "error"
-    }
-
-    /**
-     * See [AssistantMarkdownBlock] — same cheap-equals rationale.
-     */
-    @Immutable
-    class AssistantLegacyContent(
-        val messageId: String,
-        val content: String,
-        val isStreaming: Boolean,
-        /** Same as content here (no separate text-block markdown for legacy rows). */
-        val messageMarkdown: String = content,
-    ) : FlatChatItem() {
-        override val key = "legacy:$messageId"
-        override val contentType = "legacy"
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is AssistantLegacyContent) return false
-            return messageId == other.messageId &&
-                isStreaming == other.isStreaming &&
-                content.length == other.content.length &&
-                messageMarkdown.length == other.messageMarkdown.length
-        }
-        override fun hashCode(): Int {
-            var h = messageId.hashCode()
-            h = h * 31 + isStreaming.hashCode()
-            h = h * 31 + content.length
-            h = h * 31 + messageMarkdown.length
-            return h
-        }
-    }
-
     /**
      * [fix/message-node-item-generator] Message-level aggregated item —
-     * the "one node, one card" row used by the aggregate pipeline (gated by
-     * [AGGREGATE_MESSAGE_ITEMS] in ChatScreen.kt). A whole assistant message
+     * the "one node, one card" row used by the aggregate pipeline. A whole assistant message
      * collapses into a single item instead of being flattened into 6-7 rows
      * (header + fragment blocks + tool run group + thinking). Stage D renders
      * THIS item via the reused AssistantMessageView.
      *
-     * [T-android-cheap-equals-aggregate] Like [AssistantMarkdownBlock], equals is
+     * [T-android-cheap-equals-aggregate] Its equals is
      * hand-rolled cheap: a *frozen* message (same instance every tick —
      * the ledger path reuses frozen instances by reference) returns the
      * identity-equal fast path so LazyColumn stable-skips; a *streaming*
@@ -325,86 +79,22 @@ internal sealed class FlatChatItem {
 /**
  * [P0-0] The owning message id for any flat row.
  *
- * Deliberately an extension rather than an `abstract val` on [FlatChatItem]:
- * nine subclasses already expose a `messageId` property, but [UserBubble]
- * carries the id inside `message.id`. Adding an abstract member would force a
- * rename there for no behavioural gain, so the mapping lives here instead.
- *
- * Note one message flattens into MANY rows (header + text blocks + tools + …),
- * so this is intentionally many-to-one: focusing a message matches every row
- * belonging to it, which is what makes whole-message highlighting fall out for
- * free.
+ * User rows carry the id inside the message; assistant rows expose it directly.
+ * This mapping is shared by focus, pagination and incremental prefix reuse.
  */
 internal fun FlatChatItem.owningMessageId(): String = when (this) {
     is FlatChatItem.UserBubble -> message.id
-    is FlatChatItem.AssistantHeader -> messageId
-    is FlatChatItem.AssistantMarkdownBlock -> messageId
-    is FlatChatItem.AssistantThinking -> messageId
-    is FlatChatItem.AssistantToolRunGroup -> messageId
-    is FlatChatItem.AssistantInfo -> messageId
-    is FlatChatItem.AssistantTyping -> messageId
-    is FlatChatItem.AssistantError -> messageId
-    is FlatChatItem.AssistantLegacyContent -> messageId
     is FlatChatItem.AssistantMessageItem -> messageId
 }
 
 /**
  * T-streaming-side-channel: overlay any active [StreamingDelta]s on top of
  * the canonical [messages] list, producing the snapshot
- * [buildFlatChatItems] should fold over. The original [messages] list is
+ * [buildAggregateChatItems] should fold over. The original [messages] list is
  * never mutated; affected entries are replaced via `copy()` so downstream
  * keying / equality stays correct. When [streaming] is empty the input is
  * returned as-is to skip the per-element walk on idle frames.
  */
-/**
- * [fix/chat-render-tick-scan] Lightweight per-message fingerprint for the
- * streaming tick dirty check.
- *
- * Replaces the previous full data-class `==` across the whole message list
- * (which deep-compared every content string, toolArgs blob, error detail,
- * image URI list, ... on every 80ms tick — O(total bytes), the dominant
- * cost of the main-thread scan in long sessions).
- *
- * The fingerprint is per-message and O(1)-per-field:
- *  - Strings are compared by LENGTH only (content.length, and per tool block
- *    content.length) — cheap "has content grown" proxy, never a char walk.
- *  - Live flags (isStreaming / isAwaitingModelResponse / isQueued / error)
- *    are plain booleans.
- *  - toolBlocks reduce to a digest of (kind, status, content.length,
- *    durationMs, toolTitle) — state + growth signals without the payload
- *    bytes (toolTitle renders on the tool card, so it participates).
- *
- * Invariant: fingerprint equality ⇒ the rendering-relevant view is
- * unchanged, so the caller may skip reconcile. Any field LazyColumn actually
- * renders from a ChatMessage is covered: text growth (content/tool-block
- * lengths), live-state flips (flags + tool status), row-set changes
- * (toolBlocks.size), tool card duration ticks (durationMs). Payload fields
- * that never render (toolArgs internals, attachment URIs, errorDetail) are
- * intentionally excluded.
- *
- * Note on turn-end: the terminal snapshot can rewrite content at the same
- * length ("AAAA"→"BBBB") with an identical fingerprint — that blind spot is
- * closed by [StableChatRowLedger.reconcileAndVerifyTerminalText] on the
- * turn-end tick (content equality, not length), not by this fingerprint.
- */
-internal fun lightFingerprint(messages: List<ChatMessage>): List<Any?> {
-    if (messages.isEmpty()) return emptyList()
-    return messages.map { m ->
-        listOf(
-            m.id,
-            m.content.length,
-            m.isStreaming,
-            m.isAwaitingModelResponse,
-            m.error != null,
-            m.isQueued,
-            m.toolBlocks.size,
-            m.toolBlocks.joinToString("|") {
-                "${it.kind}:${it.toolStatus?.name}:${it.content.length}:${it.durationMs}:${it.toolTitle}"
-            },
-        )
-    }
-}
-
 internal fun mergeStreamingOverlay(
     messages: List<ChatMessage>,
     streaming: Map<String, StreamingDelta>,
@@ -430,7 +120,7 @@ internal fun mergeStreamingOverlay(
 
 /**
  * [fix/message-node-item-generator] Message-level aggregate generator — the
- * stage-D counterpart of [buildFlatChatItems]. Semantic contract: **one
+ * aggregate builder. Semantic contract: **one
  * [ChatMessage] in → exactly one [FlatChatItem] out**.
  *
  *  - user role      → [FlatChatItem.UserBubble], `precededByUser` mirrors the
@@ -439,49 +129,15 @@ internal fun mergeStreamingOverlay(
  *                     message; `messageMarkdown` is the joined raw markdown
  *                     of the message's text-kind blocks (falling back to
  *                     `content`), byte-consistent with the `joinedMarkdown`
- *                     computed inside [buildFlatChatItems] so Copy Markdown
- *                     semantics stay aligned.
+ *                     used by the selection toolbar for Copy Markdown.
  *  - `isInternalBridge` messages are always skipped (defensive, mirrors the
  *    uiMessages sink's bridge filter) — a bridge must never render.
  *
  * No ledger / segmenter / skipTextBlocks machinery: the whole list is built
- * in one pass. It is the aggregate pipeline (ChatScreen AGGREGATE_MESSAGE_ITEMS)
- * and staged by stage D / the reused AssistantMessageView.
+ * in one pass, rendered by AssistantMessageView.
  */
-internal fun buildAggregateChatItems(messages: List<ChatMessage>): List<FlatChatItem> {
-    val out = mutableListOf<FlatChatItem>()
-    val usedKeys = mutableSetOf<String>()
-    for (idx in messages.indices) {
-        val message = messages[idx]
-        // [T-bridge-message-ui-leak-android] Defensive bridge filter — same
-        // contract as the uiMessages sink; an internal bridge must never
-        // surface as a chat bubble.
-        if (message.isInternalBridge) continue
-        if (message.role == "user") {
-            val prevIsUser = idx > 0 && messages[idx - 1].role == "user"
-            val key = "user:${message.id}"
-            if (usedKeys.add(key)) {
-                out.add(FlatChatItem.UserBubble(message, precededByUser = prevIsUser))
-            }
-            continue
-        }
-        // Joined raw markdown of the whole assistant message, matching the
-        // joinedMarkdown computation in buildFlatChatItems (text-kind tool
-        // blocks joined with blank lines, else message.content).
-        val messageMarkdown = run {
-            val parts = message.toolBlocks
-                .filter { it.kind == "text" && it.content.isNotEmpty() }
-                .joinToString("\n\n") { it.content }
-            if (parts.isNotEmpty()) parts else message.content
-        }
-        out.add(FlatChatItem.AssistantMessageItem(
-            messageId = message.id,
-            message = message,
-            messageMarkdown = messageMarkdown,
-        ))
-    }
-    return out
-}
+internal fun buildAggregateChatItems(messages: List<ChatMessage>): List<FlatChatItem> =
+    buildAggregateChatItemsFrom(messages, 0)
 
 /**
  * [fix/long-session-aggregate-storm] Incremental aggregate rebuild — the
@@ -558,7 +214,7 @@ internal fun buildAggregateChatItemsIncremental(
  * (the caller guarantees fromIndex ≤ size; a fromIndex of 0 yields the full
  * build).
  */
-private fun buildAggregateChatItemsFrom(
+internal fun buildAggregateChatItemsFrom(
     messages: List<ChatMessage>,
     fromIndex: Int,
 ): List<FlatChatItem> {

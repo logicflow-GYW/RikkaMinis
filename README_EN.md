@@ -525,7 +525,6 @@ RikkaMinis' agent runtime, automation, and system-integration capabilities
 **Android** — [AndroidX & Jetpack Compose](https://developer.android.com/jetpack),
 [OkHttp](https://square.github.io/okhttp/), [Coil](https://coil-kt.github.io/coil/),
 [kotlinx](https://github.com/Kotlin) serialization & coroutines,
-[multiplatform-markdown-renderer](https://github.com/mikepenz/multiplatform-markdown-renderer),
 [Reorderable](https://github.com/Calvin-LL/Reorderable), [ACRA](https://github.com/ACRA/acra)
 (all Apache-2.0), and [Shizuku](https://github.com/RikkaApps/Shizuku-API) (MIT).
 

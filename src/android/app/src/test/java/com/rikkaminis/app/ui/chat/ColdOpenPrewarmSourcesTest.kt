@@ -11,10 +11,10 @@ import org.junit.Test
  * Contract under test: the sources handed to the prewarm are exactly the
  * strings the rows will later feed to the markdown parser — for the row type
  * the pipeline ACTUALLY emits (`AGGREGATE_MESSAGE_ITEMS = true` →
- * [FlatChatItem.AssistantMessageItem]) as well as the legacy row types.
+ * [FlatChatItem.AssistantMessageItem]) with one row per message.
  *
  * The regression this pins: the old inline expression
- * `(item as? FlatChatItem.AssistantMarkdownBlock)?.rawText` matched nothing
+ * The old fragment-only cast matched nothing
  * once the aggregate generator became the default, so the whole prewarm pass
  * silently parsed nothing (no `coldPrewarm.done` line in any device log, and
  * every session open's newest row grew after the opening snap).
@@ -88,44 +88,11 @@ class ColdOpenPrewarmSourcesTest {
     }
 
     @Test
-    fun `legacy flat rows still yield their markdown`() {
-        val markdownBlock = FlatChatItem.AssistantMarkdownBlock(
-            messageId = "m1",
-            parentBlockId = "b1",
-            rawText = "fragment body",
-            blockIndex = 0,
-            isLastBlockOfMessage = true,
-            messageIsStreaming = false,
-            messageMarkdown = "fragment body",
-        )
-        assertEquals(listOf("fragment body"), markdownSourcesForRow(markdownBlock))
-
-        val legacy = FlatChatItem.AssistantLegacyContent(
-            messageId = "m1",
-            content = "legacy row body",
-            isStreaming = false,
-        )
-        assertEquals(listOf("legacy row body"), markdownSourcesForRow(legacy))
-    }
-
-    @Test
     fun `rows that render no markdown body yield nothing`() {
         val user = FlatChatItem.UserBubble(
             message = ChatMessage(id = "u1", role = "user", content = "hello"),
         )
-        val rows = listOf(
-            user,
-            FlatChatItem.AssistantHeader("m1"),
-            FlatChatItem.AssistantThinking(
-                messageId = "m1",
-                block = AssistantBlock(id = "th1", kind = "thinking", content = "…"),
-                isLast = false,
-                messageIsStreaming = false,
-            ),
-            FlatChatItem.AssistantInfo("m1", AssistantBlock(id = "i1", kind = "info", content = "note")),
-            FlatChatItem.AssistantTyping("m1"),
-            FlatChatItem.AssistantError("m1", "boom"),
-        )
+        val rows = listOf(user)
 
         rows.forEach { row ->
             assertTrue(
@@ -140,14 +107,12 @@ class ColdOpenPrewarmSourcesTest {
      * aggregate row list, so `raws` was empty and the pass was a no-op.
      */
     @Test
-    fun `old inline extraction found nothing in an aggregate row list`() {
+    fun `aggregate row list prewarms newest first`() {
         val rows: List<FlatChatItem> = listOf(
             aggregateRow("m1", textBlocks = listOf("first answer body")),
             aggregateRow("m2", textBlocks = listOf("second answer body")),
         )
 
-        val oldStyle = rows.mapNotNull { (it as? FlatChatItem.AssistantMarkdownBlock)?.rawText }
-        assertTrue("the legacy extraction must be empty — that WAS the bug", oldStyle.isEmpty())
         assertEquals(
             listOf("second answer body", "first answer body"),
             collectColdOpenPrewarmSources(rows.asReversed(), maxSources = 8, charBudget = 1_000),
@@ -160,7 +125,7 @@ class ColdOpenPrewarmSourcesTest {
     fun `newest row sources come from the last row`() {
         val rows: List<FlatChatItem> = listOf(
             aggregateRow("m1", textBlocks = listOf("oldest")),
-            FlatChatItem.AssistantTyping("m2"),
+            FlatChatItem.UserBubble(ChatMessage("u2", "user", "hello")),
             aggregateRow("m3", textBlocks = listOf("newest one", "newest two")),
         )
 

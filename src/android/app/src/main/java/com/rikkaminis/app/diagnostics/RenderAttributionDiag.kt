@@ -78,15 +78,7 @@ object RenderAttributionDiag {
      */
     enum class ItemType(val label: String) {
         USER("user"),
-        HEADER("header"),
-        MDBLOCK("mdblock"),
-        THINKING("thinking"),
-        TOOLRUN("toolrun"),
-        INFO("info"),
-        TYPING("typing"),
-        ERROR("error"),
         MSGITEM("msgitem"),
-        LEGACY("legacy"),
     }
 
     private val typeCount = IntArray(ItemType.entries.size)

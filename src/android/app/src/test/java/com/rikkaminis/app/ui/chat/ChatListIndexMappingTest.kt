@@ -17,18 +17,14 @@ class ChatListIndexMappingTest {
 
     private val rows = listOf<FlatChatItem>(
         FlatChatItem.UserBubble(ChatMessage(id = "u1", role = "user", content = "hi")),
-        FlatChatItem.AssistantHeader("a1"),
-        FlatChatItem.AssistantMarkdownBlock(
-            messageId = "a1", parentBlockId = "b0", rawText = "A", blockIndex = 0,
-            isLastBlockOfMessage = false, messageIsStreaming = false, messageMarkdown = "A",
-        ),
-        FlatChatItem.AssistantHeader("a2"),
+        FlatChatItem.AssistantMessageItem("a1", ChatMessage("a1", "assistant", "A"), "A"),
+        FlatChatItem.AssistantMessageItem("a2", ChatMessage("a2", "assistant", "B"), "B"),
     )
 
     @Test fun `first row of a message is found in natural order`() {
         assertEquals(0, firstRowIndexOfMessage(rows, "u1"))
         assertEquals(1, firstRowIndexOfMessage(rows, "a1"))
-        assertEquals(3, firstRowIndexOfMessage(rows, "a2"))
+        assertEquals(2, firstRowIndexOfMessage(rows, "a2"))
     }
 
     @Test fun `absent message returns null`() {
