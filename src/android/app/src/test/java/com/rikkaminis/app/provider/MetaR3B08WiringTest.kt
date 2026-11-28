@@ -175,24 +175,27 @@ class MetaR3B08WiringTest {
 
     @Test
     fun `F-06 and F-07 the models apis call the extracted decisions`() {
-        // [refactor/reuse-basics-1128] The decision now has ONE home
-        // (provider/ModelListFallback.kt); each API must import it and call it.
-        // Anchored on the import + a call, not on one spelling of the argument
-        // names, so a rename of the parameter does not fail this wiring check.
+        // The decision has one home, but each API must feed it its actual
+        // endpoint classification and failure status, and consume the verdict.
+        // A shared import plus any call would also accept a hard-coded 500.
         val shared = code(SHARED_FALLBACK)
         assertTrue(
             "the shared builtin-catalog decision is not defined in $SHARED_FALLBACK",
             Regex("fun usesBuiltinCatalogOnFailure\\s*\\(").containsMatchIn(shared),
         )
-        for ((label, rel) in listOf("openai" to OPENAI_MODELS, "anthropic" to ANTHROPIC_MODELS)) {
+        for ((rel, inputs) in listOf(
+            OPENAI_MODELS to """isCustomBase\s*,\s*response\.code""",
+            ANTHROPIC_MODELS to """isCustomEndpoint\s*,\s*lastFailureCode""",
+        )) {
             val api = code(rel)
             assertTrue(
-                "$label models api does not import the shared builtin-catalog decision",
+                "$rel does not import the shared builtin-catalog decision",
                 "import com.rikkaminis.app.provider.usesBuiltinCatalogOnFailure" in api,
             )
             assertTrue(
-                "$label models api does not call the shared builtin-catalog decision",
-                Regex("usesBuiltinCatalogOnFailure\\s*\\(").containsMatchIn(api),
+                "$rel must branch on the shared verdict for the actual endpoint and failure status",
+                Regex("""\bif\s*\(\s*usesBuiltinCatalogOnFailure\s*\(\s*$inputs\s*\)\s*\)""")
+                    .containsMatchIn(api),
             )
         }
         assertTrue(
