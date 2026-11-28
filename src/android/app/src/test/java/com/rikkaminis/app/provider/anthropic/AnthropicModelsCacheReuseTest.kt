@@ -5,6 +5,7 @@ import com.rikkaminis.app.data.model.LLMModel
 import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.provider.ProviderModelsCache
 import com.rikkaminis.app.provider.decodeCachedModels
+import com.rikkaminis.app.provider.usesBuiltinCatalogOnFailure
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
