@@ -103,7 +103,7 @@ internal fun topSheetReleaseTarget(
 
 /** Foundation reports both cancelled and stationary releases with zero velocity. */
 internal class TopSheetTouch {
-    var pressed = false
+    var pressed by mutableStateOf(false)
         private set
     var releasedNormally = false
         private set
@@ -120,6 +120,7 @@ internal class TopSheetListScroll(
     private val offset: () -> Float,
     val dragBy: (Float) -> Float,
     val release: (Float) -> Unit,
+    private val onHistoryScroll: () -> Unit = {},
 ) : NestedScrollConnection {
     private var draggedSheet = false
 
@@ -131,6 +132,10 @@ internal class TopSheetListScroll(
         }
 
     override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+        // Intent belongs to the LIST's consumed movement, including wheel,
+        // keyboard, accessibility and focus scrolling without a physical touch.
+        // Keep this notification separate from the sheet's leftover-drag gate.
+        if (source == NestedScrollSource.UserInput && consumed.y > 0f) onHistoryScroll()
         if (source != NestedScrollSource.UserInput || !touch.pressed || available.y >= 0f) return Offset.Zero
         val moved = dragBy(available.y)
         draggedSheet = draggedSheet || moved < 0f
@@ -153,7 +158,8 @@ internal class TopSheetListScroll(
 internal fun TopChatSheet(
     paneName: String,
     onDismissRequest: () -> Unit,
-    content: @Composable () -> Unit,
+    onHistoryScroll: () -> Unit = {},
+    content: @Composable (canFollow: () -> Boolean, closing: () -> Boolean) -> Unit,
 ) {
     val state = remember { AnchoredDraggableState(TopSheetAnchor.Hidden) }
     val scope = rememberCoroutineScope()
@@ -161,6 +167,7 @@ internal fun TopChatSheet(
     var entered by remember { mutableStateOf(false) }
     var closeRequested by remember { mutableStateOf(false) }
     val latestDismiss by rememberUpdatedState(onDismissRequest)
+    val latestHistoryScroll by rememberUpdatedState(onHistoryScroll)
     val requestClose: () -> Unit = { closeRequested = true }
 
     LaunchedEffect(state, closeRequested) {
@@ -221,6 +228,7 @@ internal fun TopChatSheet(
                         scope.launch(start = CoroutineStart.UNDISPATCHED) { state.animateTo(target, SheetMotion) }
                     }
                 },
+                onHistoryScroll = { latestHistoryScroll() },
             )
         }
         // Same native draggable as ModalBottomSheet. Only the handle and the
@@ -290,7 +298,17 @@ internal fun TopChatSheet(
                         WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
                     ),
                 ) {
-                    Box(Modifier.weight(1f)) { content() }
+                    Box(Modifier.weight(1f)) {
+                        content(
+                            {
+                                entered && !closeRequested && !touch.pressed &&
+                                    !state.isAnimationRunning && state.offset == 0f &&
+                                    state.targetValue == TopSheetAnchor.Expanded
+                            },
+                            { closeRequested || (entered && !touch.pressed && state.isAnimationRunning &&
+                                state.targetValue == TopSheetAnchor.Hidden) },
+                        )
+                    }
                     Box(
                         modifier = Modifier.fillMaxWidth().height(34.dp).then(directDrag)
                             .semantics(mergeDescendants = true) { dismiss(label = closeLabel) { requestClose(); true } },
