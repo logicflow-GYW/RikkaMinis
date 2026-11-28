@@ -456,6 +456,7 @@ dependencies {
 // Retirement evidence runs on the CI build's resolved release graph, not a
 // source grep: dependencyInsight also sees accidentally reintroduced transitives.
 val retiredChatDependencyInsight by tasks.registering(org.gradle.api.tasks.diagnostics.DependencyInsightReportTask::class) {
+    showingAllVariants.set(false)
     configuration = configurations.getByName("releaseRuntimeClasspath")
     setDependencySpec(org.gradle.api.specs.Spec<org.gradle.api.artifacts.result.DependencyResult> {
         val requested = it.requested.displayName
