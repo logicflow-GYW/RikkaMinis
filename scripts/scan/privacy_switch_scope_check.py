@@ -72,6 +72,17 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _kotlin_lexer import KotlinLexError, mask_comments
+
+
+def strip_comments(src):
+    """Shared lexer; unlexable source degrades to blank text (judges then RED)."""
+    try:
+        return mask_comments(src)
+    except KotlinLexError:
+        return ""
+
 SRC = "src/android/app/src/main/java"
 
 STORE = SRC + "/com/rikkaminis/app/data/EnvVarPrivacyStore.kt"
@@ -91,46 +102,6 @@ def read(root, rel):
     path = os.path.join(root, rel)
     with open(path, encoding="utf-8") as f:
         return f.read()
-
-
-def strip_comments(src):
-    """Blank // and /* */ comments, preserving offsets and line structure."""
-    out = []
-    i = 0
-    n = len(src)
-    while i < n:
-        c = src[i]
-        if c == '"':
-            j = i + 1
-            while j < n:
-                if src[j] == "\\":
-                    j += 2
-                    continue
-                if src[j] == '"':
-                    j += 1
-                    break
-                j += 1
-            out.append(src[i:j])
-            i = j
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            j = src.find("\n", i)
-            if j < 0:
-                j = n
-            out.append(" " * (j - i))
-            i = j
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "*":
-            j = src.find("*/", i + 2)
-            if j < 0:
-                j = n - 2
-            chunk = src[i:j + 2]
-            out.append("".join("\n" if ch == "\n" else " " for ch in chunk))
-            i = j + 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
 
 
 def brace_span(src, open_at):
@@ -491,6 +462,34 @@ def selftest():
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    # Gate-level lexer witnesses (measured, see the evidence probe): each shape
+    # below made the PRE-refactor private lexer mis-read the file — a nested
+    # block comment leaked its tail as code (decoy default true), and a `'"'`
+    # char literal swallowed the real declaration. The shared lexer must keep
+    # the gate green, AND the real default must still be readable: flipping it
+    # to true inside the same decoyed file must still turn the gate red.
+    for name, prefix in (
+        ("nested block comment", "/* outer /* inner */ DEFAULT_ENABLED = true */\n"),
+        ("double quote char", "val quote = '\"' // DEFAULT_ENABLED = true\n"),
+    ):
+        tree = dict(SELFTEST_TREE)
+        tree[STORE] = prefix + tree[STORE]
+        code, problems = rc(tree)
+        check(name, code == 0, "; ".join(problems))
+        still_readable = mutate(tree, STORE, "DEFAULT_ENABLED = false", "DEFAULT_ENABLED = true")
+        code2, _ = rc(still_readable)
+        check(name + " (real default still judged)", code2 == 1, "gate stayed green")
+        if code == 0 and code2 == 1:
+            print("  LEXER ARM OK: " + name)
+
+    # Fail-closed: unlexable source must be RED, not silently compliant.
+    broken = dict(SELFTEST_TREE)
+    broken[STORE] = broken[STORE] + 'val s = "unterminated\n'
+    code, problems = rc(broken)
+    check("unlexable source is reported", code == 1, "gate stayed green")
+    if code == 1:
+        print("  LEXER ARM OK: unlexable source")
+
     # positive control: the fixed tree must be GREEN
     code, problems = rc(SELFTEST_TREE)
     check("fixed tree is green", code == 0, "; ".join(problems))
@@ -567,7 +566,8 @@ def selftest():
             print("SELFTEST ARM FAILED: " + f)
         print("SELFTEST=FAIL (%d)" % len(failures))
         return 1
-    print("SELFTEST=PASS (%d arms)" % (len(arms) + 2))
+    print("SELFTEST=PASS (%d checks: %d mutations + 2 lexer shapes x2 + unlexable + fail-closed)"
+          % (len(arms) + 6, len(arms)))
     return 0
 
 

@@ -19,6 +19,7 @@ import com.rikkaminis.app.data.model.ThinkingLevel
 import com.rikkaminis.app.provider.ImageBudget
 import com.rikkaminis.app.provider.LLMProvider
 import com.rikkaminis.app.provider.executeOrCancel
+import com.rikkaminis.app.provider.llmErrorOf
 import com.rikkaminis.app.provider.extractHttpErrorMessage
 import com.rikkaminis.app.provider.safeOptString
 import com.rikkaminis.app.provider.sanitizeToolPairing
@@ -472,7 +473,7 @@ class GeminiProvider(
                 // or reported as a successful Finished.
                 channel.close(e)
             } else {
-                cancel("Stream error", mapError(e))
+                cancel("Stream error", llmErrorOf(e))
             }
         } finally {
             reader.close()
@@ -916,11 +917,6 @@ class GeminiProvider(
         return LLMError.ProviderError(message)
     }
 
-    private fun mapError(error: Throwable): LLMError {
-        if (error is LLMError) return error
-        if (error is java.io.IOException) return LLMError.NetworkError(error)
-        return LLMError.Unknown(error)
-    }
 
     /**
      * [deep-audit-1019 ISSUE-04] Stream-activity size of one Gemini functionCall:
