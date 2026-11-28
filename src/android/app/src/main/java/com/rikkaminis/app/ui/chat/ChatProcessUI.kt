@@ -133,9 +133,9 @@ internal sealed interface ChatProcessPage {
 }
 
 /**
- * The process list stays mounted beneath native detail sheets. Dismissal,
- * nested scrolling and swipe/back gestures belong to the existing sheets;
- * this host only owns which detail is above the list.
+ * The process list stays mounted beneath the native bottom detail sheets.
+ * This host only owns which detail is above the list; each sheet owns its
+ * own gestures and dismissal.
  */
 @Composable
 internal fun ChatProcessSheet(
@@ -161,12 +161,10 @@ internal fun ChatProcessSheet(
         onClearTool()
     }
 
-    // Same shell as TokenUsageSheet. It is NOT inside the detail-page when:
-    // opening a detail must keep this window and its list scroll state alive.
-    StandardChatSheet(
-        title = stringResource(R.string.chat_process_title),
-        onDismiss = onDismiss,
-        showClose = false,
+    // Keep this window outside the detail switch so its list stays mounted.
+    TopChatSheet(
+        paneName = stringResource(R.string.chat_process_title),
+        onDismissRequest = onDismiss,
     ) {
         ChatProcessList(
             blocks = blocks,
@@ -192,7 +190,7 @@ internal fun ChatProcessSheet(
             )
         }
         is ChatProcessPage.Thinking -> StandardChatSheet(
-            title = stringResource(R.string.chat_deep_thinking),
+            title = null,
             onDismiss = backToList,
             showClose = false,
         ) {
@@ -223,7 +221,7 @@ private fun ChatProcessList(
     }
     LazyColumn(
         state = listState,
-        // The standard sheet already owns its header and bounds this body.
+        // The parent sheet bounds this body and arbitrates leftover drag deltas.
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 20.dp),
     ) {
@@ -336,12 +334,12 @@ private fun ProcessThinkingRow(block: AssistantBlock, isLive: Boolean, onClick: 
     }
 }
 
-/** Selectable reasoning body; the standard sheet owns the title and gestures. */
+/** Selectable reasoning body; the standard sheet owns the handle and gestures. */
 @Composable
 internal fun ChatProcessThinkingReader(content: String) {
     Box(
         Modifier.fillMaxSize()
-            .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 24.dp),
+            .padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 24.dp),
     ) {
         ChatProcessThinkingText(content)
     }
