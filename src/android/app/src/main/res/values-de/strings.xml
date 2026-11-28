@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RikkaMinis</string>
-    <string name="onboarding_default_group_name">Standardmodelle</string>
     <string name="settings">Einstellungen</string>
     <string name="no_sessions">Noch keine Unterhaltungen</string>
     <string name="delete">Löschen</string>
@@ -450,25 +449,11 @@
     <string name="rootfs_reset_confirm_title">Rootfs zurücksetzen?</string>
     <string name="rootfs_reset_confirm_message">Die Linux-Shell-Umgebung (Rootfs) wird neu installiert. App-Einstellungen, Unterhaltungen und Dateien außerhalb des Rootfs bleiben erhalten.</string>
 
-    <!-- T172 — components / onboarding / preview i18n -->
+    <!-- T172 — components / preview i18n -->
     <string name="common_back">Zurück</string>
     <string name="common_close">Schließen</string>
     <string name="common_skip">Überspringen</string>
     <string name="common_next">Weiter</string>
-    <string name="onboarding_welcome_title">Willkommen bei RikkaMinis</string>
-    <string name="onboarding_welcome_subtitle">Ihr KI-Agent mit Terminal-, Browser- und nativem Gerätezugriff.</string>
-    <string name="onboarding_get_started">Loslegen</string>
-    <string name="onboarding_provider_title">Anbieter hinzufügen</string>
-    <string name="onboarding_provider_subtitle">Geben Sie einen API-Schlüssel für mindestens einen Anbieter ein, um zu beginnen.</string>
-    <string name="onboarding_provider_api_key_label">%1$s API-Schlüssel</string>
-    <string name="onboarding_save_api_key">API-Schlüssel speichern</string>
-    <string name="onboarding_saved">Gespeichert</string>
-    <string name="onboarding_select_models_title">Modelle auswählen</string>
-    <string name="onboarding_select_models_subtitle">Wählen Sie bis zu 3 Modelle für Ihre Standardgruppe.</string>
-    <string name="onboarding_search_models">Modelle suchen</string>
-    <string name="onboarding_filter_models">Modelle filtern</string>
-    <string name="onboarding_done_count">Fertig (%1$d/3)</string>
-    <string name="onboarding_loading_models">Modelle werden geladen…</string>
     <string name="webpreview_close">Schließen</string>
     <string name="webpreview_stop">Laden stoppen</string>
     <string name="webpreview_reload">Neu laden</string>

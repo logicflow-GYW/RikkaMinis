@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RikkaMinis</string>
-    <string name="onboarding_default_group_name">默认模型</string>
     <string name="settings">设置</string>
     <string name="no_sessions">暂无会话</string>
     <string name="delete">删除</string>
@@ -548,25 +547,11 @@
     <string name="rootfs_reset_confirm_title">重置 Rootfs？</string>
     <string name="rootfs_reset_confirm_message">这将重新安装 Linux Shell 环境（rootfs），应用设置、对话和 rootfs 外的文件都会保留。</string>
 
-    <!-- T172 — components / onboarding / preview i18n -->
+    <!-- T172 — components / preview i18n -->
     <string name="common_back">返回</string>
     <string name="common_close">关闭</string>
     <string name="common_skip">跳过</string>
     <string name="common_next">下一步</string>
-    <string name="onboarding_welcome_title">欢迎使用 RikkaMinis</string>
-    <string name="onboarding_welcome_subtitle">集终端、浏览器和设备本地访问于一身的 AI 助手。</string>
-    <string name="onboarding_get_started">开始使用</string>
-    <string name="onboarding_provider_title">添加提供方</string>
-    <string name="onboarding_provider_subtitle">请至少为一个提供方输入 API 密钥以开始使用。</string>
-    <string name="onboarding_provider_api_key_label">%1$s API 密钥</string>
-    <string name="onboarding_save_api_key">保存 API 密钥</string>
-    <string name="onboarding_saved">已保存</string>
-    <string name="onboarding_select_models_title">选择模型</string>
-    <string name="onboarding_select_models_subtitle">为默认模型组选择最多 3 个模型。</string>
-    <string name="onboarding_search_models">搜索模型</string>
-    <string name="onboarding_filter_models">筛选模型</string>
-    <string name="onboarding_done_count">完成 (%1$d/3)</string>
-    <string name="onboarding_loading_models">正在加载模型…</string>
     <string name="webpreview_close">关闭</string>
     <string name="webpreview_stop">停止加载</string>
     <string name="webpreview_reload">重新加载</string>

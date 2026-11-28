@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RikkaMinis</string>
-    <string name="onboarding_default_group_name">デフォルトモデル</string>
     <string name="settings">設定</string>
     <string name="no_sessions">まだ会話がありません</string>
     <string name="delete">削除</string>
@@ -450,25 +449,11 @@
     <string name="rootfs_reset_confirm_title">Rootfsをリセットしますか？</string>
     <string name="rootfs_reset_confirm_message">Linux シェル環境（rootfs）を再インストールします。アプリ設定、会話、rootfs 外のファイルは保持されます。</string>
 
-    <!-- T172 — components / onboarding / preview i18n -->
+    <!-- T172 — components / preview i18n -->
     <string name="common_back">戻る</string>
     <string name="common_close">閉じる</string>
     <string name="common_skip">スキップ</string>
     <string name="common_next">次へ</string>
-    <string name="onboarding_welcome_title">RikkaMinis へようこそ</string>
-    <string name="onboarding_welcome_subtitle">ターミナル、ブラウザ、ネイティブデバイスへのアクセスを備えた AI エージェント。</string>
-    <string name="onboarding_get_started">はじめる</string>
-    <string name="onboarding_provider_title">プロバイダーを追加</string>
-    <string name="onboarding_provider_subtitle">少なくとも 1 つのプロバイダーの API キーを入力して開始します。</string>
-    <string name="onboarding_provider_api_key_label">%1$s API キー</string>
-    <string name="onboarding_save_api_key">API キーを保存</string>
-    <string name="onboarding_saved">保存しました</string>
-    <string name="onboarding_select_models_title">モデルを選択</string>
-    <string name="onboarding_select_models_subtitle">デフォルトグループに最大 3 つのモデルを選択してください。</string>
-    <string name="onboarding_search_models">モデルを検索</string>
-    <string name="onboarding_filter_models">モデルを絞り込み</string>
-    <string name="onboarding_done_count">完了 (%1$d/3)</string>
-    <string name="onboarding_loading_models">モデルを読み込んでいます…</string>
     <string name="webpreview_close">閉じる</string>
     <string name="webpreview_stop">読み込みを停止</string>
     <string name="webpreview_reload">再読み込み</string>

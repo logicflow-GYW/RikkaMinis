@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RikkaMinis</string>
-    <string name="onboarding_default_group_name">기본 모델</string>
     <string name="settings">설정</string>
     <string name="no_sessions">아직 대화가 없습니다</string>
     <string name="delete">삭제</string>
@@ -450,25 +449,11 @@
     <string name="rootfs_reset_confirm_title">Rootfs를 초기화하시겠습니까?</string>
     <string name="rootfs_reset_confirm_message">Linux 셸 환경(rootfs)을 다시 설치합니다. 앱 설정, 대화 및 rootfs 외부의 파일은 유지됩니다.</string>
 
-    <!-- T172 — components / onboarding / preview i18n -->
+    <!-- T172 — components / preview i18n -->
     <string name="common_back">뒤로</string>
     <string name="common_close">닫기</string>
     <string name="common_skip">건너뛰기</string>
     <string name="common_next">다음</string>
-    <string name="onboarding_welcome_title">RikkaMinis에 오신 것을 환영합니다</string>
-    <string name="onboarding_welcome_subtitle">터미널, 브라우저, 네이티브 장치 액세스를 갖춘 AI 에이전트입니다.</string>
-    <string name="onboarding_get_started">시작하기</string>
-    <string name="onboarding_provider_title">제공자 추가</string>
-    <string name="onboarding_provider_subtitle">시작하려면 최소 한 제공자의 API 키를 입력하세요.</string>
-    <string name="onboarding_provider_api_key_label">%1$s API 키</string>
-    <string name="onboarding_save_api_key">API 키 저장</string>
-    <string name="onboarding_saved">저장됨</string>
-    <string name="onboarding_select_models_title">모델 선택</string>
-    <string name="onboarding_select_models_subtitle">기본 그룹에 최대 3개 모델을 선택하세요.</string>
-    <string name="onboarding_search_models">모델 검색</string>
-    <string name="onboarding_filter_models">모델 필터링</string>
-    <string name="onboarding_done_count">완료 (%1$d/3)</string>
-    <string name="onboarding_loading_models">모델을 불러오는 중…</string>
     <string name="webpreview_close">닫기</string>
     <string name="webpreview_stop">로딩 중지</string>
     <string name="webpreview_reload">새로 고침</string>
