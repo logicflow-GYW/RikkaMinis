@@ -432,7 +432,6 @@ ANSI/CSI/OSC 解析与 TUI 渲染引擎。
 **Android** — [AndroidX & Jetpack Compose](https://developer.android.com/jetpack)、
 [OkHttp](https://square.github.io/okhttp/)、[Coil](https://coil-kt.github.io/coil/)、
 [kotlinx](https://github.com/Kotlin) 序列化与协程、
-[multiplatform-markdown-renderer](https://github.com/mikepenz/multiplatform-markdown-renderer)、
 [Reorderable](https://github.com/Calvin-LL/Reorderable)、[ACRA](https://github.com/ACRA/acra)
 （均为 Apache-2.0），以及 [Shizuku](https://github.com/RikkaApps/Shizuku-API)（MIT）。
 

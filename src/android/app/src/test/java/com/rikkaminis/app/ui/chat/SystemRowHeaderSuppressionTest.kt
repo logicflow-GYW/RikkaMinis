@@ -131,7 +131,10 @@ class SystemRowHeaderSuppressionTest {
         // NOT special-case `role == "system"` into a different item type. If a
         // future change does split system rows off, this test (and the guard it
         // pins) must be revisited — that's deliberate.
-        val marker = "internal fun buildAggregateChatItems"
+        // The full builder delegates to the suffix builder from index zero;
+        // inspect the shared implementation rather than demanding a second copy.
+        assertTrue(flatItemsText.contains("buildAggregateChatItemsFrom(messages, 0)"))
+        val marker = "internal fun buildAggregateChatItemsFrom"
         val start = flatItemsText.indexOf(marker)
         assertTrue("buildAggregateChatItems not found", start >= 0)
         val nextDecl = flatItemsText.indexOf("\ninternal fun ", start + marker.length)

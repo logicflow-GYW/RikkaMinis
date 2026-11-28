@@ -1,50 +1,10 @@
 package com.rikkaminis.app.ui.chat
 
 /**
- * [fix/open-row-first-frame-final] Cold-open markdown prewarm source selection.
- *
- * ## The bug this replaces
- *
- * ChatScreen's cold-open prewarm collected its raw markdown with
- *
- * ```
- * val raw = (item as? FlatChatItem.AssistantMarkdownBlock)?.rawText ?: continue
- * ```
- *
- * — a row type that only the LEGACY fragment generator emits. Under
- * `AGGREGATE_MESSAGE_ITEMS = true` (the default since Stage D) the flatten
- * pipeline emits exactly ONE row per message, [FlatChatItem.AssistantMessageItem],
- * so that cast failed for EVERY row, `raws` came back empty and the whole
- * "parallel viewport prewarm" pass silently did nothing. The comment above it
- * ("block-parse + inline-warm the newest markdown fragments off-main so the
- * first frame's rows compose as cache HITs") described a pass that had not run
- * once since the aggregate flip.
- *
- * Device forensics (2026-09-13, /data/local/tmp/rc2.log): no `coldPrewarm.done`
- * line in any session open, `coldOpen summary … prewarmMs=-1` on all of them,
- * and every open's newest row GREW after the INITIAL_OPEN snap resolved against
- * its first layout (`firstItem.placed` 1,065→5,255px; 13,350→25,995px) — which
- * is what produces both "opens one screen short" and the visible catch-up roll.
- *
- * ## Contract
- *
- * [markdownSourcesForRow] returns the exact strings the row's renderer will
- * feed to the markdown parser, so prewarming them is a pure win:
- *  - [FlatChatItem.AssistantMessageItem] → its `kind == "text"` block contents
- *    in order (mirrors `AssistantMessageView`); the message-level fallback
- *    content only when the message carries no text block at all.
- *  - [FlatChatItem.AssistantMarkdownBlock] /
- *    [FlatChatItem.AssistantLegacyContent] → their own markdown.
- *  - everything else (user bubbles, headers, thinking, tool pills, typing,
- *    errors, info rows) → empty, they render no markdown body.
- *
- * [collectColdOpenPrewarmSources] walks newest-row-first with a source cap and
- * a character budget, de-duplicating identical fragments (a budget must not be
- * spent twice on the same string). Newest-first matters: the opening snap
- * resolves against the LAST row, so its fragments are the ones that must be
- * warm before the rows are published.
- *
- * Pure — JVM-testable (no Compose / Android deps beyond the row model).
+ * Select the exact markdown strings rendered by message-level assistant rows.
+ * Text blocks retain their order, with message content as the fallback.
+ * Newest-first collection, source cap, character budget and deduplication are
+ * shared by the awaited newest-row warm and the async viewport prewarm.
  */
 
 /** Character budget for the async cold-open prewarm pass (was a local 96_000). */
@@ -75,14 +35,7 @@ internal fun markdownSourcesForRow(item: FlatChatItem): List<String> = when (ite
             listOfNotNull(item.message.content.takeIf { it.isNotEmpty() })
         }
     }
-    // legacy-ok: [fix/open-row-first-frame-final] this is the single-point
-    // source function for BOTH pipelines. The aggregate caller passes
-    // AssistantMessageItem; the legacy rows are listed here on purpose so that
-    // any future row-type change has exactly one place to update — which is the
-    // whole lesson of the 2026-09-13 incident this file was written for.
-    is FlatChatItem.AssistantMarkdownBlock -> listOfNotNull(item.rawText.takeIf { it.isNotEmpty() })
-    is FlatChatItem.AssistantLegacyContent -> listOfNotNull(item.content.takeIf { it.isNotEmpty() })
-    else -> emptyList()
+    is FlatChatItem.UserBubble -> emptyList()
 }
 
 /**

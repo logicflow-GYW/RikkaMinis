@@ -85,7 +85,7 @@ class AggregateChatItemGeneratorTest {
         assertTrue(b3.precededByUser)
     }
 
-    // ── messageMarkdown joining aligns with buildFlatChatItems semantics ──
+    // ── messageMarkdown joining preserves Copy Markdown semantics ──
 
     @Test
     fun `messageMarkdown joins text blocks with blank line else falls back to content`() {

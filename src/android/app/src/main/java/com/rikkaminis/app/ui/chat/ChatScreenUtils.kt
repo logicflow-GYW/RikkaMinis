@@ -17,8 +17,7 @@ internal fun originalMessageId(id: String): String =
 
 /**
  * Whether a flat chat item should render grayed-out (compacted history).
- * System rows ([FlatChatItem.AssistantInfo], [FlatChatItem.AssistantTyping])
- * are never grayed; every other row looks up its message id (dedupe suffix
+ * System-role messages are never grayed; every other row looks up its message id (dedupe suffix
  * stripped via [originalMessageId]) in [grayedMap].
  *
  * Extracted from ChatScreen's local `FlatChatItem.isCompacted()` extension so
@@ -26,15 +25,8 @@ internal fun originalMessageId(id: String): String =
  */
 internal fun isCompactedItem(item: FlatChatItem, grayedMap: Map<String, Boolean>): Boolean = when (item) {
     is FlatChatItem.UserBubble -> grayedMap[originalMessageId(item.message.id)] == true
-    is FlatChatItem.AssistantHeader -> grayedMap[originalMessageId(item.messageId)] == true
-    is FlatChatItem.AssistantMarkdownBlock -> grayedMap[originalMessageId(item.messageId)] == true
-    is FlatChatItem.AssistantThinking -> grayedMap[originalMessageId(item.messageId)] == true
-    is FlatChatItem.AssistantToolRunGroup -> grayedMap[originalMessageId(item.messageId)] == true
-    is FlatChatItem.AssistantInfo -> false // system rows never grayed
-    is FlatChatItem.AssistantTyping -> false
-    is FlatChatItem.AssistantError -> grayedMap[originalMessageId(item.messageId)] == true
-    is FlatChatItem.AssistantLegacyContent -> grayedMap[originalMessageId(item.messageId)] == true
-    is FlatChatItem.AssistantMessageItem -> grayedMap[originalMessageId(item.messageId)] == true
+    is FlatChatItem.AssistantMessageItem -> item.message.role != "system" &&
+        grayedMap[originalMessageId(item.messageId)] == true
 }
 
 // ── Forward-list index mapping (post-reverseLayout migration) ──────────────

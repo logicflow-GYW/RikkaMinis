@@ -29,7 +29,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -56,11 +55,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -78,7 +78,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -145,9 +144,7 @@ internal fun AssistantHeader() {
  * inner tool_use is drawn as a single [ToolCallPill] (all tools of one turn
  * collapse into ONE LazyColumn row rather than a separate flat item each).
  * The caller supplies per-block actions ─ stop / detail / rerun-from-here /
- * copy / open-terminal ─ mirroring the flat
- * [FlatChatItem.AssistantToolRunGroup] branch in ChatScreen.kt, but
- * scoped to the current tool_use block.
+ * copy / open-terminal ─ scoped to the current tool_use block.
  *
  * A `null` return from the provider falls back to the pill's defaults (the
  * legacy call site passes null everywhere → no-op actions, exactly as before
@@ -622,7 +619,7 @@ internal fun ToolCallPill(
     onOpenTerminalWithCommand: (String) -> Unit = {},
     // T261: detail open routes through ChatViewModel so the sheet survives
     // LazyColumn item disposal. Default no-op for the legacy
-    // AssistantMessageView call site (currently dead code).
+    // AssistantMessageView call site.
     onOpenDetail: (String) -> Unit = {},
     // [T-android-tool-bubble-longpress-menu] Long-press actions. Null
     // disables the corresponding menu item (e.g. re-run is null while
@@ -842,199 +839,6 @@ internal fun ToolCallPill(
         // any more. retryLast() / retryFromMessage() remain reachable from
         // other entry points (long-press menu, etc.).
         // iOS: Spacer(minLength: 0) — pill stays content-width, not full-row-width
-    }
-}
-
-// ─── Tool Run Group (iOS-style collapsible "agent turn" card) ──────────────
-// [T-android-tool-run-collapse] One assistant message with >= 2 tool_use
-// blocks renders as a single foldable row. While any tool is live the group
-// stays expanded (live progress visible); once every tool reached a terminal
-// state the card auto-collapses to a one-line summary ("N tools · total"),
-// exactly like the ThinkingBlock does for long deep-think content. Tapping
-// the header expands it again and takes over the state.
-
-/**
- * Header-only summary for a collapsed/expanded tool run group.
- *
- * The card is collapsed by default and NEVER auto-expands: the one-line
- * header (spinner + "Running N tools" / "Thinking…" while live) is the
- * always-visible status; the user taps to reveal thinking + tools.
- */
-@Composable
-internal fun ToolCallRunGroup(
-    group: FlatChatItem.AssistantToolRunGroup,
-    onRetry: (() -> Unit)? = null,
-    onStop: (() -> Unit)? = null,
-    onOpenTerminalWithCommand: (String) -> Unit = {},
-    onOpenDetail: (String) -> Unit = {},
-    onRerunFromHere: (() -> Unit)? = null,
-    onCopyDetails: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
-) {
-    val isRunning = group.isRunning
-    // No tools → nothing to render (thinking no longer lives in this card;
-    // it's a separate AssistantThinking row upstream).
-    if (group.tools.isEmpty()) return
-    // [render-churn-2] Stable lambdas for the pill actions that don't
-    // depend on group content. The call site re-creates these closures on
-    // every recomposition, and an unstable lambda parameter forces the pill
-    // to recompose even when its block is frozen — which, for a 20-pill
-    // run card, meant re-running every completed pill at 1Hz during tool
-    // progress churn. Captured once: their semantics are identical across
-    // ticks (they only touch the ViewModel / parent callbacks). onRetry /
-    // onRerunFromHere stay dynamic — they genuinely depend on group state.
-    // onCopyDetails must ALSO stay dynamic: the call site gates it on
-    // !isStreaming, so freezing it here captures the null from the first
-    // composition (a tool-run group always first composes while streaming)
-    // and the Copy menu item never appears after the stream ends (T288
-    // regression). No perf is lost: while streaming it is a stable null
-    // (equals holds, pill skip unaffected) and the null -> non-null flip
-    // at turn end recomposes the pill exactly once.
-    val stableOnStop = remember { onStop }
-    val stableOnOpenDetail = remember { onOpenDetail }
-    val stableOnOpenTerminal = remember { onOpenTerminalWithCommand }
-    // [T-android-run-group-manual] The card is collapsed by default and
-    // never auto-expands, not even while running — the header itself IS the
-    // live status (spinner + "Running N tools" / "Thinking…"), so an
-    // auto-open would only fight the user's scroll position. The user taps
-    // the header to expand, taps again to collapse; `expanded` is the single
-    // source of truth.
-    var expanded by remember(group.messageId) { mutableStateOf(false) }
-    val effectiveExpanded = expanded
-
-    val groupAccent = toolAccentColor("shell_execute")
-    val totalDurationText = when {
-        group.totalDurationMs > 0 -> {
-            val seconds = group.totalDurationMs / 1000.0
-            if (seconds < 10) String.format("%.1fs", seconds)
-            else String.format("%.0fs", seconds)
-        }
-        else -> null
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp),
-    ) {
-        // Header — always visible; the collapsing unit is the content below.
-        // [T-android-run-group-thinking] Two-line header: row 1 = icon +
-        // title (tool count / thinking state) + duration + chevron; row 2
-        // (completed cards with tools only) = the last tool's title as a
-        // one-line summary, so a collapsed run card still says what it
-        // ended on. Zero new strings — the tool title is the summary.
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(ChatColors.toolCapsuleBg, RoundedCornerShape(14.dp))
-                .border(0.5.dp, ChatColors.toolBorder, RoundedCornerShape(14.dp))
-                .clickable {
-                    expanded = !expanded
-                }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (isRunning) {
-                    DecorativeSpinner(
-                        modifier = Modifier.size(13.dp),
-                        color = groupAccent,
-                        strokeWidth = 1.5.dp,
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        tint = groupAccent,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
-                // With tools the header keeps the familiar tool count; a
-                // thinking-only turn reads as "Thinking…" / "Deep Thinking".
-                Text(
-                    text = when {
-                        group.tools.isNotEmpty() && isRunning -> "Running ${group.count} tools"
-                        group.tools.isNotEmpty() -> "${group.count} tools"
-                        isRunning -> "Thinking…"
-                        else -> "Deep Thinking"
-                    },
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (totalDurationText != null) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = totalDurationText,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        softWrap = false,
-                        maxLines = 1,
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                }
-                Icon(
-                    imageVector = if (effectiveExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                    contentDescription = if (effectiveExpanded) "Collapse tools" else "Expand tools",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    modifier = Modifier.size(16.dp),
-                )
-            }
-            // Last-step summary — only on the completed card with tools.
-            // 22.dp start pad ≈ icon (14dp) + spacer (8dp): aligns the
-            // summary under the row-1 title.
-            if (!isRunning && group.tools.isNotEmpty()) {
-                val lastTool = group.tools.lastOrNull()
-                val summary = if (lastTool != null) lastTool.toolTitle.ifEmpty { lastTool.toolName } else ""
-                if (summary.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(
-                        text = summary,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 22.dp),
-                    )
-                }
-            }
-        }
-
-        // Pill list — only shown when expanded. AnimatedVisibility gives the
-        // collapse/expand a smooth height + fade transition.
-        AnimatedVisibility(
-            visible = effectiveExpanded,
-            enter = expandVertically(
-                animationSpec = tween(durationMillis = 260),
-            ) + fadeIn(animationSpec = tween(durationMillis = 200)),
-            exit = shrinkVertically(
-                animationSpec = tween(durationMillis = 200),
-            ) + fadeOut(animationSpec = tween(durationMillis = 160)),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 8.dp),
-        ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                group.tools.forEach { block ->
-                    ToolCallPill(
-                        block = block,
-                        allToolBlocks = group.tools,
-                        onRetry = if (group.isLastCancelled && block.id == group.tools.lastOrNull()?.id) onRetry else null,
-                        onStop = stableOnStop,
-                        onOpenTerminalWithCommand = stableOnOpenTerminal,
-                        onOpenDetail = stableOnOpenDetail,
-                        onRerunFromHere = onRerunFromHere,
-                        onCopyDetails = onCopyDetails,
-                    )
-                }
-            }
-        }
     }
 }
 
