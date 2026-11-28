@@ -272,6 +272,20 @@ class UxIntegrationWiringTest {
         assertTrue(button.contains("performSendOrEnqueue()"))
     }
 
+    @Test fun `the sheet divider belongs to the titled header only`() {
+        val standard = source("ui/chat/StandardChatSheet.kt")
+        val sheet = standard.substringAfter("fun StandardChatSheet(").substringBefore("internal fun CompactDragHandle(")
+        assertTrue(Regex("""if\s*\(title != null\)\s*\{\s*StandardChatSheetHeader\([^}]*?\)\s*HorizontalDivider\([^}]*?\)\s*}\s*Box\(""")
+            .containsMatchIn(sheet))
+        assertEquals(1, Regex("""\bHorizontalDivider\(""").findAll(sheet).count())
+    }
+
+    @Test fun `the reasoning reader reduces only the top padding`() {
+        val reader = source("ui/chat/ChatProcessUI.kt").substringAfter("internal fun ChatProcessThinkingReader(")
+        assertTrue(Regex("""\.padding\(\s*start\s*=\s*20\.dp,\s*end\s*=\s*20\.dp,\s*top\s*=\s*4\.dp,\s*bottom\s*=\s*24\.dp,?\s*\)""")
+            .containsMatchIn(reader))
+    }
+
     @Test fun `a header reopen starts at the top but drag does not restart the scroller`() {
         val ui = source("ui/chat/ChatAssistantMessageUI.kt")
         val thinking = ui.substringAfter("internal fun ThinkingBlock(")

@@ -155,7 +155,13 @@ class ChatProcessSheetRenderTest {
         val axis = readerNode.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange]
         assertEquals(0f, axis.value(), 0f)
         compose.onNode(hasText(thinkingTitle) and !hasAnyAncestor(pane), useUnmergedTree = true).assertDoesNotExist()
-        compose.onNode(dismiss and !hasAnyAncestor(pane), useUnmergedTree = true).performTouchInput {
+        val dragHandle = compose.onNode(dismiss and !hasAnyAncestor(pane), useUnmergedTree = true)
+        val readerTop = readerNode.getUnclippedBoundsInRoot().top
+        val handleBottom = dragHandle.getUnclippedBoundsInRoot().bottom
+        val expectedGap = with(readerNode.fetchSemanticsNode().layoutInfo.density) { 4.dp.roundToPx().toDp() }
+        assertEquals("Only the reader's top padding separates handle and body", expectedGap.value,
+            (readerTop - handleBottom).value, 0.1f)
+        dragHandle.performTouchInput {
             swipe(center, center + Offset(0f, 220.dp.toPx()))
         }
         parent().assertIsDisplayed()

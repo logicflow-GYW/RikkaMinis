@@ -339,7 +339,7 @@ private fun ProcessThinkingRow(block: AssistantBlock, isLive: Boolean, onClick: 
 internal fun ChatProcessThinkingReader(content: String) {
     Box(
         Modifier.fillMaxSize()
-            .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 24.dp),
+            .padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 24.dp),
     ) {
         ChatProcessThinkingText(content)
     }

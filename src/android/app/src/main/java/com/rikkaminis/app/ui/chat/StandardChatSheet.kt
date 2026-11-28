@@ -60,8 +60,8 @@ import com.rikkaminis.app.ui.theme.ChatColors
  * open (a fixed half-screen detent forced scrolling to the lower
  * sections).
  *
- * [title] may be null to omit the entire header row. The drag handle, divider,
- * body and native dismissal still belong to the sheet.
+ * [title] may be null to omit the entire header row and its separator. The
+ * drag handle, body and native dismissal still belong to the sheet.
  *
  * [showClose] toggles the header's close button. Sheets that rely on
  * swipe-down / scrim-tap dismissal alone (e.g. [TokenUsageSheet]) pass false;
@@ -131,8 +131,8 @@ fun StandardChatSheet(
                     leadingAction = leadingAction,
                     showClose = showClose,
                 )
+                HorizontalDivider(thickness = 0.5.dp, color = ChatColors.separator)
             }
-            HorizontalDivider(thickness = 0.5.dp, color = ChatColors.separator)
             Box(modifier = Modifier.fillMaxSize()) {
                 content()
             }
