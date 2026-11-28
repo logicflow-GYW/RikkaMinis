@@ -474,6 +474,7 @@ val retiredChatDependencyInsight by tasks.registering(org.gradle.api.tasks.diagn
         println("RETIRED_CHAT_RUNTIME_DEPENDENCIES=ABSENT (releaseRuntimeClasspath)")
     }
 }
-tasks.matching { it.name == "preBuild" }.configureEach {
+// Do not resolve release dependencies when building only a debug variant.
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     dependsOn(retiredChatDependencyInsight)
 }
