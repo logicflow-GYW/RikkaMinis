@@ -248,8 +248,12 @@ class UxIntegrationWiringTest {
         assertFalse(list.contains(".failed"))
         assertFalse(list.contains("chatProcessStatus("))
         assertFalse(list.contains("blocks.size"))
-        // Opens at the newest entry.
-        assertTrue(list.contains("listState.scrollToItem(blocks.lastIndex)"))
+        // Opens at the newest committed entry, then follows geometry only while
+        // the reader still owns this opening's following mode.
+        assertTrue(list.contains("initialFirstVisibleItemIndex = blocks.lastIndex.coerceAtLeast(0)"))
+        assertTrue(host.contains("onHistoryScroll = follow::detach"))
+        assertTrue(list.contains("listState.scrollToItem(target.index, target.offset)"))
+        assertTrue(list.contains("listState.canScrollForward"))
         // Every level closes by gesture: no back arrow, no close button.
         assertFalse(ui.contains("Icons.Default.Close"))
         assertFalse(ui.contains("ArrowBack"))

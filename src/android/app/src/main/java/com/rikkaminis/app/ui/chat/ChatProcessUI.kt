@@ -24,9 +24,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +46,80 @@ import com.rikkaminis.app.ui.components.DecorativeSpinner
 import com.rikkaminis.app.ui.settings.thinkingCharCountVisibleEnabled
 import com.rikkaminis.app.ui.settings.thinkingDurationVisibleEnabled
 import com.rikkaminis.app.ui.theme.ChatColors
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+
+/** Committed geometry only: progress text, stream flags and scroll offsets are not revisions. */
+internal data class ProcessTailGeometry(val count: Int, val key: Any?, val height: Int?)
+
+internal data class ProcessTailTarget(val index: Int, val offset: Int)
+
+/** One opening has one owner. Reaching the bottom never changes ownership. */
+internal class ProcessSheetFollow {
+    var following by mutableStateOf(true)
+        private set
+    private var observed: ProcessTailGeometry? = null
+    private var covered = false
+    private var pending = false
+    private var positioned: ProcessTailTarget? = null
+
+    fun detach() {
+        following = false
+        pending = false
+    }
+
+    fun suspendForDetail() {
+        covered = true
+        pending = false
+    }
+
+    fun observe(tail: ProcessTailGeometry, detailCovered: Boolean, closing: Boolean) {
+        val before = observed
+        // A newly measured tail height belongs to the already observed append,
+        // not another update caused by our own positioning.
+        val changed = before == null || tail.count > before.count || tail.key != before.key ||
+            (before.height != null && tail.height != null && tail.height > before.height)
+        if (changed) positioned = null
+        observed = tail
+        if (!following || closing || detailCovered || covered != detailCovered) {
+            pending = false
+        } else if (changed && tail.count > 0) {
+            pending = true
+        }
+        covered = detailCovered
+        if (tail.count == 0) pending = false
+    }
+
+    fun target(
+        tail: ProcessTailGeometry,
+        canScrollForward: Boolean,
+        busy: Boolean,
+        detailCovered: Boolean,
+        closing: Boolean,
+        viewportEnd: Int,
+        afterPadding: Int,
+    ): ProcessTailTarget? {
+        if (!following || detailCovered || closing) {
+            pending = false
+            return null
+        }
+        if (!pending || busy || tail.count <= 0) return null
+        if (!canScrollForward) {
+            pending = false
+            return null
+        }
+        // scrollToItem clamps ordinary rows at the end. If the last row alone
+        // exceeds the viewport, align its measured bottom plus content padding.
+        val index = safeBottomScrollIndex(tail.count) ?: return null
+        val offset = tail.height?.let { (it - viewportEnd + afterPadding).coerceAtLeast(0) } ?: 0
+        val target = ProcessTailTarget(index, offset)
+        return target.takeUnless { it == positioned }
+    }
+
+    fun positioned(target: ProcessTailTarget) {
+        positioned = target
+    }
+}
 
 @Composable
 private fun chatProcessLabel(status: ChatProcessStatus, isStreaming: Boolean): String {
@@ -151,6 +228,7 @@ internal fun ChatProcessSheet(
     onOpenBrowserForUrl: (String) -> Unit,
 ) {
     var page by remember(messageId) { mutableStateOf<ChatProcessPage>(ChatProcessPage.List) }
+    val follow = remember(messageId) { ProcessSheetFollow() }
     val tools = remember(blocks) { blocks.filter { it.kind == "tool_use" } }
     val selected = tools.any { it.id == selectedToolId }
     LaunchedEffect(page, selectedToolId, selected) {
@@ -165,14 +243,21 @@ internal fun ChatProcessSheet(
     TopChatSheet(
         paneName = stringResource(R.string.chat_process_title),
         onDismissRequest = onDismiss,
-    ) {
-        ChatProcessList(
-            blocks = blocks,
-            isStreaming = isStreaming,
-            onOpenTool = { onSelectTool(it); page = ChatProcessPage.Tool },
-            onOpenThinking = { page = ChatProcessPage.Thinking(it) },
-            toolActions = toolActions,
-        )
+        onHistoryScroll = follow::detach,
+    ) { canFollow, closing ->
+        key(messageId) {
+            ChatProcessList(
+                blocks = blocks,
+                isStreaming = isStreaming,
+                follow = follow,
+                detailCovered = { page != ChatProcessPage.List },
+                canFollow = canFollow,
+                closing = closing,
+                onOpenTool = { follow.suspendForDetail(); onSelectTool(it); page = ChatProcessPage.Tool },
+                onOpenThinking = { follow.suspendForDetail(); page = ChatProcessPage.Thinking(it) },
+                toolActions = toolActions,
+            )
+        }
     }
 
     // A separate native sheet is stacked ABOVE the still-mounted parent.
@@ -203,6 +288,10 @@ internal fun ChatProcessSheet(
 private fun ChatProcessList(
     blocks: List<AssistantBlock>,
     isStreaming: Boolean,
+    follow: ProcessSheetFollow,
+    detailCovered: () -> Boolean,
+    canFollow: () -> Boolean,
+    closing: () -> Boolean,
     onOpenTool: (String) -> Unit,
     onOpenThinking: (String) -> Unit,
     toolActions: (AssistantBlock) -> ToolPillActions?,
@@ -211,13 +300,52 @@ private fun ChatProcessList(
     // ThinkingBlock uses the same rule. Without it every reasoning row of a
     // streaming turn would spin at once.
     val liveBlockId = if (isStreaming) blocks.lastOrNull { it.kind != "info" }?.id else null
-    val listState = rememberLazyListState()
-    // Open at the newest entry — the reader wants "what just happened", not
-    // the first tool of a 199-call turn.
-    // Once, on open. Keyed on the list, a streaming turn would re-run this on
-    // every appended block and yank a reader who had scrolled up back down.
-    LaunchedEffect(Unit) {
-        if (blocks.isNotEmpty()) listState.scrollToItem(blocks.lastIndex)
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = blocks.lastIndex.coerceAtLeast(0))
+    val latestBlocks by rememberUpdatedState(blocks)
+    val latestCovered by rememberUpdatedState(detailCovered)
+    val latestCanFollow by rememberUpdatedState(canFollow)
+    val latestClosing by rememberUpdatedState(closing)
+    LaunchedEffect(listState, follow) {
+        fun committedTail(): ProcessTailGeometry? {
+            val layout = listState.layoutInfo
+            if (layout.totalItemsCount == 0) return ProcessTailGeometry(0, null, null)
+            val last = latestBlocks.lastOrNull() ?: return null
+            val tailKey = "${last.kind}:${last.id}"
+            // Do not pair a new data batch with the previous committed measure.
+            if (layout.totalItemsCount != latestBlocks.size) return null
+            val measured = layout.visibleItemsInfo.lastOrNull { it.index == layout.totalItemsCount - 1 }
+            if (measured != null && measured.key != tailKey) return null
+            return ProcessTailGeometry(layout.totalItemsCount, tailKey, measured?.size)
+        }
+        fun currentTarget(): ProcessTailTarget? {
+            val tail = committedTail() ?: return null
+            val covered = latestCovered()
+            val isClosing = latestClosing()
+            follow.observe(tail, covered, isClosing)
+            return follow.target(
+                tail, listState.canScrollForward,
+                listState.isScrollInProgress || !latestCanFollow(), covered, isClosing,
+                listState.layoutInfo.viewportEndOffset, listState.layoutInfo.afterContentPadding,
+            )
+        }
+        snapshotFlow {
+            // Data/geometry changes and idle transitions wake us; offsets and
+            // decorative content do not. No stream flag gates the last batch.
+            listOf(committedTail(), listState.canScrollForward, listState.isScrollInProgress,
+                latestCanFollow(), latestCovered(), latestClosing(), follow.following)
+        }.collect {
+            if (currentTarget() != null) {
+                // A user-priority mutation can cancel this child scroll without
+                // killing the observer. Re-read every gate and target at commit.
+                coroutineScope {
+                    launch {
+                        val target = currentTarget() ?: return@launch
+                        listState.scrollToItem(target.index, target.offset)
+                        follow.positioned(target)
+                    }
+                }
+            }
+        }
     }
     LazyColumn(
         state = listState,
