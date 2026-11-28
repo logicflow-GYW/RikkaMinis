@@ -1,5 +1,6 @@
 package com.rikkaminis.app.provider.openai
 
+import com.rikkaminis.app.provider.usesBuiltinCatalogOnFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -22,23 +23,23 @@ class OpenAIModelsUrlAndFallbackTest {
 
     @Test
     fun `official instance uses the builtin catalog on a network failure`() {
-        assertTrue(usesBuiltinCatalogOnFailure(isCustomBase = false, statusCode = 502))
+        assertTrue(usesBuiltinCatalogOnFailure(isCustom = false, statusCode = 502))
     }
 
     @Test
     fun `official instance does not use it on 401`() {
-        assertFalse(usesBuiltinCatalogOnFailure(isCustomBase = false, statusCode = 401))
+        assertFalse(usesBuiltinCatalogOnFailure(isCustom = false, statusCode = 401))
     }
 
     @Test
     fun `official instance does not use it on 403`() {
-        assertFalse(usesBuiltinCatalogOnFailure(isCustomBase = false, statusCode = 403))
+        assertFalse(usesBuiltinCatalogOnFailure(isCustom = false, statusCode = 403))
     }
 
     @Test
     fun `custom base never uses the builtin catalog`() {
-        assertFalse(usesBuiltinCatalogOnFailure(isCustomBase = true, statusCode = 500))
-        assertFalse(usesBuiltinCatalogOnFailure(isCustomBase = true, statusCode = 200))
+        assertFalse(usesBuiltinCatalogOnFailure(isCustom = true, statusCode = 500))
+        assertFalse(usesBuiltinCatalogOnFailure(isCustom = true, statusCode = 200))
     }
 
     // -- F-07 ---------------------------------------------------------------

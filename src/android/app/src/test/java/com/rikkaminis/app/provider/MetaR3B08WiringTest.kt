@@ -175,17 +175,29 @@ class MetaR3B08WiringTest {
 
     @Test
     fun `F-06 and F-07 the models apis call the extracted decisions`() {
+        // [refactor/reuse-basics-1128] The decision now has ONE home
+        // (provider/ModelListFallback.kt); each API must import it and call it.
+        // Anchored on the import + a call, not on one spelling of the argument
+        // names, so a rename of the parameter does not fail this wiring check.
+        val shared = code(SHARED_FALLBACK)
         assertTrue(
-            "OpenAI models api does not consult the auth-failure decision",
-            "usesBuiltinCatalogOnFailure(isCustomBase, response.code)" in code(OPENAI_MODELS),
+            "the shared builtin-catalog decision is not defined in $SHARED_FALLBACK",
+            Regex("fun usesBuiltinCatalogOnFailure\\s*\\(").containsMatchIn(shared),
         )
+        for ((label, rel) in listOf("openai" to OPENAI_MODELS, "anthropic" to ANTHROPIC_MODELS)) {
+            val api = code(rel)
+            assertTrue(
+                "$label models api does not import the shared builtin-catalog decision",
+                "import com.rikkaminis.app.provider.usesBuiltinCatalogOnFailure" in api,
+            )
+            assertTrue(
+                "$label models api does not call the shared builtin-catalog decision",
+                Regex("usesBuiltinCatalogOnFailure\\s*\\(").containsMatchIn(api),
+            )
+        }
         assertTrue(
             "OpenAI models api does not use the azure-aware url builder",
             "buildModelsURL(baseURL, azureMode)" in code(OPENAI_MODELS),
-        )
-        assertTrue(
-            "Anthropic models api still answers every failure with the builtin catalog",
-            "usesBuiltinCatalogOnFailure(isCustomEndpoint, lastFailureCode)" in code(ANTHROPIC_MODELS),
         )
         assertTrue(
             "Gemini models api still answers a relay failure with the builtin catalog",
@@ -264,6 +276,7 @@ class MetaR3B08WiringTest {
         const val CONFIG_BUILTINS = BASE + "config/ConfigBuiltins.kt"
         const val OPENAI = BASE + "provider/openai/OpenAIProvider.kt"
         const val OPENAI_MODELS = BASE + "provider/openai/OpenAIModelsApi.kt"
+        const val SHARED_FALLBACK = BASE + "provider/ModelListFallback.kt"
         const val ANTHROPIC = BASE + "provider/anthropic/AnthropicProvider.kt"
         const val ANTHROPIC_MODELS = BASE + "provider/anthropic/AnthropicModelsApi.kt"
         const val GEMINI = BASE + "provider/gemini/GeminiProvider.kt"

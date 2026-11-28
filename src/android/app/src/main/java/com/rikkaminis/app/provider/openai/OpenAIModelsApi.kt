@@ -7,6 +7,7 @@ import com.rikkaminis.app.provider.ModelsDevApi
 import com.rikkaminis.app.provider.ProviderModelsCache
 import com.rikkaminis.app.provider.applyUserAgentOverride
 import com.rikkaminis.app.provider.executeOrCancel
+import com.rikkaminis.app.provider.usesBuiltinCatalogOnFailure
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -365,21 +366,3 @@ internal fun buildModelsURL(baseURL: String?, azureMode: Boolean): String {
     // force /v1, or the toggle is overridden and services without /v1 404.
     return "${baseURL.trimEnd('/')}/models"
 }
-
-/**
- * [r3-b08 F-06] Whether a non-2xx models answer may be swapped for the
- * builtin catalog.
- *
- * Custom bases: never (the caller preserves the existing rows — a vLLM/Ollama
- * endpoint failing is not a licence to relabel its models as OpenAI's).
- * Official instance: only for non-auth failures, where the builtin list is
- * the historical network-failure net. A 401/403 means the credential was
- * REJECTED, and answering it with the static list is what made
- * `ProviderRepository.refreshModels` report `SUCCESS_API` for a revoked key
- * (Gemini reaches the same verdict through `[FIX-1 / F-196]`).
- *
- * Boolean rather than "return the list" so the table is unit-testable
- * without constructing a provider catalog (see ModelsApiFallbackTest).
- */
-internal fun usesBuiltinCatalogOnFailure(isCustomBase: Boolean, statusCode: Int): Boolean =
-    !isCustomBase && statusCode != 401 && statusCode != 403
